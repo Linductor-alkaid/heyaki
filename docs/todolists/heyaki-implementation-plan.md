@@ -1,13 +1,12 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：进行中（M0 收口，新增证据门禁待 CI）
+> - 状态：M0 已完成（准入 M1）
 > - 日期：2026-08-14
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
 
-本文把总设计拆成可以按依赖顺序实施、独立验收和回归的任务。当前仓库只有设计文档、
-第三方依赖锁定与抓取脚本，尚无 Heyaki 顶层构建、源码或测试骨架，因此所有实现项均从
-未完成状态开始。
+本文把总设计拆成可以按依赖顺序实施、独立验收和回归的任务。M0 已建立顶层构建、源码与
+测试骨架、三平台 CI、依赖锁定和供应链基线；后续里程碑在此工程基线上按退出条件推进。
 
 勾选规则：只有代码、测试、必要文档和本阶段验收同时完成后，任务才可从 `[ ]` 改为
 `[x]`。因环境限制无法执行的验证保持未勾选，并在条目后记录环境、负责人和补跑条件。
@@ -99,8 +98,8 @@
 
 - [x] `M0-07` 运行 `scripts/fetch_third_party.sh --check --all`，补齐当前未抓取的 `googletest` 与可选 `zstd` 验证路径。
 - [x] `M0-08` 为 Boost、TLS backend 和 coturn 确定可复现版本策略；不能只依赖开发机上未记录的系统版本。
-- [ ] `M0-09` 验证 libdatachannel v0.23.2 的 ICE backend、TURN/TCP/TLS、证书库和 Windows 构建组合，形成兼容矩阵。
-- [ ] `M0-10` 对所有 pinned 依赖生成许可证清单和 SBOM；确认静态/动态链接与发布包合规。
+- [x] `M0-09` 验证 libdatachannel v0.23.2 的 ICE backend、TURN/TCP/TLS、证书库和 Windows 构建组合，形成兼容矩阵。
+- [x] `M0-10` 对所有 pinned 依赖生成许可证清单和 SBOM；确认静态/动态链接与发布包合规。
 - [x] `M0-11` 给依赖升级建立单独流程：更新 ref/commit、验证 moved tag、运行全量协议/网络回归并记录版本差异。
 
 ### 3.3 CI 与测试入口
@@ -119,7 +118,7 @@
 - [x] 单元、集成、网络、fuzz 和 sanitizer 命令均有稳定入口，CI 不以“无测试可运行”冒充成功。
 - [x] 产品决策 `DEC-01` 至 `DEC-09` 已确认，或明确记录暂定默认值、负责人和最迟冻结里程碑。
 
-M0 验证记录（2026-08-14）：本机 GCC 13.3 的 Debug、Release、UBSAN、禁异常与可选依赖校验构建通过，安装后 consumer 通过；ASAN 因宿主 ptrace 限制、TSAN 因宿主地址映射限制而明确 skip。GitHub Actions 在 commit `8761343` 上完成 Linux GCC/Clang、Windows MSVC、ASAN、UBSAN、TSAN 和 fuzz smoke 矩阵，configure、build、CTest 与安装后 consumer 全部通过，CI 不允许 sanitizer runtime skip；据此完成 `M0-12`、`M0-13` 和跨平台退出条件。Linux network harness 在缺少 `CAP_NET_ADMIN` 的环境明确 skip。供应链生成器现覆盖 9 个直接 pin、5 个 libdatachannel submodule、许可证文件存在性与 SPDX 父子关系；当前安装/链接闭包见 [M0 链接与许可证审计](../supply-chain/m0-linkage-license-audit.md)，`M0-10` 待新增 CI 清单测试通过后完成。libdatachannel 的最小静态 DataChannel profile 已在本机 GCC 13.3 编译通过，并为 GCC/Clang/MSVC 增加真实依赖构建门禁；默认 libjuice 明确不支持 TURN/TCP/TLS，详见 [兼容矩阵](../compatibility/libdatachannel-v0.23.2.md)，`M0-09` 待新增 CI 构建矩阵通过后完成。产品默认值、owner 与冻结点见 [M0 产品决策默认值](../decisions/m0-product-defaults.md)。
+M0 验证记录（2026-08-14）：本机 GCC 13.3 的 Debug、Release、UBSAN、禁异常、可选依赖及 pinned libdatachannel 最小静态 DataChannel profile 构建通过，安装后 consumer 通过；ASAN 因宿主 ptrace 限制、TSAN 因宿主地址映射限制而明确 skip。GitHub Actions 在 commit `72c55d7` 上完成 Linux GCC/Clang、Windows MSVC、ASAN、UBSAN、TSAN 和 fuzz smoke 矩阵，configure、build、CTest、安装后 consumer 以及三平台 pinned libdatachannel 构建全部通过，CI 不允许 sanitizer runtime skip。Linux network harness 在缺少 `CAP_NET_ADMIN` 的环境明确 skip。供应链生成器覆盖 9 个直接 pin、5 个 libdatachannel submodule、许可证文件存在性与 SPDX 父子关系，相关 CI 清单测试通过；当前安装/链接闭包见 [M0 链接与许可证审计](../supply-chain/m0-linkage-license-audit.md)。默认 libjuice 明确不支持 TURN/TCP/TLS，该负向能力结论与后续 libnice/coturn 门禁见 [兼容矩阵](../compatibility/libdatachannel-v0.23.2.md)。产品默认值、owner 与冻结点见 [M0 产品决策默认值](../decisions/m0-product-defaults.md)。据此 `M0-01` 至 `M0-17` 及全部 M0 退出条件完成，正式准入 M1。
 
 ---
 
