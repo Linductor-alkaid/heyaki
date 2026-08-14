@@ -106,7 +106,7 @@ command -v git >/dev/null 2>&1 || fail "git is required"
 [[ -f "${heyaki_lock_file}" ]] || fail "lock file not found: ${heyaki_lock_file}"
 
 while IFS= read -r heyaki_lock_line || [[ -n "${heyaki_lock_line}" ]]; do
-  heyaki_lock_line=${heyaki_lock_line%$'\r'}
+  heyaki_lock_line=${heyaki_lock_line//$'\r'/}
   [[ -z "${heyaki_lock_line}" || "${heyaki_lock_line}" == \#* ]] && continue
   IFS='|' read -r heyaki_name heyaki_url heyaki_ref heyaki_commit heyaki_recursive heyaki_group <<< \
     "${heyaki_lock_line}"
