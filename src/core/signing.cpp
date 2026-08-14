@@ -85,6 +85,60 @@ bool is_printable_ascii(std::span<const std::byte> value, std::size_t minimum,
   });
 }
 
+bool is_nonempty_utf8(std::span<const std::byte> value) noexcept {
+  if (value.empty()) {
+    return false;
+  }
+
+  std::size_t index = 0U;
+  while (index < value.size()) {
+    const auto first = std::to_integer<std::uint8_t>(value[index]);
+    if (first <= 0x7fU) {
+      ++index;
+      continue;
+    }
+
+    std::size_t continuation_count = 0U;
+    std::uint8_t second_minimum = 0x80U;
+    std::uint8_t second_maximum = 0xbfU;
+    if (first >= 0xc2U && first <= 0xdfU) {
+      continuation_count = 1U;
+    } else if (first >= 0xe0U && first <= 0xefU) {
+      continuation_count = 2U;
+      if (first == 0xe0U) {
+        second_minimum = 0xa0U;
+      } else if (first == 0xedU) {
+        second_maximum = 0x9fU;
+      }
+    } else if (first >= 0xf0U && first <= 0xf4U) {
+      continuation_count = 3U;
+      if (first == 0xf0U) {
+        second_minimum = 0x90U;
+      } else if (first == 0xf4U) {
+        second_maximum = 0x8fU;
+      }
+    } else {
+      return false;
+    }
+
+    if (value.size() - index <= continuation_count) {
+      return false;
+    }
+    const auto second = std::to_integer<std::uint8_t>(value[index + 1U]);
+    if (second < second_minimum || second > second_maximum) {
+      return false;
+    }
+    for (std::size_t offset = 2U; offset <= continuation_count; ++offset) {
+      const auto continuation = std::to_integer<std::uint8_t>(value[index + offset]);
+      if (continuation < 0x80U || continuation > 0xbfU) {
+        return false;
+      }
+    }
+    index += continuation_count + 1U;
+  }
+  return true;
+}
+
 bool has_canonical_domain(std::span<const std::byte> value,
                           std::string_view expected_domain) noexcept {
   constexpr std::size_t fixed_prefix_size = 6U;
@@ -170,11 +224,13 @@ bool matches_rules(std::span<const CanonicalField> fields,
 bool matches_field_shape(SigningDomain domain, std::span<const CanonicalField> fields) noexcept {
   switch (domain) {
     case SigningDomain::enrollment:
-      return matches_rules(fields, enrollment_rules);
+      return matches_rules(fields, enrollment_rules) && is_nonempty_utf8(fields[5U].value);
     case SigningDomain::enrollment_record:
-      return matches_rules(fields, enrollment_record_rules);
+      return matches_rules(fields, enrollment_record_rules) &&
+             is_nonempty_utf8(fields[3U].value);
     case SigningDomain::endpoint_record:
-      return matches_rules(fields, endpoint_record_rules);
+      return matches_rules(fields, endpoint_record_rules) &&
+             is_nonempty_utf8(fields[2U].value);
     case SigningDomain::service_manifest:
       return matches_rules(fields, service_manifest_rules);
     case SigningDomain::offer:

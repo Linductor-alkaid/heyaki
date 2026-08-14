@@ -171,6 +171,23 @@ TEST(Protocol, NegotiatesMinorAndRejectsMissingRequiredCapability) {
   EXPECT_FALSE(heyaki::negotiate_protocol(local, remote));
 }
 
+TEST(Protocol, IgnoresUnknownOptionalCapabilitiesAndRejectsUnknownRequiredOnes) {
+  constexpr std::uint64_t unknown_capability = 1ULL << 63U;
+  const auto session = static_cast<std::uint64_t>(heyaki::Capability::session);
+  const heyaki::ProtocolHello local{.version = {1U, 0U},
+                                    .supported = {.bits = session | unknown_capability},
+                                    .required = {.bits = session}};
+  const auto optional = heyaki::negotiate_protocol(local, local);
+  ASSERT_TRUE(optional);
+  EXPECT_EQ(optional.value_if()->capabilities.bits, session);
+
+  auto required = local;
+  required.required.bits |= unknown_capability;
+  const auto rejected = heyaki::negotiate_protocol(local, required);
+  ASSERT_FALSE(rejected);
+  EXPECT_EQ(rejected.error_if()->safe_detail(), "unknown_required_capability");
+}
+
 TEST(Protocol, PreservesSchemaVersionWidth) {
   const heyaki::ProtocolHello local{.version = {70000U, 80000U},
                                     .supported = {.bits = 0U},

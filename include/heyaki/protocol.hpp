@@ -26,6 +26,18 @@ enum class Capability : std::uint64_t {
   shell = 1ULL << 9U,
 };
 
+inline constexpr std::uint64_t known_capability_bits =
+    static_cast<std::uint64_t>(Capability::enrollment) |
+    static_cast<std::uint64_t>(Capability::signaling) |
+    static_cast<std::uint64_t>(Capability::session) |
+    static_cast<std::uint64_t>(Capability::pairing) |
+    static_cast<std::uint64_t>(Capability::message) |
+    static_cast<std::uint64_t>(Capability::unary_rpc) |
+    static_cast<std::uint64_t>(Capability::event) |
+    static_cast<std::uint64_t>(Capability::byte_stream) |
+    static_cast<std::uint64_t>(Capability::file) |
+    static_cast<std::uint64_t>(Capability::shell);
+
 struct CapabilitySet {
   std::uint64_t bits{};
 

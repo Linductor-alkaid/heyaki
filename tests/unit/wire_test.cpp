@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <utility>
@@ -150,6 +151,24 @@ TEST(Wire, FileRejectAndShellTerminalFramesAreKnown) {
                           heyaki::FrameType::shell_error, heyaki::FrameType::shell_close}) {
     EXPECT_TRUE(heyaki::is_known_frame_type(static_cast<std::uint8_t>(type)));
   }
+}
+
+TEST(Wire, FileChunkLimitCountsDataRatherThanRawHeader) {
+  constexpr std::size_t file_chunk_header_bytes = 60U;
+  const heyaki::Limits limits;
+  auto frame = sample_frame();
+  frame.type = static_cast<std::uint8_t>(heyaki::FrameType::file_chunk);
+  frame.payload.resize(file_chunk_header_bytes + limits.max_file_chunk_bytes);
+
+  const auto boundary = heyaki::encode_frame(frame, limits);
+  ASSERT_TRUE(boundary);
+  EXPECT_EQ(heyaki::parse_frame(*boundary.value_if(), limits).status,
+            heyaki::FrameParseStatus::parsed);
+
+  frame.payload.push_back(std::byte{0});
+  const auto oversized = heyaki::encode_frame(frame, limits);
+  ASSERT_FALSE(oversized);
+  EXPECT_EQ(oversized.error_if()->safe_detail(), "file_chunk_limit");
 }
 
 }  // namespace

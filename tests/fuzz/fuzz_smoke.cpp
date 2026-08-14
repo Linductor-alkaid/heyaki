@@ -4,6 +4,7 @@
 #include <heyaki/wire.hpp>
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -120,24 +121,23 @@ int main(int argc, char** argv) {
       std::pair{std::string_view{"oversize-field-envelope"}, malformed_protobuf},
   };
   for (const auto& [name, seed] : protobuf_seeds) {
-    heyaki::fuzz::protobuf_message_parser(seed);
+    heyaki::fuzz::protobuf_schema_parser(seed);
     if (!write_seed(corpus_root / "protobuf-parser", name, seed)) {
       std::cerr << "cannot write protobuf seed " << name << '\n';
       return 1;
     }
   }
 
-  const std::vector<std::vector<std::byte>> state_seeds{
-      {std::byte{0U}},
-      {std::byte{1U}, std::byte{1U}},
-      {std::byte{2U}, std::byte{0x80U}, std::byte{3U}},
-      {std::byte{3U}, std::byte{0x81U}, std::byte{0U}},
-      {std::byte{0xffU}, std::byte{0xffU}, std::byte{0xffU}},
-  };
+  std::vector<std::vector<std::byte>> state_seeds;
+  for (std::uint8_t domain = 0U; domain < 9U; ++domain) {
+    state_seeds.push_back({static_cast<std::byte>(domain), std::byte{0U}, std::byte{1U},
+                           std::byte{2U}, std::byte{3U}, std::byte{4U}, std::byte{5U},
+                           std::byte{6U}, std::byte{7U}});
+  }
   for (std::size_t index = 0U; index < state_seeds.size(); ++index) {
-    heyaki::fuzz::operation_state_machine(state_seeds[index]);
-    const auto name = "transition-" + std::to_string(index);
-    if (!write_seed(corpus_root / "operation-state", name, state_seeds[index])) {
+    heyaki::fuzz::protocol_state_machines(state_seeds[index]);
+    const auto name = "domain-" + std::to_string(index);
+    if (!write_seed(corpus_root / "protocol-state", name, state_seeds[index])) {
       std::cerr << "cannot write state seed " << name << '\n';
       return 1;
     }

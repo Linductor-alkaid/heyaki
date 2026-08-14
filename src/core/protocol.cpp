@@ -13,6 +13,9 @@ Result<NegotiatedProtocol> negotiation_error(const char* detail) {
 
 Result<NegotiatedProtocol> negotiate_protocol(const ProtocolHello& local,
                                               const ProtocolHello& remote) {
+  if (((local.required.bits | remote.required.bits) & ~known_capability_bits) != 0U) {
+    return negotiation_error("unknown_required_capability");
+  }
   if (!local.supported.contains(local.required) || !remote.supported.contains(remote.required)) {
     return negotiation_error("invalid_required_capabilities");
   }
@@ -26,7 +29,8 @@ Result<NegotiatedProtocol> negotiate_protocol(const ProtocolHello& local,
   return Result<NegotiatedProtocol>::success(
       {.version = {.major = local.version.major,
                    .minor = std::min(local.version.minor, remote.version.minor)},
-       .capabilities = {.bits = local.supported.bits & remote.supported.bits}});
+       .capabilities = {
+           .bits = local.supported.bits & remote.supported.bits & known_capability_bits}});
 }
 
 }  // namespace heyaki

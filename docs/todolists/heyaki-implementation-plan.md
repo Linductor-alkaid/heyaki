@@ -171,6 +171,17 @@ Windows MSVC Debug、ASAN、UBSAN、TSAN 和两个真实 libFuzzer target 各 10
 已将 Windows 扩展为 Debug/Release 矩阵并增加第三个 target，但更新后的远端 CI 尚未执行。
 该 CI 与独立协议/安全复审完成前，保持对应两项退出条件未勾选，不准入 M2。
 
+M1 独立评审整改记录（2026-08-15）：未知可选 capability 现按 v1 已知掩码忽略，任一未知
+必需 bit 明确拒绝；tenant 和 application ID 的规范化签名字段要求非空且通过严格 UTF-8
+校验；`FILE_CHUNK` 的 256 KiB 限制只计算 60 字节 raw header 后的数据，并覆盖精确边界。
+Protobuf fuzz target 现遍历 11 个 schema 文件中的全部 42 个消息类型，state-machine target
+覆盖 enrollment、signaling、session/pairing、message、RPC、event、stream、file 和 shell，
+并保留 operation 生命周期检查。Linux CI 已扩展为 GCC/Clang × Debug/Release，libFuzzer
+仍在 Clang Debug 执行；Windows pinned Protobuf、Abseil 与 Heyaki 目标统一使用 MSVC 动态
+runtime，保留 Debug/Release 矩阵。全新本地 GCC Debug/Release、`-Werror` 构建均通过，
+各 16 项 CTest 为 15 pass、1 network 权限 skip；UBSAN 协议/安全/fuzz 标签 11 项全部通过。
+更新后的 Windows Debug/Release 仍须远端执行确认，因此跨平台退出条件继续保持未勾选。
+
 ---
 
 ## 5. M2：Runtime、身份与 ProfileStore

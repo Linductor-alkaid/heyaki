@@ -8,6 +8,7 @@ set(ABSL_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(ABSL_BUILD_TEST_HELPERS OFF CACHE BOOL "" FORCE)
 set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
 set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
+set(ABSL_MSVC_STATIC_RUNTIME OFF CACHE BOOL "" FORCE)
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../third_party/abseil-cpp"
                  "${CMAKE_CURRENT_BINARY_DIR}/abseil-cpp" EXCLUDE_FROM_ALL)
 
@@ -21,6 +22,7 @@ set(protobuf_BUILD_PROTOC_BINARIES ON CACHE BOOL "" FORCE)
 set(protobuf_BUILD_LIBUPB ON CACHE BOOL "" FORCE)
 set(protobuf_WITH_ZLIB OFF CACHE BOOL "" FORCE)
 set(protobuf_LOCAL_DEPENDENCIES_ONLY ON CACHE BOOL "" FORCE)
+set(protobuf_MSVC_STATIC_RUNTIME OFF CACHE BOOL "" FORCE)
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../third_party/protobuf"
                  "${CMAKE_CURRENT_BINARY_DIR}/protobuf" EXCLUDE_FROM_ALL)
 include("${CMAKE_CURRENT_SOURCE_DIR}/../third_party/protobuf/cmake/protobuf-generate.cmake")
@@ -204,15 +206,15 @@ if(HEYAKI_BUILD_FUZZERS)
   target_link_options(heyaki_frame_parser_fuzzer PRIVATE -fsanitize=fuzzer)
   heyaki_configure_target(heyaki_frame_parser_fuzzer)
 
-  add_executable(heyaki_operation_state_fuzzer
+  add_executable(heyaki_protocol_state_fuzzer
     fuzz/state_machine_fuzzer_entry.cpp
     $<TARGET_OBJECTS:heyaki_fuzz_harness>)
-  target_link_libraries(heyaki_operation_state_fuzzer PRIVATE heyaki::core heyaki_protocol_lite)
-  target_include_directories(heyaki_operation_state_fuzzer PRIVATE
+  target_link_libraries(heyaki_protocol_state_fuzzer PRIVATE heyaki::core heyaki_protocol_lite)
+  target_include_directories(heyaki_protocol_state_fuzzer PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/fuzz")
-  target_compile_options(heyaki_operation_state_fuzzer PRIVATE -fsanitize=fuzzer)
-  target_link_options(heyaki_operation_state_fuzzer PRIVATE -fsanitize=fuzzer)
-  heyaki_configure_target(heyaki_operation_state_fuzzer)
+  target_compile_options(heyaki_protocol_state_fuzzer PRIVATE -fsanitize=fuzzer)
+  target_link_options(heyaki_protocol_state_fuzzer PRIVATE -fsanitize=fuzzer)
+  heyaki_configure_target(heyaki_protocol_state_fuzzer)
 
   add_executable(heyaki_protobuf_parser_fuzzer
     fuzz/protobuf_fuzzer_entry.cpp

@@ -208,7 +208,8 @@ are omitted, never encoded as an empty stand-in.
 The field numbers and value encodings are fixed below. An omitted optional field is absent, not an empty
 value. `ID32`, `ID16`, `NONCE32`, `HASH32`, `U16`, `U32`, and `U64` mean respectively raw 32-byte ID,
 raw 16-byte ID, 32-byte nonce, 32-byte SHA-256/BLAKE3 digest, and fixed-width unsigned big-endian
-integers. `TEXT` is exact validated UTF-8; `ASCII` is exact bytes in the printable ASCII range.
+integers. `TEXT` is non-empty exact validated UTF-8; `ASCII` is exact bytes in the printable ASCII
+range.
 
 | Domain separator | Field number and value encoding, in order | Signer/role |
 | --- | --- | --- |

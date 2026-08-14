@@ -119,8 +119,10 @@ const char* payload_limit_error(std::uint8_t type, std::size_t payload_size,
       payload_size > limits.max_pairing_payload_bytes) {
     return "pairing_payload_limit";
   }
+  constexpr std::size_t file_chunk_header_bytes = 60U;
   if (type == static_cast<std::uint8_t>(FrameType::file_chunk) &&
-      payload_size > limits.max_file_chunk_bytes) {
+      payload_size > file_chunk_header_bytes &&
+      payload_size - file_chunk_header_bytes > limits.max_file_chunk_bytes) {
     return "file_chunk_limit";
   }
   return nullptr;

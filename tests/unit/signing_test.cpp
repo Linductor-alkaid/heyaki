@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <initializer_list>
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -133,6 +134,38 @@ TEST(Signing, EverySignedDomainAcceptsItsFrozenFieldShape) {
   without_expiry.push_back({.number = 8U, .value = std::vector<std::byte>(32U, std::byte{0})});
   EXPECT_TRUE(heyaki::canonicalize_for_signature(heyaki::SigningDomain::trust_grant,
                                                   without_expiry));
+}
+
+TEST(Signing, TextFieldsRequireNonemptyCanonicalUtf8) {
+  const auto canonicalize_text = [](heyaki::SigningDomain domain, std::size_t text_index,
+                                    std::initializer_list<std::size_t> sizes,
+                                    std::vector<std::byte> text) {
+    std::vector<heyaki::CanonicalField> fields;
+    std::uint16_t number = 1U;
+    for (const auto size : sizes) {
+      fields.push_back(
+          {.number = number++, .value = std::vector<std::byte>(size, std::byte{0})});
+    }
+    fields[text_index].value = std::move(text);
+    return heyaki::canonicalize_for_signature(domain, fields);
+  };
+
+  const std::vector<std::byte> valid_utf8{std::byte{0xe7U}, std::byte{0xa7U},
+                                          std::byte{0x9fU}, std::byte{'x'}};
+  const std::vector<std::byte> overlong_utf8{std::byte{0xc0U}, std::byte{0x80U}};
+  const std::vector<std::byte> surrogate_utf8{std::byte{0xedU}, std::byte{0xa0U},
+                                              std::byte{0x80U}};
+
+  EXPECT_TRUE(canonicalize_text(heyaki::SigningDomain::enrollment, 5U,
+                                {32U, 16U, 32U, 32U, 32U, 1U, 4U, 4U, 8U, 8U, 8U},
+                                valid_utf8));
+  EXPECT_FALSE(canonicalize_text(heyaki::SigningDomain::enrollment, 5U,
+                                 {32U, 16U, 32U, 32U, 32U, 1U, 4U, 4U, 8U, 8U, 8U},
+                                 overlong_utf8));
+  EXPECT_FALSE(canonicalize_text(heyaki::SigningDomain::enrollment_record, 3U,
+                                 {32U, 16U, 32U, 1U, 8U, 8U}, {}));
+  EXPECT_FALSE(canonicalize_text(heyaki::SigningDomain::endpoint_record, 2U,
+                                 {32U, 16U, 1U, 8U, 32U, 8U}, surrogate_utf8));
 }
 
 TEST(Signing, SignalingTranscriptRejectsMissingOrOversizedObjects) {
