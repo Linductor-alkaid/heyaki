@@ -1,6 +1,6 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：M1 首轮评审问题已整改并通过本地门禁；待更新后的 GitHub CI（含 Windows Debug/Release）与独立复审后准入 M2
+> - 状态：M1 评审问题及 Windows Protobuf/Abseil ABI 问题已整改并通过本地门禁，独立复审通过；待修复提交的 GitHub CI（含 Windows Debug/Release）通过后准入 M2
 > - 日期：2026-08-15
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
@@ -157,7 +157,7 @@ M0 验证记录（2026-08-14）：本机 GCC 13.3 的 Debug、Release、UBSAN、
 - [x] 所有公共强类型、错误码、限制默认值和序列化边界有单元测试及公开头独立编译测试。
 - [ ] golden vectors 在 Linux/Windows、Debug/Release 上得到相同字节；协议文档与 schema 版本一致。
 - [x] 所有 parser 在分配 payload 前检查长度，fuzz smoke 无 crash、越界、超限分配或无限循环。
-- [ ] threat model、安全默认值和 wire protocol 通过独立评审后再进入 M2；后续不兼容修改必须显式提升协议 major。
+- [x] threat model、安全默认值和 wire protocol 通过独立评审后再进入 M2；后续不兼容修改必须显式提升协议 major。
 
 M1 本地验证记录（2026-08-15）：首轮协议/安全评审的七项问题已完成整改。Linux GCC 13.3 的
 Debug、Release、`-Werror` 和禁异常构建均通过；各配置的 16 项 CTest 为 15 pass、1 network
@@ -169,7 +169,7 @@ test 和 fuzz smoke 均通过。新增 generated Protobuf parser 的第三个 li
 宿主没有 Clang/libFuzzer。GitHub Actions 在基线 commit `0567800` 上完成 Linux GCC/Clang、
 Windows MSVC Debug、ASAN、UBSAN、TSAN 和两个真实 libFuzzer target 各 100 次短跑；本次整改
 已将 Windows 扩展为 Debug/Release 矩阵并增加第三个 target，但更新后的远端 CI 尚未执行。
-该 CI 与独立协议/安全复审完成前，保持对应两项退出条件未勾选，不准入 M2。
+该 CI 与独立协议/安全复审均完成前，保持对应退出条件未勾选，不准入 M2。
 
 M1 独立评审整改记录（2026-08-15）：未知可选 capability 现按 v1 已知掩码忽略，任一未知
 必需 bit 明确拒绝；tenant 和 application ID 的规范化签名字段要求非空且通过严格 UTF-8
@@ -181,6 +181,17 @@ Protobuf fuzz target 现遍历 11 个 schema 文件中的全部 42 个消息类�
 runtime，保留 Debug/Release 矩阵。全新本地 GCC Debug/Release、`-Werror` 构建均通过，
 各 16 项 CTest 为 15 pass、1 network 权限 skip；UBSAN 协议/安全/fuzz 标签 11 项全部通过。
 更新后的 Windows Debug/Release 仍须远端执行确认，因此跨平台退出条件继续保持未勾选。
+
+M1 准入复审与 Windows CI 整改记录（2026-08-15）：复审逐项核对公共类型、错误不可变性、
+版本/能力协商、规范化签名字段、信令 transcript 绑定、frame parser、全部 42 个 Protobuf
+Lite 消息及九个协议域状态模型，未发现新的协议或安全阻断问题。Windows Debug/Release 的
+`protoc.exe` 链接失败源于同一构建图中 Abseil 按 MSVC 默认 C++14、Protobuf 按 C++17
+编译，导致 Abseil drop-in `string_view` ABI 不一致。修复提交 `2a5340f` 将所有 in-tree
+target 统一为必需的 C++20，并在配置期验证 `absl_cord`、Protobuf runtime、`libprotoc`、
+`protoc` 的语言标准及动态 MSVC runtime 一致。全新 GCC 13.3 Debug、Release、禁异常和
+UBSAN `-Werror` 构建均通过，四套各 16 项 CTest 全部通过；依赖锁离线校验通过。本机无
+Clang，且当前环境没有 GitHub 推送凭据，因此修复提交尚待推送并由更新后的 Linux/Windows、
+sanitizer 与 libFuzzer CI 验证；在远端结果完成前，跨平台退出条件保持未勾选且不准入 M2。
 
 ---
 
