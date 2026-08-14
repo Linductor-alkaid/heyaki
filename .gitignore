@@ -75,8 +75,8 @@ rules.ninja
 !.env.example
 !.env.*.example
 *.pid
-core
-core.*
+/core
+/core.*
 
 # Package-manager state
 /vcpkg_installed/
