@@ -5,7 +5,7 @@ submodules verified by `scripts/fetch_third_party.sh`.
 
 | Area | Selected M0 baseline | Evidence | Verification status |
 | --- | --- | --- | --- |
-| Build profile | static DataChannel-only library; examples, upstream tests, media, and WebSocket disabled | `BUILD_SHARED_LIBS=OFF`, `NO_EXAMPLES=ON`, `NO_TESTS=ON`, `NO_MEDIA=ON`, `NO_WEBSOCKET=ON` | GCC 13.3 Release build passed locally; GCC/Clang/MSVC gate added to CI |
+| Build profile | static DataChannel-only library; examples, upstream tests, media, WebSocket, and install rules disabled | `BUILD_SHARED_LIBS=OFF`, `NO_EXAMPLES=ON`, `NO_TESTS=ON`, `NO_MEDIA=ON`, `NO_WEBSOCKET=ON`, `CMAKE_SKIP_INSTALL_RULES=ON` | GCC 13.3 Release build passed locally; GCC/Clang/MSVC gate added to CI |
 | ICE backend | bundled libjuice | libdatachannel defaults `USE_NICE=OFF`; pinned libjuice submodule is initialized and included by the baseline build | GCC 13.3 build verified; GCC/Clang/MSVC CI result pending |
 | TURN/UDP | required | libjuice documents RFC 5766/8656 TURN relay support | Capability documented; coturn interop pending M4 |
 | TURN/TCP/TLS | v1 requirement, unavailable in selected M0 backend | `IceTransport` explicitly rejects both with libjuice; its libnice branch maps `TurnTcp` and `TurnTls` to the corresponding `NiceRelayType` | Negative capability verified by a pinned-source contract test; select/pin libnice or revise DEC-02 before M3 |
@@ -13,6 +13,12 @@ submodules verified by `scripts/fetch_third_party.sh`.
 | Linux GCC | x86_64 | standalone pinned source build with the M0 profile | GCC 13.3 Release passed locally; CI gate pending |
 | Linux Clang | x86_64 | standalone pinned source build added to the Clang matrix job | CI gate pending |
 | Windows MSVC | x64 | standalone pinned source build uses the `windows-2025` OpenSSL development package | CI gate pending |
+
+The pinned upstream CMake evaluates `$<TARGET_PDB_FILE:datachannel>` from an install rule whenever
+MSVC is active. With `BUILD_SHARED_LIBS=OFF`, `datachannel` is static and that generator expression
+is invalid. The M0 probe does not install libdatachannel, so it sets `CMAKE_SKIP_INSTALL_RULES=ON`
+instead of patching pinned source or changing the library type. Heyaki integration must revisit the
+upstream install rule before M4 if it installs libdatachannel as a separate artifact.
 
 The M0 gate is a compile and capability baseline, not a claim of network interoperability. It is
 complete only when the standalone pinned build passes GCC, Clang, and MSVC CI. The selected
