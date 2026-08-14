@@ -1,0 +1,17 @@
+# Heyaki third-party dependency lock file.
+#
+# Format:
+# name|repository|ref|commit|recursive|group
+#
+# Keep commit as the resolved commit behind ref. The fetch script checks both so
+# a moved tag cannot silently change the source used by the build.
+
+FTXUI|https://github.com/ArthurSonzogni/FTXUI.git|989917eba88b7b67bf2b7e40fbdbe5bba66c23d5|989917eba88b7b67bf2b7e40fbdbe5bba66c23d5|false|runtime
+executor|https://github.com/Linductor-alkaid/executor.git|e9dc36d8a7d5277a0c23adcdcb307a28fc73b2e3|e9dc36d8a7d5277a0c23adcdcb307a28fc73b2e3|false|runtime
+libdatachannel|https://github.com/paullouisageneau/libdatachannel.git|v0.23.2|9e6a13abbb6846c003d817d0387b6706466e2b03|true|runtime
+libsodium|https://github.com/jedisct1/libsodium.git|1.0.20-RELEASE|9511c982fb1d046470a8b42aa36556cdb7da15de|false|runtime
+protobuf|https://github.com/protocolbuffers/protobuf.git|v31.1|74211c0dfc2777318ab53c2cd2c317a2ef9012de|true|runtime
+blake3|https://github.com/BLAKE3-team/BLAKE3.git|1.8.2|df610ddc3b93841ffc59a87e3da659a15910eb46|false|runtime
+sqlite|https://github.com/sqlite/sqlite.git|version-3.50.4|8ed5e7365e6f12f427910188bbf6b254daad2ef6|false|runtime
+googletest|https://github.com/google/googletest.git|v1.17.0|52eb8108c5bdec04579160ae17225d66034bd723|false|test
+zstd|https://github.com/facebook/zstd.git|v1.5.7|f8745da6ff1ad1e7bab384bd1f9d742439278e99|false|optional

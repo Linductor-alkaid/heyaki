@@ -1,0 +1,4 @@
+# Dependencies are materialized by scripts/fetch_third_party.sh.
+*
+!.gitignore
+!dependencies.lock

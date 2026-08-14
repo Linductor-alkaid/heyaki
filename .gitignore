@@ -1,0 +1,107 @@
+# Third-party sources are restored by scripts/fetch_third_party.sh.
+/third_party/*
+!/third_party/.gitignore
+!/third_party/dependencies.lock
+
+# CMake and build directories
+/build/
+/build-*/
+/cmake-build-*/
+/out/
+/install/
+/_deps/
+/meson-build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+CPackConfig.cmake
+CPackSourceConfig.cmake
+CMakeUserPresets.json
+compile_commands.json
+build.ninja
+rules.ninja
+.ninja_deps
+.ninja_log
+
+# Compiler and linker outputs
+*.o
+*.obj
+*.lo
+*.a
+*.la
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.out
+*.app/
+*.dSYM/
+*.pdb
+*.ilk
+*.exp
+
+# Test, coverage, profiling, and fuzzing outputs
+/Testing/
+/test-results/
+/coverage/
+/fuzz-artifacts/
+*.gcda
+*.gcno
+*.gcov
+*.lcov
+*.profraw
+*.profdata
+*.coverage
+
+# Generated protocol sources and documentation output
+/generated/
+/docs/_build/
+/docs/html/
+
+# Local Heyaki state and credentials
+/.heyaki/
+/heyaki-state/
+/secrets/
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pid
+core
+core.*
+
+# Package-manager state
+/vcpkg_installed/
+/.conan/
+/.conan2/
+
+# IDE and editor files
+/.vscode/
+/.idea/
+/.vs/
+/.cache/
+/.clangd/
+/.ccls-cache/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.VC.db
+*.VC.VC.opendb
+*.swp
+*.swo
+*~
+
+# Operating-system and temporary files
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.log
+*.tmp
+*.bak
+*.orig
+*.rej
