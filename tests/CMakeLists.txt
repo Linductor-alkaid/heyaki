@@ -27,6 +27,21 @@ add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../third_party/protobuf"
                  "${CMAKE_CURRENT_BINARY_DIR}/protobuf" EXCLUDE_FROM_ALL)
 include("${CMAKE_CURRENT_SOURCE_DIR}/../third_party/protobuf/cmake/protobuf-generate.cmake")
 
+foreach(heyaki_protobuf_abi_target IN ITEMS
+    absl_cord libprotobuf-lite libprotobuf libprotoc protoc)
+  get_target_property(heyaki_protobuf_abi_cxx_standard
+    ${heyaki_protobuf_abi_target} CXX_STANDARD)
+  if(NOT heyaki_protobuf_abi_cxx_standard EQUAL 20)
+    message(FATAL_ERROR
+      "${heyaki_protobuf_abi_target} must use C++20 to keep Abseil drop-in types ABI-compatible; "
+      "got CXX_STANDARD=${heyaki_protobuf_abi_cxx_standard}")
+  endif()
+endforeach()
+if(MSVC AND (ABSL_MSVC_STATIC_RUNTIME OR protobuf_MSVC_STATIC_RUNTIME))
+  message(FATAL_ERROR
+    "Pinned Abseil and Protobuf targets must use the dynamic MSVC runtime")
+endif()
+
 set(HEYAKI_PROTO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../proto")
 set(HEYAKI_PROTO_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated-proto")
 file(MAKE_DIRECTORY "${HEYAKI_PROTO_GENERATED_DIR}")

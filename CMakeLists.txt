@@ -6,6 +6,11 @@ project(
   DESCRIPTION "Device-to-device communication infrastructure"
   LANGUAGES C CXX)
 
+# Abseil's drop-in types change ABI with the active C++ language standard.
+# Keep every in-tree dependency on the same standard as Heyaki targets.
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 include(CTest)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
