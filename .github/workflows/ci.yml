@@ -1,0 +1,64 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch pinned dependencies
+        run: scripts/fetch_third_party.sh --all
+      - name: Configure
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_COMPILER=${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }}
+          -DHEYAKI_WARNINGS_AS_ERRORS=ON
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --no-tests=error
+      - name: Verify all dependency groups offline
+        run: scripts/fetch_third_party.sh --check --all
+
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch pinned dependencies
+        shell: bash
+        run: scripts/fetch_third_party.sh --all
+      - name: Configure
+        run: cmake -S . -B build -A x64 -DHEYAKI_WARNINGS_AS_ERRORS=ON
+      - name: Build
+        run: cmake --build build --config Debug --parallel 2
+      - name: Test
+        run: ctest --test-dir build -C Debug --output-on-failure --no-tests=error
+
+  sanitizer:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [asan, ubsan, tsan]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch pinned dependencies
+        run: scripts/fetch_third_party.sh --all
+      - name: Configure
+        run: >-
+          cmake --preset ${{ matrix.preset }}
+          -DHEYAKI_REQUIRE_SANITIZER_RUNTIME=ON
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }} --parallel 2
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}
+      - name: Fuzz smoke
+        run: cmake --build build/${{ matrix.preset }} --target heyaki-fuzz-smoke

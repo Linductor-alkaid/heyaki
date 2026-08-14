@@ -2,6 +2,7 @@
 /third_party/*
 !/third_party/.gitignore
 !/third_party/dependencies.lock
+!/third_party/licenses.lock
 
 # CMake and build directories
 /build/
@@ -49,6 +50,8 @@ rules.ninja
 /test-results/
 /coverage/
 /fuzz-artifacts/
+/fuzz-corpus/
+/test-state/
 *.gcda
 *.gcno
 *.gcov
@@ -59,6 +62,7 @@ rules.ninja
 
 # Generated protocol sources and documentation output
 /generated/
+/supply-chain/
 /docs/_build/
 /docs/html/
 

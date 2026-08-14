@@ -29,9 +29,29 @@ tools, examples, and tests.
   shutdown behavior as explicit design choices. Do not accept silent task or
   message loss.
 
-Before implementing concurrent behavior, consult the pinned executor API and
-communication documentation under `third_party/executor/`; prefer its public
-facade and established components over local abstractions.
+## Executor Skills And Documentation
+
+Use the resources shipped with the pinned executor dependency before designing
+or implementing concurrent behavior. Local resources match the dependency
+version used by Heyaki and take precedence over documentation for another
+executor release.
+
+- For application integration, use
+  `third_party/executor/docs/skill/executor-integration/SKILL.md`. Follow its
+  routing instructions and load only the relevant router and capability card.
+- If explicit direction has been given to change executor itself, use
+  `third_party/executor/docs/skill/executor-maintainer/SKILL.md` before editing
+  the dependency. Follow its source, invariant, test, and documentation checks.
+  Do not use the maintainer skill as implicit permission to modify executor.
+- Use the current user-guide website sources under
+  `third_party/executor/website/zh/` (or the corresponding `en/` page when
+  needed) for lifecycle, submission, communication, monitoring, failure, and
+  production-readiness guidance. In particular, consult the relevant guides in
+  `guides/`, `realtime-and-communication/`, and `reliability/` rather than
+  guessing API semantics.
+- Treat executor public headers and the pinned user guide as authoritative for
+  application use. Prefer the public facade and documented communication
+  components over local abstractions or executor implementation details.
 
 If executor cannot satisfy a required behavior and correctness appears to
 require a new lock, a dedicated thread, or an independently managed execution

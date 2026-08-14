@@ -1,0 +1,14 @@
+---
+Checks: >
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  cppcoreguidelines-pro-type-member-init,
+  modernize-use-nullptr,
+  performance-*,
+  portability-*,
+  readability-container-size-empty
+WarningsAsErrors: ''
+HeaderFilterRegex: '^(include|src|apps|tests)/'
+FormatStyle: file
+...
