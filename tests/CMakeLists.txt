@@ -2,6 +2,8 @@ set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
 set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../third_party/googletest"
                  "${CMAKE_CURRENT_BINARY_DIR}/googletest" EXCLUDE_FROM_ALL)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 set(HEYAKI_M1_GOLDEN_VECTOR_FILE
   "${CMAKE_CURRENT_SOURCE_DIR}/vectors/m1-golden-vectors.json")
@@ -28,10 +30,10 @@ foreach(field_number RANGE 1 10)
     canonical_offer field_${field_number}_hex)
 endforeach()
 heyaki_read_golden_json(M1_CANONICAL_HEX canonical_offer canonical_hex)
-heyaki_read_golden_json(M1_ED25519_SEED_HEX ed25519_rfc8032_test_1 seed_hex)
-heyaki_read_golden_json(M1_ED25519_PUBLIC_KEY_HEX ed25519_rfc8032_test_1 public_key_hex)
-heyaki_read_golden_json(M1_ED25519_MESSAGE_HEX ed25519_rfc8032_test_1 message_hex)
-heyaki_read_golden_json(M1_ED25519_SIGNATURE_HEX ed25519_rfc8032_test_1 signature_hex)
+heyaki_read_golden_json(M1_ED25519_SEED_HEX ed25519_canonical_offer seed_hex)
+heyaki_read_golden_json(M1_ED25519_PUBLIC_KEY_HEX ed25519_canonical_offer public_key_hex)
+heyaki_read_golden_json(M1_ED25519_MESSAGE_HEX ed25519_canonical_offer message_hex)
+heyaki_read_golden_json(M1_ED25519_SIGNATURE_HEX ed25519_canonical_offer signature_hex)
 heyaki_read_golden_json(M1_PROTOBUF_ENVELOPE_HEX protobuf_message_envelope bytes_hex)
 heyaki_read_golden_json(M1_FRAME_HEX frame bytes_hex)
 
@@ -62,9 +64,10 @@ endfunction()
 add_executable(heyaki_unit_tests
   unit/contracts_test.cpp
   unit/golden_vectors_test.cpp
+  unit/signing_test.cpp
   unit/version_test.cpp
   unit/wire_test.cpp)
-target_link_libraries(heyaki_unit_tests PRIVATE heyaki::core GTest::gtest_main)
+target_link_libraries(heyaki_unit_tests PRIVATE heyaki::core GTest::gtest_main OpenSSL::Crypto)
 target_include_directories(heyaki_unit_tests PRIVATE
   "${HEYAKI_TEST_GENERATED_DIR}"
   "${CMAKE_CURRENT_SOURCE_DIR}/unit")
@@ -165,6 +168,16 @@ add_test(
     "-DHEYAKI_PROTOCOL_MINOR=${HEYAKI_PROTOCOL_VERSION_MINOR}"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/protocol/CheckProtocolSources.cmake")
 set_tests_properties(heyaki_protocol_sources PROPERTIES LABELS "protocol;security")
+
+add_test(
+  NAME heyaki_protobuf_conformance
+  COMMAND "${CMAKE_COMMAND}" -E env
+    "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../third_party/protobuf/python"
+    "PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python"
+    "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/protocol/protobuf_conformance_test.py"
+    "${HEYAKI_M1_GOLDEN_VECTOR_FILE}")
+set_tests_properties(heyaki_protobuf_conformance PROPERTIES LABELS "protocol;security;fuzz")
 
 add_executable(heyaki_performance_smoke performance/build_info_benchmark.cpp)
 target_link_libraries(heyaki_performance_smoke PRIVATE heyaki::core)

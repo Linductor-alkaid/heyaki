@@ -37,3 +37,18 @@ message ShellExit {
   optional sint32 exit_code = 2;
   heyaki.protocol.common.v1.StableStatusCode status = 3;
 }
+
+message ShellEof {
+  bytes shell_id = 1;
+}
+
+message ShellError {
+  bytes shell_id = 1;
+  heyaki.protocol.common.v1.StableStatusCode status = 2;
+  string safe_detail = 3;
+}
+
+message ShellClose {
+  bytes shell_id = 1;
+  heyaki.protocol.common.v1.StableStatusCode status = 2;
+}

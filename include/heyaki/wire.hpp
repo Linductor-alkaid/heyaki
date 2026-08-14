@@ -37,12 +37,16 @@ enum class FrameType : std::uint8_t {
   file_accept = 0x61,
   file_chunk = 0x62,
   file_complete = 0x63,
+  file_reject = 0x64,
   shell_open = 0x70,
   shell_input = 0x71,
   shell_output = 0x72,
   shell_resize = 0x73,
   shell_signal = 0x74,
   shell_exit = 0x75,
+  shell_eof = 0x76,
+  shell_error = 0x77,
+  shell_close = 0x78,
 };
 
 inline constexpr std::uint8_t frame_flag_required = 0x01U;

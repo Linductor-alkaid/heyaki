@@ -13,9 +13,10 @@ trusted for enrollment policy, presence, and availability, but not for business 
 asserting a peer identity without a device signature. Coturn is trusted only to forward encrypted
 packets and enforce allocation policy.
 
-TLS authenticates device-to-relay control connections. DTLS protects the peer data path, while signed
-offer/answer/candidate objects bind the DTLS fingerprint, both identities/endpoints, nonce, session,
-and expiry. `SESSION_HELLO` binds the authenticated signaling exchange to the actual DTLS exporter value.
+TLS authenticates device-to-relay control connections. DTLS protects the peer data path. A signed
+offer binds the initiator nonce; the signed answer adds the responder nonce; candidates sent after the
+answer bind both. All three bind the relevant DTLS fingerprint, both identities/endpoints, session,
+and expiry. `SESSION_HELLO` binds both nonces and the signaling exchange to the actual DTLS exporter.
 ProfileStore protection terminates at the local OS security principal; a process allowed to read a
 profile can act as that device.
 
@@ -53,7 +54,9 @@ The following matrix is mandatory:
 
 `value_for_log` enforces this baseline and returns a fixed redaction marker for unsafe classes. Error
 objects accept only stable code, numeric underlying code, peer/operation IDs, component, and a
-pre-reviewed safe detail token. Callers must not put remote text or payload fragments in `safe_detail`.
+pre-reviewed safe detail token. A received token must pass `is_safe_detail_token`: 1-64 ASCII bytes
+from `[a-z0-9_.-]`. Invalid values are replaced by a local stable protocol token before logging;
+callers must not put remote text or payload fragments in `safe_detail`.
 
 ## 4. Replay cache
 
@@ -64,8 +67,9 @@ The replay key is a typed tuple, never an unscoped nonce:
 ```
 
 Entries expire at the earlier of the signed expiry plus bounded skew and ten minutes after local
-monotonic insertion. The default capacity is 4096 entries per process security domain. Partitions and
-per-peer quotas prevent one peer from evicting the entire cache. An exact duplicate may return a cached
+monotonic insertion. The default capacity is 4096 entries per process security domain and 256 per peer.
+Partitions and the per-peer quota prevent one peer from evicting the entire cache. An exact duplicate
+may return a cached
 idempotent response; a key collision with different canonical bytes is rejected and audited.
 
 When capacity is exhausted, enrollment, login, signaling, pairing, grant, and session hello fail closed
@@ -83,6 +87,8 @@ health system.
   generation. Parameters are not inferred from string formatting.
 - Calibration targets 500 ms on the owning device, accepted range 250-750 ms, memory range 64-512 MiB,
   and operations range 2-6. Constrained-device changes require an explicit policy/version review.
+- `validate_security_policy` treats those lower and upper bounds as hard v1 limits. A constrained
+  profile cannot weaken them through ordinary configuration; it requires a new reviewed policy version.
 - Verification uses libsodium, constant-time comparison where applicable, locked/guarded secure buffers
   when available, and `sodium_memzero` before releasing password and derived temporary buffers.
 - Rotation increments a non-zero 64-bit password generation transactionally. Old passwords stop issuing

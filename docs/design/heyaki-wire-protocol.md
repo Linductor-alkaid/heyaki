@@ -18,6 +18,8 @@ The words MUST, MUST NOT, SHOULD, and MAY describe interoperability requirements
 - Raw identifiers are fixed-size byte strings. They are never C++ object representations.
 - Text is UTF-8. Fields used in ACL or dispatch are compared as exact bytes after their domain-specific
   validation; no locale-sensitive comparison is allowed.
+- A `safe_detail` is a 1-64 byte ASCII token matching `[a-z0-9_.-]+`. Remote free-form text is never a
+  safe detail and must not be copied into errors or logs.
 - A relative duration is an unsigned millisecond count. The receiver starts its own monotonic timer
   when the field is received and clamps it to its local maximum.
 - A Unix millisecond timestamp is metadata or a bounded expiry hint. Wall-clock agreement MUST NOT be
@@ -70,8 +72,8 @@ frames that violate a domain limit are protocol errors.
 | `0x30-0x3f` | RPC | request, response, cancel |
 | `0x40-0x4f` | event | subscribe, item, unsubscribe |
 | `0x50-0x5f` | stream | open, data, window update, fin, reset |
-| `0x60-0x6f` | file | manifest, accept, chunk, complete |
-| `0x70-0x7f` | shell | open, input, output, resize, signal, exit |
+| `0x60-0x6f` | file | manifest, accept, chunk, complete, reject |
+| `0x70-0x7f` | shell | open, input, output, resize, signal, exit, EOF, error, close |
 
 The parser reads and validates the length varint before waiting for or allocating the payload. It then
 validates the minimum header, flags, channel varint, and domain-specific payload limit. A streaming
@@ -87,7 +89,8 @@ session. Resource exhaustion rejects the operation before state mutation and rem
 
 `heyaki::Limits` is the single public baseline. Defaults are 2 MiB/frame, 64 KiB/control frame,
 1 MiB/message and RPC payload, 8 MiB/1024-message send queue, 4 MiB/256-frame receive window,
-16 GiB/file, 256 KiB/file chunk, 256 concurrent operations, 8 KiB/pairing payload, five pairing
+16 GiB/file and 16 GiB/expanded file, 256 KiB/file chunk, 256 concurrent operations,
+8 KiB/pairing payload, five pairing
 attempts, 64 KiB/endpoint manifest, and 2048 diagnostic events. Validation also applies hard safety
 ceilings. Negotiation may only reduce a local limit; a peer advertisement cannot raise it.
 
@@ -95,6 +98,9 @@ Queue message counts and byte counts are enforced together. Control traffic has 
 capacity. Reject, drop-oldest, and keep-latest are semantic policies, not interchangeable defaults;
 reliable control, pairing, message, RPC, stream, file, and shell frames default to rejection rather than
 silent loss.
+
+For a compressed file, manifest `size` is the encoded byte count and `expanded_size` is mandatory.
+Receivers enforce both `max_file_bytes` and `max_expanded_file_bytes` before accepting the transfer.
 
 ## 4. Version and capability negotiation
 
@@ -133,21 +139,32 @@ IDs and hashes use raw fixed-width bytes; strings use exact validated UTF-8/ASCI
 implicit defaults. Required fields are always emitted, including zero-valued integers. Optional fields
 are omitted, never encoded as an empty stand-in.
 
-| Domain separator | Ordered fields |
-| --- | --- |
-| `heyaki.enrollment.v1` | device ID, endpoint ID, identity public key, relay ID, challenge nonce, tenant, protocol major/minor, capabilities, expiry |
-| `heyaki.endpoint-record.v1` | device ID, endpoint ID, application ID, record generation, manifest SHA-256, expiry |
-| `heyaki.service-manifest.v1` | device ID, endpoint ID, manifest generation, canonical manifest SHA-256, expiry |
-| `heyaki.offer.v1` | initiator device/endpoint, responder device/endpoint, request ID, session ID, session nonce, expiry, exact SDP, DTLS fingerprint |
-| `heyaki.answer.v1` | same binding and order as offer, followed by exact answer SDP and DTLS fingerprint |
-| `heyaki.candidate.v1` | both device/endpoint pairs, request ID, session ID, session nonce, expiry, candidate sequence, exact candidate bytes |
-| `heyaki.session-hello.v1` | sender device/endpoint, peer device/endpoint, session ID, epoch, both nonces, DTLS channel binding, protocol version, supported/required capabilities, expiry |
-| `heyaki.trust-grant.v1` | grant ID, issuer device ID, subject device ID, sorted unique scopes, password generation, issued time, optional expiry, pairing nonce |
+The field numbers and value encodings are fixed below. An omitted optional field is absent, not an empty
+value. `ID32`, `ID16`, `NONCE32`, `HASH32`, `U16`, `U32`, and `U64` mean respectively raw 32-byte ID,
+raw 16-byte ID, 32-byte nonce, 32-byte SHA-256/BLAKE3 digest, and fixed-width unsigned big-endian
+integers. `TEXT` is exact validated UTF-8; `ASCII` is exact bytes in the printable ASCII range.
 
-The two device identities and endpoints are always bound for signaling and session objects. Nonces are
-32 random bytes and request/session/grant IDs are 16 random bytes. Expiry is checked with a bounded
-local skew policy and replay uniqueness still relies on the signed nonce/ID tuple. Trust scopes are
-ASCII, sorted by byte order, unique, and length-prefixed individually inside their field value.
+| Domain separator | Field number and value encoding, in order | Signer/role |
+| --- | --- | --- |
+| `heyaki.enrollment.v1` | 1 ID32 device, 2 ID16 endpoint, 3 raw 32-byte identity public key, 4 raw 32-byte relay ID, 5 NONCE32 challenge, 6 TEXT tenant, 7 U32 major, 8 U32 minor, 9 U64 supported bits, 10 U64 required bits, 11 U64 expiry | enrolling device |
+| `heyaki.enrollment-record.v1` | 1 ID32 device, 2 ID16 endpoint, 3 raw 32-byte relay ID, 4 TEXT tenant, 5 U64 generation, 6 U64 issued time | relay |
+| `heyaki.endpoint-record.v1` | 1 ID32 device, 2 ID16 endpoint, 3 TEXT application ID, 4 U64 record generation, 5 HASH32 manifest, 6 U64 expiry | device |
+| `heyaki.service-manifest.v1` | 1 ID32 device, 2 ID16 endpoint, 3 U64 manifest generation, 4 HASH32 canonical manifest, 5 U64 expiry | device |
+| `heyaki.offer.v1` | 1 initiator ID32, 2 initiator ID16 endpoint, 3 responder ID32, 4 responder ID16 endpoint, 5 ID16 request, 6 ID16 session, 7 NONCE32 initiator nonce, 8 U64 expiry, 9 exact SDP bytes, 10 raw 32-byte DTLS fingerprint | initiator |
+| `heyaki.answer.v1` | 1-6 same signaling binding, 7 NONCE32 initiator nonce, 8 NONCE32 responder nonce, 9 U64 expiry, 10 exact SDP bytes, 11 raw 32-byte DTLS fingerprint | responder |
+| `heyaki.candidate.v1` | 1-6 same signaling binding, 7 NONCE32 initiator nonce, 8 NONCE32 responder nonce, 9 U64 expiry, 10 U32 candidate sequence, 11 exact candidate bytes | candidate owner |
+| `heyaki.session-hello.v1` | 1 sender ID32, 2 sender ID16 endpoint, 3 peer ID32, 4 peer ID16 endpoint, 5 ID16 session, 6 U64 epoch, 7 NONCE32 initiator nonce, 8 NONCE32 responder nonce, 9 raw 32-byte DTLS exporter binding, 10 U32 major, 11 U32 minor, 12 U64 supported bits, 13 U64 required bits, 14 U64 expiry | hello sender |
+| `heyaki.trust-grant.v1` | 1 ID16 grant, 2 issuer ID32, 3 subject ID32, 4 scope list, 5 U64 password generation, 6 U64 issued time, optional 7 U64 expiry, 8 NONCE32 pairing nonce | grant issuer |
+
+The scope-list value is `U16 count` followed by `count` repetitions of `U16 byte length` and
+`ASCII` scope bytes. It is sorted by byte order, unique, and bounded to 0-256 scopes of 1-256
+bytes each. The two device identities and endpoints are always bound for signaling and session
+objects. Expiry is checked with a bounded local skew policy; replay uniqueness relies on the signed
+nonce/ID tuple. Bootstrap tokens and other secrets are never canonicalized or signed.
+
+An offer omits `responder_nonce`. A valid answer supplies it, and candidate transmission starts only
+after that answer has been verified so every candidate binds both nonces. The canonical answer and
+candidate objects therefore always contain fields 7 and 8.
 
 Signatures are Ed25519 over the canonical bytes. Verification also checks that each declared
 `DeviceId` derives from the supplied public key, the signing role is correct, and all fixed widths and
@@ -165,8 +182,8 @@ semantic limits hold before accepting state.
 | RPC | received, executing, responded/cancelled/outcome-unknown | A request ID maps to one immutable request. Cancellation is cooperative. Non-idempotent work interrupted after admission returns outcome unknown and is not retried. |
 | Event | subscribed, active, unsubscribed/closed | Publisher sequence detects gaps and duplicates. Best-effort may drop; reliable-live closes only the subscription on irrecoverable overflow. |
 | Stream | idle, open, half-closed-local/remote, closed/reset | DATA offsets must match the next expected offset. Exact already-consumed duplicates may be ignored; gaps, conflicting duplicates, and DATA after FIN reset the stream. |
-| File | offered, accepted, transferring, verifying, committed/failed | Chunks may arrive out of order within the negotiated bitmap/window. Same offset and hash is idempotent; conflict fails the transfer. COMPLETE before all chunks is rejected. |
-| Shell | opening, active, input-eof, exited, closed | Data offsets are ordered. Resize may supersede older resize state. Input after EOF and frames after EXIT are rejected locally; the shell channel closes without affecting other services. |
+| File | offered, accepted/rejected, transferring, verifying, committed/failed | REJECT is an explicit terminal response. Chunks may arrive out of order within the negotiated bitmap/window. Same offset and hash is idempotent; conflict fails the transfer. COMPLETE before all chunks is rejected. |
+| Shell | opening, active, input-eof, exited, closed | EOF is explicit and idempotent. Data offsets are ordered. Resize may supersede older resize state. Input after EOF and frames after EXIT are rejected locally; ERROR/CLOSE terminates only the shell channel. |
 
 Every transition validates frame size before decoding payload and validates the session epoch before
 mutating state. Oversize frames fail at the parser. Protobuf decode failure, a repeated identifier with
@@ -176,6 +193,7 @@ failure scope above. No parser loops waiting on an already complete invalid inpu
 ## 7. Golden vectors
 
 `tests/vectors/m1-golden-vectors.json` contains the normative DeviceId derivation, canonical signing
-encoding, RFC 8032 Ed25519 signature, Protobuf Lite envelope bytes, and complete frame bytes. Tests read
+encoding, Ed25519 signature over that canonical offer, Protobuf Lite envelope bytes, and complete frame
+bytes. Tests read
 that JSON at configure time and compare exact bytes. Implementations must not normalize or reserialize
 the expected values before comparison.

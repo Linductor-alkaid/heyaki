@@ -56,15 +56,27 @@ jobs:
 
   windows:
     runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
     steps:
       - uses: actions/checkout@v4
       - name: Fetch pinned dependencies
         shell: bash
         run: scripts/fetch_third_party.sh --all
       - name: Configure
-        run: cmake -S . -B build -A x64 -DHEYAKI_WARNINGS_AS_ERRORS=ON
+        shell: pwsh
+        run: |
+          $opensslRoot = "${env:ProgramFiles}/OpenSSL"
+          if (-not (Test-Path "$opensslRoot/include/openssl/ssl.h")) {
+            throw "GitHub runner OpenSSL development files not found at $opensslRoot"
+          }
+          cmake -S . -B build -A x64 `
+            -DHEYAKI_WARNINGS_AS_ERRORS=ON `
+            "-DOPENSSL_ROOT_DIR=$opensslRoot"
       - name: Build
-        run: cmake --build build --config Debug --parallel 2
+        run: cmake --build build --config ${{ matrix.build_type }} --parallel 2
       - name: Configure pinned libdatachannel baseline
         shell: pwsh
         run: |
@@ -88,7 +100,7 @@ jobs:
       - name: Build pinned libdatachannel baseline
         run: cmake --build build-libdatachannel --target datachannel-static --config Release --parallel 2
       - name: Test
-        run: ctest --test-dir build -C Debug --output-on-failure --no-tests=error
+        run: ctest --test-dir build -C ${{ matrix.build_type }} --output-on-failure --no-tests=error
 
   sanitizer:
     runs-on: ubuntu-24.04

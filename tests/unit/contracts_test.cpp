@@ -99,6 +99,10 @@ TEST(Limits, DefaultsPassAndUnsafeValuesFail) {
   ASSERT_NE(result.error_if(), nullptr);
   EXPECT_EQ(result.error_if()->code, heyaki::ErrorCode::configuration);
   EXPECT_EQ(result.error_if()->safe_detail, "max_frame_bytes");
+
+  invalid = defaults;
+  invalid.max_expanded_file_bytes = 0U;
+  EXPECT_FALSE(heyaki::validate_limits(invalid));
 }
 
 TEST(Time, WireTimeoutUsesReceiverMonotonicClockAndLocalClamp) {
@@ -147,6 +151,15 @@ TEST(Protocol, NegotiatesMinorAndRejectsMissingRequiredCapability) {
   EXPECT_FALSE(heyaki::negotiate_protocol(local, remote));
 }
 
+TEST(Protocol, PreservesSchemaVersionWidth) {
+  const heyaki::ProtocolHello local{.version = {70000U, 80000U},
+                                    .supported = {.bits = 0U},
+                                    .required = {.bits = 0U}};
+  const auto negotiated = heyaki::negotiate_protocol(local, local);
+  ASSERT_TRUE(negotiated);
+  EXPECT_EQ(negotiated.value_if()->version, local.version);
+}
+
 TEST(Security, SensitiveClassesAreAlwaysRedacted) {
   EXPECT_EQ(heyaki::value_for_log(heyaki::LogDataClass::operational, "queue_full"),
             "queue_full");
@@ -159,6 +172,28 @@ TEST(Security, SensitiveClassesAreAlwaysRedacted) {
     EXPECT_EQ(heyaki::value_for_log(data_class, "must-not-escape"), "[REDACTED]");
   }
   EXPECT_TRUE(heyaki::validate_security_policy({}, {}));
+  EXPECT_TRUE(heyaki::is_safe_detail_token("queue_full"));
+  EXPECT_TRUE(heyaki::is_safe_detail_token("transport.timeout"));
+  EXPECT_FALSE(heyaki::is_safe_detail_token("remote text"));
+  EXPECT_FALSE(heyaki::is_safe_detail_token("line\nfeed"));
+  EXPECT_FALSE(heyaki::is_safe_detail_token(""));
+  EXPECT_TRUE(heyaki::is_safe_detail_token(heyaki::Error{}.safe_detail));
+  const heyaki::Error sanitized{heyaki::ErrorCode::remote_error, "peer", "remote text"};
+  EXPECT_EQ(sanitized.safe_detail, "invalid_safe_detail");
+}
+
+TEST(Security, RejectsPoliciesBelowThreatModelBaseline) {
+  auto password = heyaki::PasswordSecurityPolicy{};
+  password.minimum_unicode_scalars = 15U;
+  EXPECT_FALSE(heyaki::validate_security_policy({}, password));
+
+  password = heyaki::PasswordSecurityPolicy{};
+  password.argon2_minimum_memory_kib = 32U * 1024U;
+  EXPECT_FALSE(heyaki::validate_security_policy({}, password));
+
+  auto replay = heyaki::ReplayCachePolicy{};
+  replay.per_peer_capacity = replay.capacity + 1U;
+  EXPECT_FALSE(heyaki::validate_security_policy(replay, {}));
 }
 
 }  // namespace

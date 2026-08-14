@@ -32,3 +32,20 @@ message EnrollmentRecord {
   uint64 issued_unix_milliseconds = 5;
   heyaki.protocol.common.v1.Signature relay_signature = 6;
 }
+
+message EndpointRecord {
+  heyaki.protocol.common.v1.DeviceEndpoint endpoint = 1;
+  string application_id = 2;
+  uint64 record_generation = 3;
+  bytes manifest_sha256 = 4;
+  uint64 expires_unix_milliseconds = 5;
+  heyaki.protocol.common.v1.Signature signature = 6;
+}
+
+message ServiceManifest {
+  heyaki.protocol.common.v1.DeviceEndpoint endpoint = 1;
+  uint64 manifest_generation = 2;
+  bytes canonical_manifest_sha256 = 3;
+  uint64 expires_unix_milliseconds = 4;
+  heyaki.protocol.common.v1.Signature signature = 5;
+}

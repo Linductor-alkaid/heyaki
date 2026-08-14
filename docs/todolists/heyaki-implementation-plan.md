@@ -1,6 +1,6 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：M1 实现完成且本地门禁通过；待跨平台 CI 与独立协议/安全评审后准入 M2
+> - 状态：M1 首轮评审问题已整改并通过本地门禁；待更新后的 GitHub CI（含 Windows Debug/Release）与独立复审后准入 M2
 > - 日期：2026-08-14
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
@@ -159,13 +159,16 @@ M0 验证记录（2026-08-14）：本机 GCC 13.3 的 Debug、Release、UBSAN、
 - [x] 所有 parser 在分配 payload 前检查长度，fuzz smoke 无 crash、越界、超限分配或无限循环。
 - [ ] threat model、安全默认值和 wire protocol 通过独立评审后再进入 M2；后续不兼容修改必须显式提升协议 major。
 
-M1 本地验证记录（2026-08-14）：Linux GCC 13.3 的 Debug、Release、`-Werror`、禁异常和
-UBSAN 构建及 CTest 均无失败（各 14 pass、1 network skip）；ASAN 构建通过，但相关运行时测试
+M1 本地验证记录（2026-08-14）：首轮协议/安全评审的七项问题已完成整改。Linux GCC 13.3 的
+Debug、Release、`-Werror` 和 UBSAN 构建及 CTest 均无失败（各 14 pass、1 network skip）；
+禁异常配置为 15 pass、1 network skip。ASAN 构建通过，但相关运行时测试
 因宿主 ptrace/LeakSanitizer 限制按既定规则明确 skip，network harness 同样因缺少
 `CAP_NET_ADMIN` skip。公开头逐头独立编译，安装后 consumer、schema/文档版本检查、golden
-bytes、frame parser、operation 状态机和 fuzz smoke 均通过。当前宿主没有 Clang/libFuzzer，
-Clang CI 已配置构建两个真实 fuzz target 并各短跑 100 次；Windows/Clang CI 结果与独立协议/
-安全评审完成前，保持后两项退出条件未勾选，不准入 M2。
+bytes、frame parser、operation 状态机和 fuzz smoke 均通过。当前宿主没有 Clang/libFuzzer。
+GitHub Actions 在基线 commit `0567800` 上完成 Linux GCC/Clang、Windows MSVC Debug、ASAN、
+UBSAN、TSAN 和两个真实 libFuzzer target 各 100 次短跑；本次整改已将 Windows 扩展为
+Debug/Release 矩阵，但更新后的远端 CI 尚未执行。该 CI 与独立协议/安全复审完成前，保持对应
+两项退出条件未勾选，不准入 M2。
 
 ---
 

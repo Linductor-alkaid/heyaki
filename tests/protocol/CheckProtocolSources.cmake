@@ -10,6 +10,26 @@ foreach(required_variable IN ITEMS
   endif()
 endforeach()
 
+foreach(schema_contract IN ITEMS
+    "enrollment|message EndpointRecord"
+    "enrollment|message ServiceManifest"
+    "signaling|bytes initiator_nonce = 5"
+    "signaling|optional bytes responder_nonce = 7"
+    "file|message FileReject"
+    "shell|message ShellEof"
+    "shell|message ShellError"
+    "shell|message ShellClose")
+  string(REPLACE "|" ";" contract_parts "${schema_contract}")
+  list(GET contract_parts 0 domain)
+  list(GET contract_parts 1 required_text)
+  set(schema "${HEYAKI_PROTO_DIR}/heyaki/${domain}/v1/${domain}.proto")
+  file(READ "${schema}" contents)
+  string(FIND "${contents}" "${required_text}" required_position)
+  if(required_position EQUAL -1)
+    message(FATAL_ERROR "Schema contract '${required_text}' is missing from ${schema}")
+  endif()
+endforeach()
+
 foreach(required_file IN ITEMS
     "${HEYAKI_WIRE_DOCUMENT}"
     "${HEYAKI_THREAT_MODEL}"
@@ -45,11 +65,22 @@ file(READ "${HEYAKI_GOLDEN_VECTOR_FILE}" golden_json)
 string(JSON vector_format ERROR_VARIABLE format_error GET "${golden_json}" format)
 string(JSON vector_major ERROR_VARIABLE major_error GET "${golden_json}" protocol major)
 string(JSON vector_minor ERROR_VARIABLE minor_error GET "${golden_json}" protocol minor)
-if(format_error OR major_error OR minor_error)
+string(JSON canonical_hex ERROR_VARIABLE canonical_error GET
+  "${golden_json}" canonical_offer canonical_hex)
+string(JSON signed_message_hex ERROR_VARIABLE signed_message_error GET
+  "${golden_json}" ed25519_canonical_offer message_hex)
+string(JSON signature_hex ERROR_VARIABLE signature_error GET
+  "${golden_json}" ed25519_canonical_offer signature_hex)
+if(format_error OR major_error OR minor_error OR canonical_error OR signed_message_error OR
+   signature_error)
   message(FATAL_ERROR "Golden vector JSON is malformed")
 endif()
 if(NOT vector_format STREQUAL "heyaki-m1-golden-vectors-v1")
   message(FATAL_ERROR "Unknown golden vector format: ${vector_format}")
+endif()
+string(LENGTH "${signature_hex}" signature_hex_length)
+if(NOT signed_message_hex STREQUAL canonical_hex OR NOT signature_hex_length EQUAL 128)
+  message(FATAL_ERROR "Ed25519 vector must sign the canonical offer and contain 64 signature bytes")
 endif()
 if(NOT vector_major EQUAL HEYAKI_PROTOCOL_MAJOR OR
    NOT vector_minor EQUAL HEYAKI_PROTOCOL_MINOR)
@@ -60,7 +91,9 @@ endif()
 
 file(READ "${HEYAKI_WIRE_DOCUMENT}" wire_document)
 if(NOT wire_document MATCHES "Protocol version: ${HEYAKI_PROTOCOL_MAJOR}\\.${HEYAKI_PROTOCOL_MINOR}" OR
-   NOT wire_document MATCHES "tests/vectors/m1-golden-vectors\\.json")
+   NOT wire_document MATCHES "tests/vectors/m1-golden-vectors\\.json" OR
+   NOT wire_document MATCHES "heyaki\\.enrollment-record\\.v1" OR
+   NOT wire_document MATCHES "responder nonce")
   message(FATAL_ERROR "Wire protocol document version/vector reference is inconsistent")
 endif()
 

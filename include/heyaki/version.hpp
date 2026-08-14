@@ -32,8 +32,8 @@ class BuildFeatures {
 struct BuildInfo {
   std::string_view version;
   std::string_view commit;
-  std::uint16_t protocol_major;
-  std::uint16_t protocol_minor;
+  std::uint32_t protocol_major;
+  std::uint32_t protocol_minor;
   BuildFeatures features;
 };
 

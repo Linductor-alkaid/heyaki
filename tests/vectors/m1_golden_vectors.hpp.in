@@ -5,8 +5,8 @@
 
 namespace heyaki::test_vectors {
 
-inline constexpr std::uint16_t protocol_major = @M1_PROTOCOL_MAJOR@U;
-inline constexpr std::uint16_t protocol_minor = @M1_PROTOCOL_MINOR@U;
+inline constexpr std::uint32_t protocol_major = @M1_PROTOCOL_MAJOR@U;
+inline constexpr std::uint32_t protocol_minor = @M1_PROTOCOL_MINOR@U;
 inline constexpr std::string_view identity_public_key_hex = "@M1_IDENTITY_PUBLIC_KEY_HEX@";
 inline constexpr std::string_view device_digest_hex = "@M1_DEVICE_DIGEST_HEX@";
 inline constexpr std::string_view device_id_text = "@M1_DEVICE_ID_TEXT@";

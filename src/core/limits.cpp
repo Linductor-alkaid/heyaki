@@ -56,6 +56,9 @@ Result<void> validate_limits(const Limits& limits) {
       limits.max_file_bytes > max_file_limit) {
     return invalid_limit("max_file_bytes");
   }
+  if (outside(limits.max_expanded_file_bytes, limits.max_file_chunk_bytes, max_file_limit)) {
+    return invalid_limit("max_expanded_file_bytes");
+  }
   if (outside(limits.max_file_chunk_bytes, 4U * kib, 1024U * kib) ||
       limits.max_file_chunk_bytes > limits.max_frame_bytes) {
     return invalid_limit("max_file_chunk_bytes");

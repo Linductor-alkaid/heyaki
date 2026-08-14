@@ -84,4 +84,11 @@ TEST(Wire, UnknownRequiredFrameClosesOnlyTheChannel) {
             heyaki::UnknownFrameAction::close_channel);
 }
 
+TEST(Wire, FileRejectAndShellTerminalFramesAreKnown) {
+  for (const auto type : {heyaki::FrameType::file_reject, heyaki::FrameType::shell_eof,
+                          heyaki::FrameType::shell_error, heyaki::FrameType::shell_close}) {
+    EXPECT_TRUE(heyaki::is_known_frame_type(static_cast<std::uint8_t>(type)));
+  }
+}
+
 }  // namespace

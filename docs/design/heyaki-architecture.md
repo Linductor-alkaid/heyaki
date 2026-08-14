@@ -278,7 +278,7 @@ TrustGrant 是有方向的：目标 B 使用自己的授权密码允许 A 操作
 
 WSS 保护的是设备到中继，不足以阻止被控制的中继替换 WebRTC SDP 和 DTLS fingerprint。因此：
 
-- offer、answer、ICE ufrag、DTLS fingerprint、双方 `DeviceId`/`EndpointId`、会话 nonce 和过期时间必须作为一个规范化对象由长期设备密钥签名；
+- offer、answer、ICE ufrag、DTLS fingerprint、双方 `DeviceId`/`EndpointId`、发起方/响应方会话 nonce 和过期时间必须作为规范化对象由长期设备密钥签名；
 - 对端验证签名、公钥派生的 `DeviceId`、nonce 和时效后才接受 DTLS 会话；
 - 首个 Heyaki `SESSION_HELLO` 再携带 DTLS channel binding、会话 ID、endpoint 和能力摘要签名，避免信令与实际连接错配；
 - 重放的连接请求通过一次性 request ID、短过期时间和最近 nonce 缓存拒绝。
@@ -862,7 +862,7 @@ resource_exhausted, remote_error, outcome_unknown, internal
 1. 所有公网控制连接使用 TLS 1.3 或受支持的安全 TLS 1.2 配置，并校验证书和主机名。
 2. `DeviceId` 必须由公钥派生；注册、信令和会话握手均验证签名。
 3. 自动登录每次都验证随机 challenge 签名、enrollment generation 和吊销状态，只省略人工输入。
-4. DTLS fingerprint 与双方身份、endpoint、nonce、expiry 一起签名，防止中继 MITM。
+4. DTLS fingerprint 与双方身份、endpoint、发起方/响应方 nonce、expiry 一起签名，防止中继 MITM。
 5. 授权密码只在本机安全输入和已认证的端到端 pairing channel 中出现；本机仅持久化 Argon2id verifier。
 6. pairing-only 会话不能创建业务通道，并实施消息大小、尝试次数、时间和来源速率限制。
 7. 设备服务默认拒绝，按 TrustGrant scope、endpoint policy 和服务策略的交集最小授权。

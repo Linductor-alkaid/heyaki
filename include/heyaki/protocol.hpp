@@ -7,8 +7,8 @@
 namespace heyaki {
 
 struct ProtocolVersion {
-  std::uint16_t major{1U};
-  std::uint16_t minor{0U};
+  std::uint32_t major{1U};
+  std::uint32_t minor{0U};
 
   friend constexpr bool operator==(ProtocolVersion, ProtocolVersion) noexcept = default;
 };

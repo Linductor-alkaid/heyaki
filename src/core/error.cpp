@@ -2,6 +2,20 @@
 
 namespace heyaki {
 
+bool is_safe_detail_token(std::string_view value) noexcept {
+  if (value.empty() || value.size() > max_safe_detail_bytes) {
+    return false;
+  }
+  for (const char character : value) {
+    const bool is_lower = character >= 'a' && character <= 'z';
+    const bool is_digit = character >= '0' && character <= '9';
+    if (!is_lower && !is_digit && character != '_' && character != '-' && character != '.') {
+      return false;
+    }
+  }
+  return true;
+}
+
 std::string_view error_code_name(ErrorCode code) noexcept {
   switch (code) {
     case ErrorCode::configuration:

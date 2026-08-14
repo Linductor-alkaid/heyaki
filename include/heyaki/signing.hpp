@@ -13,6 +13,7 @@ namespace heyaki {
 
 enum class SigningDomain : std::uint8_t {
   enrollment,
+  enrollment_record,
   endpoint_record,
   service_manifest,
   offer,
@@ -39,5 +40,7 @@ inline constexpr std::size_t max_canonical_signing_bytes = 1024U * 1024U;
 [[nodiscard]] std::vector<std::byte> canonical_bytes(const DeviceId& value);
 [[nodiscard]] std::vector<std::byte> canonical_bytes(const EndpointId& value);
 [[nodiscard]] std::vector<std::byte> canonical_bytes(const SessionId& value);
+[[nodiscard]] std::vector<std::byte> canonical_bytes(const RequestId& value);
+[[nodiscard]] std::vector<std::byte> canonical_bytes(const TransferId& value);
 
 }  // namespace heyaki

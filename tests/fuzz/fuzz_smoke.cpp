@@ -73,10 +73,6 @@ int main(int argc, char** argv) {
   unknown_optional[1] = std::byte{0x7fU};
   auto unknown_required = unknown_optional;
   unknown_required[2] = std::byte{heyaki::frame_flag_required};
-  auto unknown_protobuf_field = valid;
-  unknown_protobuf_field[0] = std::byte{0x3aU};
-  unknown_protobuf_field.insert(unknown_protobuf_field.end(),
-                                {std::byte{0x7aU}, std::byte{0x01U}, std::byte{0xffU}});
   const std::vector<std::byte> oversize{std::byte{0x81U}, std::byte{0x80U},
                                         std::byte{0x80U}, std::byte{0x01U}};
   heyaki::Frame boundary_frame{
@@ -97,7 +93,6 @@ int main(int argc, char** argv) {
       std::pair{std::string_view{"duplicate-frame"}, duplicate},
       std::pair{std::string_view{"unknown-optional-frame"}, unknown_optional},
       std::pair{std::string_view{"unknown-required-frame"}, unknown_required},
-      std::pair{std::string_view{"unknown-protobuf-field"}, unknown_protobuf_field},
       std::pair{std::string_view{"maximum-message"}, *boundary_result.value_if()},
       std::pair{std::string_view{"oversize-length"}, oversize},
   };

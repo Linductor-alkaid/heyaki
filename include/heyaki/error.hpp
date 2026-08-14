@@ -2,6 +2,7 @@
 
 #include <heyaki/ids.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -10,6 +11,9 @@
 #include <variant>
 
 namespace heyaki {
+
+inline constexpr std::size_t max_safe_detail_bytes = 64U;
+[[nodiscard]] bool is_safe_detail_token(std::string_view value) noexcept;
 
 enum class ErrorCode : std::uint16_t {
   configuration = 1,
@@ -43,14 +47,15 @@ struct Error {
   Error(ErrorCode code_value, std::string component_value, std::string safe_detail_value)
       : code(code_value),
         component(std::move(component_value)),
-        safe_detail(std::move(safe_detail_value)) {}
+        safe_detail(is_safe_detail_token(safe_detail_value) ? std::move(safe_detail_value)
+                                                             : "invalid_safe_detail") {}
 
   ErrorCode code{ErrorCode::internal};
   std::optional<std::int64_t> underlying_code;
   std::optional<DeviceId> peer_id;
   std::optional<OperationId> operation_id;
   std::string component;
-  std::string safe_detail;
+  std::string safe_detail{"internal_error"};
 };
 
 [[nodiscard]] std::string_view error_code_name(ErrorCode code) noexcept;

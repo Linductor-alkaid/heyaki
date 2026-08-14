@@ -133,12 +133,16 @@ bool is_known_frame_type(std::uint8_t type) noexcept {
     case FrameType::file_accept:
     case FrameType::file_chunk:
     case FrameType::file_complete:
+    case FrameType::file_reject:
     case FrameType::shell_open:
     case FrameType::shell_input:
     case FrameType::shell_output:
     case FrameType::shell_resize:
     case FrameType::shell_signal:
     case FrameType::shell_exit:
+    case FrameType::shell_eof:
+    case FrameType::shell_error:
+    case FrameType::shell_close:
       return true;
   }
   return false;

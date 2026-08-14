@@ -60,10 +60,11 @@ TEST(GoldenVectors, CanonicalOfferBytesAreExact) {
             heyaki::test::bytes_from_hex(heyaki::test_vectors::canonical_hex));
 }
 
-TEST(GoldenVectors, Rfc8032SignatureVectorHasCanonicalWidths) {
+TEST(GoldenVectors, Ed25519SignatureCoversCanonicalOffer) {
   EXPECT_EQ(heyaki::test::bytes_from_hex(heyaki::test_vectors::ed25519_seed_hex).size(), 32U);
   EXPECT_EQ(heyaki::test::bytes_from_hex(heyaki::test_vectors::ed25519_public_key_hex).size(), 32U);
-  EXPECT_TRUE(heyaki::test_vectors::ed25519_message_hex.empty());
+  EXPECT_EQ(heyaki::test_vectors::ed25519_message_hex,
+            heyaki::test_vectors::canonical_hex);
   EXPECT_EQ(heyaki::test::bytes_from_hex(heyaki::test_vectors::ed25519_signature_hex).size(), 64U);
   EXPECT_EQ(heyaki::test_vectors::ed25519_public_key_hex,
             heyaki::test_vectors::identity_public_key_hex);

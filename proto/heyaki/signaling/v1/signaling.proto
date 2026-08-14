@@ -11,8 +11,9 @@ message SignalBinding {
   heyaki.protocol.common.v1.DeviceEndpoint responder = 2;
   bytes request_id = 3; // Exactly 16 bytes.
   bytes session_id = 4; // Exactly 16 bytes.
-  bytes session_nonce = 5; // Exactly 32 bytes.
+  bytes initiator_nonce = 5;
   uint64 expires_unix_milliseconds = 6;
+  optional bytes responder_nonce = 7;
 }
 
 message SignedOffer {

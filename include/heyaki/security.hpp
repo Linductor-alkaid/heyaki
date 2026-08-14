@@ -33,6 +33,7 @@ enum class ReplayCacheFullPolicy : std::uint8_t { reject };
 struct ReplayCachePolicy {
   std::uint32_t ttl_milliseconds{10U * 60U * 1000U};
   std::size_t capacity{4096U};
+  std::size_t per_peer_capacity{256U};
   ReplayCacheFullPolicy full_policy{ReplayCacheFullPolicy::reject};
 };
 

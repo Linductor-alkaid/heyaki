@@ -7,3 +7,7 @@ not allowed.
 When code generation is enabled by a consuming milestone, generated files must be written to
 `HEYAKI_GENERATED_DIR`, which CMake requires to remain inside the build tree. Imports resolve
 from this `proto/` directory.
+
+M1 validates the golden `MessageEnvelope` with the pinned Protobuf runtime's wire decoder, including
+unknown-field and malformed-length behavior. The first milestone that consumes generated messages must
+add its generated Lite decoder paths to the existing parser fuzz targets.
