@@ -77,6 +77,15 @@ set_tests_properties(heyaki_network_harness PROPERTIES
   LABELS "network"
   SKIP_RETURN_CODE 77)
 
+add_test(
+  NAME heyaki_dependency_lock_crlf
+  COMMAND "${CMAKE_COMMAND}"
+    "-DHEYAKI_FETCH_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/../scripts/fetch_third_party.sh"
+    "-DHEYAKI_DEPENDENCY_LOCK=${CMAKE_CURRENT_SOURCE_DIR}/../third_party/dependencies.lock"
+    "-DHEYAKI_TEST_WORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/dependency-lock-work"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/supply_chain/CheckCrlfDependencyLock.cmake")
+set_tests_properties(heyaki_dependency_lock_crlf PROPERTIES LABELS "security")
+
 find_program(HEYAKI_OPENSSL_EXECUTABLE NAMES openssl)
 find_program(HEYAKI_SQLITE3_EXECUTABLE NAMES sqlite3)
 if(HEYAKI_OPENSSL_EXECUTABLE AND HEYAKI_SQLITE3_EXECUTABLE)

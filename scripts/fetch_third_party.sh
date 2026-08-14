@@ -105,8 +105,11 @@ done
 command -v git >/dev/null 2>&1 || fail "git is required"
 [[ -f "${heyaki_lock_file}" ]] || fail "lock file not found: ${heyaki_lock_file}"
 
-while IFS='|' read -r heyaki_name heyaki_url heyaki_ref heyaki_commit heyaki_recursive heyaki_group; do
-  [[ -z "${heyaki_name}" || "${heyaki_name}" == \#* ]] && continue
+while IFS= read -r heyaki_lock_line || [[ -n "${heyaki_lock_line}" ]]; do
+  heyaki_lock_line=${heyaki_lock_line%$'\r'}
+  [[ -z "${heyaki_lock_line}" || "${heyaki_lock_line}" == \#* ]] && continue
+  IFS='|' read -r heyaki_name heyaki_url heyaki_ref heyaki_commit heyaki_recursive heyaki_group <<< \
+    "${heyaki_lock_line}"
   [[ "${heyaki_name}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || \
     fail "invalid dependency name in ${heyaki_lock_file}: ${heyaki_name}"
   [[ -n "${heyaki_url}" && -n "${heyaki_ref}" && -n "${heyaki_commit}" ]] || \
