@@ -23,6 +23,24 @@ jobs:
           -DHEYAKI_WARNINGS_AS_ERRORS=ON
       - name: Build
         run: cmake --build build --parallel 2
+      - name: Configure pinned libdatachannel baseline
+        run: >-
+          cmake -S third_party/libdatachannel -B build-libdatachannel
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=${{ matrix.compiler == 'gcc' && 'gcc' || 'clang' }}
+          -DCMAKE_CXX_COMPILER=${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }}
+          -DBUILD_SHARED_LIBS=OFF
+          -DNO_EXAMPLES=ON
+          -DNO_TESTS=ON
+          -DNO_MEDIA=ON
+          -DNO_WEBSOCKET=ON
+          -DUSE_NICE=OFF
+          -DUSE_GNUTLS=OFF
+          -DUSE_MBEDTLS=OFF
+          -DWARNINGS_AS_ERRORS=ON
+          -DRTC_UPDATE_VERSION_HEADER=OFF
+      - name: Build pinned libdatachannel baseline
+        run: cmake --build build-libdatachannel --target datachannel-static --parallel 2
       - name: Test
         run: ctest --test-dir build --output-on-failure --no-tests=error
       - name: Verify all dependency groups offline
@@ -39,6 +57,27 @@ jobs:
         run: cmake -S . -B build -A x64 -DHEYAKI_WARNINGS_AS_ERRORS=ON
       - name: Build
         run: cmake --build build --config Debug --parallel 2
+      - name: Configure pinned libdatachannel baseline
+        shell: pwsh
+        run: |
+          $opensslRoot = "${env:ProgramFiles}/OpenSSL"
+          if (-not (Test-Path "$opensslRoot/include/openssl/ssl.h")) {
+            throw "GitHub runner OpenSSL development files not found at $opensslRoot"
+          }
+          cmake -S third_party/libdatachannel -B build-libdatachannel -A x64 `
+            -DBUILD_SHARED_LIBS=OFF `
+            -DNO_EXAMPLES=ON `
+            -DNO_TESTS=ON `
+            -DNO_MEDIA=ON `
+            -DNO_WEBSOCKET=ON `
+            -DUSE_NICE=OFF `
+            -DUSE_GNUTLS=OFF `
+            -DUSE_MBEDTLS=OFF `
+            -DWARNINGS_AS_ERRORS=ON `
+            -DRTC_UPDATE_VERSION_HEADER=OFF `
+            "-DOPENSSL_ROOT_DIR=$opensslRoot"
+      - name: Build pinned libdatachannel baseline
+        run: cmake --build build-libdatachannel --target datachannel-static --config Release --parallel 2
       - name: Test
         run: ctest --test-dir build -C Debug --output-on-failure --no-tests=error
 

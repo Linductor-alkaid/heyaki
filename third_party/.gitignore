@@ -3,3 +3,4 @@
 !.gitignore
 !dependencies.lock
 !licenses.lock
+!transitive-dependencies.lock

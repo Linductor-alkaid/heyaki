@@ -4,8 +4,11 @@
 
 `third_party/dependencies.lock` is authoritative for vendored runtime, test, and optional source
 dependencies. Each record contains the upstream URL, human-readable ref, resolved commit, recursive
-submodule policy, and dependency group. `scripts/fetch_third_party.sh` rejects moved refs, mismatched
-origins or commits, dirty checkouts, and incomplete recursive submodules.
+submodule policy, and dependency group. `third_party/transitive-dependencies.lock` records the exact
+recursive submodules selected by those pins for SBOM and license accounting. The parent Git tree is
+the checkout authority; the transitive lock makes that otherwise nested inventory reviewable.
+`scripts/fetch_third_party.sh` rejects moved refs, mismatched origins or commits, dirty checkouts, and
+incomplete recursive submodules.
 
 The supported offline checks are:
 
@@ -35,12 +38,18 @@ been committed.
 
 ## License inventory and SBOM
 
-`third_party/licenses.lock` maps every pinned dependency to an SPDX expression and upstream license
-file. The `heyaki-sbom` target cross-checks both locks and emits an SPDX 2.3 tag-value document plus
-a Markdown license manifest. Configure fails generation if a pin has no license record.
+`third_party/licenses.lock` maps every direct and transitive pinned dependency to an SPDX expression
+and upstream license file. The `heyaki-sbom` target cross-checks all three locks, verifies every
+license file exists, and emits an SPDX 2.3 tag-value document plus a Markdown license manifest.
+Generation fails for a missing, duplicate, extra, or malformed package/license record. CTest also
+checks all expected packages and parent/submodule relationships.
 
-The M0 inventory covers direct pins. M3/M4 release packaging must additionally inventory transitive
-submodules, system libraries, the coturn artifact, and the actual static/dynamic linkage closure.
+The M0 inventory covers 9 direct pins and the 5 recursive libdatachannel submodules. The
+[M0 linkage and license audit](m0-linkage-license-audit.md) confirms that current installed Heyaki
+artifacts do not yet link or redistribute pinned third-party code. Before any milestone first links a
+pin, that milestone must freeze the selected build artifact and review its actual static/dynamic
+closure. M3/M4 additionally inventory Boost, OpenSSL, coturn and the selected ICE backend artifacts;
+M9 repeats the audit against the final release package.
 
 ## Upgrade workflow
 
@@ -55,4 +64,3 @@ Dependency upgrades are isolated changes:
 6. Record user-visible and wire-compatibility differences in the upgrade change.
 
 Moved tags are never accepted by simply replacing the commit without review.
-

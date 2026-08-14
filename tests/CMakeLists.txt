@@ -88,6 +88,32 @@ add_test(
     -P "${CMAKE_CURRENT_SOURCE_DIR}/supply_chain/CheckCrlfDependencyLock.cmake")
 set_tests_properties(heyaki_dependency_lock_crlf PROPERTIES LABELS "security")
 
+add_test(
+  NAME heyaki_supply_chain_inventory
+  COMMAND "${CMAKE_COMMAND}"
+    "-DHEYAKI_SBOM_FILE=${HEYAKI_SBOM_FILE}"
+    "-DHEYAKI_LICENSE_MANIFEST_FILE=${HEYAKI_LICENSE_MANIFEST_FILE}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/supply_chain/CheckGeneratedSupplyChain.cmake")
+set_tests_properties(heyaki_supply_chain_inventory PROPERTIES LABELS "security")
+
+find_program(HEYAKI_GIT_EXECUTABLE NAMES git REQUIRED)
+add_test(
+  NAME heyaki_transitive_dependency_lock
+  COMMAND "${CMAKE_COMMAND}"
+    "-DHEYAKI_GIT_EXECUTABLE=${HEYAKI_GIT_EXECUTABLE}"
+    "-DHEYAKI_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/.."
+    "-DHEYAKI_TRANSITIVE_DEPENDENCY_LOCK=${CMAKE_CURRENT_SOURCE_DIR}/../third_party/transitive-dependencies.lock"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/supply_chain/CheckTransitiveDependencyLock.cmake")
+set_tests_properties(heyaki_transitive_dependency_lock PROPERTIES LABELS "security")
+
+add_test(
+  NAME heyaki_libdatachannel_compatibility_contract
+  COMMAND "${CMAKE_COMMAND}"
+    "-DHEYAKI_LIBDATACHANNEL_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libdatachannel"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/compatibility/CheckLibdatachannelBaseline.cmake")
+set_tests_properties(heyaki_libdatachannel_compatibility_contract PROPERTIES
+  LABELS "network;security")
+
 find_program(HEYAKI_OPENSSL_EXECUTABLE NAMES openssl)
 find_program(HEYAKI_SQLITE3_EXECUTABLE NAMES sqlite3)
 if(HEYAKI_OPENSSL_EXECUTABLE AND HEYAKI_SQLITE3_EXECUTABLE)

@@ -23,11 +23,14 @@ function(heyaki_generate_supply_chain_files output_dir sbom_output manifest_outp
     OUTPUT "${sbom_file}" "${manifest_file}"
     COMMAND "${CMAKE_COMMAND}"
       "-DHEYAKI_DEPENDENCY_LOCK=${CMAKE_CURRENT_SOURCE_DIR}/third_party/dependencies.lock"
+      "-DHEYAKI_TRANSITIVE_DEPENDENCY_LOCK=${CMAKE_CURRENT_SOURCE_DIR}/third_party/transitive-dependencies.lock"
       "-DHEYAKI_LICENSE_LOCK=${CMAKE_CURRENT_SOURCE_DIR}/third_party/licenses.lock"
+      "-DHEYAKI_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
       "-DHEYAKI_OUTPUT_DIR=${output_dir}"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateSupplyChain.cmake"
     DEPENDS
       "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dependencies.lock"
+      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/transitive-dependencies.lock"
       "${CMAKE_CURRENT_SOURCE_DIR}/third_party/licenses.lock"
       "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateSupplyChain.cmake"
     VERBATIM)
@@ -35,4 +38,3 @@ function(heyaki_generate_supply_chain_files output_dir sbom_output manifest_outp
   set(${sbom_output} "${sbom_file}" PARENT_SCOPE)
   set(${manifest_output} "${manifest_file}" PARENT_SCOPE)
 endfunction()
-

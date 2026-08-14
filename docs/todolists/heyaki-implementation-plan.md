@@ -1,6 +1,6 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：进行中（M0）
+> - 状态：进行中（M0 收口，新增证据门禁待 CI）
 > - 日期：2026-08-14
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
@@ -105,8 +105,8 @@
 
 ### 3.3 CI 与测试入口
 
-- [ ] `M0-12` 建立 Linux GCC/Clang 与 Windows MSVC 构建矩阵，至少执行 configure、build、unit test 和安装后 consumer compile test。
-- [ ] `M0-13` 建立 ASAN/UBSAN 常规任务、TSAN 专项任务和 fuzz smoke 任务；宿主不支持时记录目标机补跑门禁。
+- [x] `M0-12` 建立 Linux GCC/Clang 与 Windows MSVC 构建矩阵，至少执行 configure、build、unit test 和安装后 consumer compile test。
+- [x] `M0-13` 建立 ASAN/UBSAN 常规任务、TSAN 专项任务和 fuzz smoke 任务；宿主不支持时记录目标机补跑门禁。
 - [x] `M0-14` 建立测试标签：`unit`、`protocol`、`integration`、`network`、`security`、`fuzz`、`performance`、`tui`、`windows`。
 - [x] `M0-15` 建立测试证书、bootstrap token、relay database 和 profile fixture 生成器；fixture 只能包含测试密钥。
 - [x] `M0-16` 建立 network namespace + nftables/netem harness 的 Linux-only 入口，并在无权限环境明确 skip 原因。
@@ -114,12 +114,12 @@
 
 ### M0 测试与退出条件
 
-- [ ] 空实现 targets 在 Linux GCC/Clang 和 Windows MSVC 上可构建、安装并由外部最小 consumer 引用。
+- [x] 空实现 targets 在 Linux GCC/Clang 和 Windows MSVC 上可构建、安装并由外部最小 consumer 引用。
 - [x] runtime、test、optional 三组 dependency pin 均可离线校验，依赖缺失时 configure 给出可操作错误。
 - [x] 单元、集成、网络、fuzz 和 sanitizer 命令均有稳定入口，CI 不以“无测试可运行”冒充成功。
 - [x] 产品决策 `DEC-01` 至 `DEC-09` 已确认，或明确记录暂定默认值、负责人和最迟冻结里程碑。
 
-M0 验证记录（2026-08-14）：本机 GCC 13.3 的 Debug、Release、UBSAN、禁异常与可选依赖校验构建通过，安装后 consumer 通过；ASAN 因宿主 ptrace 限制、TSAN 因宿主地址映射限制而明确 skip，CI 配置为不允许该类 skip。Linux network harness 因隔离 namespace 缺少 `CAP_NET_ADMIN` 明确 skip。Clang 与 Windows MSVC 由 CI 补跑，因此 `M0-12`、`M0-13` 和跨平台退出条件暂不勾选。直接 pin 的 SPDX/许可证清单已生成，但传递依赖与最终静态/动态发布闭包尚未审计，`M0-10` 保持未完成。libdatachannel 默认 libjuice backend 明确不支持 TURN/TCP/TLS；详见 [兼容矩阵](../compatibility/libdatachannel-v0.23.2.md)。产品默认值、owner 与冻结点见 [M0 产品决策默认值](../decisions/m0-product-defaults.md)。
+M0 验证记录（2026-08-14）：本机 GCC 13.3 的 Debug、Release、UBSAN、禁异常与可选依赖校验构建通过，安装后 consumer 通过；ASAN 因宿主 ptrace 限制、TSAN 因宿主地址映射限制而明确 skip。GitHub Actions 在 commit `8761343` 上完成 Linux GCC/Clang、Windows MSVC、ASAN、UBSAN、TSAN 和 fuzz smoke 矩阵，configure、build、CTest 与安装后 consumer 全部通过，CI 不允许 sanitizer runtime skip；据此完成 `M0-12`、`M0-13` 和跨平台退出条件。Linux network harness 在缺少 `CAP_NET_ADMIN` 的环境明确 skip。供应链生成器现覆盖 9 个直接 pin、5 个 libdatachannel submodule、许可证文件存在性与 SPDX 父子关系；当前安装/链接闭包见 [M0 链接与许可证审计](../supply-chain/m0-linkage-license-audit.md)，`M0-10` 待新增 CI 清单测试通过后完成。libdatachannel 的最小静态 DataChannel profile 已在本机 GCC 13.3 编译通过，并为 GCC/Clang/MSVC 增加真实依赖构建门禁；默认 libjuice 明确不支持 TURN/TCP/TLS，详见 [兼容矩阵](../compatibility/libdatachannel-v0.23.2.md)，`M0-09` 待新增 CI 构建矩阵通过后完成。产品默认值、owner 与冻结点见 [M0 产品决策默认值](../decisions/m0-product-defaults.md)。
 
 ---
 

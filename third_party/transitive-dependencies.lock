@@ -1,0 +1,6 @@
+# parent|name|path within parent|repository|commit
+libdatachannel|nlohmann-json|deps/json|https://github.com/nlohmann/json.git|55f93686c01528224f448c19128836e7df245f72
+libdatachannel|libjuice|deps/libjuice|https://github.com/paullouisageneau/libjuice.git|b509b6c1f90e4a1d4753e6bde62ffbeb4d10c6bb
+libdatachannel|libsrtp|deps/libsrtp|https://github.com/cisco/libsrtp.git|ee1a77c9f9dc02c42bda9901038c500c5efe4cfa
+libdatachannel|plog|deps/plog|https://github.com/SergiusTheBest/plog.git|94899e0b926ac1b0f4750bfbd495167b4a6ae9ef
+libdatachannel|usrsctp|deps/usrsctp|https://github.com/paullouisageneau/usrsctp.git|fec583d54493f879d2ae44a743423bf8a04371ab
