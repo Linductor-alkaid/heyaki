@@ -15,8 +15,10 @@ packets and enforce allocation policy.
 
 TLS authenticates device-to-relay control connections. DTLS protects the peer data path. A signed
 offer binds the initiator nonce; the signed answer adds the responder nonce; candidates sent after the
-answer bind both. All three bind the relevant DTLS fingerprint, both identities/endpoints, session,
-and expiry. `SESSION_HELLO` binds both nonces and the signaling exchange to the actual DTLS exporter.
+answer bind both. Offer and answer bind the relevant DTLS fingerprints, both identities/endpoints,
+session, and expiry. Each candidate additionally binds the verified offer/answer transcript hash and
+its owner's ICE ufrag and fingerprint. `SESSION_HELLO` signs that transcript hash over the actual
+fingerprint-verified DataChannel.
 ProfileStore protection terminates at the local OS security principal; a process allowed to read a
 profile can act as that device.
 
@@ -25,7 +27,7 @@ profile can act as that device.
 | Threat | Attack | Required control and failure behavior |
 | --- | --- | --- |
 | Malicious registered device | malformed frames, privilege requests, slow consumption, identifier collision attempts | fixed-width ID validation, signed identity derivation, default-deny scopes, per-peer limits, bounded queues, parser/state fuzzing; reject before allocation or handler dispatch |
-| Controlled relay | replace SDP/fingerprint, replay signaling, enumerate metadata, deny service | canonical device signatures bind both peers, endpoints, nonces, expiry and DTLS fingerprint; hello verifies channel binding; relay can still observe metadata or deny service |
+| Controlled relay | replace SDP/fingerprint, replay signaling, enumerate metadata, deny service | canonical signatures bind both peers, endpoints, nonces, expiry and fingerprints; candidates and hello bind the verified signaling transcript; relay can still observe metadata or deny service |
 | Password guessing | repeated pairing attempts from devices/IPs or distributed sources | minimum strength, generated 128-bit passphrases, local Argon2id, per-source/target/session rate limits and exponential delay; no permanent global lockout |
 | ProfileStore theft | steal private key, verifier, grants, or relay pin | OS secret backend, encrypted file fallback, owner-only permissions, secure buffers, atomic storage, audit; treat copied usable private key as full device compromise |
 | Replay | replay enrollment, offer, candidate, hello, pairing, RPC, or grant | signed random nonce plus request/session/grant ID, expiry, epoch, bounded replay cache; cache saturation rejects high-risk requests and emits an observable counter |
@@ -66,8 +68,10 @@ The replay key is a typed tuple, never an unscoped nonce:
 (protocol_domain, signer_device_id, peer_device_id?, request_or_session_id, nonce)
 ```
 
-Entries expire at the earlier of the signed expiry plus bounded skew and ten minutes after local
-monotonic insertion. The default capacity is 4096 entries per process security domain and 256 per peer.
+Every accepted entry remains for the fixed ten minutes after local monotonic insertion. Signed
+transient objects may be at most five minutes in the verifier's future and have only 30 seconds of
+negative clock-skew grace, so replay retention exceeds the entire remaining acceptance window. The
+default capacity is 4096 entries per process security domain and 256 per peer.
 Partitions and the per-peer quota prevent one peer from evicting the entire cache. An exact duplicate
 may return a cached
 idempotent response; a key collision with different canonical bytes is rejected and audited.
@@ -95,14 +99,17 @@ health system.
   grants immediately. Existing grants remain until explicit revocation unless the user selects rotation
   with generation revocation.
 
-## 6. TLS, DTLS, and channel-binding review
+## 6. TLS, DTLS, and signaling-transcript review
 
 An active relay that replaces an offer fingerprint cannot produce the initiator's Ed25519 signature.
 Replacing the whole offer with a replay fails nonce/request expiry and replay-cache checks. Relaying a
 valid offer into another connection fails because answer and hello bind both device/endpoint pairs,
 session ID, and both nonces. Replacing the DTLS endpoint after signed signaling produces a certificate
-fingerprint mismatch. Forwarding the valid DTLS session to a different transport produces a different
-DTLS exporter; `SESSION_HELLO` signature and channel-binding comparison fail before authorization.
+fingerprint mismatch. Moving a candidate to another ICE generation fails its transcript, owner ufrag,
+and owner fingerprint checks. Forwarding a valid hello to a connection established from another
+offer/answer pair fails the signed transcript comparison before authorization. Pinned libdatachannel
+v0.23.2 has no public DTLS exporter API; protocol 1.0 therefore uses this reproducible transcript
+binding and does not claim exporter semantics.
 
 Therefore a relay cannot silently become a peer or read business plaintext. It can drop/delay traffic,
 serve stale presence within bounded lease behavior, perform traffic analysis, and refuse TURN
@@ -113,7 +120,7 @@ regional deployment, and retention policy rather than new cryptography.
 
 Protocol parsers and state machines must cover golden, truncated, duplicate, unknown, boundary, and
 oversize inputs under sanitizer and fuzz smoke runs. Enrollment and session code must prove replay-cache
-full rejection, signature/fingerprint/channel-binding failures, and restricted-session isolation before
+full rejection, signature/fingerprint/transcript failures, and restricted-session isolation before
 M4. File code must prove path containment and quota checks before M7. Shell remains disabled until its
 VT parser, process containment, logging exclusions, and termination escalation receive a separate
 review in M8.

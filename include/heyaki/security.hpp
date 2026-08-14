@@ -30,8 +30,12 @@ enum class LogDataClass : std::uint8_t {
 
 enum class ReplayCacheFullPolicy : std::uint8_t { reject };
 
+inline constexpr std::uint32_t replay_cache_ttl_milliseconds{10U * 60U * 1000U};
+inline constexpr std::uint64_t maximum_signed_validity_milliseconds{5U * 60U * 1000U};
+inline constexpr std::uint64_t maximum_expiry_clock_skew_milliseconds{30U * 1000U};
+
 struct ReplayCachePolicy {
-  std::uint32_t ttl_milliseconds{10U * 60U * 1000U};
+  std::uint32_t ttl_milliseconds{replay_cache_ttl_milliseconds};
   std::size_t capacity{4096U};
   std::size_t per_peer_capacity{256U};
   ReplayCacheFullPolicy full_policy{ReplayCacheFullPolicy::reject};
@@ -51,5 +55,7 @@ struct PasswordSecurityPolicy {
 
 [[nodiscard]] Result<void> validate_security_policy(const ReplayCachePolicy& replay,
                                                     const PasswordSecurityPolicy& password);
+[[nodiscard]] Result<void> validate_signed_expiry(std::uint64_t expires_unix_milliseconds,
+                                                  std::uint64_t now_unix_milliseconds);
 
 }  // namespace heyaki

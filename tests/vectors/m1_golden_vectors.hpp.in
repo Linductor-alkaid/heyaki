@@ -26,6 +26,11 @@ inline constexpr std::string_view ed25519_seed_hex = "@M1_ED25519_SEED_HEX@";
 inline constexpr std::string_view ed25519_public_key_hex = "@M1_ED25519_PUBLIC_KEY_HEX@";
 inline constexpr std::string_view ed25519_message_hex = "@M1_ED25519_MESSAGE_HEX@";
 inline constexpr std::string_view ed25519_signature_hex = "@M1_ED25519_SIGNATURE_HEX@";
+inline constexpr std::string_view signaling_transcript_domain =
+    "@M1_SIGNALING_TRANSCRIPT_DOMAIN@";
+inline constexpr std::string_view canonical_answer_hex = "@M1_CANONICAL_ANSWER_HEX@";
+inline constexpr std::string_view signaling_transcript_sha256_hex =
+    "@M1_SIGNALING_TRANSCRIPT_SHA256_HEX@";
 inline constexpr std::string_view protobuf_envelope_hex = "@M1_PROTOBUF_ENVELOPE_HEX@";
 inline constexpr std::string_view frame_hex = "@M1_FRAME_HEX@";
 

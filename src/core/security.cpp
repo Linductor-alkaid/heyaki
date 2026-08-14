@@ -1,5 +1,7 @@
 #include <heyaki/security.hpp>
 
+#include <limits>
+
 namespace heyaki {
 
 std::string_view value_for_log(LogDataClass data_class, std::string_view value) noexcept {
@@ -8,7 +10,7 @@ std::string_view value_for_log(LogDataClass data_class, std::string_view value) 
 
 Result<void> validate_security_policy(const ReplayCachePolicy& replay,
                                       const PasswordSecurityPolicy& password) {
-  if (replay.ttl_milliseconds < 1000U || replay.ttl_milliseconds > 10U * 60U * 1000U) {
+  if (replay.ttl_milliseconds != replay_cache_ttl_milliseconds) {
     return Result<void>::failure(Error{ErrorCode::configuration, "security", "replay_ttl"});
   }
   if (replay.capacity < 64U || replay.capacity > 1024U * 1024U) {
@@ -31,6 +33,27 @@ Result<void> validate_security_policy(const ReplayCachePolicy& replay,
       password.argon2_maximum_operations > 6U) {
     return Result<void>::failure(
         Error{ErrorCode::configuration, "security", "password_policy"});
+  }
+  return Result<void>::success();
+}
+
+Result<void> validate_signed_expiry(std::uint64_t expires_unix_milliseconds,
+                                    std::uint64_t now_unix_milliseconds) {
+  const auto earliest = now_unix_milliseconds > maximum_expiry_clock_skew_milliseconds
+                            ? now_unix_milliseconds - maximum_expiry_clock_skew_milliseconds
+                            : 0U;
+  const auto latest = now_unix_milliseconds >
+                              std::numeric_limits<std::uint64_t>::max() -
+                                  maximum_signed_validity_milliseconds
+                          ? std::numeric_limits<std::uint64_t>::max()
+                          : now_unix_milliseconds + maximum_signed_validity_milliseconds;
+  if (expires_unix_milliseconds < earliest) {
+    return Result<void>::failure(
+        Error{ErrorCode::authentication, "security", "signed_object_expired"});
+  }
+  if (expires_unix_milliseconds > latest) {
+    return Result<void>::failure(
+        Error{ErrorCode::authentication, "security", "signed_expiry_too_far"});
   }
   return Result<void>::success();
 }

@@ -51,6 +51,7 @@ jobs:
         run: |
           build/tests/heyaki_frame_parser_fuzzer -runs=100 build/fuzz-corpus/frame-parser
           build/tests/heyaki_operation_state_fuzzer -runs=100 build/fuzz-corpus/operation-state
+          build/tests/heyaki_protobuf_parser_fuzzer -runs=100 build/fuzz-corpus/protobuf-parser
       - name: Verify all dependency groups offline
         run: scripts/fetch_third_party.sh --check --all
 

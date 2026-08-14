@@ -17,45 +17,57 @@ inline constexpr std::size_t max_safe_detail_bytes = 64U;
 
 enum class ErrorCode : std::uint16_t {
   configuration = 1,
-  identity,
-  authentication,
-  permission,
-  not_registered,
-  enrollment_revoked,
-  profile_locked,
-  pairing_required,
-  pairing_denied,
-  pairing_rate_limited,
-  peer_offline,
-  endpoint_offline,
-  signaling,
-  nat_traversal,
-  relay_unavailable,
-  transport,
-  protocol,
-  timeout,
-  cancelled,
-  would_block,
-  resource_exhausted,
-  remote_error,
-  outcome_unknown,
-  internal,
+  identity = 2,
+  authentication = 3,
+  permission = 4,
+  not_registered = 5,
+  enrollment_revoked = 6,
+  profile_locked = 7,
+  pairing_required = 8,
+  pairing_denied = 9,
+  pairing_rate_limited = 10,
+  peer_offline = 11,
+  endpoint_offline = 12,
+  signaling = 13,
+  nat_traversal = 14,
+  relay_unavailable = 15,
+  transport = 16,
+  protocol = 17,
+  timeout = 18,
+  cancelled = 19,
+  would_block = 20,
+  resource_exhausted = 21,
+  remote_error = 22,
+  outcome_unknown = 23,
+  internal = 24,
 };
 
-struct Error {
+class Error {
+ public:
   Error() = default;
-  Error(ErrorCode code_value, std::string component_value, std::string safe_detail_value)
-      : code(code_value),
-        component(std::move(component_value)),
-        safe_detail(is_safe_detail_token(safe_detail_value) ? std::move(safe_detail_value)
-                                                             : "invalid_safe_detail") {}
+  Error(ErrorCode code, std::string component, std::string safe_detail,
+        std::optional<std::int64_t> underlying_code = std::nullopt,
+        std::optional<DeviceId> peer_id = std::nullopt,
+        std::optional<OperationId> operation_id = std::nullopt);
 
-  ErrorCode code{ErrorCode::internal};
-  std::optional<std::int64_t> underlying_code;
-  std::optional<DeviceId> peer_id;
-  std::optional<OperationId> operation_id;
-  std::string component;
-  std::string safe_detail{"internal_error"};
+  [[nodiscard]] ErrorCode code() const noexcept { return code_; }
+  [[nodiscard]] const std::optional<std::int64_t>& underlying_code() const noexcept {
+    return underlying_code_;
+  }
+  [[nodiscard]] const std::optional<DeviceId>& peer_id() const noexcept { return peer_id_; }
+  [[nodiscard]] const std::optional<OperationId>& operation_id() const noexcept {
+    return operation_id_;
+  }
+  [[nodiscard]] std::string_view component() const noexcept { return component_; }
+  [[nodiscard]] std::string_view safe_detail() const noexcept { return safe_detail_; }
+
+ private:
+  ErrorCode code_{ErrorCode::internal};
+  std::optional<std::int64_t> underlying_code_;
+  std::optional<DeviceId> peer_id_;
+  std::optional<OperationId> operation_id_;
+  std::string component_{"core"};
+  std::string safe_detail_{"internal_error"};
 };
 
 [[nodiscard]] std::string_view error_code_name(ErrorCode code) noexcept;

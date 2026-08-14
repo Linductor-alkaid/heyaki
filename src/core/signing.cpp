@@ -1,5 +1,7 @@
 #include <heyaki/signing.hpp>
 
+#include <sodium/crypto_hash_sha256.h>
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -62,7 +64,8 @@ constexpr std::array answer_rules{FieldRule{32U}, FieldRule{16U}, FieldRule{32U}
 constexpr std::array candidate_rules{FieldRule{32U}, FieldRule{16U}, FieldRule{32U},
                                      FieldRule{16U}, FieldRule{16U}, FieldRule{16U},
                                      FieldRule{32U}, FieldRule{32U}, FieldRule{8U},
-                                     FieldRule{4U}, variable};
+                                     FieldRule{4U}, variable, FieldRule{32U}, variable,
+                                     FieldRule{32U}};
 constexpr std::array session_hello_rules{FieldRule{32U}, FieldRule{16U}, FieldRule{32U},
                                          FieldRule{16U}, FieldRule{16U}, FieldRule{8U},
                                          FieldRule{32U}, FieldRule{32U}, FieldRule{32U},
@@ -70,6 +73,33 @@ constexpr std::array session_hello_rules{FieldRule{32U}, FieldRule{16U}, FieldRu
                                          FieldRule{8U},  FieldRule{8U}};
 constexpr std::array trust_grant_required_rules{FieldRule{16U}, FieldRule{32U}, FieldRule{32U},
                                                 variable, FieldRule{8U}, FieldRule{8U}};
+
+bool is_printable_ascii(std::span<const std::byte> value, std::size_t minimum,
+                        std::size_t maximum) noexcept {
+  if (value.size() < minimum || value.size() > maximum) {
+    return false;
+  }
+  return std::all_of(value.begin(), value.end(), [](std::byte character) {
+    const auto byte = std::to_integer<std::uint8_t>(character);
+    return byte >= 0x20U && byte <= 0x7eU;
+  });
+}
+
+bool has_canonical_domain(std::span<const std::byte> value,
+                          std::string_view expected_domain) noexcept {
+  constexpr std::size_t fixed_prefix_size = 6U;
+  if (value.size() < fixed_prefix_size + expected_domain.size() + 2U ||
+      value[0] != std::byte{'H'} || value[1] != std::byte{'Y'} ||
+      value[2] != std::byte{'S'} || value[3] != std::byte{'G'} ||
+      value[4] != std::byte{1U} ||
+      std::to_integer<std::size_t>(value[5]) != expected_domain.size()) {
+    return false;
+  }
+  return std::equal(expected_domain.begin(), expected_domain.end(), value.begin() + 6U,
+                    [](char expected, std::byte actual) {
+                      return static_cast<std::byte>(expected) == actual;
+                    });
+}
 
 std::uint16_t read_uint16(std::span<const std::byte> value, std::size_t offset) noexcept {
   return static_cast<std::uint16_t>(
@@ -152,7 +182,8 @@ bool matches_field_shape(SigningDomain domain, std::span<const CanonicalField> f
     case SigningDomain::answer:
       return matches_rules(fields, answer_rules);
     case SigningDomain::candidate:
-      return matches_rules(fields, candidate_rules);
+      return matches_rules(fields, candidate_rules) && !fields[10U].value.empty() &&
+             is_printable_ascii(fields[12U].value, 4U, 256U);
     case SigningDomain::session_hello:
       return matches_rules(fields, session_hello_rules);
     case SigningDomain::trust_grant: {
@@ -255,6 +286,50 @@ Result<std::vector<std::byte>> canonicalize_for_signature(
     output.insert(output.end(), field.value.begin(), field.value.end());
   }
   return Result<std::vector<std::byte>>::success(std::move(output));
+}
+
+Result<SignalingTranscriptSha256> hash_signaling_transcript(
+    std::span<const std::byte> canonical_offer, std::span<const std::byte> canonical_answer) {
+  if (canonical_offer.empty() || canonical_answer.empty()) {
+    return Result<SignalingTranscriptSha256>::failure(
+        Error{ErrorCode::protocol, "signing", "empty_signaling_transcript"});
+  }
+  if (canonical_offer.size() > max_canonical_signing_bytes ||
+      canonical_answer.size() > max_canonical_signing_bytes) {
+    return Result<SignalingTranscriptSha256>::failure(
+        Error{ErrorCode::protocol, "signing", "signaling_transcript_too_large"});
+  }
+  if (!has_canonical_domain(canonical_offer, "heyaki.offer.v1") ||
+      !has_canonical_domain(canonical_answer, "heyaki.answer.v1")) {
+    return Result<SignalingTranscriptSha256>::failure(
+        Error{ErrorCode::protocol, "signing", "invalid_signaling_transcript_domain"});
+  }
+
+  constexpr std::string_view domain{"heyaki.signaling-transcript.v1"};
+  const auto offer_length = canonical_uint32(static_cast<std::uint32_t>(canonical_offer.size()));
+  const auto answer_length = canonical_uint32(static_cast<std::uint32_t>(canonical_answer.size()));
+  crypto_hash_sha256_state state{};
+  SignalingTranscriptSha256 output{};
+  if (crypto_hash_sha256_init(&state) != 0 ||
+      crypto_hash_sha256_update(
+          &state, reinterpret_cast<const unsigned char*>(domain.data()), domain.size()) != 0 ||
+      crypto_hash_sha256_update(
+          &state, reinterpret_cast<const unsigned char*>(offer_length.data()),
+          offer_length.size()) != 0 ||
+      crypto_hash_sha256_update(
+          &state, reinterpret_cast<const unsigned char*>(canonical_offer.data()),
+          canonical_offer.size()) != 0 ||
+      crypto_hash_sha256_update(
+          &state, reinterpret_cast<const unsigned char*>(answer_length.data()),
+          answer_length.size()) != 0 ||
+      crypto_hash_sha256_update(
+          &state, reinterpret_cast<const unsigned char*>(canonical_answer.data()),
+          canonical_answer.size()) != 0 ||
+      crypto_hash_sha256_final(&state, reinterpret_cast<unsigned char*>(output.data())) != 0) {
+    return Result<SignalingTranscriptSha256>::failure(
+        Error{ErrorCode::internal, "signing", "sha256_failed"});
+  }
+  return Result<SignalingTranscriptSha256>::success(output);
 }
 
 std::vector<std::byte> canonical_uint16(std::uint16_t value) {

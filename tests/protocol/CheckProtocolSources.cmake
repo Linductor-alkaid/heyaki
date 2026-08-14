@@ -15,6 +15,10 @@ foreach(schema_contract IN ITEMS
     "enrollment|message ServiceManifest"
     "signaling|bytes initiator_nonce = 5"
     "signaling|optional bytes responder_nonce = 7"
+    "signaling|bytes signaling_transcript_sha256 = 4"
+    "signaling|string owner_ice_ufrag = 5"
+    "signaling|bytes owner_dtls_fingerprint = 6"
+    "session|bytes signaling_transcript_sha256 = 7"
     "file|message FileReject"
     "shell|message ShellEof"
     "shell|message ShellError"
@@ -27,6 +31,21 @@ foreach(schema_contract IN ITEMS
   string(FIND "${contents}" "${required_text}" required_position)
   if(required_position EQUAL -1)
     message(FATAL_ERROR "Schema contract '${required_text}' is missing from ${schema}")
+  endif()
+endforeach()
+
+foreach(raw_header_contract IN ITEMS
+    "stream|message StreamDataHeader"
+    "file|message FileChunkHeader"
+    "shell|message ShellDataHeader")
+  string(REPLACE "|" ";" contract_parts "${raw_header_contract}")
+  list(GET contract_parts 0 domain)
+  list(GET contract_parts 1 forbidden_text)
+  set(schema "${HEYAKI_PROTO_DIR}/heyaki/${domain}/v1/${domain}.proto")
+  file(READ "${schema}" contents)
+  string(FIND "${contents}" "${forbidden_text}" forbidden_position)
+  if(NOT forbidden_position EQUAL -1)
+    message(FATAL_ERROR "Raw payload header '${forbidden_text}' must not be a Protobuf schema")
   endif()
 endforeach()
 
@@ -71,9 +90,18 @@ string(JSON signed_message_hex ERROR_VARIABLE signed_message_error GET
   "${golden_json}" ed25519_canonical_offer message_hex)
 string(JSON signature_hex ERROR_VARIABLE signature_error GET
   "${golden_json}" ed25519_canonical_offer signature_hex)
+string(JSON transcript_domain ERROR_VARIABLE transcript_domain_error GET
+  "${golden_json}" signaling_transcript domain)
+string(JSON transcript_hash ERROR_VARIABLE transcript_hash_error GET
+  "${golden_json}" signaling_transcript sha256_hex)
 if(format_error OR major_error OR minor_error OR canonical_error OR signed_message_error OR
-   signature_error)
+   signature_error OR transcript_domain_error OR transcript_hash_error)
   message(FATAL_ERROR "Golden vector JSON is malformed")
+endif()
+string(LENGTH "${transcript_hash}" transcript_hash_length)
+if(NOT transcript_domain STREQUAL "heyaki.signaling-transcript.v1" OR
+   NOT transcript_hash_length EQUAL 64)
+  message(FATAL_ERROR "Signaling transcript vector must contain the v1 domain and SHA-256")
 endif()
 if(NOT vector_format STREQUAL "heyaki-m1-golden-vectors-v1")
   message(FATAL_ERROR "Unknown golden vector format: ${vector_format}")
@@ -93,7 +121,10 @@ file(READ "${HEYAKI_WIRE_DOCUMENT}" wire_document)
 if(NOT wire_document MATCHES "Protocol version: ${HEYAKI_PROTOCOL_MAJOR}\\.${HEYAKI_PROTOCOL_MINOR}" OR
    NOT wire_document MATCHES "tests/vectors/m1-golden-vectors\\.json" OR
    NOT wire_document MATCHES "heyaki\\.enrollment-record\\.v1" OR
-   NOT wire_document MATCHES "responder nonce")
+   NOT wire_document MATCHES "responder nonce" OR
+   NOT wire_document MATCHES "heyaki\\.signaling-transcript\\.v1" OR
+   NOT wire_document MATCHES "StreamData :=" OR
+   NOT wire_document MATCHES "`0x78`.*`SHELL_CLOSE`")
   message(FATAL_ERROR "Wire protocol document version/vector reference is inconsistent")
 endif()
 

@@ -15,12 +15,6 @@ message ShellOpen {
   string locale = 6;
 }
 
-message ShellDataHeader {
-  bytes shell_id = 1;
-  uint64 offset = 2;
-  uint32 data_length = 3;
-}
-
 message ShellResize {
   bytes shell_id = 1;
   uint32 columns = 2;

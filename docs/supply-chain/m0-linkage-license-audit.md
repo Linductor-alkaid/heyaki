@@ -25,7 +25,7 @@ consumer CI job and must be captured from the final packaged binaries at M9.
 
 | Dependency set | Count | M0 disposition |
 | --- | --- | --- |
-| Direct runtime/test/optional pins | 9 | Recorded in SPDX and license manifest; not installed or linked by production targets |
+| Direct runtime/test/optional pins | 10 | Recorded in SPDX and license manifest; Abseil was added in M1 as Protobuf 31.1's required dependency |
 | libdatachannel recursive submodules | 5 | Recorded with parent relationships and exact commits |
 | System/deployed dependencies | 0 linked | Boost, release OpenSSL, libnice and coturn freeze before first use |
 
@@ -36,8 +36,8 @@ installed as part of M0.
 
 ## License disposition
 
-The current Heyaki package contains no third-party code, so it has no third-party binary
-redistribution obligation beyond retaining the generated inventory. The pinned inventory contains
+The audited M0 package contained no third-party code. M1 test targets now compile the pinned Protobuf
+Lite/Abseil toolchain, but those targets remain non-installed. The pinned inventory contains
 permissive licenses, SQLite's blessing, and MPL-2.0 for libdatachannel/libjuice. Before distributing
 an artifact that contains MPL-covered files, the packaging review must preserve notices and satisfy
 MPL source-availability requirements for covered files. Optional BLAKE3 and zstd use must record the

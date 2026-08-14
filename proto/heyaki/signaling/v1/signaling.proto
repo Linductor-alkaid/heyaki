@@ -34,5 +34,8 @@ message SignedCandidate {
   SignalBinding binding = 1;
   uint32 sequence = 2;
   bytes candidate = 3;
-  heyaki.protocol.common.v1.Signature signature = 4;
+  bytes signaling_transcript_sha256 = 4; // Exactly 32 bytes over canonical offer + answer.
+  string owner_ice_ufrag = 5;
+  bytes owner_dtls_fingerprint = 6; // Exactly 32 raw SHA-256 fingerprint bytes.
+  heyaki.protocol.common.v1.Signature signature = 7;
 }

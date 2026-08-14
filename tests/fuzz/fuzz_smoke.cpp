@@ -78,8 +78,8 @@ int main(int argc, char** argv) {
   heyaki::Frame boundary_frame{
       .type = static_cast<std::uint8_t>(heyaki::FrameType::message),
       .flags = 0U,
-      .channel_id = 0U,
-      .message_id = heyaki::MessageId{},
+      .channel_id = 1U,
+      .message_id = heyaki::MessageId{heyaki::MessageId::Storage{std::byte{1U}}},
       .payload = std::vector<std::byte>(heyaki::Limits{}.max_message_bytes, std::byte{0xa5U})};
   const auto boundary_result = heyaki::encode_frame(boundary_frame);
   if (!boundary_result) {
@@ -100,6 +100,29 @@ int main(int argc, char** argv) {
     heyaki::fuzz::frame_parser(seed);
     if (!write_seed(corpus_root / "frame-parser", name, seed)) {
       std::cerr << "cannot write parser seed " << name << '\n';
+      return 1;
+    }
+  }
+
+  const auto protobuf = bytes_from_hex(heyaki::test_vectors::protobuf_envelope_hex);
+  auto truncated_protobuf = protobuf;
+  truncated_protobuf.pop_back();
+  auto unknown_protobuf = protobuf;
+  unknown_protobuf.insert(unknown_protobuf.end(),
+                          {std::byte{0x7aU}, std::byte{0x01U}, std::byte{0xffU}});
+  const std::vector<std::byte> malformed_protobuf{
+      std::byte{0x0aU}, std::byte{0xffU}, std::byte{0xffU},
+      std::byte{0xffU}, std::byte{0xffU}, std::byte{0x0fU}};
+  const std::vector protobuf_seeds{
+      std::pair{std::string_view{"golden-envelope"}, protobuf},
+      std::pair{std::string_view{"truncated-envelope"}, truncated_protobuf},
+      std::pair{std::string_view{"unknown-field-envelope"}, unknown_protobuf},
+      std::pair{std::string_view{"oversize-field-envelope"}, malformed_protobuf},
+  };
+  for (const auto& [name, seed] : protobuf_seeds) {
+    heyaki::fuzz::protobuf_message_parser(seed);
+    if (!write_seed(corpus_root / "protobuf-parser", name, seed)) {
+      std::cerr << "cannot write protobuf seed " << name << '\n';
       return 1;
     }
   }

@@ -70,6 +70,26 @@ TEST(GoldenVectors, Ed25519SignatureCoversCanonicalOffer) {
             heyaki::test_vectors::identity_public_key_hex);
 }
 
+TEST(GoldenVectors, SignalingTranscriptHashIsExact) {
+  EXPECT_EQ(heyaki::test_vectors::signaling_transcript_domain,
+            "heyaki.signaling-transcript.v1");
+  const auto offer = heyaki::test::bytes_from_hex(heyaki::test_vectors::canonical_hex);
+  const auto answer =
+      heyaki::test::bytes_from_hex(heyaki::test_vectors::canonical_answer_hex);
+  const auto expected = heyaki::test::bytes_from_hex(
+      heyaki::test_vectors::signaling_transcript_sha256_hex);
+  const auto transcript = heyaki::hash_signaling_transcript(offer, answer);
+  ASSERT_TRUE(transcript);
+  EXPECT_TRUE(std::equal(transcript.value_if()->begin(), transcript.value_if()->end(),
+                         expected.begin(), expected.end()));
+
+  auto changed_answer = answer;
+  changed_answer.back() ^= std::byte{1U};
+  const auto changed = heyaki::hash_signaling_transcript(offer, changed_answer);
+  ASSERT_TRUE(changed);
+  EXPECT_NE(*changed.value_if(), *transcript.value_if());
+}
+
 TEST(GoldenVectors, ProtobufEnvelopeAndFrameBytesAreExact) {
   const auto encoded_frame = heyaki::test::bytes_from_hex(heyaki::test_vectors::frame_hex);
   const auto envelope = heyaki::test::bytes_from_hex(heyaki::test_vectors::protobuf_envelope_hex);

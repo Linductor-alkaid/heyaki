@@ -4,9 +4,56 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 namespace {
+
+constexpr std::array<std::pair<heyaki::FrameType, std::uint8_t>, 34U> frozen_frame_types{{
+    {heyaki::FrameType::session_hello, 0x01U},
+    {heyaki::FrameType::protocol_close, 0x02U},
+    {heyaki::FrameType::ping, 0x03U},
+    {heyaki::FrameType::pong, 0x04U},
+    {heyaki::FrameType::cancel, 0x05U},
+    {heyaki::FrameType::pairing_request, 0x10U},
+    {heyaki::FrameType::pairing_result, 0x11U},
+    {heyaki::FrameType::message, 0x20U},
+    {heyaki::FrameType::message_ack, 0x21U},
+    {heyaki::FrameType::rpc_request, 0x30U},
+    {heyaki::FrameType::rpc_response, 0x31U},
+    {heyaki::FrameType::rpc_cancel, 0x32U},
+    {heyaki::FrameType::event_subscribe, 0x40U},
+    {heyaki::FrameType::event_item, 0x41U},
+    {heyaki::FrameType::event_unsubscribe, 0x42U},
+    {heyaki::FrameType::stream_open, 0x50U},
+    {heyaki::FrameType::stream_data, 0x51U},
+    {heyaki::FrameType::stream_window_update, 0x52U},
+    {heyaki::FrameType::stream_fin, 0x53U},
+    {heyaki::FrameType::stream_reset, 0x54U},
+    {heyaki::FrameType::file_manifest, 0x60U},
+    {heyaki::FrameType::file_accept, 0x61U},
+    {heyaki::FrameType::file_chunk, 0x62U},
+    {heyaki::FrameType::file_complete, 0x63U},
+    {heyaki::FrameType::file_reject, 0x64U},
+    {heyaki::FrameType::shell_open, 0x70U},
+    {heyaki::FrameType::shell_input, 0x71U},
+    {heyaki::FrameType::shell_output, 0x72U},
+    {heyaki::FrameType::shell_resize, 0x73U},
+    {heyaki::FrameType::shell_signal, 0x74U},
+    {heyaki::FrameType::shell_exit, 0x75U},
+    {heyaki::FrameType::shell_eof, 0x76U},
+    {heyaki::FrameType::shell_error, 0x77U},
+    {heyaki::FrameType::shell_close, 0x78U},
+}};
+
+static_assert([] {
+  for (const auto& [type, value] : frozen_frame_types) {
+    if (static_cast<std::uint8_t>(type) != value) {
+      return false;
+    }
+  }
+  return true;
+}());
 
 heyaki::Frame sample_frame() {
   heyaki::MessageId::Storage message_id{};
@@ -33,14 +80,14 @@ TEST(Wire, RejectsLengthBeforePayloadAllocation) {
   const auto parsed = heyaki::parse_frame(over_limit);
   EXPECT_EQ(parsed.status, heyaki::FrameParseStatus::invalid);
   ASSERT_TRUE(parsed.error.has_value());
-  EXPECT_EQ(parsed.error->safe_detail, "varint_limit");
+  EXPECT_EQ(parsed.error->safe_detail(), "varint_limit");
 
   const std::vector<std::byte> oversized_control{std::byte{0x81U}, std::byte{0x80U},
                                                  std::byte{0x04U}, std::byte{0x01U}};
   const auto control = heyaki::parse_frame(oversized_control);
   EXPECT_EQ(control.status, heyaki::FrameParseStatus::invalid);
   ASSERT_TRUE(control.error.has_value());
-  EXPECT_EQ(control.error->safe_detail, "control_frame_limit");
+  EXPECT_EQ(control.error->safe_detail(), "control_frame_limit");
 }
 
 TEST(Wire, RejectsNonCanonicalVarintsAndReservedFlags) {
@@ -51,7 +98,21 @@ TEST(Wire, RejectsNonCanonicalVarintsAndReservedFlags) {
   frame.flags = 0x80U;
   const auto encoded = heyaki::encode_frame(frame);
   ASSERT_FALSE(encoded);
-  EXPECT_EQ(encoded.error_if()->safe_detail, "reserved_frame_flags");
+  EXPECT_EQ(encoded.error_if()->safe_detail(), "reserved_frame_flags");
+}
+
+TEST(Wire, EnforcesCorrelationIdAndChannelClass) {
+  auto zero_id = sample_frame();
+  zero_id.message_id = heyaki::MessageId{};
+  EXPECT_FALSE(heyaki::encode_frame(zero_id));
+
+  auto business_on_control = sample_frame();
+  business_on_control.channel_id = 0U;
+  EXPECT_FALSE(heyaki::encode_frame(business_on_control));
+
+  auto control_on_business = sample_frame();
+  control_on_business.type = static_cast<std::uint8_t>(heyaki::FrameType::session_hello);
+  EXPECT_FALSE(heyaki::encode_frame(control_on_business));
 }
 
 TEST(Wire, DistinguishesTruncatedInputFromInvalidInput) {

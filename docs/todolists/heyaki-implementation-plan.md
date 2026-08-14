@@ -1,7 +1,7 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
 > - 状态：M1 首轮评审问题已整改并通过本地门禁；待更新后的 GitHub CI（含 Windows Debug/Release）与独立复审后准入 M2
-> - 日期：2026-08-14
+> - 日期：2026-08-15
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
 
@@ -149,7 +149,7 @@ M0 验证记录（2026-08-14）：本机 GCC 13.3 的 Debug、Release、UBSAN、
 - [x] `M1-15` 定义密钥、token、密码、verifier 和 payload 的日志分类与脱敏测试；结构化字段只允许安全上下文。
 - [x] `M1-16` 定义 replay cache 的 key、TTL、容量和满载策略；容量耗尽必须可观测且默认拒绝高风险请求。
 - [x] `M1-17` 定义密码强度、Argon2id 参数版本/校准范围、安全 buffer 清理和 password generation 规则。
-- [x] `M1-18` 评审 TLS/DTLS 信任边界和 channel binding，证明 relay 替换 fingerprint 时会在设备侧失败。
+- [x] `M1-18` 评审 TLS/DTLS 信任边界和签名 signaling transcript 绑定，证明 relay 替换 fingerprint、ICE generation 或 offer/answer 时会在设备侧失败。
 - [x] `M1-19` 建立 parser/state-machine fuzz targets，初始 corpus 包含 golden vectors、截断、重复、边界长度和未知字段。
 
 ### M1 测试与退出条件
@@ -159,16 +159,17 @@ M0 验证记录（2026-08-14）：本机 GCC 13.3 的 Debug、Release、UBSAN、
 - [x] 所有 parser 在分配 payload 前检查长度，fuzz smoke 无 crash、越界、超限分配或无限循环。
 - [ ] threat model、安全默认值和 wire protocol 通过独立评审后再进入 M2；后续不兼容修改必须显式提升协议 major。
 
-M1 本地验证记录（2026-08-14）：首轮协议/安全评审的七项问题已完成整改。Linux GCC 13.3 的
-Debug、Release、`-Werror` 和 UBSAN 构建及 CTest 均无失败（各 14 pass、1 network skip）；
-禁异常配置为 15 pass、1 network skip。ASAN 构建通过，但相关运行时测试
+M1 本地验证记录（2026-08-15）：首轮协议/安全评审的七项问题已完成整改。Linux GCC 13.3 的
+Debug、Release、`-Werror` 和禁异常构建均通过；各配置的 16 项 CTest 为 15 pass、1 network
+skip。UBSAN 的 15 项 CTest 为 14 pass、1 network skip。ASAN 构建通过，但相关运行时测试
 因宿主 ptrace/LeakSanitizer 限制按既定规则明确 skip，network harness 同样因缺少
 `CAP_NET_ADMIN` skip。公开头逐头独立编译，安装后 consumer、schema/文档版本检查、golden
-bytes、frame parser、operation 状态机和 fuzz smoke 均通过。当前宿主没有 Clang/libFuzzer。
-GitHub Actions 在基线 commit `0567800` 上完成 Linux GCC/Clang、Windows MSVC Debug、ASAN、
-UBSAN、TSAN 和两个真实 libFuzzer target 各 100 次短跑；本次整改已将 Windows 扩展为
-Debug/Release 矩阵，但更新后的远端 CI 尚未执行。该 CI 与独立协议/安全复审完成前，保持对应
-两项退出条件未勾选，不准入 M2。
+bytes、frame parser、operation 状态机、pinned `protoc` 生成的 Protobuf Lite conformance
+test 和 fuzz smoke 均通过。新增 generated Protobuf parser 的第三个 libFuzzer target；当前
+宿主没有 Clang/libFuzzer。GitHub Actions 在基线 commit `0567800` 上完成 Linux GCC/Clang、
+Windows MSVC Debug、ASAN、UBSAN、TSAN 和两个真实 libFuzzer target 各 100 次短跑；本次整改
+已将 Windows 扩展为 Debug/Release 矩阵并增加第三个 target，但更新后的远端 CI 尚未执行。
+该 CI 与独立协议/安全复审完成前，保持对应两项退出条件未勾选，不准入 M2。
 
 ---
 
@@ -277,7 +278,7 @@ Debug/Release 矩阵，但更新后的远端 CI 尚未执行。该 CI 与独立�
 
 ### 7.3 最小身份会话与诊断 UI
 
-- [ ] `M4-13` 实现 `SESSION_HELLO`，绑定 DTLS channel、session ID/epoch、endpoint、能力摘要和签名。
+- [ ] `M4-13` 实现 `SESSION_HELLO`，在 fingerprint 已验证的 DataChannel 上绑定签名 signaling transcript、session ID/epoch、endpoint、能力摘要和签名。
 - [ ] `M4-14` 实现最小状态机 `Idle -> Signaling -> Gathering -> Checking -> TransportConnected -> Authenticating -> Closed`，每次转换记录 reason/timestamp。
 - [ ] `M4-15` 在授权功能尚未实现时，成功认证的测试设备只开放内部 control ping，不开放通用业务通道。
 - [ ] `M4-16` TUI 设备/诊断视图展示在线 endpoint、建连阶段、direct/relayed path、candidate、RTT 和结构化失败。

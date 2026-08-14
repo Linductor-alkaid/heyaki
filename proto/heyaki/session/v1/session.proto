@@ -13,7 +13,7 @@ message SessionHello {
   uint64 session_epoch = 4;
   bytes initiator_nonce = 5;
   bytes responder_nonce = 6;
-  bytes dtls_channel_binding = 7;
+  bytes signaling_transcript_sha256 = 7;
   heyaki.protocol.common.v1.ProtocolVersion protocol_version = 8;
   heyaki.protocol.common.v1.CapabilityAdvertisement capabilities = 9;
   uint64 expires_unix_milliseconds = 10;

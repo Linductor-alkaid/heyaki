@@ -278,9 +278,9 @@ TrustGrant 是有方向的：目标 B 使用自己的授权密码允许 A 操作
 
 WSS 保护的是设备到中继，不足以阻止被控制的中继替换 WebRTC SDP 和 DTLS fingerprint。因此：
 
-- offer、answer、ICE ufrag、DTLS fingerprint、双方 `DeviceId`/`EndpointId`、发起方/响应方会话 nonce 和过期时间必须作为规范化对象由长期设备密钥签名；
+- offer、answer、ICE ufrag、DTLS fingerprint、双方 `DeviceId`/`EndpointId`、发起方/响应方会话 nonce 和过期时间必须作为规范化对象由长期设备密钥签名；candidate 还必须绑定已验证 offer/answer transcript、owner ICE ufrag 和 owner fingerprint；
 - 对端验证签名、公钥派生的 `DeviceId`、nonce 和时效后才接受 DTLS 会话；
-- 首个 Heyaki `SESSION_HELLO` 再携带 DTLS channel binding、会话 ID、endpoint 和能力摘要签名，避免信令与实际连接错配；
+- 双方对规范化 offer 与 answer 做长度定界 SHA-256；首个 Heyaki `SESSION_HELLO` 在已校验签名 fingerprint 的实际 DataChannel 上携带并签名该 transcript 摘要、会话 ID/epoch、endpoint 和能力摘要，避免信令与实际连接错配；pinned libdatachannel v0.23.2 没有公共 DTLS exporter API，因此 v1 不虚构 exporter binding；
 - 重放的连接请求通过一次性 request ID、短过期时间和最近 nonce 缓存拒绝。
 
 这样 TURN 只能看到连接元数据、时序和密文流量，不能解密或篡改业务内容。中继仍可拒绝服务或进行流量分析，这不在端到端加密可解决的范围内。
@@ -863,19 +863,20 @@ resource_exhausted, remote_error, outcome_unknown, internal
 2. `DeviceId` 必须由公钥派生；注册、信令和会话握手均验证签名。
 3. 自动登录每次都验证随机 challenge 签名、enrollment generation 和吊销状态，只省略人工输入。
 4. DTLS fingerprint 与双方身份、endpoint、发起方/响应方 nonce、expiry 一起签名，防止中继 MITM。
-5. 授权密码只在本机安全输入和已认证的端到端 pairing channel 中出现；本机仅持久化 Argon2id verifier。
-6. pairing-only 会话不能创建业务通道，并实施消息大小、尝试次数、时间和来源速率限制。
-7. 设备服务默认拒绝，按 TrustGrant scope、endpoint policy 和服务策略的交集最小授权。
-8. bootstrap、TURN 和 session credential 均短期有效、可撤销、不可写入普通日志。
-9. ProfileStore 私钥、password verifier、TrustStore 和 relay pin 使用 OS 权限/密钥设施保护，更新必须原子化。
-10. endpoint record 与 service manifest 由设备身份签名；`EndpointId` 本身不提供权限。
-11. 所有长度、计数、压缩后大小、并发数和路径都在分配或执行前校验。
-12. parser、状态机、Protobuf、TUI VT parser 和 ProfileStore 边界加入 libFuzzer/AFL++ fuzz 测试。
-13. 文件写入限定 root、临时文件和原子提交，处理 symlink race 与磁盘配额。
-14. Remote Shell 默认关闭，使用受限 profile、低权限账户和资源上限。
-15. relay 与 TURN 实施认证、速率限制、带宽配额、连接上限和反射放大防护。
-16. 吊销设备后拒绝新登录与新会话；现有会话是否立即断开由安全策略明确配置。
-17. 发布前形成 threat model，至少覆盖恶意设备、被控制的 relay、授权密码猜测、ProfileStore 窃取、重放、资源耗尽、协议降级和供应链风险。
+5. candidate 绑定已验证的 offer/answer transcript、owner ICE ufrag 和 fingerprint；`SESSION_HELLO` 在 fingerprint 已验证的 DataChannel 上再次签名 transcript 摘要。
+6. 授权密码只在本机安全输入和已认证的端到端 pairing channel 中出现；本机仅持久化 Argon2id verifier。
+7. pairing-only 会话不能创建业务通道，并实施消息大小、尝试次数、时间和来源速率限制。
+8. 设备服务默认拒绝，按 TrustGrant scope、endpoint policy 和服务策略的交集最小授权。
+9. bootstrap、TURN 和 session credential 均短期有效、可撤销、不可写入普通日志。
+10. ProfileStore 私钥、password verifier、TrustStore 和 relay pin 使用 OS 权限/密钥设施保护，更新必须原子化。
+11. endpoint record 与 service manifest 由设备身份签名；`EndpointId` 本身不提供权限。
+12. 所有长度、计数、压缩后大小、并发数和路径都在分配或执行前校验。
+13. parser、状态机、Protobuf、TUI VT parser 和 ProfileStore 边界加入 libFuzzer/AFL++ fuzz 测试。
+14. 文件写入限定 root、临时文件和原子提交，处理 symlink race 与磁盘配额。
+15. Remote Shell 默认关闭，使用受限 profile、低权限账户和资源上限。
+16. relay 与 TURN 实施认证、速率限制、带宽配额、连接上限和反射放大防护。
+17. 吊销设备后拒绝新登录与新会话；现有会话是否立即断开由安全策略明确配置。
+18. 发布前形成 threat model，至少覆盖恶意设备、被控制的 relay、授权密码猜测、ProfileStore 窃取、重放、资源耗尽、协议降级和供应链风险。
 
 ## 15. 测试与验收
 

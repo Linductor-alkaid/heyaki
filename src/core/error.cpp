@@ -2,6 +2,17 @@
 
 namespace heyaki {
 
+Error::Error(ErrorCode code, std::string component, std::string safe_detail,
+             std::optional<std::int64_t> underlying_code, std::optional<DeviceId> peer_id,
+             std::optional<OperationId> operation_id)
+    : code_(code),
+      underlying_code_(underlying_code),
+      peer_id_(peer_id),
+      operation_id_(operation_id),
+      component_(is_safe_detail_token(component) ? std::move(component) : "invalid_component"),
+      safe_detail_(is_safe_detail_token(safe_detail) ? std::move(safe_detail)
+                                                     : "invalid_safe_detail") {}
+
 bool is_safe_detail_token(std::string_view value) noexcept {
   if (value.empty() || value.size() > max_safe_detail_bytes) {
     return false;

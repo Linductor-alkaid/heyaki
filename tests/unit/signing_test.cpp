@@ -90,7 +90,7 @@ TEST(Signing, CanonicalizerRejectsMissingDomainFields) {
   const auto result = heyaki::canonicalize_for_signature(heyaki::SigningDomain::offer, fields);
   EXPECT_FALSE(result);
   ASSERT_NE(result.error_if(), nullptr);
-  EXPECT_EQ(result.error_if()->safe_detail, "invalid_signed_field_shape");
+  EXPECT_EQ(result.error_if()->safe_detail(), "invalid_signed_field_shape");
 }
 
 TEST(Signing, EverySignedDomainAcceptsItsFrozenFieldShape) {
@@ -101,6 +101,9 @@ TEST(Signing, EverySignedDomainAcceptsItsFrozenFieldShape) {
     for (const auto size : sizes) {
       fields.push_back(
           {.number = number++, .value = std::vector<std::byte>(size, std::byte{0})});
+    }
+    if (domain == heyaki::SigningDomain::candidate) {
+      fields[12U].value = {std::byte{'i'}, std::byte{'c'}, std::byte{'e'}, std::byte{'1'}};
     }
     EXPECT_TRUE(heyaki::canonicalize_for_signature(domain, fields));
   };
@@ -115,7 +118,7 @@ TEST(Signing, EverySignedDomainAcceptsItsFrozenFieldShape) {
   expect_shape(heyaki::SigningDomain::answer,
                {32U, 16U, 32U, 16U, 16U, 16U, 32U, 32U, 8U, 1U, 32U});
   expect_shape(heyaki::SigningDomain::candidate,
-               {32U, 16U, 32U, 16U, 16U, 16U, 32U, 32U, 8U, 4U, 1U});
+               {32U, 16U, 32U, 16U, 16U, 16U, 32U, 32U, 8U, 4U, 1U, 32U, 4U, 32U});
   expect_shape(heyaki::SigningDomain::session_hello,
                {32U, 16U, 32U, 16U, 16U, 8U, 32U, 32U, 32U, 4U, 4U, 8U, 8U, 8U});
   expect_shape(heyaki::SigningDomain::trust_grant,
@@ -130,6 +133,17 @@ TEST(Signing, EverySignedDomainAcceptsItsFrozenFieldShape) {
   without_expiry.push_back({.number = 8U, .value = std::vector<std::byte>(32U, std::byte{0})});
   EXPECT_TRUE(heyaki::canonicalize_for_signature(heyaki::SigningDomain::trust_grant,
                                                   without_expiry));
+}
+
+TEST(Signing, SignalingTranscriptRejectsMissingOrOversizedObjects) {
+  const std::vector<std::byte> one_byte{std::byte{1U}};
+  EXPECT_FALSE(heyaki::hash_signaling_transcript({}, one_byte));
+  EXPECT_FALSE(heyaki::hash_signaling_transcript(one_byte, {}));
+
+  const std::vector<std::byte> oversized(heyaki::max_canonical_signing_bytes + 1U);
+  EXPECT_FALSE(heyaki::hash_signaling_transcript(oversized, one_byte));
+  EXPECT_FALSE(heyaki::hash_signaling_transcript(one_byte, oversized));
+  EXPECT_FALSE(heyaki::hash_signaling_transcript(one_byte, one_byte));
 }
 
 TEST(Signing, TrustGrantRejectsNonCanonicalScopeLists) {

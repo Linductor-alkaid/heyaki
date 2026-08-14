@@ -3,7 +3,62 @@ set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../third_party/googletest"
                  "${CMAKE_CURRENT_BINARY_DIR}/googletest" EXCLUDE_FROM_ALL)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+set(ABSL_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(ABSL_BUILD_TEST_HELPERS OFF CACHE BOOL "" FORCE)
+set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../third_party/abseil-cpp"
+                 "${CMAKE_CURRENT_BINARY_DIR}/abseil-cpp" EXCLUDE_FROM_ALL)
+
+set(protobuf_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(protobuf_BUILD_CONFORMANCE OFF CACHE BOOL "" FORCE)
+set(protobuf_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(protobuf_INSTALL OFF CACHE BOOL "" FORCE)
+set(protobuf_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(protobuf_BUILD_PROTOBUF_BINARIES ON CACHE BOOL "" FORCE)
+set(protobuf_BUILD_PROTOC_BINARIES ON CACHE BOOL "" FORCE)
+set(protobuf_BUILD_LIBUPB ON CACHE BOOL "" FORCE)
+set(protobuf_WITH_ZLIB OFF CACHE BOOL "" FORCE)
+set(protobuf_LOCAL_DEPENDENCIES_ONLY ON CACHE BOOL "" FORCE)
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../third_party/protobuf"
+                 "${CMAKE_CURRENT_BINARY_DIR}/protobuf" EXCLUDE_FROM_ALL)
+include("${CMAKE_CURRENT_SOURCE_DIR}/../third_party/protobuf/cmake/protobuf-generate.cmake")
+
+set(HEYAKI_PROTO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../proto")
+set(HEYAKI_PROTO_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated-proto")
+file(MAKE_DIRECTORY "${HEYAKI_PROTO_GENERATED_DIR}")
+file(GLOB_RECURSE HEYAKI_PROTO_FILES CONFIGURE_DEPENDS "${HEYAKI_PROTO_ROOT}/*.proto")
+list(SORT HEYAKI_PROTO_FILES)
+protobuf_generate(
+  LANGUAGE cpp
+  OUT_VAR HEYAKI_PROTO_GENERATED_SOURCES
+  PROTOS ${HEYAKI_PROTO_FILES}
+  IMPORT_DIRS "${HEYAKI_PROTO_ROOT}"
+  PROTOC_OUT_DIR "${HEYAKI_PROTO_GENERATED_DIR}"
+  PROTOC_EXE protobuf::protoc)
+add_library(heyaki_protocol_lite STATIC ${HEYAKI_PROTO_GENERATED_SOURCES})
+target_compile_features(heyaki_protocol_lite PUBLIC cxx_std_20)
+target_include_directories(heyaki_protocol_lite SYSTEM PUBLIC
+  "${HEYAKI_PROTO_GENERATED_DIR}"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/protobuf/src"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/abseil-cpp")
+target_link_libraries(heyaki_protocol_lite PUBLIC protobuf::libprotobuf-lite)
+if(NOT HEYAKI_SANITIZER STREQUAL "none")
+  if(HEYAKI_SANITIZER STREQUAL "address")
+    set(heyaki_protocol_sanitizer_flag -fsanitize=address)
+  elseif(HEYAKI_SANITIZER STREQUAL "undefined")
+    set(heyaki_protocol_sanitizer_flag -fsanitize=undefined)
+  elseif(HEYAKI_SANITIZER STREQUAL "thread")
+    set(heyaki_protocol_sanitizer_flag -fsanitize=thread)
+  endif()
+  target_compile_options(heyaki_protocol_lite PRIVATE
+    "${heyaki_protocol_sanitizer_flag}"
+    -fno-omit-frame-pointer)
+  target_link_options(heyaki_protocol_lite PUBLIC
+    "${heyaki_protocol_sanitizer_flag}"
+    -fno-omit-frame-pointer)
+endif()
 
 set(HEYAKI_M1_GOLDEN_VECTOR_FILE
   "${CMAKE_CURRENT_SOURCE_DIR}/vectors/m1-golden-vectors.json")
@@ -34,6 +89,9 @@ heyaki_read_golden_json(M1_ED25519_SEED_HEX ed25519_canonical_offer seed_hex)
 heyaki_read_golden_json(M1_ED25519_PUBLIC_KEY_HEX ed25519_canonical_offer public_key_hex)
 heyaki_read_golden_json(M1_ED25519_MESSAGE_HEX ed25519_canonical_offer message_hex)
 heyaki_read_golden_json(M1_ED25519_SIGNATURE_HEX ed25519_canonical_offer signature_hex)
+heyaki_read_golden_json(M1_SIGNALING_TRANSCRIPT_DOMAIN signaling_transcript domain)
+heyaki_read_golden_json(M1_CANONICAL_ANSWER_HEX signaling_transcript canonical_answer_hex)
+heyaki_read_golden_json(M1_SIGNALING_TRANSCRIPT_SHA256_HEX signaling_transcript sha256_hex)
 heyaki_read_golden_json(M1_PROTOBUF_ENVELOPE_HEX protobuf_message_envelope bytes_hex)
 heyaki_read_golden_json(M1_FRAME_HEX frame bytes_hex)
 
@@ -111,7 +169,7 @@ heyaki_configure_target(heyaki_module_linkage)
 heyaki_add_runtime_test(heyaki_module_linkage heyaki_module_linkage "integration")
 
 add_library(heyaki_fuzz_harness OBJECT fuzz/protocol_fuzz.cpp)
-target_link_libraries(heyaki_fuzz_harness PRIVATE heyaki::core)
+target_link_libraries(heyaki_fuzz_harness PRIVATE heyaki::core heyaki_protocol_lite)
 target_include_directories(heyaki_fuzz_harness PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/fuzz")
 heyaki_configure_target(heyaki_fuzz_harness)
@@ -119,7 +177,7 @@ heyaki_configure_target(heyaki_fuzz_harness)
 add_executable(heyaki_fuzz_smoke
   fuzz/fuzz_smoke.cpp
   $<TARGET_OBJECTS:heyaki_fuzz_harness>)
-target_link_libraries(heyaki_fuzz_smoke PRIVATE heyaki::core)
+target_link_libraries(heyaki_fuzz_smoke PRIVATE heyaki::core heyaki_protocol_lite)
 target_include_directories(heyaki_fuzz_smoke PRIVATE
   "${HEYAKI_TEST_GENERATED_DIR}"
   "${CMAKE_CURRENT_SOURCE_DIR}/fuzz")
@@ -139,7 +197,7 @@ if(HEYAKI_BUILD_FUZZERS)
   add_executable(heyaki_frame_parser_fuzzer
     fuzz/parser_fuzzer_entry.cpp
     $<TARGET_OBJECTS:heyaki_fuzz_harness>)
-  target_link_libraries(heyaki_frame_parser_fuzzer PRIVATE heyaki::core)
+  target_link_libraries(heyaki_frame_parser_fuzzer PRIVATE heyaki::core heyaki_protocol_lite)
   target_include_directories(heyaki_frame_parser_fuzzer PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/fuzz")
   target_compile_options(heyaki_frame_parser_fuzzer PRIVATE -fsanitize=fuzzer)
@@ -149,12 +207,24 @@ if(HEYAKI_BUILD_FUZZERS)
   add_executable(heyaki_operation_state_fuzzer
     fuzz/state_machine_fuzzer_entry.cpp
     $<TARGET_OBJECTS:heyaki_fuzz_harness>)
-  target_link_libraries(heyaki_operation_state_fuzzer PRIVATE heyaki::core)
+  target_link_libraries(heyaki_operation_state_fuzzer PRIVATE heyaki::core heyaki_protocol_lite)
   target_include_directories(heyaki_operation_state_fuzzer PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/fuzz")
   target_compile_options(heyaki_operation_state_fuzzer PRIVATE -fsanitize=fuzzer)
   target_link_options(heyaki_operation_state_fuzzer PRIVATE -fsanitize=fuzzer)
   heyaki_configure_target(heyaki_operation_state_fuzzer)
+
+  add_executable(heyaki_protobuf_parser_fuzzer
+    fuzz/protobuf_fuzzer_entry.cpp
+    $<TARGET_OBJECTS:heyaki_fuzz_harness>)
+  target_link_libraries(heyaki_protobuf_parser_fuzzer PRIVATE
+    heyaki::core
+    heyaki_protocol_lite)
+  target_include_directories(heyaki_protobuf_parser_fuzzer PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/fuzz")
+  target_compile_options(heyaki_protobuf_parser_fuzzer PRIVATE -fsanitize=fuzzer)
+  target_link_options(heyaki_protobuf_parser_fuzzer PRIVATE -fsanitize=fuzzer)
+  heyaki_configure_target(heyaki_protobuf_parser_fuzzer)
 endif()
 
 add_test(
@@ -169,15 +239,16 @@ add_test(
     -P "${CMAKE_CURRENT_SOURCE_DIR}/protocol/CheckProtocolSources.cmake")
 set_tests_properties(heyaki_protocol_sources PROPERTIES LABELS "protocol;security")
 
-add_test(
-  NAME heyaki_protobuf_conformance
-  COMMAND "${CMAKE_COMMAND}" -E env
-    "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../third_party/protobuf/python"
-    "PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python"
-    "${Python3_EXECUTABLE}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/protocol/protobuf_conformance_test.py"
-    "${HEYAKI_M1_GOLDEN_VECTOR_FILE}")
-set_tests_properties(heyaki_protobuf_conformance PROPERTIES LABELS "protocol;security;fuzz")
+add_executable(heyaki_protobuf_conformance protocol/protobuf_conformance_test.cpp)
+target_link_libraries(heyaki_protobuf_conformance PRIVATE
+  heyaki_protocol_lite
+  GTest::gtest_main)
+target_include_directories(heyaki_protobuf_conformance PRIVATE
+  "${HEYAKI_TEST_GENERATED_DIR}"
+  "${CMAKE_CURRENT_SOURCE_DIR}/unit")
+heyaki_configure_target(heyaki_protobuf_conformance)
+heyaki_add_runtime_test(
+  heyaki_protobuf_conformance heyaki_protobuf_conformance "protocol;security;fuzz")
 
 add_executable(heyaki_performance_smoke performance/build_info_benchmark.cpp)
 target_link_libraries(heyaki_performance_smoke PRIVATE heyaki::core)

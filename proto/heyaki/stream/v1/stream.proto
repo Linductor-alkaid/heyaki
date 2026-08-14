@@ -12,12 +12,6 @@ message StreamOpen {
   uint32 receive_window_frames = 3;
 }
 
-message StreamDataHeader {
-  bytes stream_id = 1;
-  uint64 offset = 2;
-  uint32 data_length = 3;
-}
-
 message WindowUpdate {
   bytes stream_id = 1;
   uint64 consumed_through_offset = 2;

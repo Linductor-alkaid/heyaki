@@ -3,8 +3,11 @@
 #include <heyaki/operation.hpp>
 #include <heyaki/wire.hpp>
 
+#include "heyaki/message/v1/message.pb.h"
+
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 #include <optional>
 #include <span>
 #include <vector>
@@ -29,6 +32,24 @@ void frame_parser(std::span<const std::byte> input) {
   const auto encoded = encode_frame(owning);
   if (!encoded || encoded.value_if()->size() != parsed.consumed ||
       !std::equal(encoded.value_if()->begin(), encoded.value_if()->end(), input.begin())) {
+    std::abort();
+  }
+}
+
+void protobuf_message_parser(std::span<const std::byte> input) {
+  if (input.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    return;
+  }
+  protocol::message::v1::MessageEnvelope message;
+  if (!message.ParseFromArray(input.data(), static_cast<int>(input.size()))) {
+    return;
+  }
+
+  const auto encoded = message.SerializeAsString();
+  protocol::message::v1::MessageEnvelope reparsed;
+  if (!reparsed.ParseFromString(encoded) || reparsed.message_id() != message.message_id() ||
+      reparsed.type() != message.type() || reparsed.schema_version() != message.schema_version() ||
+      reparsed.payload() != message.payload()) {
     std::abort();
   }
 }

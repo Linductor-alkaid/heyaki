@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string_view>
 #include <type_traits>
 
@@ -21,6 +22,25 @@ static_assert(!std::is_same_v<heyaki::DeviceId, heyaki::EndpointId>);
 static_assert(!std::is_convertible_v<heyaki::EndpointId, heyaki::SessionId>);
 static_assert(heyaki::DeviceId::size_bytes == 32U);
 static_assert(heyaki::EndpointId::size_bytes == 16U);
+
+template <typename T>
+concept HasWritableCodeField = requires(T value) {
+  value.code = heyaki::ErrorCode::internal;
+};
+
+template <typename T>
+concept HasWritableSafeDetailField = requires(T value) {
+  value.safe_detail = "untrusted";
+};
+
+template <typename T>
+concept HasWritableComponentField = requires(T value) {
+  value.component = "untrusted";
+};
+
+static_assert(!HasWritableCodeField<heyaki::Error>);
+static_assert(!HasWritableSafeDetailField<heyaki::Error>);
+static_assert(!HasWritableComponentField<heyaki::Error>);
 
 template <typename Id>
 Id sequential_id() {
@@ -97,8 +117,8 @@ TEST(Limits, DefaultsPassAndUnsafeValuesFail) {
   const auto result = heyaki::validate_limits(invalid);
   ASSERT_FALSE(result);
   ASSERT_NE(result.error_if(), nullptr);
-  EXPECT_EQ(result.error_if()->code, heyaki::ErrorCode::configuration);
-  EXPECT_EQ(result.error_if()->safe_detail, "max_frame_bytes");
+  EXPECT_EQ(result.error_if()->code(), heyaki::ErrorCode::configuration);
+  EXPECT_EQ(result.error_if()->safe_detail(), "max_frame_bytes");
 
   invalid = defaults;
   invalid.max_expanded_file_bytes = 0U;
@@ -124,12 +144,12 @@ TEST(Operation, TerminalTransitionsAreExplicitAndEpochBound) {
   ASSERT_NE(cancelled.value_if(), nullptr);
   EXPECT_EQ(cancelled.value_if()->state, heyaki::OperationState::cancelled);
   ASSERT_TRUE(cancelled.value_if()->error.has_value());
-  EXPECT_EQ(cancelled.value_if()->error->code, heyaki::ErrorCode::cancelled);
+  EXPECT_EQ(cancelled.value_if()->error->code(), heyaki::ErrorCode::cancelled);
 
   auto illegal =
       heyaki::transition_operation(*cancelled.value_if(), heyaki::OperationState::success);
   EXPECT_FALSE(illegal);
-  EXPECT_EQ(illegal.error_if()->code, heyaki::ErrorCode::protocol);
+  EXPECT_EQ(illegal.error_if()->code(), heyaki::ErrorCode::protocol);
   ASSERT_TRUE(pending.epoch.next().has_value());
   EXPECT_EQ(pending.epoch.next()->value(), 8U);
 }
@@ -177,9 +197,14 @@ TEST(Security, SensitiveClassesAreAlwaysRedacted) {
   EXPECT_FALSE(heyaki::is_safe_detail_token("remote text"));
   EXPECT_FALSE(heyaki::is_safe_detail_token("line\nfeed"));
   EXPECT_FALSE(heyaki::is_safe_detail_token(""));
-  EXPECT_TRUE(heyaki::is_safe_detail_token(heyaki::Error{}.safe_detail));
+  EXPECT_TRUE(heyaki::is_safe_detail_token(heyaki::Error{}.safe_detail()));
   const heyaki::Error sanitized{heyaki::ErrorCode::remote_error, "peer", "remote text"};
-  EXPECT_EQ(sanitized.safe_detail, "invalid_safe_detail");
+  EXPECT_EQ(sanitized.safe_detail(), "invalid_safe_detail");
+  EXPECT_EQ(sanitized.component(), "peer");
+
+  const heyaki::Error sanitized_component{heyaki::ErrorCode::remote_error, "peer component",
+                                          "remote_error"};
+  EXPECT_EQ(sanitized_component.component(), "invalid_component");
 }
 
 TEST(Security, RejectsPoliciesBelowThreatModelBaseline) {
@@ -194,6 +219,28 @@ TEST(Security, RejectsPoliciesBelowThreatModelBaseline) {
   auto replay = heyaki::ReplayCachePolicy{};
   replay.per_peer_capacity = replay.capacity + 1U;
   EXPECT_FALSE(heyaki::validate_security_policy(replay, {}));
+
+  replay = heyaki::ReplayCachePolicy{};
+  --replay.ttl_milliseconds;
+  EXPECT_FALSE(heyaki::validate_security_policy(replay, {}));
+}
+
+TEST(Security, SignedExpiryHasFixedFutureAndClockSkewBounds) {
+  constexpr std::uint64_t now = 1'700'000'000'000ULL;
+  EXPECT_TRUE(heyaki::validate_signed_expiry(now, now));
+  EXPECT_TRUE(heyaki::validate_signed_expiry(
+      now - heyaki::maximum_expiry_clock_skew_milliseconds, now));
+  EXPECT_TRUE(heyaki::validate_signed_expiry(
+      now + heyaki::maximum_signed_validity_milliseconds, now));
+  EXPECT_FALSE(heyaki::validate_signed_expiry(
+      now - heyaki::maximum_expiry_clock_skew_milliseconds - 1U, now));
+  EXPECT_FALSE(heyaki::validate_signed_expiry(
+      now + heyaki::maximum_signed_validity_milliseconds + 1U, now));
+
+  EXPECT_TRUE(heyaki::validate_signed_expiry(0U, 0U));
+  EXPECT_TRUE(heyaki::validate_signed_expiry(
+      std::numeric_limits<std::uint64_t>::max(),
+      std::numeric_limits<std::uint64_t>::max()));
 }
 
 }  // namespace

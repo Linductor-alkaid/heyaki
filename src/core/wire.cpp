@@ -81,6 +81,27 @@ FrameParseResult invalid_frame(const char* detail) {
 
 bool is_control_type(std::uint8_t type) noexcept { return type < 0x20U; }
 
+bool requires_control_channel(std::uint8_t type) noexcept {
+  return (type >= static_cast<std::uint8_t>(FrameType::session_hello) &&
+          type <= static_cast<std::uint8_t>(FrameType::pong)) ||
+         type == static_cast<std::uint8_t>(FrameType::pairing_request) ||
+         type == static_cast<std::uint8_t>(FrameType::pairing_result);
+}
+
+bool requires_business_channel(std::uint8_t type) noexcept {
+  return type >= static_cast<std::uint8_t>(FrameType::message) && is_known_frame_type(type);
+}
+
+const char* channel_error(std::uint8_t type, std::uint32_t channel_id) noexcept {
+  if (requires_control_channel(type) && channel_id != 0U) {
+    return "control_channel_required";
+  }
+  if (requires_business_channel(type) && channel_id == 0U) {
+    return "business_channel_required";
+  }
+  return nullptr;
+}
+
 const char* payload_limit_error(std::uint8_t type, std::size_t payload_size,
                                 const Limits& limits) noexcept {
   if ((type == static_cast<std::uint8_t>(FrameType::message) ||
@@ -163,6 +184,12 @@ Result<std::vector<std::byte>> encode_frame(const Frame& frame, const Limits& li
   }
   if ((frame.flags & ~frame_known_flags) != 0U) {
     return Result<std::vector<std::byte>>::failure(wire_error("reserved_frame_flags"));
+  }
+  if (frame.message_id.is_zero()) {
+    return Result<std::vector<std::byte>>::failure(wire_error("zero_message_id"));
+  }
+  if (const auto* detail = channel_error(frame.type, frame.channel_id)) {
+    return Result<std::vector<std::byte>>::failure(wire_error(detail));
   }
 
   constexpr std::size_t fixed_body_size = 1U + 1U + MessageId::size_bytes;
@@ -250,6 +277,12 @@ FrameParseResult parse_frame(std::span<const std::byte> input, const Limits& lim
   MessageId::Storage message_bytes{};
   std::copy_n(body.begin() + static_cast<std::ptrdiff_t>(message_offset),
               MessageId::size_bytes, message_bytes.begin());
+  if (MessageId{message_bytes}.is_zero()) {
+    return invalid_frame("zero_message_id");
+  }
+  if (const auto* detail = channel_error(type, channel.value)) {
+    return invalid_frame(detail);
+  }
   const std::size_t payload_offset = message_offset + MessageId::size_bytes;
   const auto payload = body.subspan(payload_offset);
   if (const auto* detail = payload_limit_error(type, payload.size(), limits)) {

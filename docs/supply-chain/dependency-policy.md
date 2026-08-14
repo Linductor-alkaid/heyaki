@@ -44,7 +44,8 @@ license file exists, and emits an SPDX 2.3 tag-value document plus a Markdown li
 Generation fails for a missing, duplicate, extra, or malformed package/license record. CTest also
 checks all expected packages and parent/submodule relationships.
 
-The M0 inventory covers 9 direct pins and the 5 recursive libdatachannel submodules. The
+The inventory covers 10 direct pins and the 5 recursive libdatachannel submodules. Abseil is pinned
+as the build/runtime dependency required by the pinned Protobuf 31.1 Lite toolchain. The
 [M0 linkage and license audit](m0-linkage-license-audit.md) confirms that current installed Heyaki
 artifacts do not yet link or redistribute pinned third-party code. Before any milestone first links a
 pin, that milestone must freeze the selected build artifact and review its actual static/dynamic

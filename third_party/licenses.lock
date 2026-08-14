@@ -4,6 +4,7 @@ executor|MIT|third_party/executor/LICENSE
 libdatachannel|MPL-2.0|third_party/libdatachannel/LICENSE
 libsodium|ISC AND BSD-2-Clause|docs/supply-chain/m1-libsodium-sha256-notices.md
 protobuf|BSD-3-Clause|third_party/protobuf/LICENSE
+abseil-cpp|Apache-2.0|third_party/abseil-cpp/LICENSE
 blake3|Apache-2.0 OR CC0-1.0|third_party/blake3/LICENSE_A2
 sqlite|blessing|third_party/sqlite/LICENSE.md
 googletest|BSD-3-Clause|third_party/googletest/LICENSE

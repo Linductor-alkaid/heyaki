@@ -9,9 +9,9 @@ namespace {
 
 Result<OperationStatus> invalid_transition(OperationStatus current,
                                            std::string_view detail) {
-  Error error{ErrorCode::protocol, "operation", std::string{detail}};
-  error.operation_id = current.id;
-  return Result<OperationStatus>::failure(std::move(error));
+  return Result<OperationStatus>::failure(
+      Error{ErrorCode::protocol, "operation", std::string{detail}, std::nullopt, std::nullopt,
+            current.id});
 }
 
 }  // namespace
@@ -37,12 +37,12 @@ Result<OperationStatus> transition_operation(OperationStatus current, OperationS
     return invalid_transition(std::move(current), "error_without_detail");
   }
   if (next == OperationState::cancelled && !error.has_value()) {
-    error = Error{ErrorCode::cancelled, "operation", "cancelled"};
-    error->operation_id = current.id;
+    error = Error{ErrorCode::cancelled, "operation", "cancelled", std::nullopt, std::nullopt,
+                  current.id};
   }
   if (next == OperationState::outcome_unknown && !error.has_value()) {
-    error = Error{ErrorCode::outcome_unknown, "operation", "connection_lost"};
-    error->operation_id = current.id;
+    error = Error{ErrorCode::outcome_unknown, "operation", "connection_lost", std::nullopt,
+                  std::nullopt, current.id};
   }
 
   current.state = next;

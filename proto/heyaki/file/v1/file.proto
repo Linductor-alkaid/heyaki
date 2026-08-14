@@ -27,13 +27,6 @@ message FileReject {
   string safe_detail = 3;
 }
 
-message FileChunkHeader {
-  bytes transfer_id = 1;
-  uint64 offset = 2;
-  uint32 data_length = 3;
-  bytes blake3 = 4;
-}
-
 message FileComplete {
   bytes transfer_id = 1;
   heyaki.protocol.common.v1.StableStatusCode status = 2;
