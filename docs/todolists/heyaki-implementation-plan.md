@@ -1,6 +1,6 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：M1 评审问题及 Windows Protobuf/Abseil ABI 问题已整改并通过本地门禁，独立复审通过；待修复提交的 GitHub CI（含 Windows Debug/Release）通过后准入 M2
+> - 状态：M1 评审问题及 Windows Protobuf/Abseil ABI 问题已整改，独立复审和修复提交的完整 GitHub CI 均通过，正式准入 M2
 > - 日期：2026-08-15
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
@@ -155,7 +155,7 @@ M0 验证记录（2026-08-14）：本机 GCC 13.3 的 Debug、Release、UBSAN、
 ### M1 测试与退出条件
 
 - [x] 所有公共强类型、错误码、限制默认值和序列化边界有单元测试及公开头独立编译测试。
-- [ ] golden vectors 在 Linux/Windows、Debug/Release 上得到相同字节；协议文档与 schema 版本一致。
+- [x] golden vectors 在 Linux/Windows、Debug/Release 上得到相同字节；协议文档与 schema 版本一致。
 - [x] 所有 parser 在分配 payload 前检查长度，fuzz smoke 无 crash、越界、超限分配或无限循环。
 - [x] threat model、安全默认值和 wire protocol 通过独立评审后再进入 M2；后续不兼容修改必须显式提升协议 major。
 
@@ -192,6 +192,14 @@ target 统一为必需的 C++20，并在配置期验证 `absl_cord`、Protobuf r
 UBSAN `-Werror` 构建均通过，四套各 16 项 CTest 全部通过；依赖锁离线校验通过。本机无
 Clang，且当前环境没有 GitHub 推送凭据，因此修复提交尚待推送并由更新后的 Linux/Windows、
 sanitizer 与 libFuzzer CI 验证；在远端结果完成前，跨平台退出条件保持未勾选且不准入 M2。
+
+M1 跨平台退出确认（2026-08-15）：提交 `5ffdca1bb43b7a9427b2096ac997728be2f392d6`
+对应 GitHub Actions run `31848814394` 已完成且结论为 success。该 run 的 9 个 check runs
+全部成功：Linux GCC/Clang Debug/Release、Windows Debug/Release、ASAN、UBSAN 和 TSAN；
+Clang Debug 同时执行并通过 `heyaki_frame_parser_fuzzer`、`heyaki_protocol_state_fuzzer`
+及 `heyaki_protobuf_parser_fuzzer` 各 100 次 smoke。Windows Debug/Release 的 pinned
+Protobuf、Abseil、Heyaki 构建、CTest 和 pinned libdatachannel baseline 均通过，golden
+vectors 的跨平台 Debug/Release 字节一致性退出条件完成，M1 正式准入 M2。
 
 ---
 
