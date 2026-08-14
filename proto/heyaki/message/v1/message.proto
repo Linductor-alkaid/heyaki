@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package heyaki.protocol.message.v1;
+
+option optimize_for = LITE_RUNTIME;
+
+enum DeliveryMode {
+  DELIVERY_MODE_UNSPECIFIED = 0;
+  DELIVERY_MODE_BEST_EFFORT = 1;
+  DELIVERY_MODE_PEER_ACKED = 2;
+}
+
+message MessageEnvelope {
+  bytes message_id = 1;
+  string type = 2;
+  uint32 schema_version = 3;
+  uint32 relative_ttl_milliseconds = 4;
+  DeliveryMode delivery_mode = 5;
+  map<string, bytes> headers = 6;
+  bytes payload = 7;
+  optional int64 wall_time_unix_milliseconds = 8; // Metadata only.
+}
+
+message MessageAck {
+  bytes message_id = 1;
+  bool protocol_accepted = 2;
+}

@@ -1,9 +1,56 @@
-#include <heyaki/version.hpp>
+#include "fuzz_targets.hpp"
+#include "m1_golden_vectors.hpp"
 
+#include <heyaki/wire.hpp>
+
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <span>
 #include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace {
+
+std::vector<std::byte> bytes_from_hex(std::string_view hex) {
+  std::vector<std::byte> output;
+  if (hex.size() % 2U != 0U) {
+    return output;
+  }
+  const auto nibble = [](char value) -> int {
+    if (value >= '0' && value <= '9') {
+      return value - '0';
+    }
+    if (value >= 'a' && value <= 'f') {
+      return value - 'a' + 10;
+    }
+    return -1;
+  };
+  output.reserve(hex.size() / 2U);
+  for (std::size_t index = 0U; index < hex.size(); index += 2U) {
+    const int high = nibble(hex[index]);
+    const int low = nibble(hex[index + 1U]);
+    if (high < 0 || low < 0) {
+      return {};
+    }
+    output.push_back(static_cast<std::byte>(static_cast<unsigned int>((high << 4) | low)));
+  }
+  return output;
+}
+
+bool write_seed(const std::filesystem::path& directory, std::string_view name,
+                std::span<const std::byte> bytes) {
+  std::filesystem::create_directories(directory);
+  std::ofstream output{directory / name, std::ios::binary | std::ios::trunc};
+  output.write(reinterpret_cast<const char*>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+  return static_cast<bool>(output);
+}
+
+}  // namespace
 
 int main(int argc, char** argv) {
   if (argc != 2) {
@@ -11,15 +58,71 @@ int main(int argc, char** argv) {
     return 2;
   }
 
-  const std::filesystem::path corpus_dir{argv[1]};
-  std::filesystem::create_directories(corpus_dir);
-  const auto seed_path = corpus_dir / "m0-version.seed";
-  std::ofstream seed{seed_path, std::ios::binary | std::ios::trunc};
-  if (!seed) {
-    std::cerr << "cannot create fuzz smoke seed: " << seed_path << '\n';
+  const std::filesystem::path corpus_root{argv[1]};
+  const auto valid = bytes_from_hex(heyaki::test_vectors::frame_hex);
+  if (valid.empty()) {
+    std::cerr << "invalid golden frame vector\n";
     return 1;
   }
-  seed << heyaki::build_info().version;
-  return seed ? 0 : 1;
-}
 
+  auto truncated = valid;
+  truncated.pop_back();
+  auto duplicate = valid;
+  duplicate.insert(duplicate.end(), valid.begin(), valid.end());
+  auto unknown_optional = valid;
+  unknown_optional[1] = std::byte{0x7fU};
+  auto unknown_required = unknown_optional;
+  unknown_required[2] = std::byte{heyaki::frame_flag_required};
+  auto unknown_protobuf_field = valid;
+  unknown_protobuf_field[0] = std::byte{0x3aU};
+  unknown_protobuf_field.insert(unknown_protobuf_field.end(),
+                                {std::byte{0x7aU}, std::byte{0x01U}, std::byte{0xffU}});
+  const std::vector<std::byte> oversize{std::byte{0x81U}, std::byte{0x80U},
+                                        std::byte{0x80U}, std::byte{0x01U}};
+  heyaki::Frame boundary_frame{
+      .type = static_cast<std::uint8_t>(heyaki::FrameType::message),
+      .flags = 0U,
+      .channel_id = 0U,
+      .message_id = heyaki::MessageId{},
+      .payload = std::vector<std::byte>(heyaki::Limits{}.max_message_bytes, std::byte{0xa5U})};
+  const auto boundary_result = heyaki::encode_frame(boundary_frame);
+  if (!boundary_result) {
+    std::cerr << "cannot encode boundary seed\n";
+    return 1;
+  }
+
+  const std::vector parser_seeds{
+      std::pair{std::string_view{"golden-frame"}, valid},
+      std::pair{std::string_view{"truncated-frame"}, truncated},
+      std::pair{std::string_view{"duplicate-frame"}, duplicate},
+      std::pair{std::string_view{"unknown-optional-frame"}, unknown_optional},
+      std::pair{std::string_view{"unknown-required-frame"}, unknown_required},
+      std::pair{std::string_view{"unknown-protobuf-field"}, unknown_protobuf_field},
+      std::pair{std::string_view{"maximum-message"}, *boundary_result.value_if()},
+      std::pair{std::string_view{"oversize-length"}, oversize},
+  };
+  for (const auto& [name, seed] : parser_seeds) {
+    heyaki::fuzz::frame_parser(seed);
+    if (!write_seed(corpus_root / "frame-parser", name, seed)) {
+      std::cerr << "cannot write parser seed " << name << '\n';
+      return 1;
+    }
+  }
+
+  const std::vector<std::vector<std::byte>> state_seeds{
+      {std::byte{0U}},
+      {std::byte{1U}, std::byte{1U}},
+      {std::byte{2U}, std::byte{0x80U}, std::byte{3U}},
+      {std::byte{3U}, std::byte{0x81U}, std::byte{0U}},
+      {std::byte{0xffU}, std::byte{0xffU}, std::byte{0xffU}},
+  };
+  for (std::size_t index = 0U; index < state_seeds.size(); ++index) {
+    heyaki::fuzz::operation_state_machine(state_seeds[index]);
+    const auto name = "transition-" + std::to_string(index);
+    if (!write_seed(corpus_root / "operation-state", name, state_seeds[index])) {
+      std::cerr << "cannot write state seed " << name << '\n';
+      return 1;
+    }
+  }
+  return 0;
+}

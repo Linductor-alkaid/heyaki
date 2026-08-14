@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package heyaki.protocol.signaling.v1;
+
+option optimize_for = LITE_RUNTIME;
+
+import "heyaki/common/v1/common.proto";
+
+message SignalBinding {
+  heyaki.protocol.common.v1.DeviceEndpoint initiator = 1;
+  heyaki.protocol.common.v1.DeviceEndpoint responder = 2;
+  bytes request_id = 3; // Exactly 16 bytes.
+  bytes session_id = 4; // Exactly 16 bytes.
+  bytes session_nonce = 5; // Exactly 32 bytes.
+  uint64 expires_unix_milliseconds = 6;
+}
+
+message SignedOffer {
+  SignalBinding binding = 1;
+  bytes sdp = 2;
+  bytes dtls_fingerprint = 3;
+  heyaki.protocol.common.v1.Signature signature = 4;
+}
+
+message SignedAnswer {
+  SignalBinding binding = 1;
+  bytes sdp = 2;
+  bytes dtls_fingerprint = 3;
+  heyaki.protocol.common.v1.Signature signature = 4;
+}
+
+message SignedCandidate {
+  SignalBinding binding = 1;
+  uint32 sequence = 2;
+  bytes candidate = 3;
+  heyaki.protocol.common.v1.Signature signature = 4;
+}

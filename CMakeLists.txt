@@ -4,7 +4,7 @@ project(
   heyaki
   VERSION 0.0.0
   DESCRIPTION "Device-to-device communication infrastructure"
-  LANGUAGES CXX)
+  LANGUAGES C CXX)
 
 include(CTest)
 include(GNUInstallDirs)
@@ -20,6 +20,7 @@ option(HEYAKI_ENABLE_CLANG_TIDY "Run clang-tidy while compiling Heyaki targets" 
 option(HEYAKI_ENABLE_IWYU "Run include-what-you-use while compiling Heyaki targets" OFF)
 option(HEYAKI_REQUIRE_SANITIZER_RUNTIME
   "Fail instead of skipping when the host cannot run a selected sanitizer" OFF)
+option(HEYAKI_BUILD_FUZZERS "Build libFuzzer protocol targets (Clang only)" OFF)
 
 set(HEYAKI_SANITIZER "none" CACHE STRING "Sanitizer: none, address, undefined, or thread")
 set_property(CACHE HEYAKI_SANITIZER PROPERTY STRINGS none address undefined thread)
@@ -59,7 +60,7 @@ if(HEYAKI_VERIFY_DEPENDENCIES)
 endif()
 
 heyaki_resolve_build_commit(HEYAKI_RESOLVED_BUILD_COMMIT)
-set(HEYAKI_PROTOCOL_VERSION_MAJOR 0)
+set(HEYAKI_PROTOCOL_VERSION_MAJOR 1)
 set(HEYAKI_PROTOCOL_VERSION_MINOR 0)
 set(HEYAKI_BUILD_FEATURE_RELAY ${HEYAKI_BUILD_APPS})
 set(HEYAKI_BUILD_FEATURE_TUI ${HEYAKI_BUILD_APPS})
@@ -70,15 +71,43 @@ configure_file(
   "${HEYAKI_GENERATED_DIR}/heyaki/detail/build_config.hpp"
   @ONLY)
 
-add_library(heyaki_core src/core/version.cpp)
+add_library(heyaki_core
+  src/core/error.cpp
+  src/core/ids.cpp
+  src/core/limits.cpp
+  src/core/operation.cpp
+  src/core/protocol.cpp
+  src/core/security.cpp
+  src/core/signing.cpp
+  src/core/sodium_memzero.cpp
+  src/core/version.cpp
+  src/core/wire.cpp
+  third_party/libsodium/src/libsodium/crypto_hash/sha256/cp/hash_sha256_cp.c
+  third_party/libsodium/src/libsodium/crypto_hash/sha256/hash_sha256.c)
 add_library(heyaki::core ALIAS heyaki_core)
 set_target_properties(heyaki_core PROPERTIES EXPORT_NAME core OUTPUT_NAME heyaki_core)
 target_compile_features(heyaki_core PUBLIC cxx_std_20)
+target_compile_features(heyaki_core PRIVATE c_std_11)
 target_include_directories(heyaki_core
   PUBLIC
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
     "$<BUILD_INTERFACE:${HEYAKI_GENERATED_DIR}>"
-    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
+  PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libsodium/src/libsodium/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libsodium/src/libsodium/include/sodium")
+# M1 needs only DeviceId SHA-256 derivation. Compile the pinned libsodium implementation with
+# private symbol names; M2 can link the full library without duplicate public sodium symbols.
+target_compile_definitions(heyaki_core PRIVATE
+  SODIUM_STATIC
+  CONFIGURED=1
+  crypto_hash_sha256=heyaki_crypto_hash_sha256
+  crypto_hash_sha256_bytes=heyaki_crypto_hash_sha256_bytes
+  crypto_hash_sha256_final=heyaki_crypto_hash_sha256_final
+  crypto_hash_sha256_init=heyaki_crypto_hash_sha256_init
+  crypto_hash_sha256_statebytes=heyaki_crypto_hash_sha256_statebytes
+  crypto_hash_sha256_update=heyaki_crypto_hash_sha256_update
+  sodium_memzero=heyaki_sodium_memzero)
 heyaki_configure_target(heyaki_core)
 
 add_library(heyaki_profile src/profile/module.cpp)
@@ -146,9 +175,13 @@ install(TARGETS ${HEYAKI_INSTALL_TARGETS}
   LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
   RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(DIRECTORY include/ DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+install(DIRECTORY proto/ DESTINATION "${CMAKE_INSTALL_DATADIR}/heyaki/proto"
+  FILES_MATCHING PATTERN "*.proto")
 install(FILES "${HEYAKI_GENERATED_DIR}/heyaki/detail/build_config.hpp"
   DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/heyaki/detail")
 install(FILES "${HEYAKI_SBOM_FILE}" "${HEYAKI_LICENSE_MANIFEST_FILE}"
+  DESTINATION "${CMAKE_INSTALL_DATADIR}/heyaki/supply-chain")
+install(FILES docs/supply-chain/m1-libsodium-sha256-notices.md
   DESTINATION "${CMAKE_INSTALL_DATADIR}/heyaki/supply-chain")
 
 set(HEYAKI_CMAKE_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/heyaki")

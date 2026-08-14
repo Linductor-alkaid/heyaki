@@ -1,0 +1,32 @@
+#pragma once
+
+#include <cstdint>
+#include <string_view>
+
+namespace heyaki::test_vectors {
+
+inline constexpr std::uint16_t protocol_major = @M1_PROTOCOL_MAJOR@U;
+inline constexpr std::uint16_t protocol_minor = @M1_PROTOCOL_MINOR@U;
+inline constexpr std::string_view identity_public_key_hex = "@M1_IDENTITY_PUBLIC_KEY_HEX@";
+inline constexpr std::string_view device_digest_hex = "@M1_DEVICE_DIGEST_HEX@";
+inline constexpr std::string_view device_id_text = "@M1_DEVICE_ID_TEXT@";
+inline constexpr std::string_view canonical_domain = "@M1_CANONICAL_DOMAIN@";
+inline constexpr std::string_view canonical_field_1_hex = "@M1_CANONICAL_FIELD_1_HEX@";
+inline constexpr std::string_view canonical_field_2_hex = "@M1_CANONICAL_FIELD_2_HEX@";
+inline constexpr std::string_view canonical_field_3_hex = "@M1_CANONICAL_FIELD_3_HEX@";
+inline constexpr std::string_view canonical_field_4_hex = "@M1_CANONICAL_FIELD_4_HEX@";
+inline constexpr std::string_view canonical_field_5_hex = "@M1_CANONICAL_FIELD_5_HEX@";
+inline constexpr std::string_view canonical_field_6_hex = "@M1_CANONICAL_FIELD_6_HEX@";
+inline constexpr std::string_view canonical_field_7_hex = "@M1_CANONICAL_FIELD_7_HEX@";
+inline constexpr std::string_view canonical_field_8_hex = "@M1_CANONICAL_FIELD_8_HEX@";
+inline constexpr std::string_view canonical_field_9_hex = "@M1_CANONICAL_FIELD_9_HEX@";
+inline constexpr std::string_view canonical_field_10_hex = "@M1_CANONICAL_FIELD_10_HEX@";
+inline constexpr std::string_view canonical_hex = "@M1_CANONICAL_HEX@";
+inline constexpr std::string_view ed25519_seed_hex = "@M1_ED25519_SEED_HEX@";
+inline constexpr std::string_view ed25519_public_key_hex = "@M1_ED25519_PUBLIC_KEY_HEX@";
+inline constexpr std::string_view ed25519_message_hex = "@M1_ED25519_MESSAGE_HEX@";
+inline constexpr std::string_view ed25519_signature_hex = "@M1_ED25519_SIGNATURE_HEX@";
+inline constexpr std::string_view protobuf_envelope_hex = "@M1_PROTOBUF_ENVELOPE_HEX@";
+inline constexpr std::string_view frame_hex = "@M1_FRAME_HEX@";
+
+}  // namespace heyaki::test_vectors

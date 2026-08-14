@@ -3,6 +3,45 @@ set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../third_party/googletest"
                  "${CMAKE_CURRENT_BINARY_DIR}/googletest" EXCLUDE_FROM_ALL)
 
+set(HEYAKI_M1_GOLDEN_VECTOR_FILE
+  "${CMAKE_CURRENT_SOURCE_DIR}/vectors/m1-golden-vectors.json")
+file(READ "${HEYAKI_M1_GOLDEN_VECTOR_FILE}" HEYAKI_M1_GOLDEN_VECTOR_JSON)
+
+function(heyaki_read_golden_json output_variable)
+  string(JSON value ERROR_VARIABLE json_error GET
+    "${HEYAKI_M1_GOLDEN_VECTOR_JSON}" ${ARGN})
+  if(json_error)
+    message(FATAL_ERROR
+      "Cannot read ${HEYAKI_M1_GOLDEN_VECTOR_FILE} at '${ARGN}': ${json_error}")
+  endif()
+  set(${output_variable} "${value}" PARENT_SCOPE)
+endfunction()
+
+heyaki_read_golden_json(M1_PROTOCOL_MAJOR protocol major)
+heyaki_read_golden_json(M1_PROTOCOL_MINOR protocol minor)
+heyaki_read_golden_json(M1_IDENTITY_PUBLIC_KEY_HEX device_id identity_public_key_hex)
+heyaki_read_golden_json(M1_DEVICE_DIGEST_HEX device_id sha256_hex)
+heyaki_read_golden_json(M1_DEVICE_ID_TEXT device_id text)
+heyaki_read_golden_json(M1_CANONICAL_DOMAIN canonical_offer domain)
+foreach(field_number RANGE 1 10)
+  heyaki_read_golden_json(M1_CANONICAL_FIELD_${field_number}_HEX
+    canonical_offer field_${field_number}_hex)
+endforeach()
+heyaki_read_golden_json(M1_CANONICAL_HEX canonical_offer canonical_hex)
+heyaki_read_golden_json(M1_ED25519_SEED_HEX ed25519_rfc8032_test_1 seed_hex)
+heyaki_read_golden_json(M1_ED25519_PUBLIC_KEY_HEX ed25519_rfc8032_test_1 public_key_hex)
+heyaki_read_golden_json(M1_ED25519_MESSAGE_HEX ed25519_rfc8032_test_1 message_hex)
+heyaki_read_golden_json(M1_ED25519_SIGNATURE_HEX ed25519_rfc8032_test_1 signature_hex)
+heyaki_read_golden_json(M1_PROTOBUF_ENVELOPE_HEX protobuf_message_envelope bytes_hex)
+heyaki_read_golden_json(M1_FRAME_HEX frame bytes_hex)
+
+set(HEYAKI_TEST_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+file(MAKE_DIRECTORY "${HEYAKI_TEST_GENERATED_DIR}")
+configure_file(
+  vectors/m1_golden_vectors.hpp.in
+  "${HEYAKI_TEST_GENERATED_DIR}/m1_golden_vectors.hpp"
+  @ONLY)
+
 function(heyaki_add_runtime_test test_name target_name labels)
   if(HEYAKI_SANITIZER STREQUAL "none")
     add_test(NAME ${test_name} COMMAND ${target_name} ${ARGN})
@@ -20,15 +59,33 @@ function(heyaki_add_runtime_test test_name target_name labels)
   set_tests_properties(${test_name} PROPERTIES LABELS "${labels}")
 endfunction()
 
-add_executable(heyaki_unit_tests unit/version_test.cpp)
+add_executable(heyaki_unit_tests
+  unit/contracts_test.cpp
+  unit/golden_vectors_test.cpp
+  unit/version_test.cpp
+  unit/wire_test.cpp)
 target_link_libraries(heyaki_unit_tests PRIVATE heyaki::core GTest::gtest_main)
+target_include_directories(heyaki_unit_tests PRIVATE
+  "${HEYAKI_TEST_GENERATED_DIR}"
+  "${CMAKE_CURRENT_SOURCE_DIR}/unit")
 target_compile_definitions(heyaki_unit_tests PRIVATE
   "HEYAKI_TEST_EXPECT_APPS=$<BOOL:${HEYAKI_BUILD_APPS}>"
   "HEYAKI_TEST_EXPECT_ZSTD=0")
 heyaki_configure_target(heyaki_unit_tests)
-heyaki_add_runtime_test(heyaki_unit heyaki_unit_tests "unit")
+heyaki_add_runtime_test(heyaki_unit heyaki_unit_tests "unit;protocol;security")
 
-add_executable(heyaki_public_headers_compile compile/public_headers.cpp)
+set(heyaki_public_header_sources)
+foreach(public_header IN ITEMS
+    error identity ids limits operation protocol security signing time version wire)
+  set(header_source
+    "${HEYAKI_TEST_GENERATED_DIR}/${public_header}_header_standalone.cpp")
+  file(GENERATE OUTPUT "${header_source}"
+    CONTENT "#include <heyaki/${public_header}.hpp>\n")
+  list(APPEND heyaki_public_header_sources "${header_source}")
+endforeach()
+add_executable(heyaki_public_headers_compile
+  compile/public_headers.cpp
+  ${heyaki_public_header_sources})
 target_link_libraries(heyaki_public_headers_compile PRIVATE heyaki::core)
 heyaki_configure_target(heyaki_public_headers_compile)
 heyaki_add_runtime_test(heyaki_public_headers heyaki_public_headers_compile "protocol;security")
@@ -50,8 +107,19 @@ target_link_libraries(heyaki_module_linkage PRIVATE
 heyaki_configure_target(heyaki_module_linkage)
 heyaki_add_runtime_test(heyaki_module_linkage heyaki_module_linkage "integration")
 
-add_executable(heyaki_fuzz_smoke fuzz/fuzz_smoke.cpp)
+add_library(heyaki_fuzz_harness OBJECT fuzz/protocol_fuzz.cpp)
+target_link_libraries(heyaki_fuzz_harness PRIVATE heyaki::core)
+target_include_directories(heyaki_fuzz_harness PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/fuzz")
+heyaki_configure_target(heyaki_fuzz_harness)
+
+add_executable(heyaki_fuzz_smoke
+  fuzz/fuzz_smoke.cpp
+  $<TARGET_OBJECTS:heyaki_fuzz_harness>)
 target_link_libraries(heyaki_fuzz_smoke PRIVATE heyaki::core)
+target_include_directories(heyaki_fuzz_smoke PRIVATE
+  "${HEYAKI_TEST_GENERATED_DIR}"
+  "${CMAKE_CURRENT_SOURCE_DIR}/fuzz")
 heyaki_configure_target(heyaki_fuzz_smoke)
 heyaki_add_runtime_test(
   heyaki_fuzz_smoke heyaki_fuzz_smoke "fuzz;security" "${HEYAKI_FUZZ_CORPUS_DIR}")
@@ -59,6 +127,44 @@ add_custom_target(heyaki-fuzz-smoke
   COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure -L fuzz -C "$<CONFIG>"
   DEPENDS heyaki_fuzz_smoke
   USES_TERMINAL)
+
+if(HEYAKI_BUILD_FUZZERS)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "HEYAKI_BUILD_FUZZERS requires Clang libFuzzer support")
+  endif()
+
+  add_executable(heyaki_frame_parser_fuzzer
+    fuzz/parser_fuzzer_entry.cpp
+    $<TARGET_OBJECTS:heyaki_fuzz_harness>)
+  target_link_libraries(heyaki_frame_parser_fuzzer PRIVATE heyaki::core)
+  target_include_directories(heyaki_frame_parser_fuzzer PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/fuzz")
+  target_compile_options(heyaki_frame_parser_fuzzer PRIVATE -fsanitize=fuzzer)
+  target_link_options(heyaki_frame_parser_fuzzer PRIVATE -fsanitize=fuzzer)
+  heyaki_configure_target(heyaki_frame_parser_fuzzer)
+
+  add_executable(heyaki_operation_state_fuzzer
+    fuzz/state_machine_fuzzer_entry.cpp
+    $<TARGET_OBJECTS:heyaki_fuzz_harness>)
+  target_link_libraries(heyaki_operation_state_fuzzer PRIVATE heyaki::core)
+  target_include_directories(heyaki_operation_state_fuzzer PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/fuzz")
+  target_compile_options(heyaki_operation_state_fuzzer PRIVATE -fsanitize=fuzzer)
+  target_link_options(heyaki_operation_state_fuzzer PRIVATE -fsanitize=fuzzer)
+  heyaki_configure_target(heyaki_operation_state_fuzzer)
+endif()
+
+add_test(
+  NAME heyaki_protocol_sources
+  COMMAND "${CMAKE_COMMAND}"
+    "-DHEYAKI_PROTO_DIR=${CMAKE_CURRENT_SOURCE_DIR}/../proto"
+    "-DHEYAKI_WIRE_DOCUMENT=${CMAKE_CURRENT_SOURCE_DIR}/../docs/design/heyaki-wire-protocol.md"
+    "-DHEYAKI_THREAT_MODEL=${CMAKE_CURRENT_SOURCE_DIR}/../docs/security/threat-model.md"
+    "-DHEYAKI_GOLDEN_VECTOR_FILE=${HEYAKI_M1_GOLDEN_VECTOR_FILE}"
+    "-DHEYAKI_PROTOCOL_MAJOR=${HEYAKI_PROTOCOL_VERSION_MAJOR}"
+    "-DHEYAKI_PROTOCOL_MINOR=${HEYAKI_PROTOCOL_VERSION_MINOR}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/protocol/CheckProtocolSources.cmake")
+set_tests_properties(heyaki_protocol_sources PROPERTIES LABELS "protocol;security")
 
 add_executable(heyaki_performance_smoke performance/build_info_benchmark.cpp)
 target_link_libraries(heyaki_performance_smoke PRIVATE heyaki::core)

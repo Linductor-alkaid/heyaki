@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package heyaki.protocol.pairing.v1;
+
+option optimize_for = LITE_RUNTIME;
+
+import "heyaki/common/v1/common.proto";
+
+message PairingRequest {
+  bytes request_id = 1;
+  bytes nonce = 2;
+  bytes password_utf8 = 3; // Secret: only inside the authenticated E2E channel.
+  repeated string requested_scopes = 4;
+}
+
+message TrustGrant {
+  bytes grant_id = 1;
+  bytes issuer_device_id = 2;
+  bytes subject_device_id = 3;
+  repeated string granted_scopes = 4;
+  uint64 password_generation = 5;
+  uint64 issued_unix_milliseconds = 6;
+  optional uint64 expires_unix_milliseconds = 7;
+  bytes pairing_nonce = 8;
+  heyaki.protocol.common.v1.Signature signature = 9;
+}
+
+message PairingResult {
+  bytes request_id = 1;
+  heyaki.protocol.common.v1.StableStatusCode status = 2;
+  TrustGrant trust_grant = 3;
+}

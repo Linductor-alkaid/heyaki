@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package heyaki.protocol.event.v1;
+
+option optimize_for = LITE_RUNTIME;
+
+enum EventQos {
+  EVENT_QOS_UNSPECIFIED = 0;
+  EVENT_QOS_BEST_EFFORT_LATEST = 1;
+  EVENT_QOS_RELIABLE_LIVE = 2;
+}
+
+message EventSubscribe {
+  bytes subscription_id = 1;
+  string topic = 2;
+  bool prefix_match = 3;
+  EventQos qos = 4;
+}
+
+message EventItem {
+  bytes subscription_id = 1;
+  bytes event_id = 2;
+  bytes publisher_device_id = 3;
+  uint64 publisher_sequence = 4;
+  uint32 schema_version = 5;
+  optional int64 wall_time_unix_milliseconds = 6;
+  EventQos qos = 7;
+  bytes payload = 8;
+}
+
+message EventUnsubscribe {
+  bytes subscription_id = 1;
+}

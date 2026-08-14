@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package heyaki.protocol.shell.v1;
+
+option optimize_for = LITE_RUNTIME;
+
+import "heyaki/common/v1/common.proto";
+
+message ShellOpen {
+  bytes shell_id = 1;
+  string profile = 2;
+  string terminal_type = 3;
+  uint32 columns = 4;
+  uint32 rows = 5;
+  string locale = 6;
+}
+
+message ShellDataHeader {
+  bytes shell_id = 1;
+  uint64 offset = 2;
+  uint32 data_length = 3;
+}
+
+message ShellResize {
+  bytes shell_id = 1;
+  uint32 columns = 2;
+  uint32 rows = 3;
+}
+
+message ShellSignal {
+  bytes shell_id = 1;
+  uint32 portable_signal = 2;
+}
+
+message ShellExit {
+  bytes shell_id = 1;
+  optional sint32 exit_code = 2;
+  heyaki.protocol.common.v1.StableStatusCode status = 3;
+}

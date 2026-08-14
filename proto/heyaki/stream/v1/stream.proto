@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package heyaki.protocol.stream.v1;
+
+option optimize_for = LITE_RUNTIME;
+
+import "heyaki/common/v1/common.proto";
+
+message StreamOpen {
+  bytes stream_id = 1;
+  uint64 receive_window_bytes = 2;
+  uint32 receive_window_frames = 3;
+}
+
+message StreamDataHeader {
+  bytes stream_id = 1;
+  uint64 offset = 2;
+  uint32 data_length = 3;
+}
+
+message WindowUpdate {
+  bytes stream_id = 1;
+  uint64 consumed_through_offset = 2;
+  uint64 additional_bytes = 3;
+  uint32 additional_frames = 4;
+}
+
+message StreamFinish {
+  bytes stream_id = 1;
+  uint64 final_offset = 2;
+}
+
+message StreamReset {
+  bytes stream_id = 1;
+  heyaki.protocol.common.v1.StableStatusCode status = 2;
+}

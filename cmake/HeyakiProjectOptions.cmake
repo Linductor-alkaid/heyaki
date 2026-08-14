@@ -16,13 +16,19 @@ endif()
 
 function(heyaki_configure_target target_name)
   if(MSVC)
-    target_compile_options(${target_name} PRIVATE /W4 /permissive- /Zc:__cplusplus /utf-8)
+    target_compile_options(${target_name} PRIVATE
+      /W4
+      /utf-8
+      "$<$<COMPILE_LANGUAGE:CXX>:/permissive->"
+      "$<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>")
     if(HEYAKI_WARNINGS_AS_ERRORS)
       target_compile_options(${target_name} PRIVATE /WX)
     endif()
     if(NOT HEYAKI_ENABLE_EXCEPTIONS)
-      target_compile_options(${target_name} PRIVATE /EHs-c-)
-      target_compile_definitions(${target_name} PRIVATE _HAS_EXCEPTIONS=0)
+      target_compile_options(${target_name} PRIVATE
+        "$<$<COMPILE_LANGUAGE:CXX>:/EHs-c->")
+      target_compile_definitions(${target_name} PRIVATE
+        "$<$<COMPILE_LANGUAGE:CXX>:_HAS_EXCEPTIONS=0>")
     endif()
   elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
     target_compile_options(${target_name} PRIVATE
@@ -31,7 +37,8 @@ function(heyaki_configure_target target_name)
       target_compile_options(${target_name} PRIVATE -Werror)
     endif()
     if(NOT HEYAKI_ENABLE_EXCEPTIONS)
-      target_compile_options(${target_name} PRIVATE -fno-exceptions)
+      target_compile_options(${target_name} PRIVATE
+        "$<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions>")
     endif()
   endif()
 

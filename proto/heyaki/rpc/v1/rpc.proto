@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package heyaki.protocol.rpc.v1;
+
+option optimize_for = LITE_RUNTIME;
+
+import "heyaki/common/v1/common.proto";
+
+message RpcRequest {
+  bytes request_id = 1;
+  string service = 2;
+  string method = 3;
+  uint32 schema_version = 4;
+  heyaki.protocol.common.v1.RelativeDeadline deadline = 5;
+  optional bytes idempotency_key = 6;
+  map<string, bytes> metadata = 7;
+  bytes payload = 8;
+}
+
+message RpcResponse {
+  bytes request_id = 1;
+  heyaki.protocol.common.v1.StableStatusCode status = 2;
+  string safe_detail = 3;
+  bytes payload = 4;
+}
+
+message RpcCancel {
+  bytes request_id = 1;
+}

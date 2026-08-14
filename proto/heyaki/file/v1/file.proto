@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package heyaki.protocol.file.v1;
+
+option optimize_for = LITE_RUNTIME;
+
+import "heyaki/common/v1/common.proto";
+
+message FileManifest {
+  bytes transfer_id = 1;
+  string logical_name = 2;
+  uint64 size = 3;
+  bytes blake3 = 4;
+  uint32 chunk_size = 5;
+  bool zstd_compressed = 6;
+  optional uint64 expanded_size = 7;
+}
+
+message FileAccept {
+  bytes transfer_id = 1;
+  repeated uint64 present_chunk_indices = 2;
+}
+
+message FileChunkHeader {
+  bytes transfer_id = 1;
+  uint64 offset = 2;
+  uint32 data_length = 3;
+  bytes blake3 = 4;
+}
+
+message FileComplete {
+  bytes transfer_id = 1;
+  heyaki.protocol.common.v1.StableStatusCode status = 2;
+}

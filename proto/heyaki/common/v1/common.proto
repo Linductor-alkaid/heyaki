@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package heyaki.protocol.common.v1;
+
+option optimize_for = LITE_RUNTIME;
+
+message ProtocolVersion {
+  uint32 major = 1;
+  uint32 minor = 2;
+}
+
+message CapabilityAdvertisement {
+  uint64 supported_bits = 1;
+  uint64 required_bits = 2;
+}
+
+message DeviceEndpoint {
+  bytes device_id = 1;   // Exactly 32 bytes.
+  bytes endpoint_id = 2; // Exactly 16 bytes.
+}
+
+message Signature {
+  bytes ed25519 = 1; // Exactly 64 bytes over the canonical signing object.
+}
+
+message RelativeDeadline {
+  uint32 remaining_milliseconds = 1;
+}
+
+enum StableStatusCode {
+  STABLE_STATUS_CODE_UNSPECIFIED = 0;
+  STABLE_STATUS_CODE_OK = 1;
+  STABLE_STATUS_CODE_CANCELLED = 2;
+  STABLE_STATUS_CODE_DEADLINE_EXCEEDED = 3;
+  STABLE_STATUS_CODE_UNAUTHENTICATED = 4;
+  STABLE_STATUS_CODE_PERMISSION_DENIED = 5;
+  STABLE_STATUS_CODE_NOT_FOUND = 6;
+  STABLE_STATUS_CODE_ALREADY_EXISTS = 7;
+  STABLE_STATUS_CODE_RESOURCE_EXHAUSTED = 8;
+  STABLE_STATUS_CODE_FAILED_PRECONDITION = 9;
+  STABLE_STATUS_CODE_UNAVAILABLE = 10;
+  STABLE_STATUS_CODE_INTERNAL = 11;
+  STABLE_STATUS_CODE_UNIMPLEMENTED = 12;
+  STABLE_STATUS_CODE_PROTOCOL_ERROR = 13;
+  STABLE_STATUS_CODE_OUTCOME_UNKNOWN = 14;
+}
