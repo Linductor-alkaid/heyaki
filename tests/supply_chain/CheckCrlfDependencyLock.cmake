@@ -9,7 +9,7 @@ file(WRITE "${crlf_lock}" "${lock_contents}")
 execute_process(
   COMMAND "${CMAKE_COMMAND}" -E env
     "HEYAKI_DEPENDENCIES_LOCK=${crlf_lock}"
-    bash "${HEYAKI_FETCH_SCRIPT}" --list
+    "${HEYAKI_BASH_EXECUTABLE}" "${HEYAKI_FETCH_SCRIPT}" --list
   RESULT_VARIABLE result
   OUTPUT_VARIABLE output
   ERROR_VARIABLE error)
