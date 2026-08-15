@@ -4,6 +4,13 @@ add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../third_party/googletest"
                  "${CMAKE_CURRENT_BINARY_DIR}/googletest" EXCLUDE_FROM_ALL)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 
+get_target_property(heyaki_sodium_interface_definitions
+  heyaki_sodium INTERFACE_COMPILE_DEFINITIONS)
+if(NOT "SODIUM_STATIC" IN_LIST heyaki_sodium_interface_definitions)
+  message(FATAL_ERROR
+    "Vendored static libsodium must propagate SODIUM_STATIC to consumers")
+endif()
+
 set(ABSL_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(ABSL_BUILD_TEST_HELPERS OFF CACHE BOOL "" FORCE)
 set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)

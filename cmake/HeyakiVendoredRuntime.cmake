@@ -175,7 +175,9 @@ function(heyaki_add_vendored_sodium)
     PUBLIC "$<BUILD_INTERFACE:${sodium_root}/include>"
     PUBLIC "$<BUILD_INTERFACE:${sodium_root}/include/sodium>"
     PRIVATE "${sodium_generated_include}/sodium" "${sodium_root}/include/sodium")
-  target_compile_definitions(heyaki_sodium PRIVATE SODIUM_STATIC CONFIGURED=1)
+  target_compile_definitions(heyaki_sodium
+    PUBLIC SODIUM_STATIC
+    PRIVATE CONFIGURED=1)
   set_target_properties(heyaki_sodium PROPERTIES
     C_STANDARD 11
     C_STANDARD_REQUIRED ON
