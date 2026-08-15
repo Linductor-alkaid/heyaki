@@ -215,12 +215,12 @@ class RuntimeOperationState {
       return false;
     }
     OperationStatus status{.id = id_, .epoch = epoch_, .state = state, .error = std::move(error)};
+    diagnostics_->record_completed();
     try {
       promise_.set_value(std::move(status));
     } catch (...) {
       return false;
     }
-    diagnostics_->record_completed();
     return true;
   }
 
