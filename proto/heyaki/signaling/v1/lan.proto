@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package heyaki.protocol.signaling.v1;
+
+option optimize_for = LITE_RUNTIME;
+
+import "heyaki/common/v1/common.proto";
+
+enum LanHelloRole {
+  LAN_HELLO_ROLE_UNSPECIFIED = 0;
+  LAN_HELLO_ROLE_INITIATOR = 1;
+  LAN_HELLO_ROLE_RESPONDER = 2;
+}
+
+message LanHello {
+  LanHelloRole role = 1;
+  heyaki.protocol.common.v1.DeviceEndpoint sender = 2;
+  heyaki.protocol.common.v1.DeviceEndpoint peer = 3;
+  bytes sender_identity_public_key = 4; // Exactly 32 bytes, Ed25519.
+  bytes initiator_nonce = 5;            // Exactly 32 unpredictable bytes.
+  bytes responder_nonce = 6;            // Exactly 32 unpredictable bytes.
+  bytes sender_tls_certificate_sha256 = 7; // Exactly 32 raw SHA-256 bytes.
+  bytes observed_peer_tls_certificate_sha256 = 8; // Exactly 32 raw SHA-256 bytes.
+  bytes sender_boot_nonce = 9;           // Exactly 32 bytes from the sender's presence.
+  heyaki.protocol.common.v1.ProtocolVersion protocol_version = 10;
+  heyaki.protocol.common.v1.CapabilityAdvertisement capabilities = 11;
+  uint32 expiry_milliseconds = 12; // Relative, non-zero, at most 10000 milliseconds.
+  heyaki.protocol.common.v1.Signature signature = 13;
+}

@@ -13,8 +13,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <span>
 #include <string_view>
 #include <type_traits>
+#include <vector>
 
 namespace {
 
@@ -186,6 +188,67 @@ TEST(Protocol, IgnoresUnknownOptionalCapabilitiesAndRejectsUnknownRequiredOnes) 
   const auto rejected = heyaki::negotiate_protocol(local, required);
   ASSERT_FALSE(rejected);
   EXPECT_EQ(rejected.error_if()->safe_detail(), "unknown_required_capability");
+}
+
+TEST(Protocol, NegotiatesLanCapabilitiesOnlyAtMinorOne) {
+  const auto lan_bits =
+      static_cast<std::uint64_t>(heyaki::Capability::lan_discovery_v1) |
+      static_cast<std::uint64_t>(heyaki::Capability::lan_signaling_v1);
+  const heyaki::ProtocolHello current{
+      .version = heyaki::current_protocol_version,
+      .supported = {.bits = static_cast<std::uint64_t>(heyaki::Capability::session) | lan_bits},
+      .required = {.bits = static_cast<std::uint64_t>(heyaki::Capability::session)},
+  };
+  auto previous = current;
+  previous.version.minor = 0U;
+
+  const auto compatible = heyaki::negotiate_protocol(current, previous);
+  ASSERT_TRUE(compatible);
+  EXPECT_EQ(compatible.value_if()->version, (heyaki::ProtocolVersion{1U, 0U}));
+  EXPECT_EQ(compatible.value_if()->capabilities.bits,
+            static_cast<std::uint64_t>(heyaki::Capability::session));
+
+  previous.required.bits |= static_cast<std::uint64_t>(heyaki::Capability::lan_discovery_v1);
+  EXPECT_FALSE(heyaki::negotiate_protocol(current, previous));
+
+  const auto current_pair = heyaki::negotiate_protocol(current, current);
+  ASSERT_TRUE(current_pair);
+  EXPECT_EQ(current_pair.value_if()->version, heyaki::current_protocol_version);
+  EXPECT_EQ(current_pair.value_if()->capabilities.bits,
+            static_cast<std::uint64_t>(heyaki::Capability::session) | lan_bits);
+}
+
+TEST(Protocol, LanDatagramEnvelopeIsBoundedAndStrict) {
+  const std::array payload{std::byte{0x0aU}, std::byte{0x01U}, std::byte{0x01U}};
+  const auto encoded = heyaki::encode_lan_datagram(heyaki::LanDatagramType::presence, payload);
+  ASSERT_TRUE(encoded);
+  ASSERT_EQ(encoded.value_if()->size(), heyaki::lan_datagram_header_bytes + payload.size());
+  EXPECT_TRUE(std::equal(heyaki::lan_datagram_magic.begin(), heyaki::lan_datagram_magic.end(),
+                         encoded.value_if()->begin()));
+
+  const auto parsed = heyaki::parse_lan_datagram(*encoded.value_if());
+  ASSERT_EQ(parsed.status, heyaki::LanDatagramParseStatus::parsed);
+  ASSERT_TRUE(parsed.datagram.has_value());
+  EXPECT_EQ(parsed.datagram->type, heyaki::LanDatagramType::presence);
+  EXPECT_TRUE(std::equal(parsed.datagram->payload.begin(), parsed.datagram->payload.end(),
+                         payload.begin(), payload.end()));
+
+  auto malformed = *encoded.value_if();
+  malformed[7U] = std::byte{0xffU};
+  EXPECT_EQ(heyaki::parse_lan_datagram(malformed).status,
+            heyaki::LanDatagramParseStatus::malformed);
+  malformed = *encoded.value_if();
+  malformed[5U] = std::byte{0x7fU};
+  EXPECT_EQ(heyaki::parse_lan_datagram(malformed).status,
+            heyaki::LanDatagramParseStatus::unsupported);
+  EXPECT_EQ(heyaki::parse_lan_datagram(std::span{malformed}.first(7U)).status,
+            heyaki::LanDatagramParseStatus::incomplete);
+
+  const std::vector oversized(heyaki::max_lan_datagram_payload_bytes + 1U, std::byte{0U});
+  const auto rejected =
+      heyaki::encode_lan_datagram(heyaki::LanDatagramType::presence, oversized);
+  ASSERT_FALSE(rejected);
+  EXPECT_EQ(rejected.error_if()->code(), heyaki::ErrorCode::resource_exhausted);
 }
 
 TEST(Protocol, PreservesSchemaVersionWidth) {

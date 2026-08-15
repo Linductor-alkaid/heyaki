@@ -1,9 +1,11 @@
 #include "fuzz_targets.hpp"
 
 #include <heyaki/operation.hpp>
+#include <heyaki/protocol.hpp>
 #include <heyaki/wire.hpp>
 
 #include "heyaki/common/v1/common.pb.h"
+#include "heyaki/discovery/v1/discovery.pb.h"
 #include "heyaki/enrollment/v1/enrollment.pb.h"
 #include "heyaki/event/v1/event.pb.h"
 #include "heyaki/file/v1/file.pb.h"
@@ -13,6 +15,7 @@
 #include "heyaki/session/v1/session.pb.h"
 #include "heyaki/shell/v1/shell.pb.h"
 #include "heyaki/signaling/v1/signaling.pb.h"
+#include "heyaki/signaling/v1/lan.pb.h"
 #include "heyaki/stream/v1/stream.pb.h"
 
 #include <algorithm>
@@ -324,6 +327,21 @@ void frame_parser(std::span<const std::byte> input) {
   }
 }
 
+void lan_datagram_parser(std::span<const std::byte> input) {
+  const auto parsed = parse_lan_datagram(input);
+  if (parsed.status != LanDatagramParseStatus::parsed) {
+    return;
+  }
+  if (!parsed.datagram.has_value()) {
+    std::abort();
+  }
+  const auto encoded = encode_lan_datagram(parsed.datagram->type, parsed.datagram->payload);
+  if (!encoded || encoded.value_if()->size() != input.size() ||
+      !std::equal(encoded.value_if()->begin(), encoded.value_if()->end(), input.begin())) {
+    std::abort();
+  }
+}
+
 void protobuf_schema_parser(std::span<const std::byte> input) {
   if (input.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
     return;
@@ -333,6 +351,7 @@ void protobuf_schema_parser(std::span<const std::byte> input) {
   parse_protobuf<protocol::common::v1::DeviceEndpoint>(input);
   parse_protobuf<protocol::common::v1::Signature>(input);
   parse_protobuf<protocol::common::v1::RelativeDeadline>(input);
+  parse_protobuf<protocol::discovery::v1::LanPresence>(input);
   parse_protobuf<protocol::enrollment::v1::EnrollmentChallenge>(input);
   parse_protobuf<protocol::enrollment::v1::EnrollmentRequest>(input);
   parse_protobuf<protocol::enrollment::v1::EnrollmentRecord>(input);
@@ -342,6 +361,7 @@ void protobuf_schema_parser(std::span<const std::byte> input) {
   parse_protobuf<protocol::signaling::v1::SignedOffer>(input);
   parse_protobuf<protocol::signaling::v1::SignedAnswer>(input);
   parse_protobuf<protocol::signaling::v1::SignedCandidate>(input);
+  parse_protobuf<protocol::signaling::v1::LanHello>(input);
   parse_protobuf<protocol::session::v1::SessionHello>(input);
   parse_protobuf<protocol::session::v1::SessionClose>(input);
   parse_protobuf<protocol::pairing::v1::PairingRequest>(input);

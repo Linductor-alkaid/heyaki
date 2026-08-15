@@ -1,6 +1,6 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：M2 代码、测试、本地验证与跨平台 CI 均完成，正式准入可并行推进的 M3A/M3B
+> - 状态：M3A 协议 1.1 change-control（M3A-01～04）完成，进入配置与 LAN runtime；M3B 可并行推进
 > - 日期：2026-08-15
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)、[局域网无服务器连接设计](../design/lan-serverless-connectivity.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
@@ -299,12 +299,20 @@ M3A 与 M3B 都依赖 M2，可并行实施。M3A 是 serverless Connectivity MVP
 
 ### 6.1 M3A：协议 1.1 LAN 扩展与配置
 
-- [ ] `M3A-01` 以协议 1.1 可选能力冻结 `lan_discovery_v1`/`lan_signaling_v1` capability；同一提交更新 CMake/build info、wire 文档、schema 和 golden vectors。
-- [ ] `M3A-02` 新增 discovery schema，并冻结无冲突的 IPv4/IPv6 multicast group、UDP port、datagram envelope/max wire size；定义有界 `LanPresence` 的设备公钥/ID、endpoint、boot nonce、sequence、relative lease、TLS port、能力和签名。
-- [ ] `M3A-03` 新增 `LAN_HELLO` schema 与 `lan_presence`/`lan_hello` canonical signing domain；hello 绑定双方身份/endpoint/nonce/boot nonce 及本端和对端 TLS 证书指纹。
-- [ ] `M3A-04` 实现 1.0/1.1 协商与 N-1/N 测试；1.0 peer 不得因未知可选能力失败，1.1 peer 不得向 1.0 peer 假定 LAN 支持。
+- [x] `M3A-01` 以协议 1.1 可选能力冻结 `lan_discovery_v1`/`lan_signaling_v1` capability；同一提交更新 CMake/build info、wire 文档、schema 和 golden vectors。
+- [x] `M3A-02` 新增 discovery schema，并冻结无冲突的 IPv4/IPv6 multicast group、UDP port、datagram envelope/max wire size；定义有界 `LanPresence` 的设备公钥/ID、endpoint、boot nonce、sequence、relative lease、TLS port、能力和签名。
+- [x] `M3A-03` 新增 `LAN_HELLO` schema 与 `lan_presence`/`lan_hello` canonical signing domain；hello 绑定双方身份/endpoint/nonce/boot nonce 及本端和对端 TLS 证书指纹。
+- [x] `M3A-04` 实现 1.0/1.1 协商与 N-1/N 测试；1.0 peer 不得因未知可选能力失败，1.1 peer 不得向 1.0 peer 假定 LAN 支持。
 - [ ] `M3A-05` 为 Node/ProfileStore 增加 `automatic/lan_only/relay_only`、LAN enabled、discoverability、`auto_connect_trusted`、接口偏好、容量与 deadline 配置；非法或零控制容量启动失败。
 - [ ] `M3A-06` 明确本地初始化独立于 relay enrollment：profile 创建身份、endpoint、verifier 和 pairing policy 后即可进入 LAN-only readiness。
+
+M3A 协议 change-control 验收记录（2026-08-15）：构建版本与公共协议版本升级为 1.1，冻结
+`lan_discovery_v1`/`lan_signaling_v1` bits、`HYLD` v1 envelope、IPv4 `239.192.72.89`、IPv6
+`ff12::4845:5941:4b49`、UDP `49189`、hop limit `1` 和 1200-byte datagram 上限；新增 Lite
+`LanPresence`/`LanHello` schemas、两个 canonical signing domain 和经 Ed25519 独立验证的 golden
+vectors。协议、来源一致性、Protobuf Lite、公共头及 fuzz smoke 针对性测试 5/5 通过；M1 1.0
+golden vector 保留为 N-1 基线，1.1/1.0 协商不会泄漏 LAN capability。replay、capacity 和网络状态机
+覆盖属于 M3A-07 之后的退出条件，仍保持未勾选。
 
 ### 6.2 M3A：Multicast discovery 与 endpoint directory
 

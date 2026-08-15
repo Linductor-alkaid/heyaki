@@ -20,6 +20,8 @@ enum class SigningDomain : std::uint8_t {
   offer,
   answer,
   candidate,
+  lan_presence,
+  lan_hello,
   session_hello,
   trust_grant,
 };

@@ -87,6 +87,9 @@ endif()
 set(HEYAKI_M1_GOLDEN_VECTOR_FILE
   "${CMAKE_CURRENT_SOURCE_DIR}/vectors/m1-golden-vectors.json")
 file(READ "${HEYAKI_M1_GOLDEN_VECTOR_FILE}" HEYAKI_M1_GOLDEN_VECTOR_JSON)
+set(HEYAKI_M3A_GOLDEN_VECTOR_FILE
+  "${CMAKE_CURRENT_SOURCE_DIR}/vectors/m3a-lan-golden-vectors.json")
+file(READ "${HEYAKI_M3A_GOLDEN_VECTOR_FILE}" HEYAKI_M3A_GOLDEN_VECTOR_JSON)
 
 function(heyaki_read_golden_json output_variable)
   string(JSON value ERROR_VARIABLE json_error GET
@@ -94,6 +97,16 @@ function(heyaki_read_golden_json output_variable)
   if(json_error)
     message(FATAL_ERROR
       "Cannot read ${HEYAKI_M1_GOLDEN_VECTOR_FILE} at '${ARGN}': ${json_error}")
+  endif()
+  set(${output_variable} "${value}" PARENT_SCOPE)
+endfunction()
+
+function(heyaki_read_m3a_golden_json output_variable)
+  string(JSON value ERROR_VARIABLE json_error GET
+    "${HEYAKI_M3A_GOLDEN_VECTOR_JSON}" ${ARGN})
+  if(json_error)
+    message(FATAL_ERROR
+      "Cannot read ${HEYAKI_M3A_GOLDEN_VECTOR_FILE} at '${ARGN}': ${json_error}")
   endif()
   set(${output_variable} "${value}" PARENT_SCOPE)
 endfunction()
@@ -118,12 +131,41 @@ heyaki_read_golden_json(M1_CANONICAL_ANSWER_HEX signaling_transcript canonical_a
 heyaki_read_golden_json(M1_SIGNALING_TRANSCRIPT_SHA256_HEX signaling_transcript sha256_hex)
 heyaki_read_golden_json(M1_PROTOBUF_ENVELOPE_HEX protobuf_message_envelope bytes_hex)
 heyaki_read_golden_json(M1_FRAME_HEX frame bytes_hex)
+heyaki_read_m3a_golden_json(M3A_PROTOCOL_MAJOR protocol major)
+heyaki_read_m3a_golden_json(M3A_PROTOCOL_MINOR protocol minor)
+heyaki_read_m3a_golden_json(M3A_IPV4_GROUP discovery ipv4_group)
+heyaki_read_m3a_golden_json(M3A_IPV6_GROUP discovery ipv6_group)
+heyaki_read_m3a_golden_json(M3A_UDP_PORT discovery udp_port)
+heyaki_read_m3a_golden_json(M3A_HOP_LIMIT discovery hop_limit)
+heyaki_read_m3a_golden_json(M3A_DATAGRAM_MAGIC_HEX discovery datagram_magic_hex)
+heyaki_read_m3a_golden_json(M3A_DATAGRAM_ENVELOPE_VERSION discovery datagram_envelope_version)
+heyaki_read_m3a_golden_json(M3A_PRESENCE_TYPE discovery presence_type)
+heyaki_read_m3a_golden_json(M3A_MAX_DATAGRAM_BYTES discovery max_datagram_bytes)
+heyaki_read_m3a_golden_json(M3A_ED25519_PUBLIC_KEY_HEX signing_key public_key_hex)
+heyaki_read_m3a_golden_json(M3A_PRESENCE_DOMAIN canonical_lan_presence domain)
+foreach(field_number RANGE 1 11)
+  heyaki_read_m3a_golden_json(M3A_PRESENCE_FIELD_${field_number}_HEX
+    canonical_lan_presence field_${field_number}_hex)
+endforeach()
+heyaki_read_m3a_golden_json(M3A_PRESENCE_CANONICAL_HEX canonical_lan_presence canonical_hex)
+heyaki_read_m3a_golden_json(M3A_PRESENCE_SIGNATURE_HEX canonical_lan_presence signature_hex)
+heyaki_read_m3a_golden_json(M3A_HELLO_DOMAIN canonical_lan_hello domain)
+foreach(field_number RANGE 1 16)
+  heyaki_read_m3a_golden_json(M3A_HELLO_FIELD_${field_number}_HEX
+    canonical_lan_hello field_${field_number}_hex)
+endforeach()
+heyaki_read_m3a_golden_json(M3A_HELLO_CANONICAL_HEX canonical_lan_hello canonical_hex)
+heyaki_read_m3a_golden_json(M3A_HELLO_SIGNATURE_HEX canonical_lan_hello signature_hex)
 
 set(HEYAKI_TEST_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${HEYAKI_TEST_GENERATED_DIR}")
 configure_file(
   vectors/m1_golden_vectors.hpp.in
   "${HEYAKI_TEST_GENERATED_DIR}/m1_golden_vectors.hpp"
+  @ONLY)
+configure_file(
+  vectors/m3a_lan_golden_vectors.hpp.in
+  "${HEYAKI_TEST_GENERATED_DIR}/m3a_lan_golden_vectors.hpp"
   @ONLY)
 
 function(heyaki_add_runtime_test test_name target_name labels)
@@ -319,6 +361,7 @@ add_test(
     "-DHEYAKI_WIRE_DOCUMENT=${CMAKE_CURRENT_SOURCE_DIR}/../docs/design/heyaki-wire-protocol.md"
     "-DHEYAKI_THREAT_MODEL=${CMAKE_CURRENT_SOURCE_DIR}/../docs/security/threat-model.md"
     "-DHEYAKI_GOLDEN_VECTOR_FILE=${HEYAKI_M1_GOLDEN_VECTOR_FILE}"
+    "-DHEYAKI_M3A_GOLDEN_VECTOR_FILE=${HEYAKI_M3A_GOLDEN_VECTOR_FILE}"
     "-DHEYAKI_PROTOCOL_MAJOR=${HEYAKI_PROTOCOL_VERSION_MAJOR}"
     "-DHEYAKI_PROTOCOL_MINOR=${HEYAKI_PROTOCOL_VERSION_MINOR}"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/protocol/CheckProtocolSources.cmake")

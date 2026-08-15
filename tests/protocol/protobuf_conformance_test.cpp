@@ -2,7 +2,9 @@
 #include "test_bytes.hpp"
 
 #include "heyaki/message/v1/message.pb.h"
+#include "heyaki/discovery/v1/discovery.pb.h"
 #include "heyaki/session/v1/session.pb.h"
+#include "heyaki/signaling/v1/lan.pb.h"
 #include "heyaki/signaling/v1/signaling.pb.h"
 
 #include <gtest/gtest.h>
@@ -20,10 +22,14 @@ namespace {
 using MessageEnvelope = heyaki::protocol::message::v1::MessageEnvelope;
 using SessionHello = heyaki::protocol::session::v1::SessionHello;
 using SignedCandidate = heyaki::protocol::signaling::v1::SignedCandidate;
+using LanPresence = heyaki::protocol::discovery::v1::LanPresence;
+using LanHello = heyaki::protocol::signaling::v1::LanHello;
 
 static_assert(std::is_base_of_v<google::protobuf::MessageLite, MessageEnvelope>);
 static_assert(std::is_base_of_v<google::protobuf::MessageLite, SessionHello>);
 static_assert(std::is_base_of_v<google::protobuf::MessageLite, SignedCandidate>);
+static_assert(std::is_base_of_v<google::protobuf::MessageLite, LanPresence>);
+static_assert(std::is_base_of_v<google::protobuf::MessageLite, LanHello>);
 
 TEST(ProtobufLite, ParsesAndReencodesPublishedEnvelope) {
   const auto encoded =
@@ -87,6 +93,44 @@ TEST(ProtobufLite, CandidateAndHelloExposeFrozenTranscriptBindings) {
   SessionHello hello;
   hello.set_signaling_transcript_sha256(std::string(32U, '\x33'));
   EXPECT_EQ(hello.signaling_transcript_sha256().size(), 32U);
+}
+
+TEST(ProtobufLite, LanPresenceAndHelloExposeFrozenIdentityBindings) {
+  LanPresence presence;
+  presence.mutable_protocol_version()->set_major(1U);
+  presence.mutable_protocol_version()->set_minor(1U);
+  presence.mutable_capabilities()->set_supported_bits(0xc06U);
+  presence.set_device_id(std::string(32U, '\x11'));
+  presence.set_identity_public_key(std::string(32U, '\x22'));
+  presence.set_endpoint_id(std::string(16U, '\x33'));
+  presence.set_boot_nonce(std::string(32U, '\x44'));
+  presence.set_sequence(42U);
+  presence.set_tls_signaling_port(49189U);
+  presence.set_lease_milliseconds(15000U);
+  presence.mutable_signature()->set_ed25519(std::string(64U, '\x55'));
+
+  LanPresence parsed_presence;
+  ASSERT_TRUE(parsed_presence.ParseFromString(presence.SerializeAsString()));
+  EXPECT_EQ(parsed_presence.device_id().size(), 32U);
+  EXPECT_EQ(parsed_presence.endpoint_id().size(), 16U);
+  EXPECT_EQ(parsed_presence.sequence(), 42U);
+
+  LanHello hello;
+  hello.set_role(heyaki::protocol::signaling::v1::LAN_HELLO_ROLE_INITIATOR);
+  hello.mutable_sender()->set_device_id(std::string(32U, '\x11'));
+  hello.mutable_sender()->set_endpoint_id(std::string(16U, '\x33'));
+  hello.mutable_peer()->set_device_id(std::string(32U, '\x66'));
+  hello.mutable_peer()->set_endpoint_id(std::string(16U, '\x77'));
+  hello.set_sender_tls_certificate_sha256(std::string(32U, '\x88'));
+  hello.set_observed_peer_tls_certificate_sha256(std::string(32U, '\x99'));
+  hello.set_expiry_milliseconds(5000U);
+
+  LanHello parsed_hello;
+  ASSERT_TRUE(parsed_hello.ParseFromString(hello.SerializeAsString()));
+  EXPECT_EQ(parsed_hello.role(),
+            heyaki::protocol::signaling::v1::LAN_HELLO_ROLE_INITIATOR);
+  EXPECT_EQ(parsed_hello.sender_tls_certificate_sha256().size(), 32U);
+  EXPECT_EQ(parsed_hello.observed_peer_tls_certificate_sha256().size(), 32U);
 }
 
 }  // namespace

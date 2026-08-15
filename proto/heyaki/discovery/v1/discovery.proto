@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package heyaki.protocol.discovery.v1;
+
+option optimize_for = LITE_RUNTIME;
+
+import "heyaki/common/v1/common.proto";
+
+message LanPresence {
+  heyaki.protocol.common.v1.ProtocolVersion protocol_version = 1;
+  heyaki.protocol.common.v1.CapabilityAdvertisement capabilities = 2;
+  bytes device_id = 3;          // Exactly 32 bytes, derived from identity_public_key.
+  bytes identity_public_key = 4; // Exactly 32 bytes, Ed25519.
+  bytes endpoint_id = 5;        // Exactly 16 bytes.
+  bytes boot_nonce = 6;         // Exactly 32 unpredictable bytes.
+  uint64 sequence = 7;          // Strictly increases within one boot_nonce.
+  uint32 tls_signaling_port = 8; // Valid range is 1..65535.
+  uint32 lease_milliseconds = 9; // Relative, bounded to 1000..120000 milliseconds.
+  heyaki.protocol.common.v1.Signature signature = 10;
+}

@@ -66,6 +66,15 @@ constexpr std::array candidate_rules{FieldRule{32U}, FieldRule{16U}, FieldRule{3
                                      FieldRule{32U}, FieldRule{32U}, FieldRule{8U},
                                      FieldRule{4U}, variable, FieldRule{32U}, variable,
                                      FieldRule{32U}};
+constexpr std::array lan_presence_rules{
+    FieldRule{4U},  FieldRule{4U},  FieldRule{8U},  FieldRule{8U},
+    FieldRule{32U}, FieldRule{32U}, FieldRule{16U}, FieldRule{32U},
+    FieldRule{8U},  FieldRule{2U},  FieldRule{4U}};
+constexpr std::array lan_hello_rules{
+    FieldRule{4U},  FieldRule{32U}, FieldRule{16U}, FieldRule{32U},
+    FieldRule{16U}, FieldRule{32U}, FieldRule{32U}, FieldRule{32U},
+    FieldRule{32U}, FieldRule{32U}, FieldRule{32U}, FieldRule{4U},
+    FieldRule{4U},  FieldRule{8U},  FieldRule{8U},  FieldRule{4U}};
 constexpr std::array session_hello_rules{FieldRule{32U}, FieldRule{16U}, FieldRule{32U},
                                          FieldRule{16U}, FieldRule{16U}, FieldRule{8U},
                                          FieldRule{32U}, FieldRule{32U}, FieldRule{32U},
@@ -240,6 +249,10 @@ bool matches_field_shape(SigningDomain domain, std::span<const CanonicalField> f
     case SigningDomain::candidate:
       return matches_rules(fields, candidate_rules) && !fields[10U].value.empty() &&
              is_printable_ascii(fields[12U].value, 4U, 256U);
+    case SigningDomain::lan_presence:
+      return matches_rules(fields, lan_presence_rules);
+    case SigningDomain::lan_hello:
+      return matches_rules(fields, lan_hello_rules);
     case SigningDomain::session_hello:
       return matches_rules(fields, session_hello_rules);
     case SigningDomain::trust_grant: {
@@ -285,6 +298,10 @@ std::string_view signing_domain_separator(SigningDomain domain) noexcept {
       return "heyaki.answer.v1";
     case SigningDomain::candidate:
       return "heyaki.candidate.v1";
+    case SigningDomain::lan_presence:
+      return "heyaki.lan-presence.v1";
+    case SigningDomain::lan_hello:
+      return "heyaki.lan-hello.v1";
     case SigningDomain::session_hello:
       return "heyaki.session-hello.v1";
     case SigningDomain::trust_grant:

@@ -1,3 +1,4 @@
+#include <heyaki/protocol.hpp>
 #include <heyaki/version.hpp>
 
 #include <gtest/gtest.h>
@@ -8,7 +9,9 @@ TEST(BuildInfo, ExposesVersionProtocolAndFeatures) {
   EXPECT_FALSE(info.version.empty());
   EXPECT_FALSE(info.commit.empty());
   EXPECT_EQ(info.protocol_major, 1U);
-  EXPECT_EQ(info.protocol_minor, 0U);
+  EXPECT_EQ(info.protocol_minor, 1U);
+  EXPECT_EQ(info.protocol_major, heyaki::current_protocol_version.major);
+  EXPECT_EQ(info.protocol_minor, heyaki::current_protocol_version.minor);
   EXPECT_TRUE(info.features.has(heyaki::BuildFeature::profile));
   EXPECT_TRUE(info.features.has(heyaki::BuildFeature::client));
   EXPECT_TRUE(info.features.has(heyaki::BuildFeature::services));

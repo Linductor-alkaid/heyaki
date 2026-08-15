@@ -1,6 +1,7 @@
 #include "fuzz_targets.hpp"
 #include "m1_golden_vectors.hpp"
 
+#include <heyaki/protocol.hpp>
 #include <heyaki/wire.hpp>
 
 #include <cstddef>
@@ -101,6 +102,35 @@ int main(int argc, char** argv) {
     heyaki::fuzz::frame_parser(seed);
     if (!write_seed(corpus_root / "frame-parser", name, seed)) {
       std::cerr << "cannot write parser seed " << name << '\n';
+      return 1;
+    }
+  }
+
+  const std::vector<std::byte> lan_presence_payload{
+      std::byte{0x0aU}, std::byte{0x04U}, std::byte{0x08U},
+      std::byte{0x01U}, std::byte{0x10U}, std::byte{0x01U}};
+  const auto lan_datagram =
+      heyaki::encode_lan_datagram(heyaki::LanDatagramType::presence, lan_presence_payload);
+  if (!lan_datagram) {
+    std::cerr << "cannot encode LAN presence seed\n";
+    return 1;
+  }
+  auto truncated_lan = *lan_datagram.value_if();
+  truncated_lan.pop_back();
+  auto unknown_lan = *lan_datagram.value_if();
+  unknown_lan[5U] = std::byte{0x7fU};
+  auto oversized_lan = *lan_datagram.value_if();
+  oversized_lan.resize(heyaki::max_lan_datagram_bytes + 1U, std::byte{0U});
+  const std::vector lan_seeds{
+      std::pair{std::string_view{"golden-presence"}, *lan_datagram.value_if()},
+      std::pair{std::string_view{"truncated-presence"}, truncated_lan},
+      std::pair{std::string_view{"unknown-type"}, unknown_lan},
+      std::pair{std::string_view{"oversized-datagram"}, oversized_lan},
+  };
+  for (const auto& [name, seed] : lan_seeds) {
+    heyaki::fuzz::lan_datagram_parser(seed);
+    if (!write_seed(corpus_root / "lan-datagram-parser", name, seed)) {
+      std::cerr << "cannot write LAN datagram seed " << name << '\n';
       return 1;
     }
   }

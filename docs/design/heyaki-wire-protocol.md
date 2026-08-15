@@ -1,8 +1,8 @@
 # Heyaki Wire Protocol v1
 
-> Status: M1 protocol baseline
+> Status: M3A protocol 1.1 baseline
 >
-> Protocol version: 1.0
+> Protocol version: 1.1
 >
 > Incompatible changes require a protocol major increment.
 
@@ -10,12 +10,10 @@ This document is normative for Heyaki framing, identifiers, negotiation, signed 
 per-domain state handling. The schemas under `proto/heyaki/*/v1` are normative for Protobuf fields.
 The words MUST, MUST NOT, SHOULD, and MAY describe interoperability requirements.
 
-The planned serverless LAN discovery and TLS signaling binding are intentionally not part of the
-frozen 1.0 wire surface. Their design is recorded in
-[LAN serverless connectivity](lan-serverless-connectivity.md); implementation requires a coordinated
-protocol 1.1 minor-version change that adds schemas, capability bits, canonical signing tables, golden
-vectors, fuzz coverage, and build-version updates in one reviewed change. A 1.0 implementation MUST
-NOT infer LAN interoperability from this design note alone.
+Protocol 1.1 adds optional serverless LAN discovery and TLS signaling binding. The 1.0 framing,
+identifiers, signed objects, schemas, and state transitions remain unchanged. A 1.0 peer ignores the
+new optional capability bits and does not participate in LAN discovery or LAN signaling; a 1.1 peer
+MUST NOT infer either LAN capability from a negotiated 1.0 session.
 
 ## 1. Primitive encodings
 
@@ -183,8 +181,9 @@ smaller minor and negotiated capabilities are the intersection. If either peer r
 does not support, negotiation fails explicitly with `protocol`; unknown optional bits are ignored.
 
 Capability bits v1 are: enrollment `0`, signaling `1`, session `2`, pairing `3`, message `4`, unary RPC
-`5`, event `6`, byte stream `7`, file `8`, and shell `9`. A schema field being parseable does not enable
-its behavior without the corresponding negotiated capability.
+`5`, event `6`, byte stream `7`, file `8`, shell `9`, `lan_discovery_v1` `10`, and
+`lan_signaling_v1` `11`. Bits 10 and 11 require negotiated minor version 1 or newer. A schema field
+being parseable does not enable its behavior without the corresponding negotiated capability.
 
 Protobuf unknown fields follow normal proto3 preservation/skipping rules. Adding an optional field or
 optional capability is a minor change. Changing field meaning, identifier width, canonical signing
@@ -227,6 +226,8 @@ range.
 | `heyaki.offer.v1` | 1 initiator ID32, 2 initiator ID16 endpoint, 3 responder ID32, 4 responder ID16 endpoint, 5 ID16 request, 6 ID16 session, 7 NONCE32 initiator nonce, 8 U64 expiry, 9 exact SDP bytes, 10 raw 32-byte DTLS fingerprint | initiator |
 | `heyaki.answer.v1` | 1-6 same signaling binding, 7 NONCE32 initiator nonce, 8 NONCE32 responder nonce, 9 U64 expiry, 10 exact SDP bytes, 11 raw 32-byte DTLS fingerprint | responder |
 | `heyaki.candidate.v1` | 1-6 same signaling binding, 7 NONCE32 initiator nonce, 8 NONCE32 responder nonce, 9 U64 expiry, 10 U32 candidate sequence, 11 exact candidate bytes, 12 HASH32 signaling transcript, 13 ASCII candidate-owner ICE ufrag, 14 raw 32-byte candidate-owner DTLS fingerprint | candidate owner |
+| `heyaki.lan-presence.v1` | 1 U32 major, 2 U32 minor, 3 U64 supported bits, 4 U64 required bits, 5 ID32 device, 6 raw 32-byte identity public key, 7 ID16 endpoint, 8 NONCE32 boot nonce, 9 U64 sequence, 10 U16 TLS port, 11 U32 relative lease | advertised device |
+| `heyaki.lan-hello.v1` | 1 U32 role, 2 sender ID32, 3 sender ID16 endpoint, 4 peer ID32, 5 peer ID16 endpoint, 6 raw 32-byte sender identity public key, 7 NONCE32 initiator nonce, 8 NONCE32 responder nonce, 9 HASH32 sender TLS certificate, 10 HASH32 observed peer TLS certificate, 11 NONCE32 sender boot nonce, 12 U32 major, 13 U32 minor, 14 U64 supported bits, 15 U64 required bits, 16 U32 relative expiry | hello sender |
 | `heyaki.session-hello.v1` | 1 sender ID32, 2 sender ID16 endpoint, 3 peer ID32, 4 peer ID16 endpoint, 5 ID16 session, 6 U64 epoch, 7 NONCE32 initiator nonce, 8 NONCE32 responder nonce, 9 HASH32 signaling transcript, 10 U32 major, 11 U32 minor, 12 U64 supported bits, 13 U64 required bits, 14 U64 expiry | hello sender |
 | `heyaki.trust-grant.v1` | 1 ID16 grant, 2 issuer ID32, 3 subject ID32, 4 scope list, 5 U64 password generation, 6 U64 issued time, optional 7 U64 expiry, 8 NONCE32 pairing nonce | grant issuer |
 
@@ -356,10 +357,46 @@ transition, or data offset overflow yields stable `protocol` status at the small
 Malformed control/session binding closes the session; a service-state failure closes only its logical
 channel. No parser loops waiting on an already complete invalid input.
 
+### 6.4 LAN discovery and TLS hello
+
+Protocol 1.1 LAN discovery uses UDP port `49189`, IPv4 organization-local group `239.192.72.89`, and
+IPv6 transient link-local group `ff12::4845:5941:4b49`. Both address families use hop limit `1`.
+`49189` is in the dynamic/private port range and is not an IANA service assignment; these values are
+the interoperability defaults and normal profiles MUST NOT silently substitute different values.
+
+Every datagram is at most 1200 bytes, including this fixed header:
+
+```text
+magic          : 48 59 4c 44 ("HYLD")
+version        : uint8 = 1
+type           : uint8 = 1 (`LAN_PRESENCE`)
+payload_length : U16 big-endian
+payload        : exactly payload_length bytes of discovery.v1.LanPresence
+```
+
+The receiver validates the total datagram limit, magic, envelope version, type, and exact payload
+length before Protobuf decoding or retained allocation. Unknown datagram types are ignored and
+counted; malformed and oversized datagrams are rejected. Type values are never repurposed.
+
+`LanPresence` carries protocol version/capabilities, exact-width device identity/public key/endpoint,
+boot nonce, sequence, TLS port, relative lease, and signature. The lease is 1000-120000 milliseconds,
+the TLS port is 1-65535, and sequence increases monotonically within one boot nonce. The UDP source
+address is only a reachability hint and is not signed identity. The message MUST NOT contain display
+name, tenant, service manifest, authorization scope, credential, TrustGrant, relay enrollment, or
+other interface topology.
+
+After TLS 1.3 establishes a provisional connection, the only permitted initial message is the bounded
+`signaling.v1.LanHello`. Role is initiator `1` or responder `2`; relative expiry is 1-10000
+milliseconds. Both parties validate the sender public-key-derived DeviceId, endpoints, nonces, sender
+boot nonce, negotiated version/capabilities, signature, and the sender/observed-peer SHA-256
+certificate fingerprints before accepting existing signed offer/answer/candidate messages. TLS
+certificate validity alone never authenticates or authorizes a Heyaki device.
+
 ## 7. Golden vectors
 
 `tests/vectors/m1-golden-vectors.json` contains the normative DeviceId derivation, canonical signing
 encoding, Ed25519 signature over that canonical offer, Protobuf Lite envelope bytes, and complete frame
-bytes. Tests read
-that JSON at configure time and compare exact bytes. Implementations must not normalize or reserialize
-the expected values before comparison.
+bytes for the protocol 1.0 N-1 baseline. `tests/vectors/m3a-lan-golden-vectors.json` contains the
+protocol 1.1 discovery constants plus canonical `LAN_PRESENCE` and `LAN_HELLO` bytes and Ed25519
+signatures. Tests read both files at configure time and compare exact bytes. Implementations must not
+normalize or reserialize the expected values before comparison.

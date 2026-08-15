@@ -1,6 +1,6 @@
 # Heyaki 局域网无服务器连接设计
 
-> 状态：v1 设计基线，wire protocol 1.1 扩展待 M3A 冻结
+> 状态：v1 设计基线，wire protocol 1.1 扩展已由 M3A 首批变更冻结
 > 日期：2026-08-15
 > 适用范围：Linux/Windows 设备端、`heyaki-tui`、局域网发现、本地信令与 WebRTC 直连
 > 上位设计：[Heyaki 设备通信基础设施设计](heyaki-architecture.md)
@@ -237,8 +237,7 @@ v1 复用现有稳定 `ErrorCode`，不因新增 route 立即扩展公共 enum�
 
 ## 10. 协议兼容与变更控制
 
-当前已冻结和实现检查的 wire protocol 仍为 1.0。LAN 能力不得仅通过文档约定直接进入 1.0。
-M3A 必须作为协议 1.1 的可选扩展完成：
+wire protocol 1.1 已把 LAN 能力冻结为可选扩展，协议 1.0 保持 N-1 兼容基线：
 
 - capability bit 与 major/minor 协商；
 - IPv4/IPv6 multicast group、UDP port、datagram envelope 与最大 wire size；
@@ -248,8 +247,9 @@ M3A 必须作为协议 1.1 的可选扩展完成：
 - N-1/N 行为：1.0 peer 忽略未知可选能力，1.1 peer 不对 1.0 peer 假定 LAN 支持；
 - CMake 版本、build info、协议文档、schemas 和 golden vectors 同一变更提交。
 
-在这组门禁完成前，本文是实现设计，不是可互操作 wire 规范；
-[Heyaki Wire Protocol v1](heyaki-wire-protocol.md) 继续是协议 1.0 的规范来源。
+上述协议 change-control 门禁由 M3A-01 至 M3A-04 完成；
+[Heyaki Wire Protocol v1](heyaki-wire-protocol.md) 是协议 1.1 的规范来源。后续 discovery、TLS
+route 和 replay/capacity 状态机仍须通过本节以下安全与网络门禁，不能因 wire 已冻结而视为完成。
 
 ## 11. 安全与测试门禁
 

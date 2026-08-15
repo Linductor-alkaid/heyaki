@@ -1,6 +1,6 @@
 # Heyaki Threat Model
 
-> Baseline: protocol 1.0, M1, plus the planned protocol 1.1 LAN extension
+> Baseline: protocol 1.1, including the frozen optional LAN extension and protocol 1.0 N-1 behavior
 >
 > Scope: device library, LAN discovery/signaling, `heyaki-relay`, coturn integration, ProfileStore,
 > and TUI

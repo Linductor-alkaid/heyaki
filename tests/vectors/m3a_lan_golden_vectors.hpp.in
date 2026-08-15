@@ -1,0 +1,58 @@
+#pragma once
+
+#include <array>
+#include <cstdint>
+#include <string_view>
+
+namespace heyaki::test_vectors::lan {
+
+inline constexpr std::uint32_t protocol_major = @M3A_PROTOCOL_MAJOR@U;
+inline constexpr std::uint32_t protocol_minor = @M3A_PROTOCOL_MINOR@U;
+inline constexpr std::string_view ipv4_group = "@M3A_IPV4_GROUP@";
+inline constexpr std::string_view ipv6_group = "@M3A_IPV6_GROUP@";
+inline constexpr std::uint16_t udp_port = @M3A_UDP_PORT@U;
+inline constexpr std::uint8_t hop_limit = @M3A_HOP_LIMIT@U;
+inline constexpr std::string_view datagram_magic_hex = "@M3A_DATAGRAM_MAGIC_HEX@";
+inline constexpr std::uint8_t datagram_envelope_version = @M3A_DATAGRAM_ENVELOPE_VERSION@U;
+inline constexpr std::uint8_t presence_type = @M3A_PRESENCE_TYPE@U;
+inline constexpr std::uint32_t max_datagram_bytes = @M3A_MAX_DATAGRAM_BYTES@U;
+inline constexpr std::string_view ed25519_public_key_hex = "@M3A_ED25519_PUBLIC_KEY_HEX@";
+inline constexpr std::string_view presence_domain = "@M3A_PRESENCE_DOMAIN@";
+inline constexpr std::array presence_fields{
+    std::string_view{"@M3A_PRESENCE_FIELD_1_HEX@"},
+    std::string_view{"@M3A_PRESENCE_FIELD_2_HEX@"},
+    std::string_view{"@M3A_PRESENCE_FIELD_3_HEX@"},
+    std::string_view{"@M3A_PRESENCE_FIELD_4_HEX@"},
+    std::string_view{"@M3A_PRESENCE_FIELD_5_HEX@"},
+    std::string_view{"@M3A_PRESENCE_FIELD_6_HEX@"},
+    std::string_view{"@M3A_PRESENCE_FIELD_7_HEX@"},
+    std::string_view{"@M3A_PRESENCE_FIELD_8_HEX@"},
+    std::string_view{"@M3A_PRESENCE_FIELD_9_HEX@"},
+    std::string_view{"@M3A_PRESENCE_FIELD_10_HEX@"},
+    std::string_view{"@M3A_PRESENCE_FIELD_11_HEX@"},
+};
+inline constexpr std::string_view presence_canonical_hex = "@M3A_PRESENCE_CANONICAL_HEX@";
+inline constexpr std::string_view presence_signature_hex = "@M3A_PRESENCE_SIGNATURE_HEX@";
+inline constexpr std::string_view hello_domain = "@M3A_HELLO_DOMAIN@";
+inline constexpr std::array hello_fields{
+    std::string_view{"@M3A_HELLO_FIELD_1_HEX@"},
+    std::string_view{"@M3A_HELLO_FIELD_2_HEX@"},
+    std::string_view{"@M3A_HELLO_FIELD_3_HEX@"},
+    std::string_view{"@M3A_HELLO_FIELD_4_HEX@"},
+    std::string_view{"@M3A_HELLO_FIELD_5_HEX@"},
+    std::string_view{"@M3A_HELLO_FIELD_6_HEX@"},
+    std::string_view{"@M3A_HELLO_FIELD_7_HEX@"},
+    std::string_view{"@M3A_HELLO_FIELD_8_HEX@"},
+    std::string_view{"@M3A_HELLO_FIELD_9_HEX@"},
+    std::string_view{"@M3A_HELLO_FIELD_10_HEX@"},
+    std::string_view{"@M3A_HELLO_FIELD_11_HEX@"},
+    std::string_view{"@M3A_HELLO_FIELD_12_HEX@"},
+    std::string_view{"@M3A_HELLO_FIELD_13_HEX@"},
+    std::string_view{"@M3A_HELLO_FIELD_14_HEX@"},
+    std::string_view{"@M3A_HELLO_FIELD_15_HEX@"},
+    std::string_view{"@M3A_HELLO_FIELD_16_HEX@"},
+};
+inline constexpr std::string_view hello_canonical_hex = "@M3A_HELLO_CANONICAL_HEX@";
+inline constexpr std::string_view hello_signature_hex = "@M3A_HELLO_SIGNATURE_HEX@";
+
+}  // namespace heyaki::test_vectors::lan

@@ -11,3 +11,7 @@ from this `proto/` directory.
 M1 validates the golden `MessageEnvelope` with the pinned Protobuf runtime's wire decoder, including
 unknown-field and malformed-length behavior. The first milestone that consumes generated messages must
 add its generated Lite decoder paths to the existing parser fuzz targets.
+
+Protocol 1.1 adds `discovery/v1/discovery.proto` and `signaling/v1/lan.proto`. Their generated Lite
+decoders are part of the parser fuzz target; LAN implementations must validate the fixed datagram and
+field limits before retaining a decoded message.
