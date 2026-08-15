@@ -288,5 +288,43 @@ int main(int argc, char** argv) {
       return 1;
     }
   }
+
+  const std::vector<std::vector<std::byte>> lan_state_seeds{
+      {std::byte{1U}, std::byte{1U}, std::byte{1U}, std::byte{1U},
+       std::byte{1U}, std::byte{0U}, std::byte{1U}, std::byte{1U},
+       std::byte{1U}, std::byte{0U}, std::byte{1U}, std::byte{0U}},
+      {std::byte{1U}, std::byte{1U}, std::byte{1U}, std::byte{3U},
+       std::byte{1U}, std::byte{0U}, std::byte{1U}, std::byte{1U},
+       std::byte{1U}, std::byte{2U}, std::byte{1U}, std::byte{0U}},
+      {std::byte{1U}, std::byte{1U}, std::byte{1U}, std::byte{1U},
+       std::byte{1U}, std::byte{0U}, std::byte{1U}, std::byte{1U},
+       std::byte{2U}, std::byte{1U}, std::byte{1U}, std::byte{0U}},
+      {std::byte{1U}, std::byte{1U}, std::byte{1U}, std::byte{1U},
+       std::byte{1U}, std::byte{0U}, std::byte{0U}, std::byte{0U},
+       std::byte{0U}, std::byte{0U}, std::byte{0U}, std::byte{255U}},
+      {std::byte{1U}, std::byte{1U}, std::byte{1U}, std::byte{1U},
+       std::byte{1U}, std::byte{0U}, std::byte{1U}, std::byte{2U},
+       std::byte{1U}, std::byte{1U}, std::byte{2U}, std::byte{0U},
+       std::byte{1U}, std::byte{3U}, std::byte{1U}, std::byte{1U},
+       std::byte{3U}, std::byte{0U}, std::byte{1U}, std::byte{4U},
+       std::byte{1U}, std::byte{1U}, std::byte{4U}, std::byte{0U},
+       std::byte{1U}, std::byte{5U}, std::byte{1U}, std::byte{1U},
+       std::byte{5U}, std::byte{0U}, std::byte{1U}, std::byte{6U},
+       std::byte{1U}, std::byte{1U}, std::byte{6U}, std::byte{0U},
+       std::byte{1U}, std::byte{7U}, std::byte{1U}, std::byte{1U},
+       std::byte{7U}, std::byte{0U}, std::byte{1U}, std::byte{8U},
+       std::byte{1U}, std::byte{1U}, std::byte{8U}, std::byte{0U},
+       std::byte{1U}, std::byte{9U}, std::byte{1U}, std::byte{1U},
+       std::byte{9U}, std::byte{0U}},
+  };
+  for (std::size_t index = 0U; index < lan_state_seeds.size(); ++index) {
+    heyaki::fuzz::lan_directory_state_machine(lan_state_seeds[index]);
+    const auto name = "lan-state-" + std::to_string(index);
+    if (!write_seed(corpus_root / "lan-directory-state", name,
+                    lan_state_seeds[index])) {
+      std::cerr << "cannot write LAN state seed " << name << '\n';
+      return 1;
+    }
+  }
   return 0;
 }

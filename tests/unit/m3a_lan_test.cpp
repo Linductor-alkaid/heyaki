@@ -8,17 +8,41 @@
 #include <executor/comm.hpp>
 
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/ip/multicast.hpp>
 #include <boost/asio/ip/address_v6.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/ip/udp.hpp>
+#include <boost/asio/ssl.hpp>
+#include <boost/asio/write.hpp>
 
 #include <gtest/gtest.h>
 
+#include <openssl/evp.h>
+#include <openssl/ssl.h>
+#include <openssl/x509.h>
+
+#include <algorithm>
+#include <array>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstddef>
+#include <cstdlib>
 #include <filesystem>
+#include <memory>
+#include <optional>
+#include <set>
 #include <string>
-#include <thread>
+#include <vector>
+
+#if defined(__linux__)
+#include <cerrno>
+#include <cstring>
+#include <net/if.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 
 namespace heyaki {
 namespace {
@@ -65,17 +89,171 @@ class M3aNodeTest : public ::testing::Test {
   template <typename Predicate>
   bool wait_until(Predicate&& predicate, std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
+    executor::comm::PhaseGate poll{"m3a-test-poll"};
     while (std::chrono::steady_clock::now() < deadline) {
       if (predicate()) {
         return true;
       }
-      std::this_thread::yield();
+      (void)poll.wait_for(1U, std::chrono::milliseconds{1});
     }
     return predicate();
   }
 
   std::filesystem::path root_;
 };
+
+bool environment_enabled(const char* name) {
+  const char* value = std::getenv(name);
+  return value != nullptr && std::string_view{value} == "1";
+}
+
+std::optional<std::size_t> environment_size(const char* name) {
+  const char* value = std::getenv(name);
+  if (value == nullptr || *value == '\0') {
+    return std::nullopt;
+  }
+  try {
+    return static_cast<std::size_t>(std::stoull(value));
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+std::size_t joined_interface_count(const NodeSnapshot& snapshot) {
+  return static_cast<std::size_t>(std::count_if(
+      snapshot.interfaces.begin(), snapshot.interfaces.end(),
+      [](const LanInterfaceSnapshot& interface) { return interface.joined; }));
+}
+
+#if defined(__linux__)
+Result<void> set_test_interface_state(std::string_view interface_name,
+                                      bool enabled) {
+  if (interface_name.empty() || interface_name.size() >= IFNAMSIZ) {
+    return Result<void>::failure(
+        Error{ErrorCode::configuration, "test", "interface_name_invalid"});
+  }
+  const int socket_handle = ::socket(AF_INET, SOCK_DGRAM, 0);
+  if (socket_handle < 0) {
+    return Result<void>::failure(
+        Error{ErrorCode::transport, "test", "interface_socket_failed", errno});
+  }
+  ifreq request{};
+  std::memcpy(request.ifr_name, interface_name.data(), interface_name.size());
+  if (::ioctl(socket_handle, SIOCGIFFLAGS, &request) != 0) {
+    const auto error = errno;
+    (void)::close(socket_handle);
+    return Result<void>::failure(
+        Error{ErrorCode::transport, "test", "interface_flags_read_failed", error});
+  }
+  if (enabled) {
+    request.ifr_flags = static_cast<short>(request.ifr_flags | IFF_UP);
+  } else {
+    request.ifr_flags = static_cast<short>(request.ifr_flags & ~IFF_UP);
+  }
+  if (::ioctl(socket_handle, SIOCSIFFLAGS, &request) != 0) {
+    const auto error = errno;
+    (void)::close(socket_handle);
+    return Result<void>::failure(
+        Error{ErrorCode::transport, "test", "interface_flags_write_failed", error});
+  }
+  (void)::close(socket_handle);
+  return Result<void>::success();
+}
+#endif
+
+struct TestTlsCertificate {
+  TlsCertificateFingerprint fingerprint{};
+};
+
+Result<TestTlsCertificate> configure_test_tls_certificate(
+    boost::asio::ssl::context& context) {
+  using PkeyContext = std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)>;
+  using Pkey = std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)>;
+  using Certificate = std::unique_ptr<X509, decltype(&X509_free)>;
+
+  PkeyContext key_context{EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, nullptr),
+                          EVP_PKEY_CTX_free};
+  EVP_PKEY* generated_key = nullptr;
+  if (!key_context || EVP_PKEY_keygen_init(key_context.get()) != 1 ||
+      EVP_PKEY_keygen(key_context.get(), &generated_key) != 1) {
+    return Result<TestTlsCertificate>::failure(
+        Error{ErrorCode::internal, "test", "tls_test_key_generation_failed"});
+  }
+  Pkey key{generated_key, EVP_PKEY_free};
+  Certificate certificate{X509_new(), X509_free};
+  if (!certificate || X509_set_version(certificate.get(), 2L) != 1 ||
+      ASN1_INTEGER_set(X509_get_serialNumber(certificate.get()), 1L) != 1 ||
+      X509_gmtime_adj(X509_getm_notBefore(certificate.get()), -60L) == nullptr ||
+      X509_gmtime_adj(X509_getm_notAfter(certificate.get()), 3600L) == nullptr ||
+      X509_set_pubkey(certificate.get(), key.get()) != 1) {
+    return Result<TestTlsCertificate>::failure(
+        Error{ErrorCode::internal, "test", "tls_test_certificate_failed"});
+  }
+  auto* subject = X509_get_subject_name(certificate.get());
+  static constexpr unsigned char common_name[] = "heyaki-m3a-test";
+  if (subject == nullptr ||
+      X509_NAME_add_entry_by_txt(subject, "CN", MBSTRING_ASC, common_name, -1,
+                                 -1, 0) != 1 ||
+      X509_set_issuer_name(certificate.get(), subject) != 1 ||
+      X509_sign(certificate.get(), key.get(), nullptr) <= 0) {
+    return Result<TestTlsCertificate>::failure(
+        Error{ErrorCode::internal, "test", "tls_test_certificate_sign_failed"});
+  }
+
+  SSL_CTX* native = context.native_handle();
+  if (SSL_CTX_set_min_proto_version(native, TLS1_3_VERSION) != 1 ||
+      SSL_CTX_set_max_proto_version(native, TLS1_3_VERSION) != 1 ||
+      SSL_CTX_use_certificate(native, certificate.get()) != 1 ||
+      SSL_CTX_use_PrivateKey(native, key.get()) != 1 ||
+      SSL_CTX_check_private_key(native) != 1) {
+    return Result<TestTlsCertificate>::failure(
+        Error{ErrorCode::internal, "test", "tls_test_context_failed"});
+  }
+  context.set_verify_mode(boost::asio::ssl::verify_peer);
+  context.set_verify_callback(
+      [](bool, boost::asio::ssl::verify_context&) { return true; });
+
+  TestTlsCertificate output;
+  unsigned int digest_size = 0U;
+  if (X509_digest(certificate.get(), EVP_sha256(),
+                  reinterpret_cast<unsigned char*>(output.fingerprint.data()),
+                  &digest_size) != 1 ||
+      digest_size != output.fingerprint.size()) {
+    return Result<TestTlsCertificate>::failure(
+        Error{ErrorCode::internal, "test", "tls_test_fingerprint_failed"});
+  }
+  return Result<TestTlsCertificate>::success(output);
+}
+
+Result<void> send_test_hello(boost::asio::ssl::context& context,
+                             std::uint16_t port, const LanHello& hello) {
+  auto encoded = encode_lan_hello(hello);
+  if (!encoded || encoded.value_if()->size() > 0xffffU) {
+    return Result<void>::failure(
+        Error{ErrorCode::protocol, "test", "tls_test_hello_encode_failed"});
+  }
+  std::vector<std::byte> framed;
+  framed.reserve(encoded.value_if()->size() + 2U);
+  const auto size = static_cast<std::uint16_t>(encoded.value_if()->size());
+  framed.push_back(static_cast<std::byte>((size >> 8U) & 0xffU));
+  framed.push_back(static_cast<std::byte>(size & 0xffU));
+  framed.insert(framed.end(), encoded.value_if()->begin(), encoded.value_if()->end());
+
+  try {
+    boost::asio::io_context io;
+    boost::asio::ssl::stream<boost::asio::ip::tcp::socket> stream{io, context};
+    stream.lowest_layer().connect(
+        {boost::asio::ip::make_address_v6("::1"), port});
+    stream.handshake(boost::asio::ssl::stream_base::client);
+    boost::asio::write(stream, boost::asio::buffer(framed));
+    boost::system::error_code ignored;
+    stream.lowest_layer().close(ignored);
+  } catch (...) {
+    return Result<void>::failure(
+        Error{ErrorCode::signaling, "test", "tls_test_hello_send_failed"});
+  }
+  return Result<void>::success();
+}
 
 NodeConfig node_config(ProfileStore& profile, std::string application_id,
                        LanSignalingValidator validator = {},
@@ -438,6 +616,9 @@ TEST_F(M3aNodeTest, ProvisionalTlsIsPerSourceRateLimitedAndTimesOut) {
 
   auto node = Node::create(node_config(*profile.value_if(), "com.example.node"));
   if (!node && node.error_if()->safe_detail() == "lan_no_ready_interface") {
+    if (environment_enabled("HEYAKI_REQUIRE_LAN_INTERFACES")) {
+      FAIL() << "Required LAN interface is unavailable";
+    }
     GTEST_SKIP() << "No multicast-capable non-loopback interface";
   }
   ASSERT_TRUE(node) << node.error_if()->safe_detail();
@@ -511,6 +692,9 @@ TEST_F(M3aNodeTest, TwoLanNodesDiscoverEachOtherWithoutRelay) {
   if (first_joined == 0 || second_joined == 0) {
     (void)first.value_if()->shutdown();
     (void)second.value_if()->shutdown();
+    if (environment_enabled("HEYAKI_REQUIRE_LAN_INTERFACES")) {
+      FAIL() << "Required LAN interface is unavailable";
+    }
     GTEST_SKIP() << "No multicast-capable non-loopback interface";
   }
 
@@ -531,6 +715,350 @@ TEST_F(M3aNodeTest, TwoLanNodesDiscoverEachOtherWithoutRelay) {
 
   EXPECT_TRUE(first.value_if()->shutdown().stopped);
   EXPECT_TRUE(second.value_if()->shutdown().stopped);
+}
+
+TEST_F(M3aNodeTest, NetworkTopologyMatchesExpectedInterfaces) {
+  const auto expected_ipv4 = environment_size("HEYAKI_EXPECT_IPV4_INTERFACES");
+  const auto expected_ipv6 = environment_size("HEYAKI_EXPECT_IPV6_INTERFACES");
+  if (!expected_ipv4 && !expected_ipv6) {
+    GTEST_SKIP() << "Network topology expectations are not configured";
+  }
+
+  LanConfiguration configuration;
+  configuration.connectivity_mode = ConnectivityMode::lan_only;
+  configuration.discoverable = false;
+  auto profile = initialized_profile("topology", "com.example.topology",
+                                     configuration);
+  ASSERT_TRUE(profile) << profile.error_if()->safe_detail();
+  auto node = Node::create(
+      node_config(*profile.value_if(), "com.example.topology"));
+  ASSERT_TRUE(node) << node.error_if()->safe_detail();
+  const auto snapshot = node.value_if()->snapshot();
+  const auto count_family = [&](LanInterfaceFamily family) {
+    return static_cast<std::size_t>(std::count_if(
+        snapshot.interfaces.begin(), snapshot.interfaces.end(),
+        [&](const auto& interface) {
+          return interface.joined && interface.family == family;
+        }));
+  };
+  if (expected_ipv4) {
+    EXPECT_EQ(count_family(LanInterfaceFamily::ipv4), *expected_ipv4);
+  }
+  if (expected_ipv6) {
+    EXPECT_EQ(count_family(LanInterfaceFamily::ipv6), *expected_ipv6);
+  }
+  EXPECT_EQ(snapshot.lan_state, LanReadinessState::ready);
+  EXPECT_TRUE(node.value_if()->shutdown().stopped);
+}
+
+TEST_F(M3aNodeTest, RefreshesSocketsAfterInterfaceSwitch) {
+  const char* interface_value = std::getenv("HEYAKI_SWITCH_INTERFACE");
+  if (interface_value == nullptr || *interface_value == '\0') {
+    GTEST_SKIP() << "Interface switch target is not configured";
+  }
+#if !defined(__linux__)
+  GTEST_SKIP() << "Interface switching test is Linux-only";
+#else
+  const std::string interface_name{interface_value};
+  ASSERT_TRUE(std::all_of(interface_name.begin(), interface_name.end(),
+                          [](unsigned char character) {
+                            return std::isalnum(character) != 0 ||
+                                   character == '_' || character == '-' ||
+                                   character == '.';
+                          }));
+
+  LanConfiguration configuration;
+  configuration.connectivity_mode = ConnectivityMode::lan_only;
+  configuration.discoverable = false;
+  configuration.interface_refresh_interval = std::chrono::seconds{30};
+  auto profile = initialized_profile("interface-switch", "com.example.switch",
+                                     configuration);
+  ASSERT_TRUE(profile) << profile.error_if()->safe_detail();
+  auto node = Node::create(
+      node_config(*profile.value_if(), "com.example.switch"));
+  ASSERT_TRUE(node) << node.error_if()->safe_detail();
+  const auto initial_snapshot = node.value_if()->snapshot();
+  ASSERT_TRUE(std::any_of(
+      initial_snapshot.interfaces.begin(), initial_snapshot.interfaces.end(),
+      [&](const auto& interface) {
+        return interface.name == interface_name && interface.joined;
+      }));
+
+  ASSERT_TRUE(set_test_interface_state(interface_name, false));
+  ASSERT_TRUE(node.value_if()->refresh_interfaces());
+  const bool removed = wait_until(
+      [&] {
+        const auto snapshot = node.value_if()->snapshot();
+        return std::none_of(snapshot.interfaces.begin(), snapshot.interfaces.end(),
+                            [&](const auto& interface) {
+                              return interface.name == interface_name;
+                            });
+      },
+      std::chrono::seconds{2});
+
+  EXPECT_TRUE(set_test_interface_state(interface_name, true));
+  ASSERT_TRUE(node.value_if()->refresh_interfaces());
+  const bool restored = wait_until(
+      [&] {
+        const auto snapshot = node.value_if()->snapshot();
+        return std::any_of(snapshot.interfaces.begin(), snapshot.interfaces.end(),
+                           [&](const auto& interface) {
+                             return interface.name == interface_name && interface.joined;
+                           });
+      },
+      std::chrono::seconds{2});
+  EXPECT_TRUE(removed);
+  EXPECT_TRUE(restored);
+  EXPECT_EQ(node.value_if()->snapshot().lan_state, LanReadinessState::ready);
+  EXPECT_TRUE(node.value_if()->shutdown().stopped);
+#endif
+}
+
+TEST_F(M3aNodeTest, ThreeEndpointsIncludeTwoFromTheSameDevice) {
+  LanConfiguration configuration;
+  configuration.connectivity_mode = ConnectivityMode::lan_only;
+  configuration.announcement_interval = std::chrono::milliseconds{100};
+  configuration.announcement_jitter = std::chrono::milliseconds{0};
+  configuration.presence_lease = std::chrono::milliseconds{1000};
+  configuration.announcement_rate_per_second = 100U;
+  configuration.per_source_announcement_rate = 100U;
+  auto shared_profile = initialized_profile(
+      "shared-device", "com.example.shared.first", configuration);
+  auto remote_profile = initialized_profile(
+      "remote-device", "com.example.remote", configuration);
+  ASSERT_TRUE(shared_profile && remote_profile);
+  auto second_endpoint =
+      shared_profile.value_if()->endpoint_for("com.example.shared.second");
+  ASSERT_TRUE(second_endpoint) << second_endpoint.error_if()->safe_detail();
+
+  auto first = Node::create(node_config(*shared_profile.value_if(),
+                                        "com.example.shared.first"));
+  auto second = Node::create(node_config(*shared_profile.value_if(),
+                                         "com.example.shared.second"));
+  auto remote = Node::create(node_config(*remote_profile.value_if(),
+                                         "com.example.remote"));
+  ASSERT_TRUE(first && second && remote);
+  if (joined_interface_count(first.value_if()->snapshot()) == 0U ||
+      joined_interface_count(second.value_if()->snapshot()) == 0U ||
+      joined_interface_count(remote.value_if()->snapshot()) == 0U) {
+    (void)first.value_if()->shutdown();
+    (void)second.value_if()->shutdown();
+    (void)remote.value_if()->shutdown();
+    if (environment_enabled("HEYAKI_REQUIRE_LAN_INTERFACES")) {
+      FAIL() << "Required LAN interface is unavailable";
+    }
+    GTEST_SKIP() << "No multicast-capable non-loopback interface";
+  }
+
+  ASSERT_TRUE(wait_until(
+      [&] {
+        return first.value_if()->endpoints().size() == 2U &&
+               second.value_if()->endpoints().size() == 2U &&
+               remote.value_if()->endpoints().size() == 2U;
+      },
+      std::chrono::seconds{4}));
+  const auto remote_entries = remote.value_if()->endpoints();
+  std::set<EndpointId> shared_endpoints;
+  for (const auto& entry : remote_entries) {
+    if (entry.key.device_id == shared_profile.value_if()->device_id()) {
+      shared_endpoints.insert(entry.key.endpoint_id);
+    }
+  }
+  EXPECT_EQ(shared_endpoints.size(), 2U);
+  EXPECT_TRUE(shared_endpoints.contains(*second_endpoint.value_if()));
+  EXPECT_TRUE(first.value_if()->shutdown().stopped);
+  EXPECT_TRUE(second.value_if()->shutdown().stopped);
+  EXPECT_TRUE(remote.value_if()->shutdown().stopped);
+}
+
+TEST_F(M3aNodeTest, BlockedMulticastFailsPeerLookupAndShutdowns) {
+  if (!environment_enabled("HEYAKI_EXPECT_MULTICAST_BLOCKED")) {
+    GTEST_SKIP() << "Blocked multicast topology is not configured";
+  }
+  LanConfiguration configuration;
+  configuration.connectivity_mode = ConnectivityMode::lan_only;
+  configuration.announcement_interval = std::chrono::milliseconds{50};
+  configuration.announcement_jitter = std::chrono::milliseconds{0};
+  configuration.presence_lease = std::chrono::milliseconds{1000};
+  configuration.announcement_rate_per_second = 100U;
+  configuration.per_source_announcement_rate = 100U;
+  auto first_profile = initialized_profile("blocked-first", "com.example.blocked.first",
+                                           configuration);
+  auto second_profile = initialized_profile("blocked-second", "com.example.blocked.second",
+                                            configuration);
+  ASSERT_TRUE(first_profile && second_profile);
+  auto first = Node::create(node_config(*first_profile.value_if(),
+                                        "com.example.blocked.first"));
+  auto second = Node::create(node_config(*second_profile.value_if(),
+                                         "com.example.blocked.second"));
+  ASSERT_TRUE(first && second);
+  ASSERT_GT(joined_interface_count(first.value_if()->snapshot()), 0U);
+  ASSERT_GT(joined_interface_count(second.value_if()->snapshot()), 0U);
+
+  executor::comm::PhaseGate observation_window{"m3a-blocked-window"};
+  EXPECT_FALSE(observation_window.wait_for(1U, std::chrono::milliseconds{500}));
+  EXPECT_TRUE(first.value_if()->endpoints().empty());
+  EXPECT_TRUE(second.value_if()->endpoints().empty());
+  const auto unavailable = first.value_if()->connect_lan(
+      DeviceEndpointKey{second.value_if()->snapshot().device_id,
+                        second.value_if()->snapshot().endpoint_id});
+  ASSERT_FALSE(unavailable);
+  EXPECT_EQ(unavailable.error_if()->code(), ErrorCode::endpoint_offline);
+  EXPECT_EQ(unavailable.error_if()->safe_detail(), "lan_endpoint_unavailable");
+
+  const auto started = std::chrono::steady_clock::now();
+  const auto first_shutdown = first.value_if()->shutdown();
+  const auto second_shutdown = second.value_if()->shutdown();
+  EXPECT_TRUE(first_shutdown.stopped);
+  EXPECT_TRUE(second_shutdown.stopped);
+  EXPECT_LT(std::chrono::steady_clock::now() - started,
+            std::chrono::seconds{2});
+}
+
+TEST_F(M3aNodeTest, RejectsForgedMulticastFloodWithinBounds) {
+  LanConfiguration configuration;
+  configuration.connectivity_mode = ConnectivityMode::lan_only;
+  configuration.discoverable = false;
+  configuration.directory_capacity = 4U;
+  configuration.trusted_directory_reserve = 1U;
+  configuration.per_interface_directory_capacity = 4U;
+  configuration.per_source_presence_capacity = 4U;
+  configuration.unknown_identity_capacity = 3U;
+  configuration.replay_capacity = 8U;
+  configuration.diagnostic_capacity = 8U;
+  configuration.announcement_rate_per_second = 8U;
+  configuration.per_source_announcement_rate = 4U;
+  auto profile = initialized_profile("multicast-flood", "com.example.flood",
+                                     configuration);
+  ASSERT_TRUE(profile) << profile.error_if()->safe_detail();
+  auto node = Node::create(node_config(*profile.value_if(), "com.example.flood"));
+  ASSERT_TRUE(node) << node.error_if()->safe_detail();
+
+  const auto snapshot = node.value_if()->snapshot();
+  const auto interface = std::find_if(
+      snapshot.interfaces.begin(), snapshot.interfaces.end(),
+      [](const auto& candidate) {
+        return candidate.joined && candidate.family == LanInterfaceFamily::ipv4;
+      });
+  if (interface == snapshot.interfaces.end()) {
+    (void)node.value_if()->shutdown();
+    GTEST_SKIP() << "No IPv4 multicast-capable interface";
+  }
+  const auto attacker = create_identity();
+  ASSERT_TRUE(attacker) << attacker.error_if()->safe_detail();
+
+  boost::asio::io_context io;
+  boost::asio::ip::udp::socket socket{io};
+  socket.open(boost::asio::ip::udp::v4());
+  socket.set_option(boost::asio::ip::multicast::outbound_interface(
+      boost::asio::ip::make_address_v4(interface->address)));
+  socket.set_option(boost::asio::ip::multicast::enable_loopback(true));
+  const boost::asio::ip::udp::endpoint destination{
+      boost::asio::ip::make_address_v4(lan_discovery_ipv4_group),
+      lan_discovery_udp_port};
+  for (std::uint8_t tag = 1U; tag <= 32U; ++tag) {
+    auto presence = signed_presence(*attacker.value_if(), tag, 1U, 1U,
+                                    std::chrono::milliseconds{1000});
+    auto datagram = encode_lan_presence_datagram(presence);
+    ASSERT_TRUE(datagram) << datagram.error_if()->safe_detail();
+    socket.send_to(boost::asio::buffer(*datagram.value_if()), destination);
+  }
+
+  ASSERT_TRUE(wait_until(
+      [&] {
+        const auto current = node.value_if()->snapshot();
+        return current.datagrams_received >= 4U &&
+               current.datagrams_rejected >= 1U;
+      },
+      std::chrono::seconds{2}));
+  const auto after = node.value_if()->snapshot();
+  EXPECT_LE(after.directory.current_entries, configuration.directory_capacity);
+  EXPECT_LE(after.directory.replay_entries, configuration.replay_capacity);
+  EXPECT_LE(after.directory.source_rate_entries,
+            configuration.per_source_presence_capacity);
+  EXPECT_LE(after.directory.diagnostic_history_size,
+            configuration.diagnostic_capacity);
+  EXPECT_GT(after.directory.capacity_rejected + after.directory.rate_rejected, 0U);
+  EXPECT_TRUE(node.value_if()->shutdown().stopped);
+}
+
+TEST_F(M3aNodeTest, RejectsRelayedHelloAndCertificateSubstitution) {
+  LanConfiguration configuration;
+  configuration.connectivity_mode = ConnectivityMode::lan_only;
+  configuration.announcement_interval = std::chrono::milliseconds{100};
+  configuration.announcement_jitter = std::chrono::milliseconds{0};
+  configuration.presence_lease = std::chrono::milliseconds{2000};
+  configuration.announcement_rate_per_second = 100U;
+  configuration.per_source_announcement_rate = 100U;
+  auto victim_profile = initialized_profile("mitm-victim", "com.example.victim",
+                                            configuration);
+  auto peer_profile = initialized_profile("mitm-peer", "com.example.peer",
+                                          configuration);
+  ASSERT_TRUE(victim_profile && peer_profile);
+  auto victim = Node::create(node_config(*victim_profile.value_if(),
+                                         "com.example.victim"));
+  auto peer = Node::create(node_config(*peer_profile.value_if(),
+                                       "com.example.peer"));
+  ASSERT_TRUE(victim && peer);
+  if (joined_interface_count(victim.value_if()->snapshot()) == 0U ||
+      joined_interface_count(peer.value_if()->snapshot()) == 0U) {
+    (void)victim.value_if()->shutdown();
+    (void)peer.value_if()->shutdown();
+    if (environment_enabled("HEYAKI_REQUIRE_LAN_INTERFACES")) {
+      FAIL() << "Required LAN interface is unavailable";
+    }
+    GTEST_SKIP() << "No multicast-capable non-loopback interface";
+  }
+  ASSERT_TRUE(wait_until(
+      [&] { return victim.value_if()->endpoints().size() == 1U; },
+      std::chrono::seconds{4}));
+
+  const auto victim_snapshot = victim.value_if()->snapshot();
+  const auto peer_snapshot = peer.value_if()->snapshot();
+  const auto peer_hint = victim.value_if()->endpoints().front();
+  ASSERT_TRUE(peer_hint.lan.has_value());
+  auto peer_identity = peer_profile.value_if()->load_identity();
+  ASSERT_TRUE(peer_identity) << peer_identity.error_if()->safe_detail();
+  EXPECT_TRUE(peer.value_if()->shutdown().stopped);
+
+  boost::asio::ssl::context client_context{boost::asio::ssl::context::tls_client};
+  const auto substitute_certificate =
+      configure_test_tls_certificate(client_context);
+  ASSERT_TRUE(substitute_certificate)
+      << substitute_certificate.error_if()->safe_detail();
+
+  LanHello relayed;
+  relayed.role = LanHelloRole::initiator;
+  relayed.sender_endpoint_id = peer_snapshot.endpoint_id;
+  relayed.peer_device_id = victim_snapshot.device_id;
+  relayed.peer_endpoint_id = victim_snapshot.endpoint_id;
+  relayed.initiator_nonce[0] = std::byte{0x11U};
+  relayed.sender_tls_certificate_sha256 =
+      peer_snapshot.tls.certificate_sha256;
+  relayed.observed_peer_tls_certificate_sha256 =
+      victim_snapshot.tls.certificate_sha256;
+  relayed.sender_boot_nonce = peer_hint.lan->boot_nonce;
+  relayed.expiry = std::chrono::milliseconds{1000};
+  ASSERT_TRUE(sign_lan_hello(relayed, *peer_identity.value_if()));
+  ASSERT_TRUE(send_test_hello(client_context, victim_snapshot.tls.listen_port,
+                              relayed));
+  ASSERT_TRUE(wait_until(
+      [&] { return victim.value_if()->snapshot().tls.hello_rejected >= 1U; },
+      std::chrono::seconds{2}));
+
+  LanHello substituted = relayed;
+  substituted.initiator_nonce[0] = std::byte{0x12U};
+  substituted.sender_tls_certificate_sha256 =
+      substitute_certificate.value_if()->fingerprint;
+  substituted.observed_peer_tls_certificate_sha256[0] ^= std::byte{0x01U};
+  ASSERT_TRUE(sign_lan_hello(substituted, *peer_identity.value_if()));
+  ASSERT_TRUE(send_test_hello(client_context, victim_snapshot.tls.listen_port,
+                              substituted));
+  ASSERT_TRUE(wait_until(
+      [&] { return victim.value_if()->snapshot().tls.hello_rejected >= 2U; },
+      std::chrono::seconds{2}));
+  EXPECT_EQ(victim.value_if()->snapshot().tls.authenticated_connections, 0U);
+  EXPECT_TRUE(victim.value_if()->shutdown().stopped);
 }
 
 TEST_F(M3aNodeTest, AuthenticatesLanTlsAndForwardsBoundedControlMessages) {
@@ -600,6 +1128,9 @@ TEST_F(M3aNodeTest, AuthenticatesLanTlsAndForwardsBoundedControlMessages) {
       second.value_if()->snapshot().interfaces.empty()) {
     (void)first.value_if()->shutdown();
     (void)second.value_if()->shutdown();
+    if (environment_enabled("HEYAKI_REQUIRE_LAN_INTERFACES")) {
+      FAIL() << "Required LAN interface is unavailable";
+    }
     GTEST_SKIP() << "No multicast-capable non-loopback interface";
   }
 
@@ -741,6 +1272,9 @@ TEST_F(M3aNodeTest, TrustedAutoConnectUsesOnlyTheTupleOfferOwner) {
                    [](const auto& interface) { return interface.joined; })) {
     (void)first.value_if()->shutdown();
     (void)second.value_if()->shutdown();
+    if (environment_enabled("HEYAKI_REQUIRE_LAN_INTERFACES")) {
+      FAIL() << "Required LAN interface is unavailable";
+    }
     GTEST_SKIP() << "No multicast-capable non-loopback interface";
   }
 
@@ -784,6 +1318,79 @@ TEST_F(M3aNodeTest, TrustedAutoConnectUsesOnlyTheTupleOfferOwner) {
   EXPECT_TRUE(second.value_if()->shutdown().stopped);
 }
 
+TEST_F(M3aNodeTest, RepeatedConnectCloseRemainsBounded) {
+  LanConfiguration configuration;
+  configuration.connectivity_mode = ConnectivityMode::lan_only;
+  configuration.announcement_interval = std::chrono::milliseconds{50};
+  configuration.announcement_jitter = std::chrono::milliseconds{0};
+  configuration.presence_lease = std::chrono::milliseconds{1000};
+  configuration.interface_refresh_interval = std::chrono::seconds{5};
+  configuration.diagnostic_capacity = 8U;
+  configuration.provisional_connection_capacity = 8U;
+  configuration.per_source_provisional_capacity = 8U;
+  configuration.provisional_accept_rate_per_second = 100U;
+  configuration.per_source_provisional_rate = 100U;
+  configuration.announcement_rate_per_second = 100U;
+  configuration.per_source_announcement_rate = 100U;
+  auto first_profile = initialized_profile("stress-first", "com.example.stress.first",
+                                           configuration);
+  auto second_profile = initialized_profile("stress-second", "com.example.stress.second",
+                                            configuration);
+  ASSERT_TRUE(first_profile && second_profile);
+  auto first = Node::create(node_config(*first_profile.value_if(),
+                                        "com.example.stress.first"));
+  auto second = Node::create(node_config(*second_profile.value_if(),
+                                         "com.example.stress.second"));
+  ASSERT_TRUE(first && second);
+  if (joined_interface_count(first.value_if()->snapshot()) == 0U ||
+      joined_interface_count(second.value_if()->snapshot()) == 0U) {
+    (void)first.value_if()->shutdown();
+    (void)second.value_if()->shutdown();
+    if (environment_enabled("HEYAKI_REQUIRE_LAN_INTERFACES")) {
+      FAIL() << "Required LAN interface is unavailable";
+    }
+    GTEST_SKIP() << "No multicast-capable non-loopback interface";
+  }
+  ASSERT_TRUE(wait_until(
+      [&] {
+        return first.value_if()->endpoints().size() == 1U &&
+               second.value_if()->endpoints().size() == 1U;
+      },
+      std::chrono::seconds{4}));
+  const auto peer = first.value_if()->endpoints().front().key;
+  const DeviceEndpointKey local{
+      first.value_if()->snapshot().device_id,
+      first.value_if()->snapshot().endpoint_id};
+
+  for (std::size_t cycle = 0U; cycle < 12U; ++cycle) {
+    ASSERT_TRUE(first.value_if()->connect_lan(peer));
+    ASSERT_TRUE(wait_until(
+        [&] {
+          return has_authenticated_connection(*first.value_if(), peer) &&
+                 has_authenticated_connection(*second.value_if(), local);
+        },
+        std::chrono::seconds{2}));
+    ASSERT_TRUE(first.value_if()->close_lan(peer));
+    ASSERT_TRUE(wait_until(
+        [&] {
+          return !has_authenticated_connection(*first.value_if(), peer) &&
+                 !has_authenticated_connection(*second.value_if(), local);
+        },
+        std::chrono::seconds{2}));
+  }
+
+  const auto first_connections = first.value_if()->signaling_connections();
+  const auto second_connections = second.value_if()->signaling_connections();
+  EXPECT_LE(first_connections.size(), configuration.diagnostic_capacity);
+  EXPECT_LE(second_connections.size(), configuration.diagnostic_capacity);
+  EXPECT_EQ(first.value_if()->snapshot().tls.provisional_connections, 0U);
+  EXPECT_EQ(first.value_if()->snapshot().tls.authenticated_connections, 0U);
+  EXPECT_EQ(second.value_if()->snapshot().tls.provisional_connections, 0U);
+  EXPECT_EQ(second.value_if()->snapshot().tls.authenticated_connections, 0U);
+  EXPECT_TRUE(first.value_if()->shutdown().stopped);
+  EXPECT_TRUE(second.value_if()->shutdown().stopped);
+}
+
 TEST_F(M3aNodeTest, ShutdownDrainsPendingSignalingHandlerWithinBudget) {
   LanConfiguration configuration;
   configuration.connectivity_mode = ConnectivityMode::lan_only;
@@ -820,6 +1427,9 @@ TEST_F(M3aNodeTest, ShutdownDrainsPendingSignalingHandlerWithinBudget) {
                    [](const auto& interface) { return interface.joined; })) {
     (void)first.value_if()->shutdown();
     (void)second.value_if()->shutdown();
+    if (environment_enabled("HEYAKI_REQUIRE_LAN_INTERFACES")) {
+      FAIL() << "Required LAN interface is unavailable";
+    }
     GTEST_SKIP() << "No multicast-capable non-loopback interface";
   }
 

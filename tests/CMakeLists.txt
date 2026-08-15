@@ -316,8 +316,11 @@ heyaki_configure_target(heyaki_fuzz_harness)
 
 add_executable(heyaki_fuzz_smoke
   fuzz/fuzz_smoke.cpp
+  fuzz/lan_state_fuzz.cpp
   $<TARGET_OBJECTS:heyaki_fuzz_harness>)
-target_link_libraries(heyaki_fuzz_smoke PRIVATE heyaki::core heyaki_protocol_lite)
+target_link_libraries(heyaki_fuzz_smoke PRIVATE
+  heyaki::client
+  heyaki_protocol_lite)
 target_include_directories(heyaki_fuzz_smoke PRIVATE
   "${HEYAKI_TEST_GENERATED_DIR}"
   "${CMAKE_CURRENT_SOURCE_DIR}/fuzz")
@@ -365,6 +368,16 @@ if(HEYAKI_BUILD_FUZZERS)
   target_compile_options(heyaki_protobuf_parser_fuzzer PRIVATE -fsanitize=fuzzer)
   target_link_options(heyaki_protobuf_parser_fuzzer PRIVATE -fsanitize=fuzzer)
   heyaki_configure_target(heyaki_protobuf_parser_fuzzer)
+
+  add_executable(heyaki_lan_state_fuzzer
+    fuzz/lan_state_fuzzer_entry.cpp
+    fuzz/lan_state_fuzz.cpp)
+  target_link_libraries(heyaki_lan_state_fuzzer PRIVATE heyaki::client)
+  target_include_directories(heyaki_lan_state_fuzzer PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/fuzz")
+  target_compile_options(heyaki_lan_state_fuzzer PRIVATE -fsanitize=fuzzer)
+  target_link_options(heyaki_lan_state_fuzzer PRIVATE -fsanitize=fuzzer)
+  heyaki_configure_target(heyaki_lan_state_fuzzer)
 endif()
 
 add_test(
@@ -417,10 +430,12 @@ endif()
 add_test(
   NAME heyaki_network_harness
   COMMAND "${HEYAKI_BASH_EXECUTABLE}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/network/run_harness.sh")
+    "${CMAKE_CURRENT_SOURCE_DIR}/network/run_harness.sh"
+    "$<TARGET_FILE:heyaki_m3a_lan_tests>")
 set_tests_properties(heyaki_network_harness PROPERTIES
-  LABELS "network"
-  SKIP_RETURN_CODE 77)
+  LABELS "network;lan;security"
+  SKIP_RETURN_CODE 77
+  TIMEOUT 120)
 
 add_test(
   NAME heyaki_dependency_lock_crlf

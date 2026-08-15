@@ -1,6 +1,6 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：M3A-01～18 实现验收完成，跨平台与隔离网络退出矩阵待补跑；M3B 可并行推进
+> - 状态：M3A-01～18 实现验收完成，Linux 隔离网络与安全矩阵已补强；Windows、libFuzzer 与长期压力门禁待远端确认；M3B 可并行推进
 > - 日期：2026-08-16
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)、[局域网无服务器连接设计](../design/lan-serverless-connectivity.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
@@ -339,15 +339,27 @@ Debug 全量构建及 CTest 22/22、ASan 定向 5/5、UBSan 定向 4/4 通过；
 但当前 Linux 宿主以 `ThreadSanitizer: unexpected memory mapping` 被测试包装器明确标记为不支持。
 本机测试覆盖双 Node 无 relay 发现、TLS 身份绑定、认证前 signed signaling 拒绝、validator 拒绝、
 同源 provisional TLS 限速与握手超时、trusted auto-connect、重复连接仲裁和有预算关闭。以下
-跨平台、隔离网络、双 TLS MITM 与长期压力退出矩阵仍保持未勾选。
+网络、安全、跨平台和压力矩阵的后续补强与剩余门禁记录如下。
 
 ### M3A 测试与退出条件
 
 - [ ] golden vectors、Protobuf parser 和状态机 fuzz 覆盖 LAN presence/hello 的截断、超大、未知字段、签名冲突、boot/sequence replay 和 capacity-full。
-- [ ] 安全测试覆盖 multicast 洪泛/伪造、TLS slowloris/洪泛、每 IP 限速、证书指纹替换、双 TLS MITM/hello relay、版本降级和未认证 SDP/candidate。
+- [x] 安全测试覆盖 multicast 洪泛/伪造、TLS slowloris/洪泛、每 IP 限速、证书指纹替换、双 TLS MITM/hello relay、版本降级和未认证 SDP/candidate。
 - [ ] Linux/Windows 可在 relay/STUN/TURN 全部未运行时双向发现；IPv4-only、IPv6 link-local、双栈、多网卡、接口切换和同 DeviceId 多 endpoint 均有稳定结果。
 - [ ] multicast blocked、Windows firewall/public network、AP isolation 模拟进入可解释失败，不挂起、不声称 LAN ready。
 - [ ] 发现/过期/交叉连接/取消/关闭压力下，socket、TLS、timer、operation、directory/replay cache 和 executor worker 无泄漏或无界增长。
+
+M3A 网络与安全矩阵补强记录（2026-08-16）：新增 LAN directory replay/capacity 状态机 fuzz
+target 与 corpus seed，状态机本体由 libFuzzer target 直接编译以保留 coverage instrumentation；
+本机缺少 Clang/libFuzzer，真实短跑等待远端 Clang Debug CI。Linux user/network namespace harness
+现强制执行 IPv4-only、IPv6 link-local、双栈四接口、接口 down/up 刷新及 nftables 阻断
+multicast 场景，覆盖无 relay 的发现、TLS/信令、同 DeviceId 多 endpoint、12 轮连接关闭及有预算
+失败。安全测试补充伪造 multicast 洪泛容量约束、hello relay 与 TLS 双证书指纹替换拒绝；既有
+测试继续覆盖 TLS provisional connection 容量、每源限速、握手超时、版本降级和认证前 signed
+signaling 拒绝。GCC Debug 全量 CTest 22/22、强制 network harness、ASan 定向 3/3、UBSan
+定向 3/3 通过；TSAN 目标构建通过，但宿主仍因 `ThreadSanitizer: unexpected memory mapping`
+明确 skip。Windows Debug/Release、Windows firewall/public network、AP isolation 与长期外部压力
+尚无本轮证据，因此对应退出条件继续保持未勾选。
 
 ### 6.4 M3B：Relay 控制面
 

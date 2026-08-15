@@ -46,6 +46,8 @@ jobs:
       - name: Build pinned libdatachannel baseline
         run: cmake --build build-libdatachannel --target datachannel-static --parallel 2
       - name: Test
+        env:
+          HEYAKI_REQUIRE_NETWORK_HARNESS: "1"
         run: ctest --test-dir build --output-on-failure --no-tests=error
       - name: Run protocol libFuzzer targets
         if: matrix.compiler == 'clang' && matrix.build_type == 'Debug'
@@ -53,6 +55,7 @@ jobs:
           build/tests/heyaki_frame_parser_fuzzer -runs=100 build/fuzz-corpus/frame-parser
           build/tests/heyaki_protocol_state_fuzzer -runs=100 build/fuzz-corpus/protocol-state
           build/tests/heyaki_protobuf_parser_fuzzer -runs=100 build/fuzz-corpus/protobuf-parser
+          build/tests/heyaki_lan_state_fuzzer -runs=100 build/fuzz-corpus/lan-directory-state
       - name: Verify all dependency groups offline
         run: scripts/fetch_third_party.sh --check --all
 
@@ -102,6 +105,8 @@ jobs:
       - name: Build pinned libdatachannel baseline
         run: cmake --build build-libdatachannel --target datachannel-static --config Release --parallel 2
       - name: Test
+        env:
+          HEYAKI_REQUIRE_LAN_INTERFACES: "1"
         run: ctest --test-dir build -C ${{ matrix.build_type }} --output-on-failure --no-tests=error
 
   sanitizer:
