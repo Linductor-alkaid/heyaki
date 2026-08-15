@@ -151,20 +151,22 @@ class EndpointDirectory::Impl {
     return true;
   }
 
-  bool is_retired_boot(const ReplayState& replay, const LanBootNonce& boot) const noexcept {
-    for (std::size_t index = 0U; index < replay.retired_count; ++index) {
-      if (replay.retired_boots[index] == boot) {
+  bool is_retired_boot(const ReplayState& replay_state,
+                       const LanBootNonce& boot) const noexcept {
+    for (std::size_t index = 0U; index < replay_state.retired_count; ++index) {
+      if (replay_state.retired_boots[index] == boot) {
         return true;
       }
     }
     return false;
   }
 
-  bool retire_current_boot(ReplayState& replay) {
-    if (replay.retired_count == replay.retired_boots.size()) {
+  bool retire_current_boot(ReplayState& replay_state) {
+    if (replay_state.retired_count == replay_state.retired_boots.size()) {
       return false;
     }
-    replay.retired_boots[replay.retired_count++] = replay.current_boot;
+    replay_state.retired_boots[replay_state.retired_count++] =
+        replay_state.current_boot;
     return true;
   }
 
