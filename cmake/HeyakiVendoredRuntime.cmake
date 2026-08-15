@@ -70,7 +70,9 @@ function(heyaki_target_use_pinned_boost_asio target_name)
   target_compile_definitions(${target_name} PRIVATE
     BOOST_ERROR_CODE_HEADER_ONLY
     BOOST_SYSTEM_NO_DEPRECATED
-    BOOST_ASIO_DISABLE_BOOST_DATE_TIME)
+    BOOST_ASIO_DISABLE_BOOST_DATE_TIME
+    BOOST_ASIO_DISABLE_BOOST_ALIGN
+    "$<$<PLATFORM_ID:Windows>:_WIN32_WINNT=0x0A00>")
   target_link_libraries(${target_name} PRIVATE Threads::Threads)
 endfunction()
 

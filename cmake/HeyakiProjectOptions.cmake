@@ -22,6 +22,8 @@ function(heyaki_configure_target target_name)
       _CRT_SECURE_NO_WARNINGS)
     target_compile_options(${target_name} PRIVATE
       /W4
+      # Executor communication objects intentionally use cache-line alignment.
+      /wd4324
       /utf-8
       "$<$<COMPILE_LANGUAGE:CXX>:/permissive->"
       "$<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>")
