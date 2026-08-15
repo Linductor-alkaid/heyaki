@@ -1678,8 +1678,19 @@ TEST_F(M3aNodeTest, LanLifecyclePressureRemainsBounded) {
                   configuration.replay_capacity);
         EXPECT_LE(snapshot.directory.source_rate_entries,
                   configuration.per_source_presence_capacity);
-        EXPECT_LE(node->signaling_connections().size(),
-                  configuration.diagnostic_capacity);
+        const auto signaling_connections = node->signaling_connections();
+        const auto finished_signaling = static_cast<std::size_t>(std::count_if(
+            signaling_connections.begin(), signaling_connections.end(),
+            [](const LanSignalingConnectionSnapshot& connection) {
+              return connection.state == LanSignalingConnectionState::closed ||
+                     connection.state == LanSignalingConnectionState::failed;
+            }));
+        EXPECT_LE(finished_signaling, configuration.diagnostic_capacity);
+        EXPECT_LE(signaling_connections.size() - finished_signaling,
+                  configuration.provisional_connection_capacity);
+        EXPECT_LE(signaling_connections.size(),
+                  configuration.diagnostic_capacity +
+                      configuration.provisional_connection_capacity);
       }
 
       const auto runtime_snapshot = runtime.value_if()->snapshot();
