@@ -182,7 +182,7 @@ std::filesystem::path parent_directory_for(const std::filesystem::path& path) {
 
 Result<void> ensure_private_directory(const std::filesystem::path& path) {
   std::error_code error;
-  const bool existed = std::filesystem::exists(path, error);
+  [[maybe_unused]] const bool existed = std::filesystem::exists(path, error);
   if (error) {
     return Result<void>::failure(filesystem_error("profile_directory_stat_failed", error));
   }
@@ -773,7 +773,7 @@ Result<sqlite3*> open_database(const std::filesystem::path& path, bool create,
     return Result<sqlite3*>::failure(error);
   }
   const auto timeout_count = std::clamp<std::int64_t>(busy_timeout.count(), 0,
-                                                       std::numeric_limits<int>::max());
+                                                       (std::numeric_limits<int>::max)());
   sqlite3_extended_result_codes(database, 1);
   sqlite3_busy_timeout(database, static_cast<int>(timeout_count));
   const auto configured = execute(

@@ -16,6 +16,10 @@ endif()
 
 function(heyaki_configure_target target_name)
   if(MSVC)
+    target_compile_definitions(${target_name} PRIVATE
+      NOMINMAX
+      WIN32_LEAN_AND_MEAN
+      _CRT_SECURE_NO_WARNINGS)
     target_compile_options(${target_name} PRIVATE
       /W4
       /utf-8

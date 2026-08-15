@@ -102,7 +102,7 @@ std::string random_token() {
 
 Result<void> ensure_private_directory(const std::filesystem::path& path) {
   std::error_code error;
-  const bool existed = std::filesystem::exists(path, error);
+  [[maybe_unused]] const bool existed = std::filesystem::exists(path, error);
   if (error) {
     return Result<void>::failure(storage_error("secret_directory_stat_failed", error));
   }
