@@ -13,6 +13,7 @@ boost-system|https://github.com/boostorg/system.git|boost-1.88.0|7a49a5d80d08a2a
 boost-config|https://github.com/boostorg/config.git|boost-1.88.0|4e9d5a3a95418d9ca623d38f5c772d485c2c2baf|false|runtime
 boost-assert|https://github.com/boostorg/assert.git|boost-1.88.0|5dcb2af5213ae132b7531e45e7f93258cc33ffd8|false|runtime
 boost-throw_exception|https://github.com/boostorg/throw_exception.git|boost-1.88.0|f3d4d55f52894fda75ef2915dc122e3133b97b45|false|runtime
+boost-winapi|https://github.com/boostorg/winapi.git|boost-1.88.0|ea553ab4d2e4cba1448d23a542993692c9d385f7|false|runtime
 libdatachannel|https://github.com/paullouisageneau/libdatachannel.git|v0.23.2|9e6a13abbb6846c003d817d0387b6706466e2b03|true|runtime
 libsodium|https://github.com/jedisct1/libsodium.git|1.0.20-RELEASE|9511c982fb1d046470a8b42aa36556cdb7da15de|false|runtime
 protobuf|https://github.com/protocolbuffers/protobuf.git|v31.1|74211c0dfc2777318ab53c2cd2c317a2ef9012de|true|runtime
