@@ -329,8 +329,19 @@ void render_node(std::string_view profile_name, const heyaki::Node& node,
     std::cout << "  none\n";
   }
   for (const auto& interface : snapshot.interfaces) {
-    std::cout << "  " << (interface.joined ? "ready " : "failed") << ' '
-              << interface.name << ' ' << interface.address << " if=" << interface.index;
+    std::string_view status = "failed";
+    if (interface.joined && !snapshot.discoverable) {
+      status = "joined";
+    } else if (interface.multicast_verified) {
+      status = "ready ";
+    } else if (interface.joined &&
+               snapshot.lan_state == heyaki::LanReadinessState::starting) {
+      status = "probe ";
+    } else if (interface.joined) {
+      status = "blocked";
+    }
+    std::cout << "  " << status << ' ' << interface.name << ' '
+              << interface.address << " if=" << interface.index;
     if (interface.error) {
       std::cout << "  ";
       print_error(*interface.error);

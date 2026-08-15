@@ -99,6 +99,12 @@ struct RuntimeSnapshot {
   std::uint64_t executor_submit_rejected_count{};
   std::uint64_t executor_task_exception_count{};
   std::uint64_t executor_wait_timeout_count{};
+  std::size_t executor_running_backend_count{};
+  std::size_t executor_stopping_backend_count{};
+  std::size_t executor_blocking_io_count{};
+  std::size_t executor_active_task_count{};
+  std::size_t executor_queued_task_count{};
+  bool executor_snapshot_partial{false};
   bool worker_ready{false};
   bool worker_running{false};
 };

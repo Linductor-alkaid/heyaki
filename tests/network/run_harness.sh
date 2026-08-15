@@ -89,7 +89,7 @@ ip addr add 192.0.2.2/24 dev hyb
 ip link set hya up
 ip link set hyb up
 run_m3a ipv4-only \
-  'M3aNodeTest.TwoLanNodesDiscoverEachOtherWithoutRelay:M3aNodeTest.AuthenticatesLanTlsAndForwardsBoundedControlMessages:M3aNodeTest.ThreeEndpointsIncludeTwoFromTheSameDevice:M3aNodeTest.RepeatedConnectCloseRemainsBounded:M3aNodeTest.RejectsForgedMulticastFloodWithinBounds'
+  'M3aNodeTest.TwoLanNodesDiscoverEachOtherWithoutRelay:M3aNodeTest.AuthenticatesLanTlsAndForwardsBoundedControlMessages:M3aNodeTest.ThreeEndpointsIncludeTwoFromTheSameDevice:M3aNodeTest.RepeatedConnectCloseRemainsBounded:M3aNodeTest.LanLifecyclePressureRemainsBounded:M3aNodeTest.RejectsForgedMulticastFloodWithinBounds'
 
 delete_links
 create_pair hya hyb
@@ -126,5 +126,26 @@ run_m3a multicast-blocked \
 nft flush chain inet heyaki_test output
 
 delete_links
+create_pair hya hyb
+sysctl -qw net.ipv6.conf.hya.disable_ipv6=1
+sysctl -qw net.ipv6.conf.hyb.disable_ipv6=1
+ip addr add 192.0.2.1/24 dev hya
+ip addr add 192.0.2.2/24 dev hyb
+ip link set hya up
+ip link set hyb up
+nft add rule inet heyaki_test output oifname hya udp dport 49189 drop
+nft add rule inet heyaki_test output oifname hyb udp dport 49189 drop
+nft add rule inet heyaki_test output \
+  ip saddr 192.0.2.1 ip daddr 192.0.2.2 tcp dport 0-65535 drop
+nft add rule inet heyaki_test output \
+  ip saddr 192.0.2.2 ip daddr 192.0.2.1 tcp dport 0-65535 drop
+run_m3a ap-isolation \
+  'M3aNodeTest.ApIsolationFailsDiscoveryWithinBudget' \
+  HEYAKI_EXPECT_AP_ISOLATION=1 \
+  HEYAKI_AP_ISOLATION_FIRST_INTERFACE=hya \
+  HEYAKI_AP_ISOLATION_SECOND_INTERFACE=hyb
+nft flush chain inet heyaki_test output
+
+delete_links
 nft delete table inet heyaki_test
-printf 'M3A network harness passed IPv4, IPv6, multi-interface, switch, and blocked multicast scenarios\n'
+printf 'M3A network harness passed IPv4, IPv6, multi-interface, switch, blocked multicast, and AP isolation scenarios\n'

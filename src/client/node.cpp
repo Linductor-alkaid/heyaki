@@ -65,6 +65,8 @@ using boost::asio::ip::tcp;
 using boost::asio::ip::udp;
 using SteadyTime = std::chrono::steady_clock::time_point;
 
+constexpr auto multicast_readiness_timeout = std::chrono::milliseconds{1500};
+
 struct InterfaceBinding {
   std::string name;
   std::uint32_t index{};
@@ -99,6 +101,11 @@ Error tls_error(ErrorCode code, const char* detail,
                 const boost::system::error_code& error = {}) {
   return {code, "lan_tls", detail,
           error ? std::optional<std::int64_t>{error.value()} : std::nullopt};
+}
+
+bool is_multicast_readiness_error(const Error& error) {
+  return error.safe_detail() == "presence_send_failed" ||
+         error.safe_detail() == "multicast_probe_timed_out";
 }
 
 std::uint64_t unix_milliseconds_now() {
@@ -386,6 +393,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     udp::endpoint multicast_endpoint;
     udp::endpoint sender_endpoint;
     std::array<std::byte, max_lan_datagram_bytes + 1U> receive_buffer{};
+    bool multicast_verified{false};
   };
 
   struct ConnectCommand {
@@ -727,6 +735,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         identity(std::move(identity)), endpoint_id(endpoint_id), boot_nonce(make_boot_nonce()),
         directory(std::move(directory)), strand(boost::asio::make_strand(std::move(executor))),
         announce_timer(strand), expiry_timer(strand), interface_timer(strand),
+        readiness_timer(strand),
         scan_results(scan_channel_options()), snapshots(NodeSnapshot{}, "heyaki-node-snapshot"),
         endpoint_snapshots(std::vector<EndpointDirectoryEntrySnapshot>{},
                            "heyaki-endpoint-snapshot"),
@@ -814,13 +823,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
             discovery_error(ErrorCode::transport, "lan_no_ready_interface"));
       }
     } else {
-      const bool degraded = std::any_of(
-          state.interfaces.begin(), state.interfaces.end(),
-          [](const LanInterfaceSnapshot& interface) { return !interface.joined; });
-      update_snapshot([&](NodeSnapshot& snapshot) {
-        snapshot.lan_state = degraded ? LanReadinessState::degraded
-                                      : LanReadinessState::ready;
-      });
+      update_lan_readiness();
     }
     return Result<void>::success();
   }
@@ -833,9 +836,11 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     for (const auto& socket : discovery_sockets) {
       start_receive(socket);
     }
+    arm_multicast_readiness_timeout();
     announce_now();
     schedule_expiry();
     schedule_interface_refresh();
+    publish_resource_snapshot();
   }
 
   Result<void> initialize_tls() {
@@ -910,6 +915,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
                                     .family = binding.family,
                                     .address = binding.address,
                                     .joined = false,
+                                    .multicast_verified = false,
                                     .error = std::nullopt};
       auto state = std::make_shared<DiscoverySocket>(strand, binding);
       boost::system::error_code error;
@@ -971,6 +977,10 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       interfaces.push_back(std::move(snapshot));
     }
     update_snapshot([&](NodeSnapshot& snapshot) { snapshot.interfaces = std::move(interfaces); });
+    peak_discovery_sockets =
+        std::max(peak_discovery_sockets, discovery_sockets.size());
+    multicast_probe_timed_out = false;
+    publish_resource_snapshot();
   }
 
   void close_discovery_sockets() {
@@ -980,9 +990,145 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       socket->socket.close(ignored);
     }
     discovery_sockets.clear();
+    publish_resource_snapshot();
   }
 
   std::size_t joined_socket_count() const noexcept { return discovery_sockets.size(); }
+
+  bool all_multicast_sockets_verified() const noexcept {
+    return std::all_of(discovery_sockets.begin(), discovery_sockets.end(),
+                       [](const auto& socket) {
+                         return socket->multicast_verified;
+                       });
+  }
+
+  static bool same_interface(const LanInterfaceSnapshot& snapshot,
+                             const InterfaceBinding& binding) noexcept {
+    return snapshot.name == binding.name && snapshot.index == binding.index &&
+           snapshot.family == binding.family && snapshot.address == binding.address;
+  }
+
+  static bool same_network_interface(const InterfaceBinding& left,
+                                     const InterfaceBinding& right) noexcept {
+    return left.index == right.index && left.family == right.family;
+  }
+
+  void update_lan_readiness() {
+    if (producers_stopped) {
+      return;
+    }
+    update_snapshot([&](NodeSnapshot& snapshot) {
+      if (!snapshot.lan_enabled) {
+        snapshot.lan_state = LanReadinessState::disabled;
+        return;
+      }
+      if (!snapshot.tls.listener_ready || discovery_sockets.empty()) {
+        snapshot.lan_state = LanReadinessState::failed;
+        if (!snapshot.last_error) {
+          snapshot.last_error = discovery_error(ErrorCode::transport,
+                                                "lan_no_ready_interface");
+        }
+        return;
+      }
+      const bool join_degraded = std::any_of(
+          snapshot.interfaces.begin(), snapshot.interfaces.end(),
+          [](const LanInterfaceSnapshot& interface) { return !interface.joined; });
+      if (lan.discoverable && !all_multicast_sockets_verified()) {
+        snapshot.lan_state = multicast_probe_timed_out
+                                 ? LanReadinessState::degraded
+                                 : LanReadinessState::starting;
+        if (multicast_probe_timed_out) {
+          snapshot.last_error = discovery_error(ErrorCode::transport,
+                                                "multicast_probe_timed_out");
+        }
+        return;
+      }
+      snapshot.lan_state = join_degraded ? LanReadinessState::degraded
+                                         : LanReadinessState::ready;
+      if (snapshot.last_error && is_multicast_readiness_error(*snapshot.last_error)) {
+        snapshot.last_error.reset();
+      }
+    });
+  }
+
+  void mark_multicast_verified(const std::shared_ptr<DiscoverySocket>& socket) {
+    if (socket->multicast_verified) {
+      return;
+    }
+    for (const auto& candidate : discovery_sockets) {
+      if (same_network_interface(candidate->binding, socket->binding)) {
+        candidate->multicast_verified = true;
+      }
+    }
+    update_snapshot([&](NodeSnapshot& snapshot) {
+      for (auto& interface : snapshot.interfaces) {
+        if (interface.index == socket->binding.index &&
+            interface.family == socket->binding.family) {
+          interface.multicast_verified = true;
+          if (interface.error && is_multicast_readiness_error(*interface.error)) {
+            interface.error.reset();
+          }
+        }
+      }
+    });
+    if (all_multicast_sockets_verified()) {
+      multicast_probe_timed_out = false;
+      readiness_timer_active = false;
+      try {
+        (void)readiness_timer.cancel();
+      } catch (...) {
+      }
+    }
+    update_lan_readiness();
+    publish_resource_snapshot();
+  }
+
+  void arm_multicast_readiness_timeout() {
+    readiness_timer_active = false;
+    try {
+      (void)readiness_timer.cancel();
+    } catch (...) {
+    }
+    multicast_probe_timed_out = false;
+    if (producers_stopped || !lan.discoverable || discovery_sockets.empty()) {
+      update_lan_readiness();
+      publish_resource_snapshot();
+      return;
+    }
+    readiness_timer_active = true;
+    readiness_timer.expires_after(multicast_readiness_timeout);
+    auto weak = weak_from_this();
+    readiness_timer.async_wait([weak](const boost::system::error_code& error) {
+      auto self = weak.lock();
+      if (!self) {
+        return;
+      }
+      self->readiness_timer_active = false;
+      if (!error && !self->producers_stopped &&
+          !self->all_multicast_sockets_verified()) {
+        self->multicast_probe_timed_out = true;
+        const auto probe_error = discovery_error(ErrorCode::transport,
+                                                 "multicast_probe_timed_out");
+        self->update_snapshot([&](NodeSnapshot& snapshot) {
+          for (auto& interface : snapshot.interfaces) {
+            const auto socket = std::find_if(
+                self->discovery_sockets.begin(), self->discovery_sockets.end(),
+                [&](const auto& candidate) {
+                  return same_interface(interface, candidate->binding);
+                });
+            if (socket != self->discovery_sockets.end() &&
+                !(*socket)->multicast_verified) {
+              interface.error = probe_error;
+            }
+          }
+        });
+        self->update_lan_readiness();
+      }
+      self->publish_resource_snapshot();
+    });
+    update_lan_readiness();
+    publish_resource_snapshot();
+  }
 
   void start_receive(const std::shared_ptr<DiscoverySocket>& socket) {
     auto weak = weak_from_this();
@@ -1025,7 +1171,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return;
     }
     if (presence.value_if()->device_id == identity.device_id() &&
-        presence.value_if()->endpoint_id == endpoint_id) {
+        presence.value_if()->endpoint_id == endpoint_id &&
+        presence.value_if()->boot_nonce == boot_nonce) {
+      mark_multicast_verified(socket);
       return;
     }
     const bool trusted = trusted_devices.contains(presence.value_if()->device_id);
@@ -1077,12 +1225,24 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     for (const auto& socket : discovery_sockets) {
       socket->socket.async_send_to(
           boost::asio::buffer(*bytes), socket->multicast_endpoint,
-          [weak, bytes](const boost::system::error_code& error, std::size_t) {
+          [weak, bytes, socket](const boost::system::error_code& error, std::size_t) {
             if (auto self = weak.lock()) {
+              if (self->producers_stopped) {
+                return;
+              }
               if (error) {
                 self->update_snapshot([&](NodeSnapshot& snapshot) {
+                  snapshot.lan_state = LanReadinessState::degraded;
                   snapshot.last_error = discovery_error(ErrorCode::transport,
                                                         "presence_send_failed", error);
+                  const auto interface = std::find_if(
+                      snapshot.interfaces.begin(), snapshot.interfaces.end(),
+                      [&](const LanInterfaceSnapshot& candidate) {
+                        return same_interface(candidate, socket->binding);
+                      });
+                  if (interface != snapshot.interfaces.end()) {
+                    interface->error = snapshot.last_error;
+                  }
                 });
               } else {
                 self->update_snapshot(
@@ -1098,6 +1258,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     if (producers_stopped) {
       return;
     }
+    announce_timer_active = true;
     const auto jitter = static_cast<std::uint32_t>(lan.announcement_jitter.count());
     const auto random = jitter == 0U ? 0U : randombytes_uniform(jitter * 2U + 1U);
     const auto offset = static_cast<std::int64_t>(random) - static_cast<std::int64_t>(jitter);
@@ -1109,6 +1270,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         if (auto self = weak.lock()) {
           self->announce_now();
         }
+      } else if (auto self = weak.lock(); self && !self->producers_stopped) {
+        self->announce_timer_active = false;
+        self->publish_resource_snapshot();
       }
     });
   }
@@ -1117,6 +1281,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     if (producers_stopped) {
       return;
     }
+    expiry_timer_active = true;
     expiry_timer.expires_after(std::chrono::milliseconds{500});
     auto weak = weak_from_this();
     expiry_timer.async_wait([weak](const boost::system::error_code& error) {
@@ -1126,6 +1291,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
           self->publish_directory();
           self->schedule_expiry();
         }
+      } else if (auto self = weak.lock(); self && !self->producers_stopped) {
+        self->expiry_timer_active = false;
+        self->publish_resource_snapshot();
       }
     });
   }
@@ -1134,6 +1302,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     if (producers_stopped) {
       return;
     }
+    interface_timer_active = true;
     interface_timer.expires_after(lan.interface_refresh_interval);
     auto weak = weak_from_this();
     interface_timer.async_wait([weak](const boost::system::error_code& error) {
@@ -1141,6 +1310,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         if (auto self = weak.lock()) {
           self->request_interface_scan();
         }
+      } else if (auto self = weak.lock(); self && !self->producers_stopped) {
+        self->interface_timer_active = false;
+        self->publish_resource_snapshot();
       }
     });
   }
@@ -1150,6 +1322,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return Result<void>::success();
     }
     interface_scan_in_flight = true;
+    publish_resource_snapshot();
     auto weak = weak_from_this();
     auto dispatched = detail::RuntimeAccess::dispatch_general(
         *runtime, "heyaki-interface-scan", [weak] {
@@ -1177,6 +1350,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         snapshot.last_error = *dispatched.error_if();
       });
       schedule_interface_refresh();
+      publish_resource_snapshot();
       return dispatched;
     }
     return Result<void>::success();
@@ -1184,12 +1358,18 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
 
   void finish_interface_scan(bool admitted) {
     interface_scan_in_flight = false;
+    if (producers_stopped) {
+      publish_resource_snapshot();
+      maybe_stopped();
+      return;
+    }
     if (!admitted) {
       update_snapshot([](NodeSnapshot& snapshot) {
         snapshot.last_error = discovery_error(ErrorCode::resource_exhausted,
                                               "interface_scan_result_rejected");
       });
       schedule_interface_refresh();
+      publish_resource_snapshot();
       return;
     }
     InterfaceScanResult result;
@@ -1199,6 +1379,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
                                               "interface_scan_result_missing");
       });
       schedule_interface_refresh();
+      publish_resource_snapshot();
       return;
     }
     if (result.error) {
@@ -1218,17 +1399,12 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       for (const auto& socket : discovery_sockets) {
         start_receive(socket);
       }
+      arm_multicast_readiness_timeout();
       announce_now();
-      update_snapshot([&](NodeSnapshot& snapshot) {
-        snapshot.lan_state = discovery_sockets.empty() ? LanReadinessState::degraded
-                                                       : LanReadinessState::ready;
-        if (discovery_sockets.empty()) {
-          snapshot.last_error = discovery_error(ErrorCode::transport,
-                                                "lan_no_ready_interface");
-        }
-      });
+      update_lan_readiness();
     }
     schedule_interface_refresh();
+    publish_resource_snapshot();
   }
 
   void start_accept() {
@@ -1385,6 +1561,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     published.insert(published.end(), finished_signaling.begin(),
                      finished_signaling.end());
     signaling_snapshots.publish(std::move(published));
+    publish_resource_snapshot();
   }
 
   void connection_state_changed(const std::shared_ptr<TlsConnection>& connection,
@@ -1728,6 +1905,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   void dispatch_signaling_callback(const std::shared_ptr<TlsConnection>& connection,
                                    LanSignalingMessage message, bool outbound) {
     const auto connection_id = connection->id;
+    ++signaling_callbacks_in_flight;
+    publish_resource_snapshot();
     auto weak = weak_from_this();
     auto validator = signaling_validator;
     auto handler = signaling_handler;
@@ -1774,11 +1953,14 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
           const bool admitted = self->signaling_results.try_send(std::move(result));
           boost::asio::post(self->strand, [weak, connection_id, admitted] {
             if (auto current = weak.lock()) {
+              current->signaling_callback_completed();
               if (!admitted) {
-                current->signaling_failed(
-                    connection_id,
-                    tls_error(ErrorCode::resource_exhausted,
-                              "signaling_result_capacity_full"));
+                if (!current->peers_closed) {
+                  current->signaling_failed(
+                      connection_id,
+                      tls_error(ErrorCode::resource_exhausted,
+                                "signaling_result_capacity_full"));
+                }
                 return;
               }
               current->drain_signaling_results();
@@ -1786,8 +1968,17 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
           });
         });
     if (!dispatched) {
+      signaling_callback_completed();
       signaling_failed(connection_id, *dispatched.error_if());
     }
+  }
+
+  void signaling_callback_completed() {
+    if (signaling_callbacks_in_flight > 0U) {
+      --signaling_callbacks_in_flight;
+    }
+    publish_resource_snapshot();
+    maybe_stopped();
   }
 
   void drain_signaling_results() {
@@ -1921,6 +2112,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         }
       });
     }
+    publish_resource_snapshot();
   }
 
   void signaling_failed(std::uint64_t id, const Error& error) {
@@ -1968,12 +2160,53 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       std::forward<Writer>(writer)(snapshot.tls);
       refresh_tls_counts(snapshot.tls);
     });
+    peak_signaling_connections =
+        std::max(peak_signaling_connections, connections.size());
+    publish_resource_snapshot();
   }
 
   void publish_directory() {
     endpoint_snapshots.publish(directory.snapshot());
     update_snapshot([&](NodeSnapshot& snapshot) {
       snapshot.directory = directory.diagnostics();
+    });
+  }
+
+  void publish_resource_snapshot() {
+    const auto scan_stats = scan_results.stats();
+    const auto command_stats = signaling_commands.stats();
+    const auto result_stats = signaling_results.stats();
+    std::size_t pending_outbound = 0U;
+    for (const auto& [id, connection] : connections) {
+      (void)id;
+      pending_outbound += connection->outbound_messages.size();
+    }
+    const std::size_t active_timers =
+        static_cast<std::size_t>(announce_timer_active) +
+        static_cast<std::size_t>(expiry_timer_active) +
+        static_cast<std::size_t>(interface_timer_active) +
+        static_cast<std::size_t>(readiness_timer_active);
+    peak_active_timers = std::max(peak_active_timers, active_timers);
+    peak_signaling_connections =
+        std::max(peak_signaling_connections, connections.size());
+    update_snapshot([&](NodeSnapshot& snapshot) {
+      snapshot.resources = LanResourceSnapshot{
+          .discovery_sockets = discovery_sockets.size(),
+          .peak_discovery_sockets = peak_discovery_sockets,
+          .tls_listener_open = acceptor && acceptor->is_open(),
+          .active_timers = active_timers,
+          .peak_active_timers = peak_active_timers,
+          .signaling_connections = connections.size(),
+          .peak_signaling_connections = peak_signaling_connections,
+          .signaling_callbacks_in_flight = signaling_callbacks_in_flight,
+          .interface_scan_in_flight = interface_scan_in_flight,
+          .interface_scan_result_depth = scan_stats.current_depth,
+          .interface_scan_result_peak_depth = scan_stats.peak_depth,
+          .signaling_command_depth = command_stats.current_depth,
+          .signaling_command_peak_depth = command_stats.peak_depth,
+          .signaling_result_depth = result_stats.current_depth,
+          .signaling_result_peak_depth = result_stats.peak_depth,
+          .pending_outbound_messages = pending_outbound};
     });
   }
 
@@ -2023,10 +2256,15 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         if (auto self = weak.lock()) {
           if (stop_producers_stage) {
             self->stop_producers();
+            promise->set_value(Result<void>::success());
           } else {
             self->close_peers();
+            if (self->stopped.current_phase() >= 1U) {
+              promise->set_value(Result<void>::success());
+            } else {
+              self->shutdown_completions.push_back(promise);
+            }
           }
-          promise->set_value(Result<void>::success());
         } else {
           promise->set_value(Result<void>::success());
         }
@@ -2045,13 +2283,24 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     producers_stopped = true;
     scan_results.close();
     signaling_commands.close();
+    InterfaceScanResult discarded_scan;
+    while (scan_results.try_receive(discarded_scan)) {
+    }
+    SignalingCommand discarded_command;
+    while (signaling_commands.try_receive(discarded_command)) {
+    }
     boost::system::error_code ignored;
     try {
       (void)announce_timer.cancel();
       (void)expiry_timer.cancel();
       (void)interface_timer.cancel();
+      (void)readiness_timer.cancel();
     } catch (...) {
     }
+    announce_timer_active = false;
+    expiry_timer_active = false;
+    interface_timer_active = false;
+    readiness_timer_active = false;
     close_discovery_sockets();
     if (acceptor) {
       acceptor->cancel(ignored);
@@ -2061,6 +2310,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       snapshot.tls.listener_ready = false;
       snapshot.lan_state = LanReadinessState::stopped;
     });
+    publish_resource_snapshot();
     maybe_stopped();
   }
 
@@ -2070,6 +2320,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     }
     peers_closed = true;
     signaling_results.close();
+    SignalingCallbackResult discarded_result;
+    while (signaling_results.try_receive(discarded_result)) {
+    }
     std::vector<std::uint64_t> connection_ids;
     connection_ids.reserve(connections.size());
     for (const auto& [id, connection] : connections) {
@@ -2083,12 +2336,18 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       }
     }
     active_connections.clear();
+    publish_resource_snapshot();
     maybe_stopped();
   }
 
   void maybe_stopped() {
-    if (producers_stopped && peers_closed) {
+    if (producers_stopped && peers_closed && !interface_scan_in_flight &&
+        signaling_callbacks_in_flight == 0U) {
       (void)stopped.advance_to(1U);
+      for (const auto& completion : shutdown_completions) {
+        completion->set_value(Result<void>::success());
+      }
+      shutdown_completions.clear();
     }
   }
 
@@ -2151,6 +2410,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   boost::asio::steady_timer announce_timer;
   boost::asio::steady_timer expiry_timer;
   boost::asio::steady_timer interface_timer;
+  boost::asio::steady_timer readiness_timer;
   executor::comm::MpscChannel<InterfaceScanResult> scan_results;
   executor::comm::DoubleBuffer<NodeSnapshot> snapshots;
   executor::comm::DoubleBuffer<std::vector<EndpointDirectoryEntrySnapshot>> endpoint_snapshots;
@@ -2166,10 +2426,20 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   std::map<DeviceEndpointKey, std::uint64_t> auto_connect_connections;
   std::deque<LanSignalingConnectionSnapshot> finished_signaling;
   std::map<std::string, AcceptRate> accept_rates;
+  std::vector<std::shared_ptr<std::promise<Result<void>>>> shutdown_completions;
   SteadyTime global_accept_window{std::chrono::steady_clock::now()};
   std::size_t global_accept_count{};
   std::uint64_t next_connection_id{};
   std::uint64_t announcement_sequence{};
+  std::size_t peak_discovery_sockets{};
+  std::size_t peak_active_timers{};
+  std::size_t peak_signaling_connections{};
+  std::size_t signaling_callbacks_in_flight{};
+  bool announce_timer_active{false};
+  bool expiry_timer_active{false};
+  bool interface_timer_active{false};
+  bool readiness_timer_active{false};
+  bool multicast_probe_timed_out{false};
   bool interface_scan_in_flight{false};
   bool producers_stopped{false};
   bool peers_closed{false};
@@ -2369,6 +2639,7 @@ NodeShutdownReport Node::shutdown() {
   }
   report.stopped = static_cast<bool>(impl_->stopped.wait_for(1U, timeout));
   report.timed_out = !report.stopped;
+  report.final_resources = impl_->snapshots.load().value.resources;
   impl_.reset();
   return report;
 }

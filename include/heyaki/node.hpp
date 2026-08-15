@@ -35,6 +35,7 @@ struct LanInterfaceSnapshot {
   LanInterfaceFamily family{LanInterfaceFamily::ipv4};
   std::string address;
   bool joined{false};
+  bool multicast_verified{false};
   std::optional<Error> error;
 };
 
@@ -82,6 +83,25 @@ struct LanSignalingConnectionSnapshot {
   std::optional<Error> error;
 };
 
+struct LanResourceSnapshot {
+  std::size_t discovery_sockets{};
+  std::size_t peak_discovery_sockets{};
+  bool tls_listener_open{false};
+  std::size_t active_timers{};
+  std::size_t peak_active_timers{};
+  std::size_t signaling_connections{};
+  std::size_t peak_signaling_connections{};
+  std::size_t signaling_callbacks_in_flight{};
+  bool interface_scan_in_flight{false};
+  std::uint64_t interface_scan_result_depth{};
+  std::uint64_t interface_scan_result_peak_depth{};
+  std::uint64_t signaling_command_depth{};
+  std::uint64_t signaling_command_peak_depth{};
+  std::uint64_t signaling_result_depth{};
+  std::uint64_t signaling_result_peak_depth{};
+  std::size_t pending_outbound_messages{};
+};
+
 using LanSignalingValidator =
     std::function<Result<void>(const LanSignalingMessage& message)>;
 using LanSignalingHandler =
@@ -101,6 +121,7 @@ struct NodeSnapshot {
   std::uint64_t announcements_sent{};
   std::uint64_t datagrams_received{};
   std::uint64_t datagrams_rejected{};
+  LanResourceSnapshot resources;
   std::optional<Error> last_error;
 };
 
@@ -117,6 +138,7 @@ struct NodeConfig {
 struct NodeShutdownReport {
   bool stopped{false};
   bool timed_out{false};
+  LanResourceSnapshot final_resources;
 };
 
 class Node {

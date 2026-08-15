@@ -119,6 +119,19 @@ std::optional<std::size_t> environment_size(const char* name) {
   }
 }
 
+std::optional<std::string> environment_string(const char* name) {
+  const char* value = std::getenv(name);
+  if (value == nullptr || *value == '\0') {
+    return std::nullopt;
+  }
+  return std::string{value};
+}
+
+bool is_multicast_unavailable_detail(std::string_view detail) {
+  return detail == "presence_send_failed" ||
+         detail == "multicast_probe_timed_out";
+}
+
 std::size_t joined_interface_count(const NodeSnapshot& snapshot) {
   return static_cast<std::size_t>(std::count_if(
       snapshot.interfaces.begin(), snapshot.interfaces.end(),
@@ -257,9 +270,9 @@ Result<void> send_test_hello(boost::asio::ssl::context& context,
 
 NodeConfig node_config(ProfileStore& profile, std::string application_id,
                        LanSignalingValidator validator = {},
-                       LanSignalingHandler handler = {}) {
+                       LanSignalingHandler handler = {}, Runtime* runtime = nullptr) {
   return NodeConfig{.profile = &profile,
-                    .runtime = nullptr,
+                    .runtime = runtime,
                     .application_id = std::move(application_id),
                     .lan_override = std::nullopt,
                     .runtime_config = RuntimeConfig{},
@@ -895,8 +908,29 @@ TEST_F(M3aNodeTest, BlockedMulticastFailsPeerLookupAndShutdowns) {
   ASSERT_GT(joined_interface_count(first.value_if()->snapshot()), 0U);
   ASSERT_GT(joined_interface_count(second.value_if()->snapshot()), 0U);
 
-  executor::comm::PhaseGate observation_window{"m3a-blocked-window"};
-  EXPECT_FALSE(observation_window.wait_for(1U, std::chrono::milliseconds{500}));
+  ASSERT_TRUE(wait_until(
+      [&] {
+        return first.value_if()->snapshot().lan_state ==
+                   LanReadinessState::degraded &&
+               second.value_if()->snapshot().lan_state ==
+                   LanReadinessState::degraded;
+      },
+      std::chrono::seconds{4}));
+  const auto first_blocked = first.value_if()->snapshot();
+  const auto second_blocked = second.value_if()->snapshot();
+  const auto has_multicast_failure = [](const NodeSnapshot& snapshot) {
+    return snapshot.last_error &&
+           is_multicast_unavailable_detail(snapshot.last_error->safe_detail()) &&
+           std::any_of(snapshot.interfaces.begin(), snapshot.interfaces.end(),
+                       [](const LanInterfaceSnapshot& interface) {
+                         return interface.joined && !interface.multicast_verified &&
+                                interface.error &&
+                                is_multicast_unavailable_detail(
+                                    interface.error->safe_detail());
+                       });
+  };
+  EXPECT_TRUE(has_multicast_failure(first_blocked));
+  EXPECT_TRUE(has_multicast_failure(second_blocked));
   EXPECT_TRUE(first.value_if()->endpoints().empty());
   EXPECT_TRUE(second.value_if()->endpoints().empty());
   const auto unavailable = first.value_if()->connect_lan(
@@ -911,6 +945,84 @@ TEST_F(M3aNodeTest, BlockedMulticastFailsPeerLookupAndShutdowns) {
   const auto second_shutdown = second.value_if()->shutdown();
   EXPECT_TRUE(first_shutdown.stopped);
   EXPECT_TRUE(second_shutdown.stopped);
+  EXPECT_EQ(first_shutdown.final_resources.discovery_sockets, 0U);
+  EXPECT_FALSE(first_shutdown.final_resources.tls_listener_open);
+  EXPECT_EQ(first_shutdown.final_resources.active_timers, 0U);
+  EXPECT_EQ(first_shutdown.final_resources.signaling_connections, 0U);
+  EXPECT_EQ(second_shutdown.final_resources.discovery_sockets, 0U);
+  EXPECT_FALSE(second_shutdown.final_resources.tls_listener_open);
+  EXPECT_EQ(second_shutdown.final_resources.active_timers, 0U);
+  EXPECT_EQ(second_shutdown.final_resources.signaling_connections, 0U);
+  EXPECT_LT(std::chrono::steady_clock::now() - started,
+            std::chrono::seconds{2});
+}
+
+TEST_F(M3aNodeTest, ApIsolationFailsDiscoveryWithinBudget) {
+  if (!environment_enabled("HEYAKI_EXPECT_AP_ISOLATION")) {
+    GTEST_SKIP() << "AP isolation topology is not configured";
+  }
+  const auto first_interface =
+      environment_string("HEYAKI_AP_ISOLATION_FIRST_INTERFACE");
+  const auto second_interface =
+      environment_string("HEYAKI_AP_ISOLATION_SECOND_INTERFACE");
+  ASSERT_TRUE(first_interface && second_interface);
+
+  LanConfiguration first_configuration;
+  first_configuration.connectivity_mode = ConnectivityMode::lan_only;
+  first_configuration.interface_preferences = {*first_interface};
+  first_configuration.announcement_interval = std::chrono::milliseconds{50};
+  first_configuration.announcement_jitter = std::chrono::milliseconds{0};
+  first_configuration.presence_lease = std::chrono::milliseconds{1000};
+  first_configuration.announcement_rate_per_second = 100U;
+  first_configuration.per_source_announcement_rate = 100U;
+  auto second_configuration = first_configuration;
+  second_configuration.interface_preferences = {*second_interface};
+  auto first_profile = initialized_profile("isolated-first", "com.example.isolated.first",
+                                           first_configuration);
+  auto second_profile = initialized_profile("isolated-second", "com.example.isolated.second",
+                                            second_configuration);
+  ASSERT_TRUE(first_profile && second_profile);
+  auto first = Node::create(node_config(*first_profile.value_if(),
+                                        "com.example.isolated.first"));
+  auto second = Node::create(node_config(*second_profile.value_if(),
+                                         "com.example.isolated.second"));
+  ASSERT_TRUE(first && second);
+  ASSERT_EQ(joined_interface_count(first.value_if()->snapshot()), 1U);
+  ASSERT_EQ(joined_interface_count(second.value_if()->snapshot()), 1U);
+
+  ASSERT_TRUE(wait_until(
+      [&] {
+        return first.value_if()->snapshot().lan_state ==
+                   LanReadinessState::degraded &&
+               second.value_if()->snapshot().lan_state ==
+                   LanReadinessState::degraded;
+      },
+      std::chrono::seconds{4}));
+  EXPECT_TRUE(first.value_if()->endpoints().empty());
+  EXPECT_TRUE(second.value_if()->endpoints().empty());
+  ASSERT_TRUE(first.value_if()->snapshot().last_error);
+  ASSERT_TRUE(second.value_if()->snapshot().last_error);
+  EXPECT_TRUE(is_multicast_unavailable_detail(
+      first.value_if()->snapshot().last_error->safe_detail()));
+  EXPECT_TRUE(is_multicast_unavailable_detail(
+      second.value_if()->snapshot().last_error->safe_detail()));
+
+  const auto unavailable = first.value_if()->connect_lan(
+      DeviceEndpointKey{second.value_if()->snapshot().device_id,
+                        second.value_if()->snapshot().endpoint_id});
+  ASSERT_FALSE(unavailable);
+  EXPECT_EQ(unavailable.error_if()->code(), ErrorCode::endpoint_offline);
+  const auto started = std::chrono::steady_clock::now();
+  const auto first_shutdown = first.value_if()->shutdown();
+  const auto second_shutdown = second.value_if()->shutdown();
+  EXPECT_TRUE(first_shutdown.stopped);
+  EXPECT_TRUE(second_shutdown.stopped);
+  EXPECT_EQ(first_shutdown.final_resources.discovery_sockets, 0U);
+  EXPECT_FALSE(first_shutdown.final_resources.tls_listener_open);
+  EXPECT_EQ(first_shutdown.final_resources.active_timers, 0U);
+  EXPECT_EQ(second_shutdown.final_resources.discovery_sockets, 0U);
+  EXPECT_FALSE(second_shutdown.final_resources.tls_listener_open);
+  EXPECT_EQ(second_shutdown.final_resources.active_timers, 0U);
   EXPECT_LT(std::chrono::steady_clock::now() - started,
             std::chrono::seconds{2});
 }
@@ -1391,6 +1503,274 @@ TEST_F(M3aNodeTest, RepeatedConnectCloseRemainsBounded) {
   EXPECT_TRUE(second.value_if()->shutdown().stopped);
 }
 
+TEST_F(M3aNodeTest, LanLifecyclePressureRemainsBounded) {
+  const std::size_t cycles =
+      environment_size("HEYAKI_M3A_STRESS_CYCLES").value_or(8U);
+  const std::size_t epochs =
+      environment_size("HEYAKI_M3A_STRESS_EPOCHS").value_or(2U);
+  ASSERT_GE(cycles, 1U);
+  ASSERT_LE(cycles, 256U);
+  ASSERT_GE(epochs, 1U);
+  ASSERT_LE(epochs, 4U);
+
+  LanConfiguration configuration;
+  configuration.connectivity_mode = ConnectivityMode::lan_only;
+  configuration.announcement_interval = std::chrono::milliseconds{50};
+  configuration.announcement_jitter = std::chrono::milliseconds{0};
+  configuration.presence_lease = std::chrono::milliseconds{1000};
+  configuration.interface_refresh_interval = std::chrono::milliseconds{100};
+  configuration.diagnostic_capacity = 8U;
+  configuration.directory_capacity = 32U;
+  configuration.trusted_directory_reserve = 1U;
+  configuration.per_interface_directory_capacity = 32U;
+  configuration.per_source_presence_capacity = 32U;
+  configuration.unknown_identity_capacity = 31U;
+  configuration.replay_capacity = 32U;
+  configuration.provisional_connection_capacity = 8U;
+  configuration.per_source_provisional_capacity = 8U;
+  configuration.pending_signaling_capacity = 8U;
+  configuration.auto_connect_capacity = 8U;
+  configuration.provisional_accept_rate_per_second = 1000U;
+  configuration.per_source_provisional_rate = 1000U;
+  configuration.announcement_rate_per_second = 1000U;
+  configuration.per_source_announcement_rate = 1000U;
+
+  auto first_profile = initialized_profile("lifecycle-first",
+                                           "com.example.lifecycle.first",
+                                           configuration);
+  auto second_profile = initialized_profile("lifecycle-second",
+                                            "com.example.lifecycle.second",
+                                            configuration);
+  ASSERT_TRUE(first_profile && second_profile);
+
+  RuntimeConfig runtime_configuration;
+  runtime_configuration.shutdown_hook_capacity = 32U;
+  runtime_configuration.executor_queue_capacity = 64U;
+  runtime_configuration.executor_min_threads = 2U;
+  runtime_configuration.executor_max_threads = 4U;
+  runtime_configuration.worker_name = "heyaki-m3a-pressure";
+  auto runtime = Runtime::create_owned(runtime_configuration);
+  ASSERT_TRUE(runtime) << runtime.error_if()->safe_detail();
+
+  executor::comm::PhaseGate delivered{"m3a-pressure-delivered"};
+  auto first_handler = [](const LanSignalingMessage&) {
+    return Result<void>::success();
+  };
+  auto second_handler = [&](const LanSignalingMessage&) {
+    (void)delivered.advance_to(delivered.current_phase() + 1U);
+    return Result<void>::success();
+  };
+  auto first = Node::create(node_config(*first_profile.value_if(),
+                                        "com.example.lifecycle.first", {},
+                                        first_handler, runtime.value_if()));
+  ASSERT_TRUE(first) << first.error_if()->safe_detail();
+  if (joined_interface_count(first.value_if()->snapshot()) == 0U) {
+    (void)first.value_if()->shutdown();
+    (void)runtime.value_if()->shutdown();
+    if (environment_enabled("HEYAKI_REQUIRE_LAN_INTERFACES")) {
+      FAIL() << "Required LAN interface is unavailable";
+    }
+    GTEST_SKIP() << "No multicast-capable non-loopback interface";
+  }
+
+  std::optional<std::size_t> running_backend_count;
+  std::uint64_t expected_deliveries = 0U;
+  for (std::size_t epoch = 0U; epoch < epochs; ++epoch) {
+    auto second = Node::create(node_config(*second_profile.value_if(),
+                                           "com.example.lifecycle.second", {},
+                                           second_handler, runtime.value_if()));
+    ASSERT_TRUE(second) << second.error_if()->safe_detail();
+    ASSERT_GT(joined_interface_count(second.value_if()->snapshot()), 0U);
+    ASSERT_TRUE(wait_until(
+        [&] {
+          return first.value_if()->snapshot().lan_state ==
+                     LanReadinessState::ready &&
+                 second.value_if()->snapshot().lan_state ==
+                     LanReadinessState::ready &&
+                 first.value_if()->endpoints().size() == 1U &&
+                 second.value_if()->endpoints().size() == 1U;
+        },
+        std::chrono::seconds{4}));
+
+    const auto first_key = DeviceEndpointKey{
+        first.value_if()->snapshot().device_id,
+        first.value_if()->snapshot().endpoint_id};
+    const auto second_key = DeviceEndpointKey{
+        second.value_if()->snapshot().device_id,
+        second.value_if()->snapshot().endpoint_id};
+    const bool first_offer_owner = is_lan_offer_owner(first_key, second_key);
+    for (std::size_t cycle = 0U; cycle < cycles; ++cycle) {
+      const bool cross_connect = cycle % 4U <= 1U;
+      const bool cancel_while_connecting = cycle % 4U == 0U;
+      if (cross_connect || first_offer_owner) {
+        ASSERT_TRUE(first.value_if()->connect_lan(second_key));
+      }
+      if (cross_connect || !first_offer_owner) {
+        ASSERT_TRUE(second.value_if()->connect_lan(first_key));
+      }
+      if (cancel_while_connecting) {
+        ASSERT_TRUE(first.value_if()->close_lan(second_key));
+        ASSERT_TRUE(second.value_if()->close_lan(first_key));
+        executor::comm::PhaseGate cancellation_window{"m3a-pressure-cancel"};
+        (void)cancellation_window.wait_for(1U, std::chrono::milliseconds{10});
+        ASSERT_TRUE(first.value_if()->close_lan(second_key));
+        ASSERT_TRUE(second.value_if()->close_lan(first_key));
+      } else {
+        ASSERT_TRUE(wait_until(
+            [&] {
+              return has_authenticated_connection(*first.value_if(), second_key) &&
+                     has_authenticated_connection(*second.value_if(), first_key);
+            },
+            std::chrono::seconds{2}));
+        if (!cross_connect) {
+          ++expected_deliveries;
+          ASSERT_TRUE(first.value_if()->send_lan_signaling(
+              LanSignalingMessage{
+                  .peer = second_key,
+                  .kind = LanSignalingMessageKind::connect_request,
+                  .request_id = request_id(static_cast<std::uint8_t>(
+                      cycle % 255U + 1U)),
+                  .payload = {}}));
+          ASSERT_TRUE(delivered.wait_for(expected_deliveries,
+                                         std::chrono::seconds{2}));
+        }
+        ASSERT_TRUE(first.value_if()->close_lan(second_key));
+        ASSERT_TRUE(second.value_if()->close_lan(first_key));
+      }
+      ASSERT_TRUE(wait_until(
+          [&] {
+            const auto first_tls = first.value_if()->snapshot().tls;
+            const auto second_tls = second.value_if()->snapshot().tls;
+            return first_tls.provisional_connections == 0U &&
+                   first_tls.authenticated_connections == 0U &&
+                   second_tls.provisional_connections == 0U &&
+                   second_tls.authenticated_connections == 0U;
+          },
+          std::chrono::seconds{2}));
+
+      for (const auto* node : {first.value_if(), second.value_if()}) {
+        const auto snapshot = node->snapshot();
+        EXPECT_LE(snapshot.resources.discovery_sockets,
+                  configuration.interface_capacity);
+        EXPECT_LE(snapshot.resources.peak_discovery_sockets,
+                  configuration.interface_capacity);
+        EXPECT_LE(snapshot.resources.active_timers, 4U);
+        EXPECT_LE(snapshot.resources.peak_active_timers, 4U);
+        EXPECT_LE(snapshot.resources.signaling_connections,
+                  configuration.provisional_connection_capacity);
+        EXPECT_LE(snapshot.resources.peak_signaling_connections,
+                  configuration.provisional_connection_capacity);
+        EXPECT_LE(snapshot.resources.signaling_command_depth,
+                  configuration.pending_signaling_capacity);
+        EXPECT_LE(snapshot.resources.signaling_command_peak_depth,
+                  configuration.pending_signaling_capacity);
+        EXPECT_LE(snapshot.resources.signaling_result_depth,
+                  configuration.pending_signaling_capacity);
+        EXPECT_LE(snapshot.resources.signaling_result_peak_depth,
+                  configuration.pending_signaling_capacity);
+        EXPECT_LE(snapshot.resources.pending_outbound_messages,
+                  configuration.pending_signaling_capacity);
+        EXPECT_LE(snapshot.directory.current_entries,
+                  configuration.directory_capacity);
+        EXPECT_LE(snapshot.directory.peak_entries,
+                  configuration.directory_capacity);
+        EXPECT_LE(snapshot.directory.replay_entries,
+                  configuration.replay_capacity);
+        EXPECT_LE(snapshot.directory.source_rate_entries,
+                  configuration.per_source_presence_capacity);
+        EXPECT_LE(node->signaling_connections().size(),
+                  configuration.diagnostic_capacity);
+      }
+
+      const auto runtime_snapshot = runtime.value_if()->snapshot();
+      EXPECT_TRUE(runtime_snapshot.worker_ready);
+      EXPECT_TRUE(runtime_snapshot.worker_running);
+      EXPECT_FALSE(runtime_snapshot.executor_snapshot_partial);
+      EXPECT_EQ(runtime_snapshot.executor_blocking_io_count, 1U);
+      EXPECT_LE(runtime_snapshot.executor_active_task_count,
+                runtime_configuration.executor_max_threads);
+      EXPECT_LE(runtime_snapshot.executor_queued_task_count,
+                runtime_configuration.executor_queue_capacity);
+      EXPECT_EQ(runtime_snapshot.executor_submit_rejected_count, 0U);
+      EXPECT_EQ(runtime_snapshot.executor_task_exception_count, 0U);
+      if (!running_backend_count && cycle > 0U) {
+        running_backend_count = runtime_snapshot.executor_running_backend_count;
+      } else if (running_backend_count) {
+        EXPECT_EQ(runtime_snapshot.executor_running_backend_count,
+                  *running_backend_count);
+      }
+    }
+
+    const auto second_shutdown = second.value_if()->shutdown();
+    ASSERT_TRUE(second_shutdown.stopped);
+    EXPECT_FALSE(second_shutdown.timed_out);
+    EXPECT_EQ(second_shutdown.final_resources.discovery_sockets, 0U);
+    EXPECT_FALSE(second_shutdown.final_resources.tls_listener_open);
+    EXPECT_EQ(second_shutdown.final_resources.active_timers, 0U);
+    EXPECT_EQ(second_shutdown.final_resources.signaling_connections, 0U);
+    EXPECT_EQ(second_shutdown.final_resources.signaling_callbacks_in_flight, 0U);
+    EXPECT_FALSE(second_shutdown.final_resources.interface_scan_in_flight);
+    EXPECT_EQ(second_shutdown.final_resources.interface_scan_result_depth, 0U);
+    EXPECT_EQ(second_shutdown.final_resources.signaling_command_depth, 0U);
+    EXPECT_EQ(second_shutdown.final_resources.signaling_result_depth, 0U);
+    EXPECT_EQ(second_shutdown.final_resources.pending_outbound_messages, 0U);
+
+    ASSERT_TRUE(wait_until(
+        [&] {
+          const auto snapshot = first.value_if()->snapshot();
+          return first.value_if()->endpoints().empty() &&
+                 snapshot.directory.expired >= epoch + 1U;
+        },
+        std::chrono::seconds{3}));
+    ASSERT_TRUE(wait_until(
+        [&] {
+          return first.value_if()->snapshot().directory.replay_entries == 0U;
+        },
+        std::chrono::seconds{4}));
+  }
+
+  const auto first_shutdown = first.value_if()->shutdown();
+  ASSERT_TRUE(first_shutdown.stopped);
+  EXPECT_FALSE(first_shutdown.timed_out);
+  EXPECT_EQ(first_shutdown.final_resources.discovery_sockets, 0U);
+  EXPECT_FALSE(first_shutdown.final_resources.tls_listener_open);
+  EXPECT_EQ(first_shutdown.final_resources.active_timers, 0U);
+  EXPECT_EQ(first_shutdown.final_resources.signaling_connections, 0U);
+  EXPECT_EQ(first_shutdown.final_resources.signaling_callbacks_in_flight, 0U);
+  EXPECT_FALSE(first_shutdown.final_resources.interface_scan_in_flight);
+  EXPECT_EQ(first_shutdown.final_resources.interface_scan_result_depth, 0U);
+  EXPECT_EQ(first_shutdown.final_resources.signaling_command_depth, 0U);
+  EXPECT_EQ(first_shutdown.final_resources.signaling_result_depth, 0U);
+  EXPECT_EQ(first_shutdown.final_resources.pending_outbound_messages, 0U);
+
+  ASSERT_TRUE(wait_until(
+      [&] {
+        const auto snapshot = runtime.value_if()->snapshot();
+        return snapshot.outstanding_operations == 0U &&
+               snapshot.executor_active_task_count == 0U &&
+               snapshot.executor_queued_task_count == 0U;
+      },
+      std::chrono::seconds{2}));
+  const auto before_runtime_shutdown = runtime.value_if()->snapshot();
+  EXPECT_TRUE(before_runtime_shutdown.worker_running);
+  EXPECT_EQ(before_runtime_shutdown.executor_blocking_io_count, 1U);
+  EXPECT_EQ(before_runtime_shutdown.executor_submit_rejected_count, 0U);
+  EXPECT_EQ(before_runtime_shutdown.executor_task_exception_count, 0U);
+  const auto runtime_shutdown = runtime.value_if()->shutdown();
+  EXPECT_EQ(runtime_shutdown.final_phase, RuntimePhase::stopped);
+  EXPECT_FALSE(runtime_shutdown.callback_drain_timed_out);
+  EXPECT_FALSE(runtime_shutdown.operation_drain_timed_out);
+  EXPECT_FALSE(runtime_shutdown.worker_stop_timed_out);
+  EXPECT_FALSE(runtime_shutdown.executor_drain_timed_out);
+  EXPECT_TRUE(runtime_shutdown.incomplete_operations.empty());
+  const auto stopped_runtime = runtime.value_if()->snapshot();
+  EXPECT_EQ(stopped_runtime.phase, RuntimePhase::stopped);
+  EXPECT_FALSE(stopped_runtime.worker_running);
+  EXPECT_EQ(stopped_runtime.outstanding_operations, 0U);
+  EXPECT_EQ(stopped_runtime.executor_active_task_count, 0U);
+  EXPECT_EQ(stopped_runtime.executor_queued_task_count, 0U);
+}
+
 TEST_F(M3aNodeTest, ShutdownDrainsPendingSignalingHandlerWithinBudget) {
   LanConfiguration configuration;
   configuration.connectivity_mode = ConnectivityMode::lan_only;
@@ -1454,8 +1834,15 @@ TEST_F(M3aNodeTest, ShutdownDrainsPendingSignalingHandlerWithinBudget) {
   const auto started = std::chrono::steady_clock::now();
   const auto shutdown = second.value_if()->shutdown();
   const auto elapsed = std::chrono::steady_clock::now() - started;
-  EXPECT_TRUE(shutdown.stopped);
-  EXPECT_FALSE(shutdown.timed_out);
+  EXPECT_TRUE(shutdown.stopped)
+      << "callbacks=" << shutdown.final_resources.signaling_callbacks_in_flight
+      << " scan=" << shutdown.final_resources.interface_scan_in_flight
+      << " sockets=" << shutdown.final_resources.discovery_sockets
+      << " timers=" << shutdown.final_resources.active_timers
+      << " connections=" << shutdown.final_resources.signaling_connections;
+  EXPECT_FALSE(shutdown.timed_out)
+      << "callbacks=" << shutdown.final_resources.signaling_callbacks_in_flight
+      << " scan=" << shutdown.final_resources.interface_scan_in_flight;
   EXPECT_LT(elapsed, std::chrono::seconds{2});
   EXPECT_TRUE(first.value_if()->shutdown().stopped);
 }

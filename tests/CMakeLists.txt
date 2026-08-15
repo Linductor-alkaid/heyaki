@@ -436,7 +436,22 @@ add_test(
 set_tests_properties(heyaki_network_harness PROPERTIES
   LABELS "network;lan;security"
   SKIP_RETURN_CODE 77
-  TIMEOUT 120)
+  TIMEOUT 180)
+
+if(WIN32)
+  find_program(HEYAKI_POWERSHELL_EXECUTABLE NAMES pwsh powershell REQUIRED)
+  add_test(
+    NAME heyaki_windows_firewall_harness
+    COMMAND "${HEYAKI_POWERSHELL_EXECUTABLE}"
+      -NoProfile
+      -ExecutionPolicy Bypass
+      -File "${CMAKE_CURRENT_SOURCE_DIR}/network/run_windows_firewall_harness.ps1"
+      -TestBinary "$<TARGET_FILE:heyaki_m3a_lan_tests>")
+  set_tests_properties(heyaki_windows_firewall_harness PROPERTIES
+    LABELS "network;lan;security;windows"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 90)
+endif()
 
 add_test(
   NAME heyaki_dependency_lock_crlf

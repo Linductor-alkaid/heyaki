@@ -48,6 +48,8 @@ jobs:
       - name: Test
         env:
           HEYAKI_REQUIRE_NETWORK_HARNESS: "1"
+          HEYAKI_M3A_STRESS_CYCLES: ${{ matrix.compiler == 'gcc' && matrix.build_type == 'Debug' && '64' || '8' }}
+          HEYAKI_M3A_STRESS_EPOCHS: ${{ matrix.compiler == 'gcc' && matrix.build_type == 'Debug' && '3' || '2' }}
         run: ctest --test-dir build --output-on-failure --no-tests=error
       - name: Run protocol libFuzzer targets
         if: matrix.compiler == 'clang' && matrix.build_type == 'Debug'
@@ -107,6 +109,9 @@ jobs:
       - name: Test
         env:
           HEYAKI_REQUIRE_LAN_INTERFACES: "1"
+          HEYAKI_REQUIRE_WINDOWS_FIREWALL_HARNESS: "1"
+          HEYAKI_M3A_STRESS_CYCLES: "16"
+          HEYAKI_M3A_STRESS_EPOCHS: "2"
         run: ctest --test-dir build -C ${{ matrix.build_type }} --output-on-failure --no-tests=error
 
   sanitizer:
@@ -126,6 +131,10 @@ jobs:
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }} --parallel 2
       - name: Test
+        env:
+          HEYAKI_REQUIRE_LAN_INTERFACES: "1"
+          HEYAKI_M3A_STRESS_CYCLES: "32"
+          HEYAKI_M3A_STRESS_EPOCHS: "3"
         run: ctest --preset ${{ matrix.preset }}
       - name: Fuzz smoke
         run: cmake --build build/${{ matrix.preset }} --target heyaki-fuzz-smoke

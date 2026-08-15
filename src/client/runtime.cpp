@@ -466,6 +466,13 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
     output.executor_submit_rejected_count = failures.submit_rejected_count;
     output.executor_task_exception_count = failures.task_exception_count;
     output.executor_wait_timeout_count = failures.wait_timeout_count;
+    const auto executor_snapshot = executor_->get_snapshot();
+    output.executor_running_backend_count = executor_snapshot.running_backend_count;
+    output.executor_stopping_backend_count = executor_snapshot.stopping_backend_count;
+    output.executor_blocking_io_count = executor_snapshot.blocking_io.size();
+    output.executor_active_task_count = executor_snapshot.active_task_count;
+    output.executor_queued_task_count = executor_snapshot.queued_task_count;
+    output.executor_snapshot_partial = executor_snapshot.partial;
     const auto worker_status = worker_.status();
     output.worker_ready = worker_status.ready;
     output.worker_running = worker_status.is_running;
