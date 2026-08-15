@@ -1,6 +1,6 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：M1 评审问题及 Windows Protobuf/Abseil ABI 问题已整改，独立复审和修复提交的完整 GitHub CI 均通过，正式准入 M2
+> - 状态：M2 代码、测试、本地验证与跨平台 CI 均完成，正式准入可并行推进的 M3A/M3B
 > - 日期：2026-08-15
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)、[局域网无服务器连接设计](../design/lan-serverless-connectivity.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
@@ -257,7 +257,7 @@ vectors 的跨平台 Debug/Release 字节一致性退出条件完成，M1 正式
 - [x] M2 demo 能创建 profile、重启后保持相同 `DeviceId`，两个 application ID 获得稳定且不同的 `EndpointId`。
 
 M2 本地验证记录（2026-08-15）：Linux GCC 13.3 的 Debug `-Werror`、禁异常和 ASAN 全量
-构建均通过 20 项 CTest，包含安装后 consumer、15 个直接依赖 pin 的供应链检查、profile
+构建均通过 20 项 CTest，包含安装后 consumer、当时 15 个直接依赖 pin 的供应链检查、profile
 崩溃恢复和 shutdown 测试。TSAN 目标成功构建；对测试进程关闭 ASLR 后，runtime 8 项全部
 通过，无 D-Bus 环境下 profile 19 项通过、2 项显式 Secret Service 集成测试按设计 skip，覆盖
 callback bridge、Node 状态转换、并发 profile 打开和 shutdown。demo 连续打开同一 profile 后
@@ -276,10 +276,18 @@ hook 容量拒绝、启动失败、完成超时、固定顺序及 persistence �
 均覆盖该路径。启用本机 Secret Service 时，系统 `libsecret`/GLib 的 `gdbus` 后台线程会产生
 第三方 TSAN 报告；正常 Secret Service 路径已由 Debug 和 ASAN 覆盖，M2 自有并发路径则在无
 D-Bus 文件回退环境下通过 TSAN。Windows vendored SQLite 生成逻辑已有 Linux 可执行的 CMake
-脚本测试，覆盖 Win32/x64/ARM/ARM64 到 `vcvarsall` 参数的映射，以及带空格路径下的
-`nmake /f ... "TOP=..." sqlite3.c sqlite3.h` 命令；全新 Linux amalgamation 生成和编译通过，
-真实 Windows runner 仍待 CI 实证。M2 本地退出条件已满足；进入 M3A/M3B 前仍须由 GitHub
-sanitizer 和 Windows runner 对当前改动给出远端实证。
+脚本测试，覆盖 Win32/x64/ARM/ARM64 到 Visual Studio 开发环境参数的映射，以及带空格路径下
+通过 PowerShell 导入 `Microsoft.VisualStudio.DevShell.dll`、执行 `Enter-VsDevShell` 和
+`nmake /f ... "TOP=..." sqlite3.c sqlite3.h`；全新 Linux amalgamation 生成和编译通过。
+
+M2 跨平台验收记录（2026-08-15）：最终提交 `168a6216` 的
+[GitHub Actions 运行 31874698030](https://github.com/Linductor-alkaid/heyaki/actions/runs/31874698030)
+以 `completed/success` 结束。Windows MSVC Debug/Release 均完成当前 17 个直接依赖 pin 的校验、SQLite
+amalgamation 生成、Heyaki 与 pinned libdatachannel 构建及全量 CTest；Linux GCC/Clang 的
+Debug/Release 四组合与 ASAN、UBSAN、TSAN 三项也全部通过，共 9/9 job 成功。Windows 验证
+过程中发现的 libsodium 静态消费定义/平台源集、Boost.System 所需 WinAPI/Predef 头文件闭包
+和 runtime 完成指标发布顺序均已修复并回归。至此 `M2-01` 至 `M2-21` 及全部 M2 退出条件
+均有本地与远端证据，正式准入 M3A/M3B。
 
 ---
 
