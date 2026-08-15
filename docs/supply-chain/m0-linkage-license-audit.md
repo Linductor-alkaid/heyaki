@@ -46,7 +46,8 @@ selected license branch and actual linked files when enabled.
 ## Re-audit gates
 
 - M2 entry: freeze and inventory the Boost artifact before first linkage.
-- M3 entry: resolve the libjuice/libnice decision and freeze Linux/Windows OpenSSL plus coturn.
+- M3A entry: freeze Linux/Windows OpenSSL and the Asio SSL linkage used by LAN signaling.
+- M3B entry: resolve the libjuice/libnice decision and freeze coturn plus relay WSS/Beast closure.
 - M4 exit: record actual libdatachannel, ICE, TLS and coturn static/dynamic closure and notices.
 - Every dependency upgrade: regenerate inventory and review license/security changes.
 - M9 release: scan the packaged binaries and installation tree, then archive final SPDX, notices,

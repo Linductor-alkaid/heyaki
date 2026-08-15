@@ -10,6 +10,13 @@ This document is normative for Heyaki framing, identifiers, negotiation, signed 
 per-domain state handling. The schemas under `proto/heyaki/*/v1` are normative for Protobuf fields.
 The words MUST, MUST NOT, SHOULD, and MAY describe interoperability requirements.
 
+The planned serverless LAN discovery and TLS signaling binding are intentionally not part of the
+frozen 1.0 wire surface. Their design is recorded in
+[LAN serverless connectivity](lan-serverless-connectivity.md); implementation requires a coordinated
+protocol 1.1 minor-version change that adds schemas, capability bits, canonical signing tables, golden
+vectors, fuzz coverage, and build-version updates in one reviewed change. A 1.0 implementation MUST
+NOT infer LAN interoperability from this design note alone.
+
 ## 1. Primitive encodings
 
 - Fixed-width integers are unsigned big-endian unless a schema explicitly uses Protobuf encoding.

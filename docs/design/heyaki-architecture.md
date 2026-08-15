@@ -1,30 +1,31 @@
 # Heyaki 设备通信基础设施设计
 
-> 状态：架构设计修订版（授权密码、自动登录与 `heyaki-tui`）  
-> 日期：2026-08-14  
-> 目标版本：MVP 至 v1  
+> 状态：架构设计修订版（授权密码、自动登录、LAN 无服务器连接与 `heyaki-tui`）
+> 日期：2026-08-15
+> 目标版本：MVP 至 v1
 > 适用范围：设备端 C++20 库、`heyaki-tui`、注册/信令服务、NAT 穿透与中继服务
 
 ## 1. 摘要
 
-Heyaki 是面向设备间通信的 C++ 基础设施库，并提供名为 `heyaki-tui` 的可直接使用的 FTXUI 终端程序。名称取自打招呼的声音 “heya”，并将 “kit” 的 `t` 隐去，与前缀组成 “aki”。它提供设备发现与连接、消息、双向字节流、文件传输、远程 Shell、RPC 和远程事件总线。设备通常位于 NAT 或防火墙之后，因此系统必须优先建立端到端直连，并在直连失败时自动切换到中继。
+Heyaki 是面向设备间通信的 C++ 基础设施库，并提供名为 `heyaki-tui` 的可直接使用的 FTXUI 终端程序。名称取自打招呼的声音 “heya”，并将 “kit” 的 `t` 隐去，与前缀组成 “aki”。它提供设备发现与连接、消息、双向字节流、文件传输、远程 Shell、RPC 和远程事件总线。同一局域网中的设备应能在没有中心服务器时自主发现并建立直连；跨 NAT 或受限网络则优先建立端到端直连，并在直连失败时自动切换到中继。
 
 系统采用“轻控制面、端到端数据面”原则：
 
-- 中继侧只负责设备注册与在线状态、连接信令、NAT 穿透辅助和密文字节转发。
+- 控制面由可组合的 LAN 与 relay 路径组成：LAN 路径负责本地发现和设备间信令，relay 路径负责注册、广域 presence、信令、NAT 穿透辅助和密文字节转发。
 - 身份校验、授权、RPC 分派、事件订阅、文件协议和远程执行都在设备端完成。
 - 中继不解析业务载荷，不执行 RPC，不保存离线消息，也不充当事件 Broker。
-- P2P 和中继是同一逻辑会话的不同网络路径，业务 API 不感知当前路径。
-- 设备在首次注册时设置授权密码；其他设备可用该密码完成首次配对，随后使用设备公钥身份自动认证。
-- `heyaki-tui` 与链接 Heyaki 的应用共享本机注册档案，注册一次后均可无人工干预地连接 relay。
+- LAN、P2P 和中继是同一逻辑会话的不同发现、信令或数据路径，业务 API 不感知当前路径。
+- 设备在首次本地初始化时设置授权密码；其他设备可用该密码完成首次配对，随后使用设备公钥身份自动认证。
+- `heyaki-tui` 与链接 Heyaki 的应用共享本机 profile；本地身份只创建一次，relay enrollment 为可选的后续能力。
 
 首版推荐采用：
 
 - `libdatachannel` 提供 ICE、DTLS、SCTP DataChannel 和 NAT 穿透客户端能力；
+- Heyaki 自有的有界 UDP multicast 提供同一局域网发现，Boost.Asio TLS/TCP 提供本地签名信令；
 - `coturn` 提供标准 STUN/TURN 服务；
 - 自研轻量 `heyaki-relay` 通过 WSS 提供注册、在线租约和 WebRTC 信令；
 - Protobuf Lite 定义控制协议和内建服务协议；
-- Ed25519 稳定设备身份与签名后的信令绑定，防止中继替换 DTLS 指纹；
+- Ed25519 稳定设备身份与签名后的信令绑定，防止 LAN/relay 信令路径替换 DTLS 指纹；
 - C++20、CMake、Boost.Asio/Beast 构建设备生命周期和服务端控制面；
 - 仓库已有 `executor` 用于业务处理、阻塞 I/O 和跨线程有界通信；FTXUI 用于正式的全功能 `heyaki-tui`。
 
@@ -34,21 +35,23 @@ Heyaki 是面向设备间通信的 C++ 基础设施库，并提供名为 `heyaki
 
 ### 2.1 功能目标
 
-1. 设备生成稳定身份，通过一个或多个中继域注册并维持在线租约。
-2. 已授权设备可以按 `DeviceId` 发起连接，不依赖固定 IP 或端口。
-3. 优先尝试 IPv6、局域网和公网 UDP 直连；失败后使用 TURN 中继。
-4. 同一设备会话承载多个相互隔离的逻辑通道。
-5. 提供消息、RPC、事件、文件和远程 Shell 等设备端服务。
-6. 全链路具备有界队列、流控、超时、取消、错误分类和可观测性。
-7. 支持 Linux 和 Windows，保留 macOS 及受限嵌入式平台的扩展空间。
-8. 设备注册时设置授权密码，未知设备验证该密码后获得目标设备授予的持久信任。
-9. 已注册设备后续启动时自动完成 relay 身份认证与重连，不再次要求用户输入注册凭据。
-10. 提供覆盖所有 Heyaki 能力的 `heyaki-tui`，并允许库应用复用其创建的设备档案。
+1. 设备在本地生成稳定身份，不依赖 relay enrollment 即可作为 Heyaki peer 运行。
+2. 同一局域网设备无需中心服务器即可自主发现 endpoint、交换认证信令并建立 DataChannel。
+3. 已授权设备可以按 `DeviceId` 发起连接，不依赖固定 IP 或端口；跨网连接通过可选 relay presence 定位。
+4. 优先尝试 IPv6、局域网和公网 UDP 直连；失败且 relay/TURN 可用时使用 TURN 中继。
+5. 同一设备会话承载多个相互隔离的逻辑通道。
+6. 提供消息、RPC、事件、文件和远程 Shell 等设备端服务。
+7. 全链路具备有界队列、流控、超时、取消、错误分类和可观测性。
+8. 支持 Linux 和 Windows，保留 macOS 及受限嵌入式平台的扩展空间。
+9. 设备本地初始化时设置授权密码，未知设备验证该密码后获得目标设备授予的持久信任。
+10. 已登记设备后续启动时自动完成 relay 身份认证与重连，不再次要求用户输入注册凭据。
+11. 提供覆盖所有 Heyaki 能力的 `heyaki-tui`，并允许库应用复用其创建的设备档案。
 
 ### 2.2 非目标
 
 - 不实现通用 VPN、三层虚拟网络或透明 IP 路由。
 - 不保证任意 NAT 下均可直连。对称 NAT、运营商级 NAT、UDP 禁止和企业代理场景必须依靠中继。
+- 不保证跨 VLAN、路由子网、阻止 multicast 的网络或启用 AP client isolation 的 Wi-Fi 能够无服务器发现/直连。
 - 不提供离线消息、持久化事件、全局有序广播或“恰好一次”投递。
 - 不让中继成为 RPC 网关、文件服务器、Shell 跳板机或业务授权中心。
 - 不向 relay 上传或保存设备授权密码明文；授权密码由目标设备端验证。
@@ -58,14 +61,16 @@ Heyaki 是面向设备间通信的 C++ 基础设施库，并提供名为 `heyaki
 ### 2.3 设计原则
 
 - **身份独立于地址**：设备身份来自长期公钥，IP、端口和中继实例均可变化。
-- **端到端鉴权**：TLS 只保护设备到中继的控制链路，设备会话还必须相互认证。
-- **一次注册、无感登录**：首次登记需要人工提供 relay 凭据，后续连接由本机长期设备密钥自动认证。
+- **端到端鉴权**：LAN TLS 或设备到 relay 的 TLS 只保护控制链路，设备会话还必须用长期设备身份相互认证。
+- **一次初始化、可选登记**：首次本地初始化创建设备身份和授权策略；relay enrollment 是扩展可达范围的可选步骤，后续连接由长期设备密钥自动认证。
 - **密码只用于首次配对**：授权密码换取的是受范围限制的持久信任，不作为每个 RPC 或文件块的口令。
-- **路径透明**：业务层只面对 `PeerSession` 和 `Channel`，不分支处理 P2P/TURN。
+- **路径透明**：业务层只面对 `PeerSession` 和 `Channel`，不分支处理 LAN/relay/TURN。
 - **显式语义**：可靠、有序、确认、持久化和可重试不能混为一谈。
 - **有界资源**：发送队列、接收窗口、并发 RPC、文件配额和 Shell 数量都必须有限制。
 - **故障优先设计**：断线、重复、超时、部分写入和不确定执行结果是正常状态，而非异常边角。
 - **服务端克制**：可以由设备协商和执行的行为，不增加到中继。
+- **发现不等于信任**：multicast presence、源 IP、TLS 建连和 relay presence 都只能提供路由 hint，不能授予业务权限。
+- **按需成网**：自动发现不意味着全量自动建连，只对已信任且策略允许的 peer 建立所需 session。
 
 ## 3. 技术路线分析
 
@@ -103,6 +108,18 @@ QUIC 很适合文件和 Shell：原生流、多路流控、TLS 1.3 和连接迁�
 
 若产品最终必须交付单一可执行文件，可以在协议稳定后再评估嵌入 TURN 实现；首版不应以减少部署组件为由承担协议安全风险。
 
+### 3.5 LAN 无服务器控制路径
+
+局域网无服务器能力不是第二套数据面。设备通过有界 UDP multicast 发布签名 presence，使用
+Boost.Asio TLS/TCP 直接交换经过长期设备密钥认证的信令，随后仍由 libdatachannel 使用 host
+candidate 建立 DTLS/SCTP DataChannel。LAN 和 relay 只是 `DiscoveryProvider` 与
+`SignalingRoute` 的不同实现，上层 `PeerSession`、授权和业务服务保持一致。
+
+v1 自有 multicast 协议只面向 Heyaki peer，不以 mDNS 互操作为目标。它限定在 hop limit 1 的
+同一二层 multicast domain；跨 VLAN、访客 Wi-Fi 隔离或防火墙拒绝时必须明确失败或使用 relay。
+详细消息、TLS 指纹绑定、路由选择、容量和验收规则见
+[局域网无服务器连接设计](lan-serverless-connectivity.md)。
+
 ## 4. 总体架构
 
 ```mermaid
@@ -114,10 +131,12 @@ flowchart LR
         AService[消息 / RPC / 事件 / 文件 / Shell]
         ASession[PeerSession 与通道调度]
         ATransport[WebRTC Transport]
+        ALan[LAN discovery / TLS signaling]
         ATui --> AService
         AApp --> AService
         AService --> ASession --> ATransport
-        AProfile -. 身份 / relay enrollment / TrustStore .-> ASession
+        AProfile -. 身份 / endpoint / relay enrollment / TrustStore .-> ASession
+        ALan -. endpoint hint / signed signaling .-> ASession
     end
 
     subgraph R[中继域]
@@ -130,9 +149,13 @@ flowchart LR
         BSession[PeerSession 与通道调度]
         BService[消息 / RPC / 事件 / 文件 / Shell]
         BApp[应用]
+        BLan[LAN discovery / TLS signaling]
         BTransport --> BSession --> BService --> BApp
+        BLan -. endpoint hint / signed signaling .-> BSession
     end
 
+    ALan -. multicast presence / TLS signaling .-> BLan
+    BLan -. multicast presence / TLS signaling .-> ALan
     ATransport -. WSS 控制面 .-> Signal
     Signal -. WSS 控制面 .-> BTransport
     ATransport -. STUN/TURN .-> Turn
@@ -140,11 +163,11 @@ flowchart LR
     ATransport <== 优先：端到端直连 ==> BTransport
 ```
 
-逻辑上分为四层：
+逻辑上分为五层：
 
 | 层 | 职责 | 不应承担的职责 |
 | --- | --- | --- |
-| 注册与信令层 | 登录、租约、在线查询、offer/answer/candidate 转发、临时 TURN 凭据 | 业务消息、RPC 路由、离线存储 |
+| 发现与信令层 | LAN presence、endpoint directory、relay 登录/租约/查询、offer/answer/candidate 转发、临时 TURN 凭据 | 业务消息、RPC 路由、离线存储、业务授权 |
 | 传输层 | ICE 建连、DTLS、DataChannel、路径状态、网络重连 | 文件路径、RPC method、topic 语义 |
 | 会话与通道层 | 对端身份确认、版本协商、通道创建、优先级、背压、帧协议 | 具体业务处理 |
 | 设备服务层 | 消息、RPC、事件、文件、Shell 和本地授权 | NAT 与 relay 细节 |
@@ -154,7 +177,7 @@ flowchart LR
 
 ### 5.1 设备身份
 
-每个设备首次初始化时在本地生成 Ed25519 长期密钥对：
+每个设备首次本地初始化时生成 Ed25519 长期密钥对；该步骤不要求 relay 可用或完成 enrollment：
 
 ```text
 device_digest = SHA-256(identity_public_key)             // 32 bytes on wire
@@ -166,29 +189,43 @@ ShortDeviceId = DeviceId 的固定长度显示前缀             // 仅用于 UI
 
 设备私钥不上传到中继。更换密钥意味着新设备身份；密钥轮换应通过旧密钥签署轮换声明，或重新执行带外配对。
 
-`DeviceId` 表示一台设备及其信任边界。同一设备上的 `heyaki-tui` 和一个或多个 Heyaki 应用共享 `DeviceId`，但分别使用 128-bit 随机 `EndpointId` 表示可连接的本地端点。endpoint registration 由设备私钥签名，relay presence 以 `(DeviceId, EndpointId)` 为键。授权和 TrustStore 默认绑定 `DeviceId`，服务发现与连接路由绑定 `EndpointId`。
+`DeviceId` 表示一台设备及其信任边界。同一设备上的 `heyaki-tui` 和一个或多个 Heyaki 应用
+共享 `DeviceId`，但分别使用 128-bit 随机 `EndpointId` 表示可连接的本地端点。endpoint record
+与 LAN/relay presence 由设备私钥签名，目录都以 `(DeviceId, EndpointId)` 为键。授权和
+TrustStore 默认绑定 `DeviceId`，服务发现与连接路由绑定 `EndpointId`。
 
-### 5.2 首次登记
+### 5.2 本地初始化与首次登记
 
-首次登记由 FTXUI 向导或库的 registration API 发起。本文将这个人工动作称为 relay enrollment（TUI 中可显示为“与 Relay 配对并注册”），它与后续设备间的授权密码配对是两个独立流程。用户输入 relay 地址、bootstrap token/二维码、设备显示名、当前设备授权密码和默认配对权限模板。建议流程：
+首次使用由 FTXUI 向导或库的 profile API 在本机创建身份、`EndpointId`、授权密码 verifier 和
+默认 pairing policy。完成后设备已经能够运行 LAN-only Node，不应因缺少 relay enrollment
+返回“未初始化”。
 
-1. Heyaki 在本机创建或加载设备密钥，并要求用户重复确认授权密码。
+relay enrollment 是可选的第二步（TUI 中可显示为“连接 Relay”），它与本地初始化以及后续
+设备间的授权密码配对是三个独立流程。用户输入 relay 地址、bootstrap token/二维码和设备
+显示名；本地授权密码不会提交给 relay。建议 relay enrollment 流程：
+
+1. Heyaki 从现有 profile 加载设备密钥和 endpoint；profile 不存在时先完成本地初始化。
 2. 设备通过 TLS 连接 `heyaki-relay`，校验证书、主机名和可选 pin。
 3. 服务端发送随机 challenge。
 4. 设备提交公钥、`DeviceId`、challenge 签名、bootstrap token、`EndpointId` 和最小能力信息。
 5. 服务端验证 `DeviceId` 与公钥派生关系、签名和 token，将设备加入指定租户或设备组。
 6. 服务端返回 enrollment record、relay 标识、短期在线租约和 TURN 临时凭据。
-7. Heyaki 原子写入共享 `ProfileStore`；只有持久化成功后注册流程才向用户报告完成。
+7. Heyaki 原子写入 relay enrollment；只有持久化成功后登记流程才向用户报告完成。
 
 bootstrap token 在服务端只保存哈希，具备过期时间和使用次数。禁止把设备序列号、MAC 地址或默认口令当作认证密钥。
 
-这里“注册时提交授权密码”是指将密码提交给本机 Heyaki 注册流程，而不是作为 WSS 字段交给 relay。Heyaki 使用随机 salt 和版本化、按设备能力校准的 Argon2id 参数生成 verifier，只把 verifier 保存在本机受保护的 `ProfileStore`。relay 只记录 `password_pairing_enabled` 和不含机密的 policy generation；配对密码在后续端到端加密通道中由目标设备验证。
+授权密码只在本地初始化流程中交给 Heyaki。Heyaki 使用随机 salt 和版本化、按设备能力校准的
+Argon2id 参数生成 verifier，只把 verifier 保存在本机受保护的 `ProfileStore`。relay 只记录
+`password_pairing_enabled` 和不含机密的 policy generation；配对密码在后续端到端加密通道
+中由目标设备验证。
 
 如果未来确实要求目标设备离线时由 relay 预先验证授权密码，可以增加基于成熟 PAKE 的可选模式，但这会扩大 relay 的信任边界和密码协议攻击面，不作为 v1 默认路线。禁止实现“relay 保存 Argon2 hash、连接方直接提交明文密码”的简化方案。
 
 ### 5.3 后续自动登录与在线注册
 
-首次登记成功后，设备不再要求用户输入 bootstrap token、授权密码或进行二次确认。Node 启动时从 `ProfileStore` 加载 relay enrollment 和设备私钥，自动完成 challenge-response、取得在线租约并在断线后重连。
+完成本地初始化后，Node 每次启动都从 `ProfileStore` 加载设备私钥与 endpoint，并可立即开始
+LAN discovery。存在启用的 relay enrollment 时，再自动完成 challenge-response、取得在线租约
+并在断线后重连；缺少或暂时无法连接 relay 不影响 LAN-only readiness。
 
 “无需二次校验”表示无需人工交互，不表示 relay 跳过密码学认证。每次新 WSS 连接仍必须验证设备对随机 challenge 的签名、设备状态和 enrollment generation；否则复制一个 `DeviceId` 字符串即可冒充设备。设备被吊销、relay 身份变化或私钥不可用时自动登录失败，并返回需要人工处理的稳定错误码。
 
@@ -210,15 +247,17 @@ bootstrap token 在服务端只保存哈希，具备过期时间和使用次数�
 
 ### 5.4 共享 ProfileStore
 
-`ProfileStore` 是 TUI 与库应用复用注册状态的正式接口，而不是约定若干散落文件。它至少保存：
+`ProfileStore` 是 TUI 与库应用复用本地身份、信任与可选登记状态的正式接口，而不是约定若干散落文件。它至少保存：
 
 - 设备身份公钥和受 OS 保护的私钥句柄/密文；
 - relay URL、relay 身份 pin/CA、tenant、enrollment generation 和自动连接策略；
+- LAN discovery、discoverability、自动连接和接口偏好；
 - 本机授权密码的 Argon2id verifier、参数版本和 password generation；
 - `TrustStore`、已签发/接收的 trust grant、endpoint records；
 - 可恢复文件传输状态和非敏感用户偏好。
 
-`heyaki-tui` 完成注册后写入默认命名 profile。使用 Heyaki 开发的程序打开同一 profile 即可自动连接：
+`heyaki-tui` 完成本地初始化后写入默认命名 profile。使用 Heyaki 开发的程序打开同一 profile
+即可使用 LAN-only 能力，并在存在 enrollment 时自动连接 relay：
 
 ```cpp
 auto profile = heyaki::ProfileStore::open_default("default");
@@ -237,11 +276,16 @@ auto node = heyaki::Node::create(std::move(config));
 
 打开同一 ProfileStore 就意味着能够代表同一 `DeviceId`，并可能使用其中已有的 TrustGrant，因此只允许同一 OS 安全主体下受信任的程序复用。需要隔离的不可信应用必须使用独立 profile/DeviceId；未来的本机 agent 模式可以按应用授予受限 IPC capability，而不是把设备私钥交给每个进程。
 
-同一 profile 的多个进程可以各自建立 relay endpoint。每个 application ID 获得持久 `EndpointId`，relay 允许同一 `DeviceId` 下多个 endpoint 在线；endpoint 显示名和 service manifest 均由设备密钥签名。若底层密钥存储不支持安全的多进程访问，实现可以选择本机 agent/IPC 模式，但公共 `ProfileStore` 和 `Node` API 不变。
+同一 profile 的多个进程可以各自广播 LAN presence 并建立 relay endpoint。每个 application ID
+获得持久 `EndpointId`；LAN directory 与 relay 都允许同一 `DeviceId` 下多个 endpoint 在线。
+endpoint 显示名和 service manifest 均由设备密钥签名，但 LAN presence 默认不广播这两类字段。
+若底层密钥存储不支持安全的多进程访问，实现可以选择本机 agent/IPC 模式，但公共
+`ProfileStore` 和 `Node` API 不变。
 
 ### 5.5 授权密码配对与设备间信任
 
-“同一中继上已注册”只表示可以被发现，不表示可以访问服务。每个设备维护本地 `TrustStore`，将对端 `DeviceId` 映射为能力范围，例如：
+“经 LAN 或 relay 被发现”只表示存在可达 hint，不表示可以访问服务。每个设备维护本地
+`TrustStore`，将对端 `DeviceId` 映射为能力范围，例如：
 
 ```text
 message.send
@@ -254,9 +298,12 @@ shell.open:maintenance
 
 授权密码提供默认的首次信任获取方式：
 
-1. 连接方先以自身已登记身份登录 relay，再按目标 `DeviceId`/`EndpointId` 发起连接并声明 `pairing` 目的；匿名来源不进入设备 pairing channel。
+1. 连接方经 LAN 或 relay 信令建立 DataChannel，并完成长期设备公钥、签名 signaling transcript
+   和双方 endpoint 验证；匿名 discovery/TLS 来源不进入 pairing channel。
 2. 未受信任目标只开放速率受限的 pairing channel，不开放消息、RPC、文件、事件或 Shell。
-3. 双方先通过签名的 DTLS fingerprint 建立端到端加密并验证对方公钥派生身份；这一步确认“正在与哪个 DeviceId 通信”，不代表已经授权。relay 无法读取 pairing payload。
+3. 双方通过签名的 DTLS fingerprint 建立端到端加密并验证对方公钥派生身份；这一步确认“正在
+   与哪个 DeviceId 通信”，不代表已经授权。LAN signaling peer、relay 和 TURN 都无法读取
+   pairing payload。
 4. 连接方在 pairing channel 提交用户输入的目标设备授权密码、请求能力和一次性 nonce。
 5. 目标设备使用本地 Argon2id verifier 做常量时间验证，并执行失败计数、指数退避和审计。
 6. 验证成功后，目标设备根据当前 pairing policy 签发 `TrustGrant`，其中绑定双方 `DeviceId`、granted scopes、password generation、签发时间、可选过期时间和 grant ID。
@@ -274,20 +321,40 @@ TrustGrant 是有方向的：目标 B 使用自己的授权密码允许 A 操作
 
 带外指纹确认、一次性配对码和管理员下发策略仍可作为可选信任来源。所有来源最终生成相同结构的 `TrustGrant`，避免服务层分支处理“密码用户”和“管理员用户”。
 
-### 5.6 防止中继中间人攻击
+### 5.6 防止信令路径中间人攻击
 
-WSS 保护的是设备到中继，不足以阻止被控制的中继替换 WebRTC SDP 和 DTLS fingerprint。因此：
+WSS 保护的是设备到中继，LAN TLS 使用的 boot-scoped 自签名证书也不直接代表设备身份；两者
+都不足以单独阻止控制路径攻击者替换 WebRTC SDP 和 DTLS fingerprint。因此：
 
 - offer、answer、ICE ufrag、DTLS fingerprint、双方 `DeviceId`/`EndpointId`、发起方/响应方会话 nonce 和过期时间必须作为规范化对象由长期设备密钥签名；candidate 还必须绑定已验证 offer/answer transcript、owner ICE ufrag 和 owner fingerprint；
 - 对端验证签名、公钥派生的 `DeviceId`、nonce 和时效后才接受 DTLS 会话；
 - 双方对规范化 offer 与 answer 做长度定界 SHA-256；首个 Heyaki `SESSION_HELLO` 在已校验签名 fingerprint 的实际 DataChannel 上携带并签名该 transcript 摘要、会话 ID/epoch、endpoint 和能力摘要，避免信令与实际连接错配；pinned libdatachannel v0.23.2 没有公共 DTLS exporter API，因此 v1 不虚构 exporter binding；
 - 重放的连接请求通过一次性 request ID、短过期时间和最近 nonce 缓存拒绝。
+- LAN TLS 在接受 offer 前还必须完成签名 `LAN_HELLO`，绑定双方长期身份、endpoint、nonce、
+  boot nonce 以及双方观察到的本端/对端 TLS 证书指纹。
 
-这样 TURN 只能看到连接元数据、时序和密文流量，不能解密或篡改业务内容。中继仍可拒绝服务或进行流量分析，这不在端到端加密可解决的范围内。
+这样 LAN 信令对端、relay 和 TURN 只能看到各自路径上的连接元数据、时序和密文流量，不能
+冒充目标设备或解密业务内容。它们仍可拒绝服务或进行流量分析，这不在端到端加密可解决的
+范围内。详细 LAN 绑定见 [局域网无服务器连接设计](lan-serverless-connectivity.md)。
 
 ## 6. 建连与路径选择
 
-### 6.1 建连时序
+### 6.1 控制路径与数据路径
+
+发现/信令路径与最终数据路径是两个独立维度。`SignalingCoordinator` 可以从 LAN directory
+或 relay presence 取得 endpoint，并通过对应 `SignalingRoute` 交换同一组签名信令；
+`WebRtcTransportSession` 再根据 host、srflx 或 relay candidate 选择数据路径。
+
+```text
+signaling_path = lan | relay
+data_path      = direct_host | direct_srflx | turn_udp | turn_tcp | turn_tls
+```
+
+LAN-only 时序为：multicast presence -> TLS `LAN_HELLO` -> signed offer/answer/candidate -> host
+ICE -> DTLS/SCTP -> `SESSION_HELLO`。relay 时序如下。两条路径的身份、授权和业务语义完全相同，
+详细 LAN 状态机与资源边界见 [局域网无服务器连接设计](lan-serverless-connectivity.md)。
+
+### 6.2 Relay 建连时序
 
 ```mermaid
 sequenceDiagram
@@ -327,7 +394,7 @@ sequenceDiagram
     end
 ```
 
-### 6.2 Candidate 策略
+### 6.3 Candidate 策略
 
 候选优先级建议为：
 
@@ -339,10 +406,11 @@ sequenceDiagram
 
 ICE 应并行检查候选，不能先等待很长的直连超时再开始中继。relay candidate 可以提前分配但低优先级提名，使常见网络快速直连，同时把失败连接的尾延迟控制在数秒内。
 
-### 6.3 会话状态机
+### 6.4 会话状态机
 
 ```text
 Idle
+  -> ResolvingEndpoint(source = Lan | Relay)
   -> Signaling
   -> GatheringCandidates
   -> Checking
@@ -354,11 +422,15 @@ Idle
   -> Closed
 ```
 
-每次状态转换都带原因码和时间戳。物理 `path` 与授权状态是两个维度，不能因为 transport 已连接就开放业务服务。`PairingRestricted` 只能收发配对协议帧，并设置很小的消息、时间和尝试次数上限；只有 `Authorized/Active` 才能创建业务通道。Direct 与 Relayed 对业务层行为相同，只作为指标和策略输入。网络接口变化时触发 ICE restart；若底层 association 无法保留，则建立新物理连接并恢复同一逻辑设备关系。
+每次状态转换都带原因码和时间戳。`signaling_path`、`data_path` 与授权状态是三个维度，不能因为
+endpoint 已发现、TLS 已建立或 transport 已连接就开放业务服务。`PairingRestricted` 只能收发
+配对协议帧，并设置很小的消息、时间和尝试次数上限；只有 `Authorized/Active` 才能创建业务
+通道。各种路径对业务层行为相同，只作为指标和策略输入。网络接口变化时触发 presence 刷新与
+ICE restart；若底层 association 无法保留，则建立新物理连接并恢复同一逻辑设备关系。
 
 v1 不承诺无损路径迁移。断线期间不同业务的恢复语义由各自协议定义，不能通过隐藏重连假装原连接从未中断。
 
-### 6.4 TCP-only 网络
+### 6.5 TCP-only 网络
 
 企业网络可能完全禁止 UDP。部署应提供 TURN/TCP 或 TURN/TLS，并在目标平台验证 libdatachannel 所选 ICE backend 的兼容性。若目标平台无法通过该路径建立 DataChannel，可增加“WSS 密文帧中继”作为独立 transport backend，但它必须保持端到端加密，且明确标记较高延迟与 TCP 队头阻塞。
 
@@ -626,7 +698,8 @@ socket/SCTP bufferedAmount
 
 ### 9.3 重连
 
-设备到 relay 的 WSS 使用带抖动的指数退避并设置上限。PeerSession 的恢复分两层：
+LAN 路径在接口恢复后重新加入 multicast group、刷新 presence，并按策略恢复已信任 peer；设备
+到 relay 的 WSS 使用带抖动的指数退避并设置上限。PeerSession 的恢复分两层：
 
 - 网络变化优先 ICE restart；
 - association 已失效时重新信令和鉴权，建立新 transport session。
@@ -706,7 +779,7 @@ MVP 使用单 relay region、单控制实例和一个 coturn 实例即可。横�
 include/heyaki/
   core/          identity, result, error, buffer, limits
   profile/       ProfileStore, relay enrollment, TrustStore
-  node/          Node, registration, PeerSession
+  node/          Node, endpoint directory, registration, PeerSession
   message/       point-to-point message API
   rpc/           RPC client/server
   event/         remote event bus
@@ -715,7 +788,10 @@ include/heyaki/
 
 src/
   core/
-  signaling/     WSS client and signed signaling
+  discovery/     bounded LAN multicast presence
+  signaling/     shared signed signaling coordinator
+  signaling/lan/ Asio TLS local signaling route
+  signaling/relay/ WSS relay signaling route
   transport/     internal SPI
   transport/webrtc/
   protocol/      framing and generated protobuf
@@ -748,11 +824,12 @@ heyaki-tui
 ### 11.1 并发模型
 
 - Asio `io_context`/strand 串行化每个 Node 和 PeerSession 的状态转换；
+- LAN multicast socket、TLS acceptor/client、lease 与 handshake timer 都运行在同一 executor 托管的 Asio runtime，不创建私有线程或 poll loop；
 - libdatachannel callback 只做校验和轻量 enqueue，不直接运行用户代码；
 - 用户 callback 派发到配置的 executor；
 - 文件读写、哈希、PTY wait 和其他阻塞操作使用 `executor::BlockingIoExecutor` 或专用 worker；
 - 解析后传入其他线程的 buffer 使用明确所有权，不暴露悬空 `span`；
-- shutdown 顺序固定为停止接收新操作、取消服务、关闭 peer、注销 relay、等待 worker、释放 I/O runtime。
+- shutdown 顺序固定为停止接收新操作和发现生产者、关闭 LAN socket/listener/pending signaling、取消服务、关闭 peer、注销 relay、等待 worker、释放 I/O runtime。
 
 仓库已有 `executor::comm` 可连接网络线程与应用线程，例如用 `MpscChannel` 传递每条控制消息，用 `LatestMailbox` 表达 latest-only 遥测。其 drop/close 语义必须映射到 Heyaki 的可观测指标。
 
@@ -775,17 +852,17 @@ heyaki-tui
 
 `heyaki-tui` 是与基础设施库同时交付的正式 FTXUI 产品组件，不只是 demo 或诊断工具。它链接 `heyaki::client`、`heyaki::services` 和 FTXUI，并只通过公共 Heyaki API 工作。这样 TUI 覆盖同时构成库的端到端验收，不为 UI 增加无法被其他库用户复用的私有协议。
 
-### 12.1 启动与注册体验
+### 12.1 启动、本地初始化与登记体验
 
 `heyaki-tui` 启动时打开选定的 `ProfileStore`：
 
-- profile 不存在时进入 relay registration 流程，收集 relay URL、bootstrap token/二维码、设备名、授权密码和默认 pairing policy；
-- profile 已登记时直接使用设备私钥无感登录 relay，不再次询问 bootstrap token 或授权密码；
+- profile 不存在时先完成本地初始化，创建身份/endpoint，收集授权密码和默认 pairing policy；relay URL 与 bootstrap token/二维码属于随后可跳过的 enrollment 步骤；
+- profile 已存在时立即启动允许的 LAN discovery；存在启用的 enrollment 时再使用设备私钥无感登录 relay，不再次询问 bootstrap token 或授权密码；
 - relay 暂时不可达时保留本地功能和档案管理，显示稳定错误状态并按自动重连策略恢复；
 - enrollment 被吊销、relay 身份 pin 改变或私钥不可用时停止自动重试，进入需要人工处理的安全状态；
 - 支持创建、选择、重命名和删除多个显式 profile，删除前明确区分“仅删除本机档案”和“先从 relay 吊销设备”。
 
-密码输入控件必须隐藏内容、禁止写入日志和历史，并在提交后清理临时 buffer。用于连接其他设备的授权密码也不得保存；成功后的持久凭据是 TrustGrant。TUI 注册完成的默认 profile 能被相同 OS 用户下的 Heyaki 库应用直接打开。
+密码输入控件必须隐藏内容、禁止写入日志和历史，并在提交后清理临时 buffer。用于连接其他设备的授权密码也不得保存；成功后的持久凭据是 TrustGrant。TUI 完成本地初始化的默认 profile 能被相同 OS 用户下的 Heyaki 库应用直接打开。
 
 ### 12.2 功能视图
 
@@ -793,8 +870,8 @@ TUI 至少提供以下工作视图：
 
 | 视图 | 能力 |
 | --- | --- |
-| Relay 与本机 | relay 状态、设备/endpoint 身份、直连率、注册、自动重连和 profile 管理 |
-| 设备 | 在线设备、endpoint/service manifest、连接路径、RTT 和会话状态 |
+| Relay、LAN 与本机 | LAN 接口/readiness、relay 状态、设备/endpoint 身份、路径比例、enrollment、自动重连和 profile 管理 |
+| 设备 | LAN/relay 来源、在线设备、endpoint/service manifest、信令/数据路径、RTT 和会话状态 |
 | 配对与信任 | 输入目标授权密码、选择请求 scopes、查看/撤销 TrustGrant、轮换本机授权密码 |
 | 消息 | 与设备收发 typed message、查看 ACK/TTL/失败状态 |
 | RPC | 选择 service/method、编辑 payload/deadline、取消请求、查看结构化结果 |
@@ -802,7 +879,7 @@ TUI 至少提供以下工作视图：
 | Stream | 打开通用 ByteStream，以文本或十六进制模式双向收发并显式 FIN/reset |
 | 文件 | 本地/远端逻辑目录、push/pull、进度、限速、暂停、取消和断点续传 |
 | Shell | 选择获准 profile、交互终端、resize/signal、退出状态和会话审计 |
-| 诊断 | 有界日志、channel 队列、direct/relay path、吞吐和协议错误 |
+| 诊断 | 有界日志、discovery/信令/channel 队列、signaling/data path、吞吐和协议错误 |
 
 RPC explorer 优先使用受权限控制的 service descriptor/reflection；目标未提供 descriptor 时，用户可以载入 descriptor set 或使用 raw bytes/JSON mapping。TUI 不能假定任意远端 RPC 都可被动态调用。
 
@@ -818,7 +895,10 @@ FTXUI 渲染线程只处理界面状态。`Node` callback 通过有界 `UiEvent`
 
 ### 12.4 TUI 与库应用共存
 
-`heyaki-tui` 使用 application ID `org.heyaki.tui` 和自己的持久 `EndpointId`。其他应用使用各自 application ID，因此可以与 TUI 同时在线。relay 的设备列表按 `DeviceId` 聚合展示 endpoint；对端连接时选择 endpoint 或目标服务，避免把发往设备服务程序的 RPC 误送给 TUI。
+`heyaki-tui` 使用 application ID `org.heyaki.tui` 和自己的持久 `EndpointId`。其他应用使用各自
+application ID，因此可以与 TUI 同时在线。LAN directory 和 relay 设备列表都按 `DeviceId`
+聚合展示 endpoint；对端连接时选择 endpoint 或目标服务，避免把发往设备服务程序的 RPC
+误送给 TUI。
 
 TrustGrant 默认在整个 `DeviceId` 上生效，但 endpoint 可进一步收窄自身暴露的服务。TUI 不能因为共享设备身份就自动代理另一个进程的业务 handler。需要进程间统一接入时，未来可以增加本机 agent/IPC backend，不能通过 relay 在同一设备的进程间绕行。
 
@@ -845,8 +925,9 @@ resource_exhausted, remote_error, outcome_unknown, internal
 
 - 注册成功率、租约续期失败和 WSS 重连次数；
 - 无感登录成功率、enrollment 拒绝原因和在线 endpoint 数；
+- 每接口 multicast join/leave/failure、presence accepted/rejected/expired、目录容量和 LAN TLS handshake 分类；
 - 密码配对成功/失败/限速、TrustGrant 签发与撤销数量，不记录密码；
-- 建连阶段耗时、candidate 类型、直连率、中继率和失败原因；
+- endpoint 来源、signaling route/fallback/winner、建连阶段耗时、candidate 类型、直连率、中继率和失败原因；
 - peer RTT、丢包估计、buffered bytes 和路径变化；
 - 每 channel 队列深度、发送/接收字节、drop、deadline 和取消；
 - RPC latency/status、进行中数量和 overload；
@@ -860,52 +941,57 @@ resource_exhausted, remote_error, outcome_unknown, internal
 ## 14. 安全设计清单
 
 1. 所有公网控制连接使用 TLS 1.3 或受支持的安全 TLS 1.2 配置，并校验证书和主机名。
-2. `DeviceId` 必须由公钥派生；注册、信令和会话握手均验证签名。
-3. 自动登录每次都验证随机 challenge 签名、enrollment generation 和吊销状态，只省略人工输入。
-4. DTLS fingerprint 与双方身份、endpoint、发起方/响应方 nonce、expiry 一起签名，防止中继 MITM。
-5. candidate 绑定已验证的 offer/answer transcript、owner ICE ufrag 和 fingerprint；`SESSION_HELLO` 在 fingerprint 已验证的 DataChannel 上再次签名 transcript 摘要。
-6. 授权密码只在本机安全输入和已认证的端到端 pairing channel 中出现；本机仅持久化 Argon2id verifier。
-7. pairing-only 会话不能创建业务通道，并实施消息大小、尝试次数、时间和来源速率限制。
-8. 设备服务默认拒绝，按 TrustGrant scope、endpoint policy 和服务策略的交集最小授权。
-9. bootstrap、TURN 和 session credential 均短期有效、可撤销、不可写入普通日志。
-10. ProfileStore 私钥、password verifier、TrustStore 和 relay pin 使用 OS 权限/密钥设施保护，更新必须原子化。
-11. endpoint record 与 service manifest 由设备身份签名；`EndpointId` 本身不提供权限。
-12. 所有长度、计数、压缩后大小、并发数和路径都在分配或执行前校验。
-13. parser、状态机、Protobuf、TUI VT parser 和 ProfileStore 边界加入 libFuzzer/AFL++ fuzz 测试。
-14. 文件写入限定 root、临时文件和原子提交，处理 symlink race 与磁盘配额。
-15. Remote Shell 默认关闭，使用受限 profile、低权限账户和资源上限。
-16. relay 与 TURN 实施认证、速率限制、带宽配额、连接上限和反射放大防护。
-17. 吊销设备后拒绝新登录与新会话；现有会话是否立即断开由安全策略明确配置。
-18. 发布前形成 threat model，至少覆盖恶意设备、被控制的 relay、授权密码猜测、ProfileStore 窃取、重放、资源耗尽、协议降级和供应链风险。
+2. LAN presence 只提供可达 hint；公告签名、TLS 建连或源 IP 都不授予信任或业务权限。
+3. LAN TLS 使用签名 `LAN_HELLO` 绑定双方身份、nonce、boot nonce 和双方 TLS 证书指纹；绑定验证前不接受 SDP/candidate。
+4. `DeviceId` 必须由公钥派生；注册、发现、信令和会话握手均验证相应签名。
+5. 自动登录每次都验证随机 challenge 签名、enrollment generation 和吊销状态，只省略人工输入。
+6. DTLS fingerprint 与双方身份、endpoint、发起方/响应方 nonce、expiry 一起签名，防止信令路径 MITM。
+7. candidate 绑定已验证的 offer/answer transcript、owner ICE ufrag 和 fingerprint；`SESSION_HELLO` 在 fingerprint 已验证的 DataChannel 上再次签名 transcript 摘要。
+8. 授权密码只在本机安全输入和已认证的端到端 pairing channel 中出现；本机仅持久化 Argon2id verifier。
+9. pairing-only 会话不能创建业务通道，并实施消息大小、尝试次数、时间和来源速率限制。
+10. 设备服务默认拒绝，按 TrustGrant scope、endpoint policy 和服务策略的交集最小授权。
+11. bootstrap、TURN 和 session credential 均短期有效、可撤销、不可写入普通日志。
+12. ProfileStore 私钥、password verifier、TrustStore 和 relay pin 使用 OS 权限/密钥设施保护，更新必须原子化。
+13. endpoint record 与 service manifest 由设备身份签名；`EndpointId` 本身不提供权限。
+14. multicast datagram、endpoint directory、provisional TLS、pending attempt 和 replay cache 都有全局/每来源上限，满载显式拒绝。
+15. 所有长度、计数、压缩后大小、并发数和路径都在分配或执行前校验。
+16. parser、状态机、Protobuf、TUI VT parser 和 ProfileStore 边界加入 libFuzzer/AFL++ fuzz 测试。
+17. 文件写入限定 root、临时文件和原子提交，处理 symlink race 与磁盘配额。
+18. Remote Shell 默认关闭，使用受限 profile、低权限账户和资源上限。
+19. relay 与 TURN 实施认证、速率限制、带宽配额、连接上限和反射放大防护。
+20. 吊销设备后拒绝新登录与新会话；现有会话是否立即断开由安全策略明确配置。
+21. 发布前形成 threat model，至少覆盖恶意 LAN 设备、被控制的 relay、信令 MITM、授权密码猜测、ProfileStore 窃取、重放、资源耗尽、协议降级和供应链风险。
 
 ## 15. 测试与验收
 
 ### 15.1 测试层次
 
 - **单元测试**：身份派生、签名对象规范化、Argon2 verifier、TrustGrant、ProfileStore、framing、版本协商、ACL、状态机、队列上限和路径清理。
-- **协议测试**：golden vectors、未知字段、版本前后兼容、重复/乱序/截断/超大 frame。
-- **集成测试**：TUI 首次注册、库应用无感登录、同设备多 endpoint、授权密码配对、两设备直连、强制 TURN、relay 重启、设备掉线、ICE restart、重复信令。
-- **网络仿真**：Linux network namespace + nftables/netem 模拟 full-cone、restricted、port-restricted、symmetric NAT、hairpin、CGNAT、UDP blocked、IPv6-only、高延迟和丢包。
-- **跨平台测试**：Linux/Windows 双向建连、文件名与权限差异、PTY/ConPTY 生命周期。
+- **协议测试**：golden vectors、LAN presence/hello、未知字段、版本前后兼容、重复/乱序/截断/超大 frame/datagram。
+- **集成测试**：TUI 本地初始化与 relay enrollment、同设备多 endpoint、授权密码配对、无服务器三设备 LAN、两设备公网直连、强制 TURN、relay 重启、设备掉线、ICE restart、重复信令。
+- **网络仿真**：Linux network namespace + nftables/netem 模拟同一 bridge multicast、multicast blocked、接口切换、full-cone、restricted、port-restricted、symmetric NAT、hairpin、CGNAT、UDP blocked、IPv6-only、高延迟和丢包。
+- **跨平台测试**：Linux/Windows 双向 LAN discovery/建连、Windows firewall/network profile、文件名与权限差异、PTY/ConPTY 生命周期。
 - **故障注入**：磁盘满、进程中止、部分文件、过期 credential、关联断开和慢消费者。
-- **安全测试**：密码猜测/泄漏、受限会话越权、伪造 TrustGrant/endpoint/fingerprint、重放 offer、越权 method/topic、ProfileStore 权限、路径穿越、恶意 VT escape、relay 放大和 parser fuzz。
+- **安全测试**：multicast 洪泛/伪造/重放、TLS slowloris/指纹替换/LAN MITM、密码猜测/泄漏、受限会话越权、伪造 TrustGrant/endpoint/fingerprint、重放 offer、越权 method/topic、ProfileStore 权限、路径穿越、恶意 VT escape、relay 放大和 parser fuzz。
 - **性能测试**：消息 latency、并发 RPC、单/多文件吞吐、Shell 在文件占满链路时的交互延迟、relay 带宽和内存。
 - **TUI 测试**：无 profile onboarding、自动登录、全部功能视图、断线/重连、operation 取消、窄终端布局和高频事件下的有界刷新。
 
-测试不应只在公网“偶尔试通”。NAT 类型和路径必须可强制选择，CI 至少覆盖 direct 与 relay 两条数据路径。
+测试不应只在公网“偶尔试通”。发现、信令和数据路径必须可强制选择，CI 至少覆盖
+LAN-only、direct-with-relay-signaling 与 TURN 三条组合。
 
 ### 15.2 建议 v1 验收目标
 
 以下是首轮可测目标，不是对任意公网环境的硬 SLA：
 
 - 同区域、网络正常时注册 P95 小于 2 秒；
-- TUI 注册完成后，相同 OS 用户下的库应用打开默认 profile 可无人工输入登录 relay；
+- relay/STUN/TURN 全部未运行时，同一测试 LAN 的三设备可以发现正确 endpoint 并建立通过签名与 transcript 认证的 DataChannel；
+- TUI 本地初始化完成后，相同 OS 用户下的库应用打开默认 profile 可运行 LAN-only；存在 enrollment 时可无人工输入登录 relay；
 - TUI 与库应用可以同一 `DeviceId`、不同 `EndpointId` 同时在线并被准确路由；
 - 未信任设备只能进入 pairing-only 会话，正确授权密码生成受范围限制的 TrustGrant，错误密码不会触达业务 handler；
 - relay 日志、数据库和协议抓包中不存在授权密码明文或本机 Argon2id verifier；
 - 可打洞网络的直连建连 P95 小于 3 秒；
 - 直连失败时 TURN fallback P95 小于 5 秒；
-- 强制 relay 场景下消息、RPC、文件和 Shell 均无需业务层改代码；
+- LAN-only 与强制 relay 场景下消息、RPC、文件和 Shell 均无需业务层改代码；
 - 所有发送队列在压力测试中保持配置上限，无持续内存增长；
 - 文件在任意块边界断开后可恢复并通过最终 BLAKE3；
 - 非幂等 RPC 断线后明确返回 `outcome_unknown`，不静默重试；
@@ -924,15 +1010,19 @@ resource_exhausted, remote_error, outcome_unknown, internal
 - 完成 threat model、wire protocol 草案和依赖许可证审计；
 - 建立 CMake、格式化、静态分析、sanitizer、fuzz 和跨平台 CI 骨架。
 
-### 阶段 1：注册与最小连接
+### 阶段 1：本地发现、注册与最小连接
 
-- 实现 ProfileStore、WSS 首次注册、无感登录、endpoint 租约和在线查询；
-- 实现 FTXUI onboarding、relay/profile 管理和自动连接状态；
+- 完成 wire protocol 1.1 的 LAN presence/hello capability、schema、签名对象和 golden vectors；
+- 实现 ProfileStore 本地初始化、LAN multicast discovery、endpoint directory 和 TLS 本地信令；
+- 实现 ProfileStore、WSS relay enrollment、无感登录、endpoint 租约和在线查询；
+- 实现 FTXUI 本地 onboarding、LAN/relay/profile 管理和自动连接状态；
 - 部署 coturn 并签发短期 credential；
 - 实现 signed offer/answer/candidate 转发；
-- 两设备建立 DataChannel，报告 direct/relay path。
+- 在无 relay 的三设备 LAN 与 relay/TURN 拓扑中建立 DataChannel，分别报告 signaling/data path。
 
-完成标准是：TUI 可以注册设备，库应用可以复用同一 profile 自动登录；在可控 NAT 仿真中自动直连或 fallback，且双方验证稳定身份与 endpoint。
+完成标准是：TUI 可以创建本地身份并选择性登记 relay，库应用可以复用同一 profile；同一 LAN
+无需服务器即可发现和认证建连，在可控 NAT 仿真中也可自动直连或 fallback，且双方验证稳定
+身份与 endpoint。
 
 ### 阶段 2：会话与基础通信
 
@@ -962,6 +1052,7 @@ resource_exhausted, remote_error, outcome_unknown, internal
 - TURN/TCP/TLS 与目标企业网络兼容性；
 - relay 配额、滥用防护、滚动升级和灾难恢复；
 - schema compatibility、长稳、故障注入和跨版本互通；
+- LAN discovery/TLS signaling 的多网卡、Windows firewall、洪泛、长稳和资源上限；
 - 基于指标决定是否需要 QUIC backend、跨 region 或外部事件 Broker。
 
 ## 17. 需要尽早确认的产品决策
@@ -977,9 +1068,22 @@ resource_exhausted, remote_error, outcome_unknown, internal
 7. 是否需要移动网络切换时无损会话。若是，QUIC 后端和更强的逻辑 session resume 优先级会上升。
 8. 默认 ProfileStore 是 per-user 还是 system-wide；生产部署是否要求本机 agent 统一持有私钥。
 9. endpoint service manifest 可以向同租户暴露到什么粒度，避免服务发现泄漏敏感设备能力。
+10. LAN v1 是否明确只覆盖同一二层 multicast domain，跨 VLAN 统一依赖 relay 或手工 endpoint hint。
+11. 启用 LAN 模式时广播完整 `DeviceId`/`EndpointId` 的元数据暴露是否可接受。
+12. 自动连接是否保持“仅已信任 peer”，以及默认 peer/pending attempt 上限。
 
 ## 18. 结论
 
-Heyaki 的可行实现不应从自定义 socket 协议开始，而应把成熟的 NAT traversal 和安全传输作为底座，把差异化能力集中在设备端会话和服务层。`libdatachannel + coturn + 轻量 WSS relay` 能满足“直连优先、中继 fallback、服务端简单、业务逻辑在设备端”的核心要求，并提供最快的可验证路径。共享 ProfileStore 使设备只注册一次，`heyaki-tui` 和库应用随后都能无人工干预地认证并连接 relay。
+Heyaki 的可行实现不应从自研可靠传输开始，而应把成熟的 ICE、DTLS、SCTP 和 TURN 作为数据
+面底座，把差异化能力集中在设备端发现、信令、会话和服务层。`LAN multicast + TLS 本地信令
++ libdatachannel` 提供无需服务器的同网段连接；`轻量 WSS relay + coturn` 扩展到 NAT、受限网络
+和广域寻址。两者复用相同签名信令与 WebRTC transport，不形成两套业务协议。
 
-授权密码只负责把未知设备提升为持有受范围限制 TrustGrant 的已信任设备，后续连接依靠长期公钥身份。架构的关键不是隐藏所有失败，而是使注册、配对、路径变化、拥塞、重复、断线和不确定结果拥有明确语义。只要公共 API 保持 transport-neutral、服务端不吸收业务职责、设备身份与细粒度授权从第一版建立，后续增加本机 agent、QUIC、跨区域 relay 或外部 Broker 都可以作为独立能力演进，而无需推翻 TUI、消息、RPC、文件和 Shell 的上层协议。
+共享 ProfileStore 使设备只初始化一次；`heyaki-tui` 和库应用随后可以在 LAN-only 模式自主
+发现/认证，也可以在存在 enrollment 时无人工干预地连接 relay。
+
+授权密码只负责把未知设备提升为持有受范围限制 TrustGrant 的已信任设备，后续连接依靠长期
+公钥身份。架构的关键不是隐藏所有失败，而是使发现、注册、信令路由、配对、路径变化、拥塞、
+重复、断线和不确定结果拥有明确语义。只要公共 API 保持 transport-neutral、发现不承担授权、
+服务端不吸收业务职责、设备身份与细粒度授权从第一版建立，后续增加 mDNS provider、本机
+agent、QUIC、跨区域 relay 或外部 Broker 都可以独立演进，而无需推翻上层协议。

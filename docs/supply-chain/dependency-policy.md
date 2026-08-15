@@ -28,9 +28,9 @@ strategy is fixed now, while exact package artifacts freeze before first use:
 
 | Component | Strategy | Current M0 evidence | Freeze gate |
 | --- | --- | --- | --- |
-| Boost | Pin the exact modular Asio/System header closure used by M2; add Beast and its reviewed closure before M3 WSS work. | Boost 1.88.0 Asio/System/Config/Assert/ThrowException commits are source-locked. | Complete for M2 Asio; extend at M3 entry |
-| TLS backend | Use one OpenSSL line for Boost.Beast and libdatachannel on Linux/Windows; record exact headers/runtime versions and package digest in release provenance. | Local probe: OpenSSL 3.5.7; not a release pin. | M3 entry |
-| coturn | Run an external image/package referenced by immutable version and digest; keep its config and image provenance in the deployment tree. | Not deployed in M0. | M3 entry |
+| Boost | Pin the exact modular Asio/System header closure used by M2; freeze Asio SSL integration before M3A and add Beast plus its reviewed closure before M3B WSS work. | Boost 1.88.0 Asio/System/Config/Assert/ThrowException commits are source-locked. | Asio complete for M2; SSL at M3A entry; Beast at M3B entry |
+| TLS backend | Use one OpenSSL line for Asio LAN TLS, Boost.Beast, and libdatachannel on Linux/Windows; record exact headers/runtime versions and package digest in release provenance. | Local probe: OpenSSL 3.5.7; not a release pin. | M3A entry |
+| coturn | Run an external image/package referenced by immutable version and digest; keep its config and image provenance in the deployment tree. | Not deployed in M0. | M3B entry |
 
 This table deliberately does not claim the developer machine's packages are reproducible. A
 milestone cannot consume one of these components until its exact artifact or package baseline has
@@ -49,7 +49,7 @@ as the build/runtime dependency required by the pinned Protobuf 31.1 Lite toolch
 [M0 linkage and license audit](m0-linkage-license-audit.md) confirms that current installed Heyaki
 artifacts do not yet link or redistribute pinned third-party code. Before any milestone first links a
 pin, that milestone must freeze the selected build artifact and review its actual static/dynamic
-closure. M3/M4 additionally inventory Boost, OpenSSL, coturn and the selected ICE backend artifacts;
+closure. M3A/M3B/M4 additionally inventory Boost, OpenSSL, coturn and the selected ICE backend artifacts;
 M9 repeats the audit against the final release package.
 
 ## Upgrade workflow

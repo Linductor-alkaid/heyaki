@@ -1,8 +1,9 @@
 # Heyaki Threat Model
 
-> Baseline: protocol 1.0, M1
+> Baseline: protocol 1.0, M1, plus the planned protocol 1.1 LAN extension
 >
-> Scope: device library, `heyaki-relay`, coturn integration, ProfileStore, and TUI
+> Scope: device library, LAN discovery/signaling, `heyaki-relay`, coturn integration, ProfileStore,
+> and TUI
 
 ## 1. Assets and trust boundaries
 
@@ -10,10 +11,14 @@ The primary assets are the Ed25519 identity private key, authorization password 
 relay bootstrap/TURN/session credentials, TrustGrant and TrustStore state, service payloads, file data,
 and terminal input/output. Device identity and authorization are end-to-end decisions. The relay is
 trusted for enrollment policy, presence, and availability, but not for business confidentiality or for
-asserting a peer identity without a device signature. Coturn is trusted only to forward encrypted
-packets and enforce allocation policy.
+asserting a peer identity without a device signature. The local network is untrusted: any host may
+observe or inject multicast traffic, open the signaling listener, and advertise arbitrary self-created
+identities. Coturn is trusted only to forward encrypted packets and enforce allocation policy.
 
-TLS authenticates device-to-relay control connections. DTLS protects the peer data path. A signed
+PKI TLS authenticates device-to-relay control connections. LAN TLS provides confidentiality but uses
+boot-scoped self-signed certificates; device authentication comes from a signed `LAN_HELLO` binding
+both identities, nonces, boot nonce, and both peers' observed certificate fingerprints. DTLS protects
+the peer data path. A signed
 offer binds the initiator nonce; the signed answer adds the responder nonce; candidates sent after the
 answer bind both. Offer and answer bind the relevant DTLS fingerprints, both identities/endpoints,
 session, and expiry. Each candidate additionally binds the verified offer/answer transcript hash and
@@ -27,6 +32,10 @@ profile can act as that device.
 | Threat | Attack | Required control and failure behavior |
 | --- | --- | --- |
 | Malicious registered device | malformed frames, privilege requests, slow consumption, identifier collision attempts | fixed-width ID validation, signed identity derivation, default-deny scopes, per-peer limits, bounded queues, parser/state fuzzing; reject before allocation or handler dispatch |
+| Malicious LAN device | advertise unlimited identities/endpoints, spoof source addresses, probe the TLS listener, trigger crossed connects | discovery is never authorization; validate before allocation, bound per-interface/source/peer state, rate-limit provisional TLS and attempts, auto-connect only trusted peers |
+| LAN observer | enumerate stable DeviceId/EndpointId, source address, timing, and traffic volume | do not advertise names/manifests/scopes; protect SDP/candidates with TLS; document stable-ID enumeration as accepted v1 metadata exposure and allow LAN mode to be disabled |
+| Discovery injection/replay | forge, alter, replay, or flood presence datagrams | derive DeviceId from included key, verify signature/boot nonce/sequence/relative lease, use bounded caches, reject conflicts and full capacity, fuzz datagram parser |
+| LAN signaling MITM | terminate two self-signed TLS sessions, replace certificates/SDP/candidates, relay a valid hello | signed LAN hello binds roles, both IDs/endpoints, both nonces, boot nonce, and local/peer certificate fingerprints; no signaling is accepted before binding verification |
 | Controlled relay | replace SDP/fingerprint, replay signaling, enumerate metadata, deny service | canonical signatures bind both peers, endpoints, nonces, expiry and fingerprints; candidates and hello bind the verified signaling transcript; relay can still observe metadata or deny service |
 | Password guessing | repeated pairing attempts from devices/IPs or distributed sources | minimum strength, generated 128-bit passphrases, local Argon2id, per-source/target/session rate limits and exponential delay; no permanent global lockout |
 | ProfileStore theft | steal private key, verifier, grants, or relay pin | OS secret backend, encrypted file fallback, owner-only permissions, secure buffers, atomic storage, audit; treat copied usable private key as full device compromise |
@@ -46,7 +55,7 @@ The following matrix is mandatory:
 | --- | --- | --- |
 | Public | protocol version, capability names, safe error code | allowed |
 | Operational | queue depth, duration, path type, byte count | allowed |
-| Identifier | full DeviceId, endpoint/session/operation IDs | allowed with deployment retention policy; never substitute short IDs in protocol decisions |
+| Identifier | full DeviceId, endpoint/session/operation IDs | allowed with deployment retention policy; LAN presence exposes device/endpoint IDs when enabled; never substitute short IDs in protocol decisions |
 | Secret key | identity private key, secret backend plaintext | redact, never export through diagnostics |
 | Token | bootstrap, TURN password, session credential | redact; at most log non-secret record ID or expiry |
 | Password | entered/generated authorization password | redact; never history, metrics, trace, crash context, or relay field |
@@ -65,7 +74,7 @@ callers must not put remote text or payload fragments in `safe_detail`.
 The replay key is a typed tuple, never an unscoped nonce:
 
 ```text
-(protocol_domain, signer_device_id, peer_device_id?, request_or_session_id, nonce)
+(protocol_domain, signer_device_id, peer_device_id?, request_or_session_id, boot_nonce?, nonce/sequence)
 ```
 
 Every accepted entry remains for the fixed ten minutes after local monotonic insertion. Signed
@@ -76,7 +85,7 @@ Partitions and the per-peer quota prevent one peer from evicting the entire cach
 may return a cached
 idempotent response; a key collision with different canonical bytes is rejected and audited.
 
-When capacity is exhausted, enrollment, login, signaling, pairing, grant, and session hello fail closed
+When capacity is exhausted, enrollment, login, LAN presence/hello, signaling, pairing, grant, and session hello fail closed
 with `resource_exhausted`. No untracked eviction admits a high-risk request. The cache reports current
 entries, expiry removals, duplicate hits, conflicting duplicates, and full rejections through the
 existing executor/communication and protocol diagnostic facilities; it does not create a parallel task
@@ -99,7 +108,15 @@ health system.
   grants immediately. Existing grants remain until explicit revocation unless the user selects rotation
   with generation revocation.
 
-## 6. TLS, DTLS, and signaling-transcript review
+## 6. LAN TLS, relay TLS, DTLS, and signaling-transcript review
+
+A LAN attacker can present its own TLS certificate to both devices and relay plaintext between two TLS
+connections. This fails after `LAN_HELLO`: each real device signs both its own certificate fingerprint
+and the peer certificate fingerprint observed on its TLS connection, with explicit initiator/responder
+roles and both nonces. The attacker cannot replace either fingerprint in the signed object and cannot
+complete the expected binding on both legs. No offer, answer, candidate, credential, grant, or password
+is processed before this check. A replayed hello fails boot nonce, nonce, role, expiry, or replay-cache
+validation.
 
 An active relay that replaces an offer fingerprint cannot produce the initiator's Ed25519 signature.
 Replacing the whole offer with a replay fails nonce/request expiry and replay-cache checks. Relaying a
@@ -111,20 +128,25 @@ offer/answer pair fails the signed transcript comparison before authorization. P
 v0.23.2 has no public DTLS exporter API; protocol 1.0 therefore uses this reproducible transcript
 binding and does not claim exporter semantics.
 
-Therefore a relay cannot silently become a peer or read business plaintext. It can drop/delay traffic,
-serve stale presence within bounded lease behavior, perform traffic analysis, and refuse TURN
-credentials. These availability and metadata risks are residual and require operational monitoring,
-regional deployment, and retention policy rather than new cryptography.
+Therefore a LAN signaling attacker or relay cannot silently become a peer or read business plaintext.
+They can drop/delay traffic, advertise arbitrary new identities, serve stale presence within bounded
+lease behavior, perform traffic analysis, and refuse connectivity. LAN presence also exposes stable
+device/endpoint identifiers to local observers. These availability and metadata risks are residual and
+require product controls, operational monitoring, retention policy, or disabling LAN mode rather than
+being represented as authenticated success.
 
 ## 7. Security gates
 
 Protocol parsers and state machines must cover golden, truncated, duplicate, unknown, boundary, and
-oversize inputs under sanitizer and fuzz smoke runs. Enrollment and session code must prove replay-cache
-full rejection, signature/fingerprint/transcript failures, and restricted-session isolation before
-M4. File code must prove path containment and quota checks before M7. Shell remains disabled until its
+oversize frame/datagram inputs under sanitizer and fuzz smoke runs. LAN code must prove multicast flood
+limits, provisional TLS limits, certificate-binding MITM rejection, crossed-connect arbitration,
+replay-cache full rejection, cancellation, and shutdown convergence before M4. Enrollment and minimal
+session code must prove signature/fingerprint/transcript failures before M4; restricted-session
+isolation must pass before M5 opens pairing. File code must prove path containment and quota checks
+before M7. Shell remains disabled until its
 VT parser, process containment, logging exclusions, and termination escalation receive a separate
 review in M8.
 
-Residual risks accepted for v1 are relay/coturn denial of service and traffic analysis, compromise of a
-device OS principal, and lack of lossless network migration. They are not represented as successful or
-authorized operation outcomes.
+Residual risks accepted for v1 are LAN stable-ID enumeration, local/relay/coturn denial of service and
+traffic analysis, compromise of a device OS principal, lack of cross-VLAN serverless discovery, and lack
+of lossless network migration. They are not represented as successful or authorized operation outcomes.
