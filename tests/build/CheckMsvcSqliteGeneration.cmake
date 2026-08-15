@@ -21,26 +21,33 @@ if(NOT versioned_arch STREQUAL "x64")
 endif()
 
 set(test_root "${HEYAKI_TEST_WORK_DIR}/Visual Studio SQLite Generation")
-set(vcvarsall "${test_root}/Visual Studio 2022/VC/Auxiliary/Build/vcvarsall.bat")
-set(sqlite_source_dir "${test_root}/SQLite Source")
-set(generation_script "${test_root}/SQLite Build/generate-amalgamation.bat")
+set(visual_studio_root "${test_root}/Visual Studio 2022")
+set(sqlite_source_dir "${test_root}/SQLite Source's")
+set(generation_script "${test_root}/SQLite Build/generate-amalgamation.ps1")
 file(MAKE_DIRECTORY "${test_root}/SQLite Build")
 
 heyaki_write_sqlite_msvc_generation_script(
-  "${generation_script}" "${vcvarsall}" x64 "${sqlite_source_dir}")
+  "${generation_script}" "${visual_studio_root}" x64 "${sqlite_source_dir}")
 file(READ "${generation_script}" script_contents)
 
-set(vcvarsall_native "${vcvarsall}")
+set(visual_studio_root_native "${visual_studio_root}")
 set(sqlite_source_dir_native "${sqlite_source_dir}")
 set(sqlite_makefile_native "${sqlite_source_dir}/Makefile.msc")
-cmake_path(NATIVE_PATH vcvarsall_native NORMALIZE vcvarsall_native)
+cmake_path(NATIVE_PATH visual_studio_root_native NORMALIZE visual_studio_root_native)
 cmake_path(NATIVE_PATH sqlite_source_dir_native NORMALIZE sqlite_source_dir_native)
 cmake_path(NATIVE_PATH sqlite_makefile_native NORMALIZE sqlite_makefile_native)
+foreach(path_variable IN ITEMS
+    visual_studio_root_native sqlite_source_dir_native sqlite_makefile_native)
+  string(REPLACE "'" "''" ${path_variable} "${${path_variable}}")
+endforeach()
 foreach(expected_command IN ITEMS
-    "echo [heyaki-sqlite] initializing MSVC environment"
-    "call \"${vcvarsall_native}\" x64"
-    "echo [heyaki-sqlite] generating SQLite amalgamation"
-    "nmake /NOLOGO /f \"${sqlite_makefile_native}\" \"TOP=${sqlite_source_dir_native}\" sqlite3.c sqlite3.h")
+    "$vsInstallPath = '${visual_studio_root_native}'"
+    "$devShellModule = Join-Path $vsInstallPath 'Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll'"
+    "Write-Host '[heyaki-sqlite] initializing MSVC environment'"
+    "Import-Module $devShellModule"
+    "Enter-VsDevShell -VsInstallPath $vsInstallPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'"
+    "Write-Host '[heyaki-sqlite] generating SQLite amalgamation'"
+    "& nmake.exe /NOLOGO /f '${sqlite_makefile_native}' 'TOP=${sqlite_source_dir_native}' sqlite3.c sqlite3.h")
   string(FIND "${script_contents}" "${expected_command}" command_index)
   if(command_index EQUAL -1)
     message(FATAL_ERROR
@@ -48,30 +55,3 @@ foreach(expected_command IN ITEMS
       "Generated script:\n${script_contents}")
   endif()
 endforeach()
-
-if(WIN32)
-  set(execution_script "${test_root}/SQLite Build/check batch execution.bat")
-  file(WRITE "${execution_script}"
-    "@echo off\r\n"
-    "echo [heyaki-test] Windows batch execution reached stdin\r\n"
-    "exit /b 7\r\n")
-  heyaki_execute_windows_batch(
-    "${execution_script}"
-    "${test_root}/SQLite Build"
-    execution_result
-    execution_stdout
-    execution_stderr)
-  if(NOT execution_result EQUAL 7)
-    message(FATAL_ERROR
-      "Windows batch execution returned ${execution_result}; expected 7\n"
-      "stdout:\n${execution_stdout}\n"
-      "stderr:\n${execution_stderr}")
-  endif()
-  if(NOT execution_stdout MATCHES
-      "\\[heyaki-test\\] Windows batch execution reached stdin")
-    message(FATAL_ERROR
-      "Windows batch execution did not emit its marker\n"
-      "stdout:\n${execution_stdout}\n"
-      "stderr:\n${execution_stderr}")
-  endif()
-endif()

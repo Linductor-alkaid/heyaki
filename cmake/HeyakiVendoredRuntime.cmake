@@ -23,43 +23,30 @@ function(heyaki_visual_studio_platform_to_vcvars_arch output_variable platform_n
 endfunction()
 
 function(heyaki_write_sqlite_msvc_generation_script
-    output_file vcvarsall_file vcvars_arch sqlite_source_dir)
-  set(vcvarsall_native "${vcvarsall_file}")
+    output_file visual_studio_root vcvars_arch sqlite_source_dir)
+  set(visual_studio_root_native "${visual_studio_root}")
   set(sqlite_source_dir_native "${sqlite_source_dir}")
   set(sqlite_makefile_native "${sqlite_source_dir}/Makefile.msc")
-  cmake_path(NATIVE_PATH vcvarsall_native NORMALIZE vcvarsall_native)
+  cmake_path(NATIVE_PATH visual_studio_root_native NORMALIZE visual_studio_root_native)
   cmake_path(NATIVE_PATH sqlite_source_dir_native NORMALIZE sqlite_source_dir_native)
   cmake_path(NATIVE_PATH sqlite_makefile_native NORMALIZE sqlite_makefile_native)
+  foreach(path_variable IN ITEMS
+      visual_studio_root_native sqlite_source_dir_native sqlite_makefile_native)
+    string(REPLACE "'" "''" ${path_variable} "${${path_variable}}")
+  endforeach()
   file(WRITE "${output_file}"
-    "@echo off\r\n"
-    "echo [heyaki-sqlite] initializing MSVC environment\r\n"
-    "call \"${vcvarsall_native}\" ${vcvars_arch}\r\n"
-    "if errorlevel 1 exit /b 1\r\n"
-    "echo [heyaki-sqlite] generating SQLite amalgamation\r\n"
-    "nmake /NOLOGO /f \"${sqlite_makefile_native}\" "
-      "\"TOP=${sqlite_source_dir_native}\" sqlite3.c sqlite3.h\r\n"
-    "exit /b %errorlevel%\r\n")
-endfunction()
-
-function(heyaki_execute_windows_batch
-    script_file working_directory result_variable stdout_variable stderr_variable)
-  find_program(heyaki_cmd_executable NAMES cmd.exe cmd NO_CACHE)
-  if(NOT heyaki_cmd_executable)
-    message(FATAL_ERROR "Could not locate cmd.exe for Windows batch execution")
-  endif()
-
-  # Feeding the script over stdin avoids cmd.exe /c's special quote parsing,
-  # which differs from the argument quoting used by execute_process().
-  execute_process(
-    COMMAND "${heyaki_cmd_executable}" /d /q
-    INPUT_FILE "${script_file}"
-    WORKING_DIRECTORY "${working_directory}"
-    RESULT_VARIABLE batch_result
-    OUTPUT_VARIABLE batch_stdout
-    ERROR_VARIABLE batch_stderr)
-  set(${result_variable} "${batch_result}" PARENT_SCOPE)
-  set(${stdout_variable} "${batch_stdout}" PARENT_SCOPE)
-  set(${stderr_variable} "${batch_stderr}" PARENT_SCOPE)
+    "$ErrorActionPreference = 'Stop'\n"
+    "$vsInstallPath = '${visual_studio_root_native}'\n"
+    "$devShellModule = Join-Path $vsInstallPath "
+      "'Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll'\n"
+    "Write-Host '[heyaki-sqlite] initializing MSVC environment'\n"
+    "Import-Module $devShellModule\n"
+    "Enter-VsDevShell -VsInstallPath $vsInstallPath -SkipAutomaticLocation "
+      "-DevCmdArguments '-arch=${vcvars_arch} -host_arch=x64'\n"
+    "Write-Host '[heyaki-sqlite] generating SQLite amalgamation'\n"
+    "& nmake.exe /NOLOGO /f '${sqlite_makefile_native}' "
+      "'TOP=${sqlite_source_dir_native}' sqlite3.c sqlite3.h\n"
+    "exit $LASTEXITCODE\n")
 endfunction()
 
 function(heyaki_add_pinned_boost_asio)
@@ -244,11 +231,12 @@ function(heyaki_add_vendored_sqlite)
           OUTPUT_VARIABLE sqlite_generate_stdout
           ERROR_VARIABLE sqlite_generate_stderr)
       elseif(CMAKE_GENERATOR MATCHES "^Visual Studio ")
-        set(sqlite_vcvarsall
-          "${CMAKE_GENERATOR_INSTANCE}/VC/Auxiliary/Build/vcvarsall.bat")
-        if(NOT CMAKE_GENERATOR_INSTANCE OR NOT EXISTS "${sqlite_vcvarsall}")
+        set(sqlite_dev_shell_module
+          "${CMAKE_GENERATOR_INSTANCE}/Common7/Tools/Microsoft.VisualStudio.DevShell.dll")
+        if(NOT CMAKE_GENERATOR_INSTANCE OR NOT EXISTS "${sqlite_dev_shell_module}")
           message(FATAL_ERROR
-            "Could not locate vcvarsall.bat for the selected Visual Studio instance: "
+            "Could not locate Microsoft.VisualStudio.DevShell.dll for the selected "
+            "Visual Studio instance: "
             "${CMAKE_GENERATOR_INSTANCE}")
         endif()
 
@@ -259,18 +247,27 @@ function(heyaki_add_vendored_sqlite)
         heyaki_visual_studio_platform_to_vcvars_arch(
           sqlite_vcvars_arch "${sqlite_vs_platform}")
 
-        set(sqlite_generate_script "${sqlite_build_dir}/generate-amalgamation.bat")
+        find_program(heyaki_powershell_executable
+          NAMES pwsh.exe powershell.exe pwsh powershell NO_CACHE)
+        if(NOT heyaki_powershell_executable)
+          message(FATAL_ERROR
+            "Could not locate PowerShell for SQLite generation")
+        endif()
+
+        set(sqlite_generate_script "${sqlite_build_dir}/generate-amalgamation.ps1")
         heyaki_write_sqlite_msvc_generation_script(
           "${sqlite_generate_script}"
-          "${sqlite_vcvarsall}"
+          "${CMAKE_GENERATOR_INSTANCE}"
           "${sqlite_vcvars_arch}"
           "${sqlite_source_dir}")
-        heyaki_execute_windows_batch(
-          "${sqlite_generate_script}"
-          "${sqlite_build_dir}"
-          sqlite_generate_result
-          sqlite_generate_stdout
-          sqlite_generate_stderr)
+        execute_process(
+          COMMAND "${heyaki_powershell_executable}"
+            -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
+            -File "${sqlite_generate_script}"
+          WORKING_DIRECTORY "${sqlite_build_dir}"
+          RESULT_VARIABLE sqlite_generate_result
+          OUTPUT_VARIABLE sqlite_generate_stdout
+          ERROR_VARIABLE sqlite_generate_stderr)
         if(NOT sqlite_generate_result EQUAL 0)
           file(READ "${sqlite_generate_script}" sqlite_generate_script_contents)
         endif()
