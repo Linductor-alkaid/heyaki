@@ -67,3 +67,29 @@ including:
 
 Wait for explicit direction before implementing the exception or changing the
 executor dependency itself.
+
+## GitHub Commit And Push
+
+Only create commits or update GitHub after the user has explicitly authorized
+that action. Keep commits scoped to the requested work and preserve unrelated
+working-tree changes.
+
+- Use the HTTPS `origin` remote and prefer a normal non-force
+  `git push origin <branch>` when Git transport is available.
+- Obtain GitHub authentication from `~/.config/gh/hosts.yaml` at runtime. The
+  file may contain either the standard `oauth_token:` field or a
+  `GITHUB_TOKEN=` entry. Never print the token, copy it into the repository,
+  put it in a remote URL, expose it in process arguments, or include it in
+  command output or logs.
+- Do not assume that the `gh` CLI is installed. Detect it before use and fall
+  back to authenticated HTTPS without changing the credential file.
+- If normal Git transport is unavailable but the GitHub API is reachable, the
+  Git Database API is an acceptable fallback: verify the current remote ref,
+  create blobs, a tree, and a commit based on that exact remote commit, then
+  update the branch ref with `force: false`.
+- After an API fallback, verify the remote SHA and synchronize the local
+  tracking and branch refs without a destructive reset. The local commit may
+  have a different SHA from the API-created commit when GitHub normalizes
+  commit metadata, even when both commits have the same parent and tree.
+- Never force-push, set `force: true`, rewrite published history, or embed a PAT
+  in Git configuration unless the user explicitly requests that exact action.

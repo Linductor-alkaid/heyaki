@@ -48,3 +48,30 @@ foreach(expected_command IN ITEMS
       "Generated script:\n${script_contents}")
   endif()
 endforeach()
+
+if(WIN32)
+  set(execution_script "${test_root}/SQLite Build/check batch execution.bat")
+  file(WRITE "${execution_script}"
+    "@echo off\r\n"
+    "echo [heyaki-test] Windows batch execution reached stdin\r\n"
+    "exit /b 7\r\n")
+  heyaki_execute_windows_batch(
+    "${execution_script}"
+    "${test_root}/SQLite Build"
+    execution_result
+    execution_stdout
+    execution_stderr)
+  if(NOT execution_result EQUAL 7)
+    message(FATAL_ERROR
+      "Windows batch execution returned ${execution_result}; expected 7\n"
+      "stdout:\n${execution_stdout}\n"
+      "stderr:\n${execution_stderr}")
+  endif()
+  if(NOT execution_stdout MATCHES
+      "\\[heyaki-test\\] Windows batch execution reached stdin")
+    message(FATAL_ERROR
+      "Windows batch execution did not emit its marker\n"
+      "stdout:\n${execution_stdout}\n"
+      "stderr:\n${execution_stderr}")
+  endif()
+endif()

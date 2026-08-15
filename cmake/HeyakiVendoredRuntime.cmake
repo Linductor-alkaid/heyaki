@@ -31,14 +31,35 @@ function(heyaki_write_sqlite_msvc_generation_script
   cmake_path(NATIVE_PATH sqlite_source_dir_native NORMALIZE sqlite_source_dir_native)
   cmake_path(NATIVE_PATH sqlite_makefile_native NORMALIZE sqlite_makefile_native)
   file(WRITE "${output_file}"
-    "@echo off\n"
-    "echo [heyaki-sqlite] initializing MSVC environment\n"
-    "call \"${vcvarsall_native}\" ${vcvars_arch}\n"
-    "if errorlevel 1 exit /b 1\n"
-    "echo [heyaki-sqlite] generating SQLite amalgamation\n"
+    "@echo off\r\n"
+    "echo [heyaki-sqlite] initializing MSVC environment\r\n"
+    "call \"${vcvarsall_native}\" ${vcvars_arch}\r\n"
+    "if errorlevel 1 exit /b 1\r\n"
+    "echo [heyaki-sqlite] generating SQLite amalgamation\r\n"
     "nmake /NOLOGO /f \"${sqlite_makefile_native}\" "
-      "\"TOP=${sqlite_source_dir_native}\" sqlite3.c sqlite3.h\n"
-    "exit /b %errorlevel%\n")
+      "\"TOP=${sqlite_source_dir_native}\" sqlite3.c sqlite3.h\r\n"
+    "exit /b %errorlevel%\r\n")
+endfunction()
+
+function(heyaki_execute_windows_batch
+    script_file working_directory result_variable stdout_variable stderr_variable)
+  find_program(heyaki_cmd_executable NAMES cmd.exe cmd NO_CACHE)
+  if(NOT heyaki_cmd_executable)
+    message(FATAL_ERROR "Could not locate cmd.exe for Windows batch execution")
+  endif()
+
+  # Feeding the script over stdin avoids cmd.exe /c's special quote parsing,
+  # which differs from the argument quoting used by execute_process().
+  execute_process(
+    COMMAND "${heyaki_cmd_executable}" /d /q
+    INPUT_FILE "${script_file}"
+    WORKING_DIRECTORY "${working_directory}"
+    RESULT_VARIABLE batch_result
+    OUTPUT_VARIABLE batch_stdout
+    ERROR_VARIABLE batch_stderr)
+  set(${result_variable} "${batch_result}" PARENT_SCOPE)
+  set(${stdout_variable} "${batch_stdout}" PARENT_SCOPE)
+  set(${stderr_variable} "${batch_stderr}" PARENT_SCOPE)
 endfunction()
 
 function(heyaki_add_pinned_boost_asio)
@@ -238,23 +259,18 @@ function(heyaki_add_vendored_sqlite)
         heyaki_visual_studio_platform_to_vcvars_arch(
           sqlite_vcvars_arch "${sqlite_vs_platform}")
 
-        find_program(heyaki_cmd_executable NAMES cmd.exe cmd NO_CACHE)
-        if(NOT heyaki_cmd_executable)
-          message(FATAL_ERROR "Could not locate cmd.exe for SQLite generation")
-        endif()
-
         set(sqlite_generate_script "${sqlite_build_dir}/generate-amalgamation.bat")
         heyaki_write_sqlite_msvc_generation_script(
           "${sqlite_generate_script}"
           "${sqlite_vcvarsall}"
           "${sqlite_vcvars_arch}"
           "${sqlite_source_dir}")
-        execute_process(
-          COMMAND "${heyaki_cmd_executable}" /d /c call generate-amalgamation.bat
-          WORKING_DIRECTORY "${sqlite_build_dir}"
-          RESULT_VARIABLE sqlite_generate_result
-          OUTPUT_VARIABLE sqlite_generate_stdout
-          ERROR_VARIABLE sqlite_generate_stderr)
+        heyaki_execute_windows_batch(
+          "${sqlite_generate_script}"
+          "${sqlite_build_dir}"
+          sqlite_generate_result
+          sqlite_generate_stdout
+          sqlite_generate_stderr)
         if(NOT sqlite_generate_result EQUAL 0)
           file(READ "${sqlite_generate_script}" sqlite_generate_script_contents)
         endif()
