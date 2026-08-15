@@ -124,4 +124,45 @@ Result<IdentityKeyPair> import_identity(std::span<const std::byte> public_key,
       IdentityKeyPair{*device_id.value_if(), public_key_copy, secret_key_copy});
 }
 
+Result<IdentitySignature> sign_identity_message(const IdentityKeyPair& identity,
+                                                std::span<const std::byte> message) {
+  const auto initialized = initialize_crypto();
+  if (!initialized) {
+    return Result<IdentitySignature>::failure(*initialized.error_if());
+  }
+  IdentitySignature signature{};
+  unsigned long long signature_size = 0U;
+  if (crypto_sign_detached(
+          reinterpret_cast<unsigned char*>(signature.data()), &signature_size,
+          reinterpret_cast<const unsigned char*>(message.data()), message.size(),
+          reinterpret_cast<const unsigned char*>(identity.secret_key().data())) != 0 ||
+      signature_size != signature.size()) {
+    return Result<IdentitySignature>::failure(
+        Error{ErrorCode::internal, "identity", "signature_generation_failed"});
+  }
+  return Result<IdentitySignature>::success(signature);
+}
+
+Result<void> verify_identity_signature(std::span<const std::byte> public_key,
+                                       std::span<const std::byte> message,
+                                       std::span<const std::byte> signature) {
+  const auto initialized = initialize_crypto();
+  if (!initialized) {
+    return initialized;
+  }
+  if (public_key.size() != ed25519_public_key_bytes ||
+      signature.size() != ed25519_signature_bytes) {
+    return Result<void>::failure(
+        Error{ErrorCode::authentication, "identity", "invalid_signature_shape"});
+  }
+  if (crypto_sign_verify_detached(
+          reinterpret_cast<const unsigned char*>(signature.data()),
+          reinterpret_cast<const unsigned char*>(message.data()), message.size(),
+          reinterpret_cast<const unsigned char*>(public_key.data())) != 0) {
+    return Result<void>::failure(
+        Error{ErrorCode::authentication, "identity", "signature_verification_failed"});
+  }
+  return Result<void>::success();
+}
+
 }  // namespace heyaki

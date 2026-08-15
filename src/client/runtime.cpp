@@ -1,5 +1,7 @@
 #include <heyaki/runtime.hpp>
 
+#include "runtime_access.hpp"
+
 #include <heyaki/identity.hpp>
 
 #include <executor/comm.hpp>
@@ -266,6 +268,11 @@ struct TrackedTask {
   std::future<void> future;
 };
 
+struct InternalTask {
+  std::string name;
+  std::future<void> future;
+};
+
 class AsioWorker final : public executor::IBlockingIoWorker {
  public:
   explicit AsioWorker(boost::asio::io_context& io) : io_(io) {}
@@ -512,6 +519,7 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
 
     cancel_callbacks_left_after_worker_stop(report);
     drain_tracked_tasks(report);
+    drain_internal_tasks(report);
     cancel_pending_operations(report);
     run_shutdown_stage(RuntimeShutdownStage::flush_persistence, shutdown_hooks, report);
 
@@ -529,6 +537,33 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
   }
 
   RuntimeOwnership ownership() const noexcept { return ownership_; }
+  boost::asio::any_io_executor io_executor() { return io_.get_executor(); }
+  Result<void> dispatch_general(std::string name, std::function<void()> task) {
+    if (!admission_open_.load(std::memory_order_acquire) || !task) {
+      return Result<void>::failure(
+          Error{ErrorCode::cancelled, "runtime", "runtime_admission_closed"});
+    }
+    try {
+      auto future = executor_->submit_auto(
+          executor::task(std::move(task))
+              .name(name)
+              .intent(executor::ExecutionIntent::GeneralCpu));
+      if (future.wait_for(std::chrono::milliseconds{0}) == std::future_status::ready) {
+        future.get();
+        return Result<void>::success();
+      }
+      prune_internal_tasks();
+      auto tracked = std::make_shared<InternalTask>(
+          InternalTask{.name = std::move(name), .future = std::move(future)});
+      internal_tasks_.push_back(tracked);
+      watch_internal_task(tracked);
+      return Result<void>::success();
+    } catch (...) {
+      diagnostics_->record_executor_event();
+      return Result<void>::failure(
+          Error{ErrorCode::resource_exhausted, "runtime", "executor_dispatch_rejected"});
+    }
+  }
 
  private:
   struct StartedShutdownHook {
@@ -771,6 +806,48 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
     std::erase_if(tracked_tasks_, [](const auto& task) { return !task->future.valid(); });
   }
 
+  void observe_internal_task(const std::shared_ptr<InternalTask>& task) {
+    if (!task->future.valid() ||
+        task->future.wait_for(std::chrono::milliseconds{0}) !=
+            std::future_status::ready) {
+      return;
+    }
+    try {
+      task->future.get();
+    } catch (...) {
+      diagnostics_->record_executor_event();
+    }
+  }
+
+  void watch_internal_task(const std::shared_ptr<InternalTask>& task) {
+    if (!task->future.valid()) {
+      return;
+    }
+    if (task->future.wait_for(std::chrono::milliseconds{0}) ==
+        std::future_status::ready) {
+      observe_internal_task(task);
+      return;
+    }
+    auto timer = std::make_shared<boost::asio::steady_timer>(
+        io_, std::chrono::milliseconds{10});
+    std::weak_ptr<RuntimeState> weak = weak_from_this();
+    timer->async_wait([weak, task, timer](const boost::system::error_code& error) {
+      if (!error) {
+        if (auto self = weak.lock()) {
+          self->watch_internal_task(task);
+        }
+      }
+    });
+  }
+
+  void prune_internal_tasks() {
+    for (const auto& task : internal_tasks_) {
+      observe_internal_task(task);
+    }
+    std::erase_if(internal_tasks_,
+                  [](const auto& task) { return !task->future.valid(); });
+  }
+
   void drain_for_shutdown(const std::shared_ptr<std::promise<void>>& barrier) {
     RuntimeCallbackEvent event;
     while (callbacks_.try_receive(event)) {
@@ -833,6 +910,21 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
     }
   }
 
+  void drain_internal_tasks(RuntimeShutdownReport& report) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          config_.operation_drain_timeout;
+    for (const auto& task : internal_tasks_) {
+      if (!task->future.valid()) {
+        continue;
+      }
+      if (task->future.wait_until(deadline) == std::future_status::ready) {
+        observe_internal_task(task);
+      } else {
+        report.operation_drain_timed_out = true;
+      }
+    }
+  }
+
   void cancel_pending_operations(RuntimeShutdownReport& report) {
     for (const auto& operation : operations_) {
       if (operation->complete(
@@ -859,6 +951,7 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
   executor::WorkerHandle worker_;
   std::vector<std::shared_ptr<RuntimeOperationState>> operations_;
   std::vector<std::shared_ptr<TrackedTask>> tracked_tasks_;
+  std::vector<std::shared_ptr<InternalTask>> internal_tasks_;
   std::atomic<bool> admission_open_{false};
   std::atomic<bool> shutdown_started_{false};
   std::atomic<std::uint64_t> pending_context_callbacks_{0U};
@@ -954,6 +1047,23 @@ Runtime::~Runtime() {
   if (state_) {
     (void)state_->shutdown();
   }
+}
+
+Result<boost::asio::any_io_executor> detail::RuntimeAccess::io_executor(Runtime& runtime) {
+  if (!runtime.state_ || runtime.state_->snapshot().phase != RuntimePhase::running) {
+    return Result<boost::asio::any_io_executor>::failure(
+        Error{ErrorCode::cancelled, "runtime", "runtime_not_running"});
+  }
+  return Result<boost::asio::any_io_executor>::success(runtime.state_->io_executor());
+}
+
+Result<void> detail::RuntimeAccess::dispatch_general(Runtime& runtime, std::string name,
+                                                     std::function<void()> task) {
+  if (!runtime.state_) {
+    return Result<void>::failure(
+        Error{ErrorCode::cancelled, "runtime", "runtime_not_running"});
+  }
+  return runtime.state_->dispatch_general(std::move(name), std::move(task));
 }
 
 Result<Runtime> Runtime::create_borrowed(executor::Executor& executor,

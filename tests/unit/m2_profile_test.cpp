@@ -281,6 +281,97 @@ TEST_F(M2ProfileTest, MissingProfileDoesNotCreateIdentity) {
   EXPECT_FALSE(std::filesystem::exists(profile_path()));
 }
 
+TEST_F(M2ProfileTest, LocalInitializationIsRelayIndependentAndPersistent) {
+  auto profile = ProfileStore::create(profile_path());
+  ASSERT_TRUE(profile) << profile.error_if()->safe_detail();
+
+  auto before = profile.value_if()->local_readiness("com.example.local-node");
+  ASSERT_TRUE(before) << before.error_if()->safe_detail();
+  EXPECT_TRUE(before.value_if()->identity_ready);
+  EXPECT_FALSE(before.value_if()->endpoint_ready);
+  EXPECT_FALSE(before.value_if()->password_verifier_ready);
+  EXPECT_TRUE(before.value_if()->pairing_policy_ready);
+  EXPECT_TRUE(before.value_if()->lan_configuration_ready);
+  EXPECT_FALSE(before.value_if()->ready());
+
+  auto verifier = create_password_verifier("correct horse battery staple",
+                                           PasswordHashParameters{});
+  ASSERT_TRUE(verifier) << verifier.error_if()->safe_detail();
+  LanConfiguration lan;
+  lan.connectivity_mode = ConnectivityMode::lan_only;
+  lan.auto_connect_trusted = true;
+  lan.interface_preferences = {"eth0", "wlan0"};
+  PairingPolicy policy;
+  policy.generation = 7U;
+  policy.default_scopes = {"file.exchange", "rpc.device.read"};
+  LocalProfileInitialization initialization{
+      .application_id = "com.example.local-node",
+      .password_verifier = *verifier.value_if(),
+      .password_generation = 3U,
+      .pairing_policy = policy,
+      .lan = lan};
+  auto endpoint = profile.value_if()->initialize_local(initialization);
+  ASSERT_TRUE(endpoint) << endpoint.error_if()->safe_detail();
+  EXPECT_FALSE(endpoint.value_if()->is_zero());
+
+  auto readiness = profile.value_if()->local_readiness(initialization.application_id);
+  ASSERT_TRUE(readiness) << readiness.error_if()->safe_detail();
+  EXPECT_TRUE(readiness.value_if()->ready());
+  auto stored_lan = profile.value_if()->lan_configuration();
+  ASSERT_TRUE(stored_lan) << stored_lan.error_if()->safe_detail();
+  EXPECT_EQ(stored_lan.value_if()->connectivity_mode, ConnectivityMode::lan_only);
+  EXPECT_TRUE(stored_lan.value_if()->auto_connect_trusted);
+  EXPECT_EQ(stored_lan.value_if()->interface_preferences, lan.interface_preferences);
+  auto stored_policy = profile.value_if()->pairing_policy();
+  ASSERT_TRUE(stored_policy) << stored_policy.error_if()->safe_detail();
+  EXPECT_EQ(stored_policy.value_if()->generation, 7U);
+  EXPECT_EQ(stored_policy.value_if()->default_scopes, policy.default_scopes);
+
+  profile = Result<ProfileStore>::failure(
+      Error{ErrorCode::internal, "test", "release_profile"});
+  sqlite3* database = nullptr;
+  ASSERT_EQ(sqlite3_open(profile_path().string().c_str(), &database), SQLITE_OK);
+  ASSERT_EQ(sqlite3_exec(database, "DROP TABLE relay_enrollments", nullptr, nullptr, nullptr),
+            SQLITE_OK);
+  ASSERT_EQ(sqlite3_close(database), SQLITE_OK);
+
+  auto reopened = ProfileStore::open(profile_path());
+  ASSERT_TRUE(reopened) << reopened.error_if()->safe_detail();
+  auto relay_free_readiness = reopened.value_if()->local_readiness(initialization.application_id);
+  ASSERT_TRUE(relay_free_readiness) << relay_free_readiness.error_if()->safe_detail();
+  EXPECT_TRUE(relay_free_readiness.value_if()->ready());
+}
+
+TEST_F(M2ProfileTest, RejectsInvalidLanCapacitiesAndDeadlinesBeforePersistence) {
+  auto profile = ProfileStore::create(profile_path());
+  ASSERT_TRUE(profile) << profile.error_if()->safe_detail();
+
+  LanConfiguration invalid_capacity;
+  invalid_capacity.pending_signaling_capacity = 0U;
+  auto capacity_result = profile.value_if()->set_lan_configuration(invalid_capacity);
+  ASSERT_FALSE(capacity_result);
+  EXPECT_EQ(capacity_result.error_if()->code(), ErrorCode::configuration);
+  EXPECT_EQ(capacity_result.error_if()->safe_detail(), "invalid_lan_configuration");
+
+  LanConfiguration invalid_deadline;
+  invalid_deadline.handshake_timeout = std::chrono::milliseconds{0};
+  auto deadline_result = profile.value_if()->set_lan_configuration(invalid_deadline);
+  ASSERT_FALSE(deadline_result);
+  EXPECT_EQ(deadline_result.error_if()->code(), ErrorCode::configuration);
+
+  LanConfiguration invalid_mode;
+  invalid_mode.connectivity_mode = ConnectivityMode::lan_only;
+  invalid_mode.enabled = false;
+  auto mode_result = profile.value_if()->set_lan_configuration(invalid_mode);
+  ASSERT_FALSE(mode_result);
+  EXPECT_EQ(mode_result.error_if()->code(), ErrorCode::configuration);
+
+  auto stored = profile.value_if()->lan_configuration();
+  ASSERT_TRUE(stored) << stored.error_if()->safe_detail();
+  EXPECT_EQ(stored.value_if()->pending_signaling_capacity, 128U);
+  EXPECT_EQ(stored.value_if()->handshake_timeout, std::chrono::milliseconds{5000});
+}
+
 TEST_F(M2ProfileTest, SecretBackendAcceptsMaximumLabelAndRejectsInvalidHandle) {
   auto backend = open_default_secret_backend(root_ / "standalone-secrets");
   ASSERT_TRUE(backend) << backend.error_if()->safe_detail();
@@ -558,6 +649,8 @@ TEST_F(M2ProfileTest, MigratesV1FixtureWithRecoverableBackup) {
   EXPECT_EQ(read_user_version(profile_path()), static_cast<int>(profile_schema_version));
   EXPECT_TRUE(sqlite_object_exists(profile_path(), "index",
                                    "trust_grants_authorization_index"));
+  EXPECT_TRUE(sqlite_object_exists(profile_path(), "table", "lan_configuration"));
+  EXPECT_TRUE(sqlite_object_exists(profile_path(), "table", "pairing_policy"));
   ASSERT_TRUE(std::filesystem::exists(backup_path));
   EXPECT_EQ(read_user_version(backup_path), 1);
 #ifndef _WIN32

@@ -188,6 +188,7 @@ endfunction()
 add_executable(heyaki_unit_tests
   unit/contracts_test.cpp
   unit/golden_vectors_test.cpp
+  unit/lan_protocol_test.cpp
   unit/signing_test.cpp
   unit/version_test.cpp
   unit/wire_test.cpp)
@@ -261,9 +262,21 @@ heyaki_enable_executor_exception_adapter_source(unit/m2_runtime_test.cpp)
 heyaki_add_runtime_test(
   heyaki_m2_runtime heyaki_m2_runtime_tests "unit;runtime;concurrency")
 
+add_executable(heyaki_m3a_lan_tests unit/m3a_lan_test.cpp)
+target_link_libraries(heyaki_m3a_lan_tests PRIVATE
+  heyaki::client
+  executor::executor
+  GTest::gtest_main)
+heyaki_target_use_pinned_boost_asio(heyaki_m3a_lan_tests)
+heyaki_configure_target(heyaki_m3a_lan_tests)
+target_compile_definitions(heyaki_m3a_lan_tests PRIVATE
+  "HEYAKI_M3A_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}\"")
+heyaki_add_runtime_test(
+  heyaki_m3a_lan heyaki_m3a_lan_tests "unit;lan;security")
+
 set(heyaki_public_header_sources)
 foreach(public_header IN ITEMS
-    error identity ids limits operation password profile_store protocol runtime secret_backend
+    error identity ids lan_directory lan_protocol limits node operation password profile_store protocol runtime secret_backend
     security signing time version wire)
   set(header_source
     "${HEYAKI_TEST_GENERATED_DIR}/${public_header}_header_standalone.cpp")
@@ -386,6 +399,19 @@ heyaki_add_runtime_test(
 
 if(HEYAKI_BUILD_APPS)
   heyaki_add_runtime_test(heyaki_tui_version heyaki-tui "tui" --version)
+  add_test(NAME heyaki_tui_local_status
+    COMMAND heyaki-tui --profile m3a-status --status)
+  if(WIN32)
+    set_tests_properties(heyaki_tui_local_status PROPERTIES
+      ENVIRONMENT "LOCALAPPDATA=${HEYAKI_TEST_STATE_DIR}/tui-status"
+      LABELS "tui;lan"
+      PASS_REGULAR_EXPRESSION "LOCAL   not-initialized;LAN     stopped;PAIRING unavailable")
+  else()
+    set_tests_properties(heyaki_tui_local_status PROPERTIES
+      ENVIRONMENT "XDG_STATE_HOME=${HEYAKI_TEST_STATE_DIR}/tui-status"
+      LABELS "tui;lan"
+      PASS_REGULAR_EXPRESSION "LOCAL   not-initialized;LAN     stopped;PAIRING unavailable")
+  endif()
 endif()
 
 add_test(

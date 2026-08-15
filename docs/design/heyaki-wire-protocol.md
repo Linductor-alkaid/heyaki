@@ -386,11 +386,28 @@ name, tenant, service manifest, authorization scope, credential, TrustGrant, rel
 other interface topology.
 
 After TLS 1.3 establishes a provisional connection, the only permitted initial message is the bounded
-`signaling.v1.LanHello`. Role is initiator `1` or responder `2`; relative expiry is 1-10000
-milliseconds. Both parties validate the sender public-key-derived DeviceId, endpoints, nonces, sender
-boot nonce, negotiated version/capabilities, signature, and the sender/observed-peer SHA-256
-certificate fingerprints before accepting existing signed offer/answer/candidate messages. TLS
-certificate validity alone never authenticates or authorizes a Heyaki device.
+`signaling.v1.LanHello`, framed as `U16 big-endian payload_length` followed by exactly that many
+Protobuf bytes. Zero, truncated, trailing, or oversized hello frames are rejected. Role is initiator
+`1` or responder `2`; relative expiry is 1-10000 milliseconds. Both parties validate the sender
+public-key-derived DeviceId, endpoints, nonces, sender boot nonce, negotiated version/capabilities,
+signature, and the sender/observed-peer SHA-256 certificate fingerprints before accepting signaling
+frames. TLS certificate validity alone never authenticates or authorizes a Heyaki device.
+
+After both hellos authenticate, each LAN signaling frame is encoded exactly as:
+
+```text
+body_length : U32 big-endian
+kind        : U8
+request_id  : 16 raw bytes
+payload     : exactly body_length - 17 bytes
+```
+
+`body_length` is 17-65553 bytes and payload is at most 65536 bytes. Kinds are `CONNECT_REQUEST` `1`,
+`CONNECT_ACCEPT` `2`, `CONNECT_DENY` `3`, signed offer `4`, signed answer `5`, and signed candidate
+`6`. Connect control kinds require an empty payload; signed kinds require a non-empty payload that is
+validated by the corresponding canonical signed-object parser before dispatch. Unknown kinds, a zero
+request ID, truncation, trailing bytes, or an out-of-range length are protocol errors and close that
+signaling connection.
 
 ## 7. Golden vectors
 

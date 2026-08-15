@@ -1,7 +1,7 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：M3A 协议 1.1 change-control（M3A-01～04）完成，进入配置与 LAN runtime；M3B 可并行推进
-> - 日期：2026-08-15
+> - 状态：M3A-01～18 实现验收完成，跨平台与隔离网络退出矩阵待补跑；M3B 可并行推进
+> - 日期：2026-08-16
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)、[局域网无服务器连接设计](../design/lan-serverless-connectivity.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
 
@@ -303,8 +303,8 @@ M3A 与 M3B 都依赖 M2，可并行实施。M3A 是 serverless Connectivity MVP
 - [x] `M3A-02` 新增 discovery schema，并冻结无冲突的 IPv4/IPv6 multicast group、UDP port、datagram envelope/max wire size；定义有界 `LanPresence` 的设备公钥/ID、endpoint、boot nonce、sequence、relative lease、TLS port、能力和签名。
 - [x] `M3A-03` 新增 `LAN_HELLO` schema 与 `lan_presence`/`lan_hello` canonical signing domain；hello 绑定双方身份/endpoint/nonce/boot nonce 及本端和对端 TLS 证书指纹。
 - [x] `M3A-04` 实现 1.0/1.1 协商与 N-1/N 测试；1.0 peer 不得因未知可选能力失败，1.1 peer 不得向 1.0 peer 假定 LAN 支持。
-- [ ] `M3A-05` 为 Node/ProfileStore 增加 `automatic/lan_only/relay_only`、LAN enabled、discoverability、`auto_connect_trusted`、接口偏好、容量与 deadline 配置；非法或零控制容量启动失败。
-- [ ] `M3A-06` 明确本地初始化独立于 relay enrollment：profile 创建身份、endpoint、verifier 和 pairing policy 后即可进入 LAN-only readiness。
+- [x] `M3A-05` 为 Node/ProfileStore 增加 `automatic/lan_only/relay_only`、LAN enabled、discoverability、`auto_connect_trusted`、接口偏好、容量与 deadline 配置；非法或零控制容量启动失败。
+- [x] `M3A-06` 明确本地初始化独立于 relay enrollment：profile 创建身份、endpoint、verifier 和 pairing policy 后即可进入 LAN-only readiness。
 
 M3A 协议 change-control 验收记录（2026-08-15）：构建版本与公共协议版本升级为 1.1，冻结
 `lan_discovery_v1`/`lan_signaling_v1` bits、`HYLD` v1 envelope、IPv4 `239.192.72.89`、IPv6
@@ -316,21 +316,30 @@ golden vector 保留为 N-1 基线，1.1/1.0 协商不会泄漏 LAN capability�
 
 ### 6.2 M3A：Multicast discovery 与 endpoint directory
 
-- [ ] `M3A-07` 使用现有 executor-managed Asio runtime 在每个允许接口加入 IPv4 管理域和 IPv6 link-local multicast group，hop limit 固定为 1，不创建第二 worker/线程/poll loop。
-- [ ] `M3A-08` 实现带 jitter 的签名 presence announce/browse、monotonic lease、boot/sequence replay 检查和接口加入/离开/休眠恢复；单 datagram 不超过无分片配置上限。
-- [ ] `M3A-09` 在分配/缓存前验证 Protobuf 长度、版本、公钥派生 DeviceId、签名、endpoint、lease 和 sequence；未知自签身份保持 untrusted。
-- [ ] `M3A-10` 实现有界 `EndpointDirectory`，按完整 `(DeviceId, EndpointId)` 合并 LAN/relay 来源和 TTL；LAN hint 过期不撤销 TrustGrant 或删除 relay presence。
-- [ ] `M3A-11` 对目录、每接口、每源地址、未知身份、公告速率和诊断历史设置硬上限；满载保留已信任控制容量并显式拒绝。
-- [ ] `M3A-12` presence 不广播 display name、tenant、service manifest、scope、credential 或其他接口拓扑；日志按 identifier retention policy 处理完整 ID。
+- [x] `M3A-07` 使用现有 executor-managed Asio runtime 在每个允许接口加入 IPv4 管理域和 IPv6 link-local multicast group，hop limit 固定为 1，不创建第二 worker/线程/poll loop。
+- [x] `M3A-08` 实现带 jitter 的签名 presence announce/browse、monotonic lease、boot/sequence replay 检查和接口加入/离开/休眠恢复；单 datagram 不超过无分片配置上限。
+- [x] `M3A-09` 在分配/缓存前验证 Protobuf 长度、版本、公钥派生 DeviceId、签名、endpoint、lease 和 sequence；未知自签身份保持 untrusted。
+- [x] `M3A-10` 实现有界 `EndpointDirectory`，按完整 `(DeviceId, EndpointId)` 合并 LAN/relay 来源和 TTL；LAN hint 过期不撤销 TrustGrant 或删除 relay presence。
+- [x] `M3A-11` 对目录、每接口、每源地址、未知身份、公告速率和诊断历史设置硬上限；满载保留已信任控制容量并显式拒绝。
+- [x] `M3A-12` presence 不广播 display name、tenant、service manifest、scope、credential 或其他接口拓扑；日志按 identifier retention policy 处理完整 ID。
 
 ### 6.3 M3A：TLS 本地信令与 TUI
 
-- [ ] `M3A-13` 复用项目冻结的 OpenSSL 系列，以 Asio TLS 1.3/TCP 实现 boot-scoped certificate、动态监听端口、client/acceptor、握手 deadline 和有界 provisional connection。
-- [ ] `M3A-14` TLS 建立后只允许限长 `LAN_HELLO`；验证签名、公钥派生 ID、role、双方 nonce、boot nonce、版本和双方证书指纹后才进入 `AuthenticatedSignaling`。
-- [ ] `M3A-15` 实现内部 `DiscoveryProvider`、`EndpointDirectory`、`SignalingRoute` 和 `LanSignalingRoute`，只转发通过校验的 connect/accept/deny 与现有 signed offer/answer/candidate。
-- [ ] `M3A-16` 实现 LAN 优先、relay fallback preference、单逻辑 attempt/transport winner、自动连接 offer owner 和手工交叉连接的确定性仲裁。
-- [ ] `M3A-17` 关闭时在 `stop_producers`/`close_peers` hook 中依次停止公告/lease/timer、关闭 multicast socket/TLS listener/pending signaling，再释放 directory/route；所有 wait 有预算和终态。
-- [ ] `M3A-18` TUI 本机/LAN 视图展示 profile 初始化、接口 readiness、发现来源、untrusted/trusted endpoint、signaling/data path、配对入口和结构化失败，不把“已发现”显示成“已授权”。
+- [x] `M3A-13` 复用项目冻结的 OpenSSL 系列，以 Asio TLS 1.3/TCP 实现 boot-scoped certificate、动态监听端口、client/acceptor、握手 deadline 和有界 provisional connection。
+- [x] `M3A-14` TLS 建立后只允许限长 `LAN_HELLO`；验证签名、公钥派生 ID、role、双方 nonce、boot nonce、版本和双方证书指纹后才进入 `AuthenticatedSignaling`。
+- [x] `M3A-15` 实现内部 `DiscoveryProvider`、`EndpointDirectory`、`SignalingRoute` 和 `LanSignalingRoute`，只转发通过校验的 connect/accept/deny 与现有 signed offer/answer/candidate。
+- [x] `M3A-16` 实现 LAN 优先、relay fallback preference、单逻辑 attempt/transport winner、自动连接 offer owner 和手工交叉连接的确定性仲裁。
+- [x] `M3A-17` 关闭时在 `stop_producers`/`close_peers` hook 中依次停止公告/lease/timer、关闭 multicast socket/TLS listener/pending signaling，再释放 directory/route；所有 wait 有预算和终态。
+- [x] `M3A-18` TUI 本机/LAN 视图展示 profile 初始化、接口 readiness、发现来源、untrusted/trusted endpoint、signaling/data path、配对入口和结构化失败，不把“已发现”显示成“已授权”。
+
+M3A 本机实现验收记录（2026-08-16）：Profile schema v3、独立本地初始化、双栈逐接口
+multicast、签名 presence 与有界 directory、boot-scoped TLS 1.3、三消息 `LAN_HELLO`、有界 LAN
+signaling frame、确定性连接仲裁、executor-managed callback/lifecycle 和本机/LAN TUI 已接通。
+Debug 全量构建及 CTest 22/22、ASan 定向 5/5、UBSan 定向 4/4 通过；TSAN 二进制完成构建，
+但当前 Linux 宿主以 `ThreadSanitizer: unexpected memory mapping` 被测试包装器明确标记为不支持。
+本机测试覆盖双 Node 无 relay 发现、TLS 身份绑定、认证前 signed signaling 拒绝、validator 拒绝、
+同源 provisional TLS 限速与握手超时、trusted auto-connect、重复连接仲裁和有预算关闭。以下
+跨平台、隔离网络、双 TLS MITM 与长期压力退出矩阵仍保持未勾选。
 
 ### M3A 测试与退出条件
 

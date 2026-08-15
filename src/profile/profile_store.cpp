@@ -312,6 +312,15 @@ bool valid_scope(std::string_view value) noexcept {
   });
 }
 
+bool valid_interface_preference(std::string_view value) noexcept {
+  if (value.empty() || value.size() > 128U || value.front() == ' ' || value.back() == ' ') {
+    return false;
+  }
+  return std::all_of(value.begin(), value.end(), [](unsigned char character) {
+    return character >= 0x20U && character <= 0x7eU;
+  });
+}
+
 std::string random_suffix() {
   std::array<unsigned char, 8U> bytes{};
   randombytes_buf(bytes.data(), bytes.size());
@@ -514,6 +523,378 @@ INSERT INTO schema_migrations(version, applied_unix_milliseconds)
 VALUES(2, CAST(unixepoch('subsec') * 1000 AS INTEGER));
 PRAGMA user_version=2;
 )SQL";
+
+const char* migration_v3 = R"SQL(
+CREATE TABLE lan_configuration(
+  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+  connectivity_mode INTEGER NOT NULL CHECK(connectivity_mode IN (1, 2, 3)),
+  enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+  discoverable INTEGER NOT NULL CHECK(discoverable IN (0, 1)),
+  auto_connect_trusted INTEGER NOT NULL CHECK(auto_connect_trusted IN (0, 1)),
+  interface_capacity INTEGER NOT NULL CHECK(interface_capacity > 0),
+  directory_capacity INTEGER NOT NULL CHECK(directory_capacity > 0),
+  trusted_directory_reserve INTEGER NOT NULL CHECK(trusted_directory_reserve > 0),
+  per_interface_directory_capacity INTEGER NOT NULL CHECK(per_interface_directory_capacity > 0),
+  per_source_presence_capacity INTEGER NOT NULL CHECK(per_source_presence_capacity > 0),
+  unknown_identity_capacity INTEGER NOT NULL CHECK(unknown_identity_capacity > 0),
+  replay_capacity INTEGER NOT NULL CHECK(replay_capacity > 0),
+  diagnostic_capacity INTEGER NOT NULL CHECK(diagnostic_capacity > 0),
+  provisional_connection_capacity INTEGER NOT NULL CHECK(provisional_connection_capacity > 0),
+  per_source_provisional_capacity INTEGER NOT NULL CHECK(per_source_provisional_capacity > 0),
+  provisional_accept_rate_per_second INTEGER NOT NULL
+    CHECK(provisional_accept_rate_per_second > 0),
+  per_source_provisional_rate INTEGER NOT NULL CHECK(per_source_provisional_rate > 0),
+  pending_signaling_capacity INTEGER NOT NULL CHECK(pending_signaling_capacity > 0),
+  auto_connect_capacity INTEGER NOT NULL CHECK(auto_connect_capacity > 0),
+  announcement_rate_per_second INTEGER NOT NULL CHECK(announcement_rate_per_second > 0),
+  per_source_announcement_rate INTEGER NOT NULL CHECK(per_source_announcement_rate > 0),
+  announcement_interval_ms INTEGER NOT NULL CHECK(announcement_interval_ms > 0),
+  presence_lease_ms INTEGER NOT NULL CHECK(presence_lease_ms > 0),
+  announcement_jitter_ms INTEGER NOT NULL CHECK(announcement_jitter_ms >= 0),
+  interface_refresh_interval_ms INTEGER NOT NULL CHECK(interface_refresh_interval_ms > 0),
+  handshake_timeout_ms INTEGER NOT NULL CHECK(handshake_timeout_ms > 0),
+  hello_timeout_ms INTEGER NOT NULL CHECK(hello_timeout_ms > 0),
+  route_preference_delay_ms INTEGER NOT NULL CHECK(route_preference_delay_ms >= 0),
+  shutdown_timeout_ms INTEGER NOT NULL CHECK(shutdown_timeout_ms > 0),
+  updated_unix_milliseconds INTEGER NOT NULL
+);
+CREATE TABLE lan_interface_preferences(
+  ordinal INTEGER PRIMARY KEY CHECK(ordinal >= 0),
+  interface_name TEXT NOT NULL UNIQUE
+);
+CREATE TABLE pairing_policy(
+  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+  generation INTEGER NOT NULL CHECK(generation > 0),
+  password_pairing_enabled INTEGER NOT NULL CHECK(password_pairing_enabled IN (0, 1)),
+  require_manual_approval_unknown INTEGER NOT NULL
+    CHECK(require_manual_approval_unknown IN (0, 1)),
+  updated_unix_milliseconds INTEGER NOT NULL
+);
+CREATE TABLE pairing_policy_scopes(
+  scope TEXT PRIMARY KEY
+);
+INSERT INTO lan_configuration(
+  singleton, connectivity_mode, enabled, discoverable, auto_connect_trusted,
+  interface_capacity, directory_capacity, trusted_directory_reserve,
+  per_interface_directory_capacity, per_source_presence_capacity,
+  unknown_identity_capacity, replay_capacity, diagnostic_capacity,
+  provisional_connection_capacity, per_source_provisional_capacity,
+  provisional_accept_rate_per_second, per_source_provisional_rate,
+  pending_signaling_capacity, auto_connect_capacity, announcement_rate_per_second,
+  per_source_announcement_rate, announcement_interval_ms, presence_lease_ms,
+  announcement_jitter_ms, interface_refresh_interval_ms, handshake_timeout_ms,
+  hello_timeout_ms, route_preference_delay_ms, shutdown_timeout_ms,
+  updated_unix_milliseconds)
+VALUES(1, 1, 1, 1, 0, 32, 4096, 128, 1024, 64, 512, 8192, 1024, 64, 8,
+       64, 16, 128, 16, 32, 8, 5000, 15000, 500, 5000, 5000, 3000, 250, 2000,
+       CAST(unixepoch('subsec') * 1000 AS INTEGER));
+INSERT INTO pairing_policy(
+  singleton, generation, password_pairing_enabled, require_manual_approval_unknown,
+  updated_unix_milliseconds)
+VALUES(1, 1, 1, 1, CAST(unixepoch('subsec') * 1000 AS INTEGER));
+INSERT INTO schema_migrations(version, applied_unix_milliseconds)
+VALUES(3, CAST(unixepoch('subsec') * 1000 AS INTEGER));
+PRAGMA user_version=3;
+)SQL";
+
+std::uint64_t current_unix_milliseconds();
+
+Result<void> write_lan_configuration(sqlite3* database,
+                                     const LanConfiguration& configuration) {
+  auto statement = prepare(
+      database,
+      "INSERT INTO lan_configuration("
+      "singleton, connectivity_mode, enabled, discoverable, auto_connect_trusted, "
+      "interface_capacity, directory_capacity, trusted_directory_reserve, "
+      "per_interface_directory_capacity, per_source_presence_capacity, "
+      "unknown_identity_capacity, replay_capacity, diagnostic_capacity, "
+      "provisional_connection_capacity, per_source_provisional_capacity, "
+      "provisional_accept_rate_per_second, per_source_provisional_rate, "
+      "pending_signaling_capacity, auto_connect_capacity, announcement_rate_per_second, "
+      "per_source_announcement_rate, announcement_interval_ms, presence_lease_ms, "
+      "announcement_jitter_ms, interface_refresh_interval_ms, handshake_timeout_ms, "
+      "hello_timeout_ms, route_preference_delay_ms, shutdown_timeout_ms, "
+      "updated_unix_milliseconds) "
+      "VALUES(1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+      "?, ?, ?, ?, ?) ON CONFLICT(singleton) DO UPDATE SET "
+      "connectivity_mode=excluded.connectivity_mode, enabled=excluded.enabled, "
+      "discoverable=excluded.discoverable, auto_connect_trusted=excluded.auto_connect_trusted, "
+      "interface_capacity=excluded.interface_capacity, "
+      "directory_capacity=excluded.directory_capacity, "
+      "trusted_directory_reserve=excluded.trusted_directory_reserve, "
+      "per_interface_directory_capacity=excluded.per_interface_directory_capacity, "
+      "per_source_presence_capacity=excluded.per_source_presence_capacity, "
+      "unknown_identity_capacity=excluded.unknown_identity_capacity, "
+      "replay_capacity=excluded.replay_capacity, diagnostic_capacity=excluded.diagnostic_capacity, "
+      "provisional_connection_capacity=excluded.provisional_connection_capacity, "
+      "per_source_provisional_capacity=excluded.per_source_provisional_capacity, "
+      "provisional_accept_rate_per_second=excluded.provisional_accept_rate_per_second, "
+      "per_source_provisional_rate=excluded.per_source_provisional_rate, "
+      "pending_signaling_capacity=excluded.pending_signaling_capacity, "
+      "auto_connect_capacity=excluded.auto_connect_capacity, "
+      "announcement_rate_per_second=excluded.announcement_rate_per_second, "
+      "per_source_announcement_rate=excluded.per_source_announcement_rate, "
+      "announcement_interval_ms=excluded.announcement_interval_ms, "
+      "presence_lease_ms=excluded.presence_lease_ms, "
+      "announcement_jitter_ms=excluded.announcement_jitter_ms, "
+      "interface_refresh_interval_ms=excluded.interface_refresh_interval_ms, "
+      "handshake_timeout_ms=excluded.handshake_timeout_ms, "
+      "hello_timeout_ms=excluded.hello_timeout_ms, "
+      "route_preference_delay_ms=excluded.route_preference_delay_ms, "
+      "shutdown_timeout_ms=excluded.shutdown_timeout_ms, "
+      "updated_unix_milliseconds=excluded.updated_unix_milliseconds");
+  if (!statement) {
+    return Result<void>::failure(*statement.error_if());
+  }
+  int index = 1;
+  sqlite3_bind_int(statement.value_if()->get(), index++,
+                   static_cast<int>(configuration.connectivity_mode));
+  sqlite3_bind_int(statement.value_if()->get(), index++, configuration.enabled ? 1 : 0);
+  sqlite3_bind_int(statement.value_if()->get(), index++, configuration.discoverable ? 1 : 0);
+  sqlite3_bind_int(statement.value_if()->get(), index++,
+                   configuration.auto_connect_trusted ? 1 : 0);
+  const auto bind_size = [&](std::size_t value) {
+    sqlite3_bind_int64(statement.value_if()->get(), index++,
+                       static_cast<sqlite3_int64>(value));
+  };
+  bind_size(configuration.interface_capacity);
+  bind_size(configuration.directory_capacity);
+  bind_size(configuration.trusted_directory_reserve);
+  bind_size(configuration.per_interface_directory_capacity);
+  bind_size(configuration.per_source_presence_capacity);
+  bind_size(configuration.unknown_identity_capacity);
+  bind_size(configuration.replay_capacity);
+  bind_size(configuration.diagnostic_capacity);
+  bind_size(configuration.provisional_connection_capacity);
+  bind_size(configuration.per_source_provisional_capacity);
+  bind_size(configuration.provisional_accept_rate_per_second);
+  bind_size(configuration.per_source_provisional_rate);
+  bind_size(configuration.pending_signaling_capacity);
+  bind_size(configuration.auto_connect_capacity);
+  bind_size(configuration.announcement_rate_per_second);
+  bind_size(configuration.per_source_announcement_rate);
+  const auto bind_duration = [&](std::chrono::milliseconds value) {
+    sqlite3_bind_int64(statement.value_if()->get(), index++,
+                       static_cast<sqlite3_int64>(value.count()));
+  };
+  bind_duration(configuration.announcement_interval);
+  bind_duration(configuration.presence_lease);
+  bind_duration(configuration.announcement_jitter);
+  bind_duration(configuration.interface_refresh_interval);
+  bind_duration(configuration.handshake_timeout);
+  bind_duration(configuration.hello_timeout);
+  bind_duration(configuration.route_preference_delay);
+  bind_duration(configuration.shutdown_timeout);
+  sqlite3_bind_int64(statement.value_if()->get(), index,
+                     static_cast<sqlite3_int64>(current_unix_milliseconds()));
+  auto written = step_done(*statement.value_if());
+  if (!written) {
+    return written;
+  }
+
+  written = execute(database, "DELETE FROM lan_interface_preferences");
+  if (!written) {
+    return written;
+  }
+  auto insert = prepare(
+      database,
+      "INSERT INTO lan_interface_preferences(ordinal, interface_name) VALUES(?, ?)");
+  if (!insert) {
+    return Result<void>::failure(*insert.error_if());
+  }
+  for (std::size_t ordinal = 0U; ordinal < configuration.interface_preferences.size(); ++ordinal) {
+    sqlite3_reset(insert.value_if()->get());
+    sqlite3_clear_bindings(insert.value_if()->get());
+    sqlite3_bind_int64(insert.value_if()->get(), 1, static_cast<sqlite3_int64>(ordinal));
+    const auto& name = configuration.interface_preferences[ordinal];
+    sqlite3_bind_text(insert.value_if()->get(), 2, name.data(), static_cast<int>(name.size()),
+                      SQLITE_TRANSIENT);
+    written = step_done(*insert.value_if());
+    if (!written) {
+      return written;
+    }
+  }
+  return Result<void>::success();
+}
+
+Result<LanConfiguration> read_lan_configuration(sqlite3* database) {
+  auto statement = prepare(
+      database,
+      "SELECT connectivity_mode, enabled, discoverable, auto_connect_trusted, "
+      "interface_capacity, directory_capacity, trusted_directory_reserve, "
+      "per_interface_directory_capacity, per_source_presence_capacity, "
+      "unknown_identity_capacity, replay_capacity, diagnostic_capacity, "
+      "provisional_connection_capacity, per_source_provisional_capacity, "
+      "provisional_accept_rate_per_second, per_source_provisional_rate, "
+      "pending_signaling_capacity, auto_connect_capacity, announcement_rate_per_second, "
+      "per_source_announcement_rate, announcement_interval_ms, presence_lease_ms, "
+      "announcement_jitter_ms, interface_refresh_interval_ms, handshake_timeout_ms, "
+      "hello_timeout_ms, route_preference_delay_ms, shutdown_timeout_ms "
+      "FROM lan_configuration WHERE singleton=1");
+  if (!statement) {
+    return Result<LanConfiguration>::failure(*statement.error_if());
+  }
+  if (sqlite3_step(statement.value_if()->get()) != SQLITE_ROW) {
+    return Result<LanConfiguration>::failure(
+        Error{ErrorCode::profile_corrupt, "profile", "lan_configuration_missing"});
+  }
+  LanConfiguration configuration;
+  configuration.connectivity_mode =
+      static_cast<ConnectivityMode>(sqlite3_column_int(statement.value_if()->get(), 0));
+  configuration.enabled = sqlite3_column_int(statement.value_if()->get(), 1) != 0;
+  configuration.discoverable = sqlite3_column_int(statement.value_if()->get(), 2) != 0;
+  configuration.auto_connect_trusted = sqlite3_column_int(statement.value_if()->get(), 3) != 0;
+  const auto column_size = [&](int column) {
+    return static_cast<std::size_t>(sqlite3_column_int64(statement.value_if()->get(), column));
+  };
+  configuration.interface_capacity = column_size(4);
+  configuration.directory_capacity = column_size(5);
+  configuration.trusted_directory_reserve = column_size(6);
+  configuration.per_interface_directory_capacity = column_size(7);
+  configuration.per_source_presence_capacity = column_size(8);
+  configuration.unknown_identity_capacity = column_size(9);
+  configuration.replay_capacity = column_size(10);
+  configuration.diagnostic_capacity = column_size(11);
+  configuration.provisional_connection_capacity = column_size(12);
+  configuration.per_source_provisional_capacity = column_size(13);
+  configuration.provisional_accept_rate_per_second = column_size(14);
+  configuration.per_source_provisional_rate = column_size(15);
+  configuration.pending_signaling_capacity = column_size(16);
+  configuration.auto_connect_capacity = column_size(17);
+  configuration.announcement_rate_per_second = column_size(18);
+  configuration.per_source_announcement_rate = column_size(19);
+  const auto column_duration = [&](int column) {
+    return std::chrono::milliseconds{sqlite3_column_int64(statement.value_if()->get(), column)};
+  };
+  configuration.announcement_interval = column_duration(20);
+  configuration.presence_lease = column_duration(21);
+  configuration.announcement_jitter = column_duration(22);
+  configuration.interface_refresh_interval = column_duration(23);
+  configuration.handshake_timeout = column_duration(24);
+  configuration.hello_timeout = column_duration(25);
+  configuration.route_preference_delay = column_duration(26);
+  configuration.shutdown_timeout = column_duration(27);
+
+  auto interfaces = prepare(
+      database,
+      "SELECT interface_name FROM lan_interface_preferences ORDER BY ordinal ASC");
+  if (!interfaces) {
+    return Result<LanConfiguration>::failure(*interfaces.error_if());
+  }
+  while (true) {
+    const int result = sqlite3_step(interfaces.value_if()->get());
+    if (result == SQLITE_DONE) {
+      break;
+    }
+    if (result != SQLITE_ROW) {
+      return Result<LanConfiguration>::failure(
+          sqlite_error(database, "lan_interface_preferences_query_failed"));
+    }
+    const auto* name = reinterpret_cast<const char*>(
+        sqlite3_column_text(interfaces.value_if()->get(), 0));
+    if (name == nullptr) {
+      return Result<LanConfiguration>::failure(
+          Error{ErrorCode::profile_corrupt, "profile", "lan_interface_preference_invalid"});
+    }
+    configuration.interface_preferences.emplace_back(name);
+  }
+  auto valid = validate_lan_configuration(configuration);
+  if (!valid) {
+    return Result<LanConfiguration>::failure(
+        Error{ErrorCode::profile_corrupt, "profile", "lan_configuration_invalid"});
+  }
+  return Result<LanConfiguration>::success(std::move(configuration));
+}
+
+Result<void> write_pairing_policy(sqlite3* database, const PairingPolicy& policy) {
+  auto statement = prepare(
+      database,
+      "INSERT INTO pairing_policy(singleton, generation, password_pairing_enabled, "
+      "require_manual_approval_unknown, updated_unix_milliseconds) VALUES(1, ?, ?, ?, ?) "
+      "ON CONFLICT(singleton) DO UPDATE SET generation=excluded.generation, "
+      "password_pairing_enabled=excluded.password_pairing_enabled, "
+      "require_manual_approval_unknown=excluded.require_manual_approval_unknown, "
+      "updated_unix_milliseconds=excluded.updated_unix_milliseconds");
+  if (!statement) {
+    return Result<void>::failure(*statement.error_if());
+  }
+  sqlite3_bind_int64(statement.value_if()->get(), 1,
+                     static_cast<sqlite3_int64>(policy.generation));
+  sqlite3_bind_int(statement.value_if()->get(), 2, policy.password_pairing_enabled ? 1 : 0);
+  sqlite3_bind_int(statement.value_if()->get(), 3,
+                   policy.require_manual_approval_unknown ? 1 : 0);
+  sqlite3_bind_int64(statement.value_if()->get(), 4,
+                     static_cast<sqlite3_int64>(current_unix_milliseconds()));
+  auto written = step_done(*statement.value_if());
+  if (!written) {
+    return written;
+  }
+  written = execute(database, "DELETE FROM pairing_policy_scopes");
+  if (!written) {
+    return written;
+  }
+  auto insert = prepare(database, "INSERT INTO pairing_policy_scopes(scope) VALUES(?)");
+  if (!insert) {
+    return Result<void>::failure(*insert.error_if());
+  }
+  for (const auto& scope : policy.default_scopes) {
+    sqlite3_reset(insert.value_if()->get());
+    sqlite3_clear_bindings(insert.value_if()->get());
+    sqlite3_bind_text(insert.value_if()->get(), 1, scope.data(), static_cast<int>(scope.size()),
+                      SQLITE_TRANSIENT);
+    written = step_done(*insert.value_if());
+    if (!written) {
+      return written;
+    }
+  }
+  return Result<void>::success();
+}
+
+Result<PairingPolicy> read_pairing_policy(sqlite3* database) {
+  auto statement = prepare(
+      database,
+      "SELECT generation, password_pairing_enabled, require_manual_approval_unknown "
+      "FROM pairing_policy WHERE singleton=1");
+  if (!statement) {
+    return Result<PairingPolicy>::failure(*statement.error_if());
+  }
+  if (sqlite3_step(statement.value_if()->get()) != SQLITE_ROW) {
+    return Result<PairingPolicy>::failure(
+        Error{ErrorCode::profile_corrupt, "profile", "pairing_policy_missing"});
+  }
+  PairingPolicy policy;
+  policy.generation =
+      static_cast<std::uint64_t>(sqlite3_column_int64(statement.value_if()->get(), 0));
+  policy.password_pairing_enabled = sqlite3_column_int(statement.value_if()->get(), 1) != 0;
+  policy.require_manual_approval_unknown =
+      sqlite3_column_int(statement.value_if()->get(), 2) != 0;
+  auto scopes = prepare(database, "SELECT scope FROM pairing_policy_scopes ORDER BY scope ASC");
+  if (!scopes) {
+    return Result<PairingPolicy>::failure(*scopes.error_if());
+  }
+  while (true) {
+    const int result = sqlite3_step(scopes.value_if()->get());
+    if (result == SQLITE_DONE) {
+      break;
+    }
+    if (result != SQLITE_ROW) {
+      return Result<PairingPolicy>::failure(
+          sqlite_error(database, "pairing_policy_scopes_query_failed"));
+    }
+    const auto* scope = reinterpret_cast<const char*>(sqlite3_column_text(scopes.value_if()->get(), 0));
+    if (scope == nullptr) {
+      return Result<PairingPolicy>::failure(
+          Error{ErrorCode::profile_corrupt, "profile", "pairing_policy_scope_invalid"});
+    }
+    policy.default_scopes.emplace_back(scope);
+  }
+  auto valid = validate_pairing_policy(policy);
+  if (!valid) {
+    return Result<PairingPolicy>::failure(
+        Error{ErrorCode::profile_corrupt, "profile", "pairing_policy_invalid"});
+  }
+  return Result<PairingPolicy>::success(std::move(policy));
+}
 
 Result<int> pragma_int(sqlite3* database, const char* pragma) {
   auto statement = prepare(database, pragma);
@@ -728,7 +1109,8 @@ Result<void> migrate_database(sqlite3* database, const std::filesystem::path& da
 
   while (*version.value_if() < static_cast<int>(profile_schema_version)) {
     const int target_version = *version.value_if() + 1;
-    const char* migration = target_version == 2 ? migration_v2 : nullptr;
+    const char* migration = target_version == 2 ? migration_v2
+                                                : (target_version == 3 ? migration_v3 : nullptr);
     if (migration == nullptr) {
       return Result<void>::failure(
           Error{ErrorCode::internal, "profile", "profile_migration_not_registered"});
@@ -905,6 +1287,106 @@ Result<std::shared_ptr<SecretBackend>> resolve_secret_backend(
 }
 
 }  // namespace
+
+Result<void> validate_lan_configuration(const LanConfiguration& configuration) {
+  const bool valid_mode =
+      configuration.connectivity_mode == ConnectivityMode::automatic ||
+      configuration.connectivity_mode == ConnectivityMode::lan_only ||
+      configuration.connectivity_mode == ConnectivityMode::relay_only;
+  constexpr std::size_t maximum_capacity = 1024U * 1024U;
+  const std::array capacities{
+      configuration.interface_capacity,
+      configuration.directory_capacity,
+      configuration.trusted_directory_reserve,
+      configuration.per_interface_directory_capacity,
+      configuration.per_source_presence_capacity,
+      configuration.unknown_identity_capacity,
+      configuration.replay_capacity,
+      configuration.diagnostic_capacity,
+      configuration.provisional_connection_capacity,
+      configuration.per_source_provisional_capacity,
+      configuration.provisional_accept_rate_per_second,
+      configuration.per_source_provisional_rate,
+      configuration.pending_signaling_capacity,
+      configuration.auto_connect_capacity,
+      configuration.announcement_rate_per_second,
+      configuration.per_source_announcement_rate};
+  const bool capacities_valid = std::all_of(
+      capacities.begin(), capacities.end(), [](std::size_t value) {
+        return value > 0U && value <= maximum_capacity;
+      });
+  const bool relationships_valid =
+      configuration.interface_preferences.size() <= configuration.interface_capacity &&
+      configuration.trusted_directory_reserve <= configuration.directory_capacity &&
+      configuration.per_interface_directory_capacity <= configuration.directory_capacity &&
+      configuration.per_source_presence_capacity <= configuration.directory_capacity &&
+      configuration.unknown_identity_capacity <= configuration.directory_capacity &&
+      configuration.per_source_provisional_capacity <=
+          configuration.provisional_connection_capacity &&
+      configuration.per_source_provisional_rate <=
+          configuration.provisional_accept_rate_per_second &&
+      configuration.auto_connect_capacity <= configuration.pending_signaling_capacity &&
+      configuration.per_source_announcement_rate <=
+          configuration.announcement_rate_per_second;
+  const bool durations_valid =
+      configuration.announcement_interval.count() > 0 &&
+      configuration.announcement_interval <= std::chrono::milliseconds{120000} &&
+      configuration.presence_lease >= std::chrono::milliseconds{1000} &&
+      configuration.presence_lease <= std::chrono::milliseconds{120000} &&
+      configuration.announcement_interval < configuration.presence_lease &&
+      configuration.announcement_jitter.count() >= 0 &&
+      configuration.announcement_jitter <= configuration.announcement_interval &&
+      configuration.interface_refresh_interval.count() > 0 &&
+      configuration.interface_refresh_interval <= std::chrono::milliseconds{120000} &&
+      configuration.handshake_timeout.count() > 0 &&
+      configuration.handshake_timeout <= std::chrono::milliseconds{60000} &&
+      configuration.hello_timeout.count() > 0 &&
+      configuration.hello_timeout <= configuration.handshake_timeout &&
+      configuration.route_preference_delay.count() >= 0 &&
+      configuration.route_preference_delay <= std::chrono::milliseconds{60000} &&
+      configuration.shutdown_timeout.count() > 0 &&
+      configuration.shutdown_timeout <= std::chrono::milliseconds{60000};
+  std::vector<std::string_view> names;
+  names.reserve(configuration.interface_preferences.size());
+  bool interfaces_valid = true;
+  for (const auto& interface_name : configuration.interface_preferences) {
+    if (!valid_interface_preference(interface_name)) {
+      interfaces_valid = false;
+      break;
+    }
+    names.emplace_back(interface_name);
+  }
+  std::sort(names.begin(), names.end());
+  interfaces_valid = interfaces_valid &&
+                     std::adjacent_find(names.begin(), names.end()) == names.end();
+  if (!valid_mode || !capacities_valid || !relationships_valid || !durations_valid ||
+      !interfaces_valid ||
+      (configuration.connectivity_mode == ConnectivityMode::lan_only &&
+       !configuration.enabled)) {
+    return Result<void>::failure(
+        Error{ErrorCode::configuration, "profile", "invalid_lan_configuration"});
+  }
+  return Result<void>::success();
+}
+
+Result<void> validate_pairing_policy(const PairingPolicy& policy) {
+  if (policy.generation == 0U || policy.default_scopes.size() > 256U ||
+      !std::all_of(policy.default_scopes.begin(), policy.default_scopes.end(), valid_scope)) {
+    return Result<void>::failure(
+        Error{ErrorCode::configuration, "profile", "invalid_pairing_policy"});
+  }
+  std::vector<std::string_view> scopes;
+  scopes.reserve(policy.default_scopes.size());
+  for (const auto& scope : policy.default_scopes) {
+    scopes.emplace_back(scope);
+  }
+  std::sort(scopes.begin(), scopes.end());
+  if (std::adjacent_find(scopes.begin(), scopes.end()) != scopes.end()) {
+    return Result<void>::failure(
+        Error{ErrorCode::configuration, "profile", "invalid_pairing_policy"});
+  }
+  return Result<void>::success();
+}
 
 ProfileStore::ProfileStore(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
 ProfileStore::ProfileStore(ProfileStore&&) noexcept = default;
@@ -1315,6 +1797,153 @@ Result<EndpointId> ProfileStore::endpoint_for(std::string_view application_id) {
   return endpoint_for(application_id);
 }
 
+Result<EndpointId> ProfileStore::initialize_local(
+    const LocalProfileInitialization& initialization) {
+  if (!valid_application_id(initialization.application_id) ||
+      initialization.password_generation == 0U ||
+      initialization.password_verifier.encoded.empty()) {
+    return Result<EndpointId>::failure(
+        Error{ErrorCode::configuration, "profile", "invalid_local_initialization"});
+  }
+  auto valid = validate_lan_configuration(initialization.lan);
+  if (!valid) {
+    return Result<EndpointId>::failure(*valid.error_if());
+  }
+  valid = validate_pairing_policy(initialization.pairing_policy);
+  if (!valid) {
+    return Result<EndpointId>::failure(*valid.error_if());
+  }
+
+  auto begin = execute(impl_->database, "BEGIN IMMEDIATE");
+  if (!begin) {
+    return Result<EndpointId>::failure(*begin.error_if());
+  }
+  auto endpoint = endpoint_for(initialization.application_id);
+  if (!endpoint) {
+    (void)execute(impl_->database, "ROLLBACK");
+    return endpoint;
+  }
+  auto written = set_password_verifier(initialization.password_verifier,
+                                       initialization.password_generation);
+  if (!written) {
+    (void)execute(impl_->database, "ROLLBACK");
+    return Result<EndpointId>::failure(*written.error_if());
+  }
+  written = write_pairing_policy(impl_->database, initialization.pairing_policy);
+  if (!written) {
+    (void)execute(impl_->database, "ROLLBACK");
+    return Result<EndpointId>::failure(*written.error_if());
+  }
+  written = write_lan_configuration(impl_->database, initialization.lan);
+  if (!written) {
+    (void)execute(impl_->database, "ROLLBACK");
+    return Result<EndpointId>::failure(*written.error_if());
+  }
+  const auto committed = execute(impl_->database, "COMMIT");
+  if (!committed) {
+    (void)execute(impl_->database, "ROLLBACK");
+    return Result<EndpointId>::failure(*committed.error_if());
+  }
+  return endpoint;
+}
+
+Result<LocalProfileReadiness> ProfileStore::local_readiness(
+    std::string_view application_id) const {
+  if (!valid_application_id(application_id)) {
+    return Result<LocalProfileReadiness>::failure(
+        Error{ErrorCode::configuration, "profile", "invalid_application_id"});
+  }
+  LocalProfileReadiness readiness;
+  readiness.identity_ready = !impl_->device_id.is_zero();
+
+  auto endpoint = prepare(
+      impl_->database,
+      "SELECT 1 FROM endpoint_records WHERE application_id=? LIMIT 1");
+  if (!endpoint) {
+    return Result<LocalProfileReadiness>::failure(*endpoint.error_if());
+  }
+  sqlite3_bind_text(endpoint.value_if()->get(), 1, application_id.data(),
+                    static_cast<int>(application_id.size()), SQLITE_TRANSIENT);
+  const int endpoint_result = sqlite3_step(endpoint.value_if()->get());
+  if (endpoint_result != SQLITE_ROW && endpoint_result != SQLITE_DONE) {
+    return Result<LocalProfileReadiness>::failure(
+        sqlite_error(impl_->database, "endpoint_readiness_query_failed"));
+  }
+  readiness.endpoint_ready = endpoint_result == SQLITE_ROW;
+
+  auto verifier = password_verifier();
+  if (!verifier) {
+    return Result<LocalProfileReadiness>::failure(*verifier.error_if());
+  }
+  readiness.password_verifier_ready = verifier.value_if()->has_value();
+
+  auto policy = read_pairing_policy(impl_->database);
+  if (!policy) {
+    return Result<LocalProfileReadiness>::failure(*policy.error_if());
+  }
+  readiness.pairing_policy_ready = true;
+
+  auto configuration = read_lan_configuration(impl_->database);
+  if (!configuration) {
+    return Result<LocalProfileReadiness>::failure(*configuration.error_if());
+  }
+  readiness.lan_configuration_ready = true;
+  return Result<LocalProfileReadiness>::success(readiness);
+}
+
+Result<void> ProfileStore::set_lan_configuration(
+    const LanConfiguration& configuration) {
+  auto valid = validate_lan_configuration(configuration);
+  if (!valid) {
+    return valid;
+  }
+  auto begin = execute(impl_->database, "BEGIN IMMEDIATE");
+  if (!begin) {
+    return begin;
+  }
+  auto written = write_lan_configuration(impl_->database, configuration);
+  if (!written) {
+    (void)execute(impl_->database, "ROLLBACK");
+    return written;
+  }
+  const auto committed = execute(impl_->database, "COMMIT");
+  if (!committed) {
+    (void)execute(impl_->database, "ROLLBACK");
+    return committed;
+  }
+  return Result<void>::success();
+}
+
+Result<LanConfiguration> ProfileStore::lan_configuration() const {
+  return read_lan_configuration(impl_->database);
+}
+
+Result<void> ProfileStore::set_pairing_policy(const PairingPolicy& policy) {
+  auto valid = validate_pairing_policy(policy);
+  if (!valid) {
+    return valid;
+  }
+  auto begin = execute(impl_->database, "BEGIN IMMEDIATE");
+  if (!begin) {
+    return begin;
+  }
+  auto written = write_pairing_policy(impl_->database, policy);
+  if (!written) {
+    (void)execute(impl_->database, "ROLLBACK");
+    return written;
+  }
+  const auto committed = execute(impl_->database, "COMMIT");
+  if (!committed) {
+    (void)execute(impl_->database, "ROLLBACK");
+    return committed;
+  }
+  return Result<void>::success();
+}
+
+Result<PairingPolicy> ProfileStore::pairing_policy() const {
+  return read_pairing_policy(impl_->database);
+}
+
 Result<void> ProfileStore::set_password_verifier(const PasswordVerifier& verifier,
                                                  std::uint64_t password_generation) {
   if (password_generation == 0U || verifier.encoded.empty()) {
@@ -1625,6 +2254,80 @@ Result<bool> ProfileStore::is_scope_authorized(const DeviceId& peer, std::string
     return Result<bool>::success(false);
   }
   return Result<bool>::failure(sqlite_error(impl_->database, "trust_authorization_failed"));
+}
+
+Result<bool> ProfileStore::is_device_trusted(const DeviceId& peer,
+                                             std::uint64_t now_unix_milliseconds) const {
+  if (peer.is_zero()) {
+    return Result<bool>::failure(
+        Error{ErrorCode::configuration, "profile", "invalid_trusted_peer"});
+  }
+  auto generation = password_generation();
+  if (!generation) {
+    return Result<bool>::failure(*generation.error_if());
+  }
+  auto statement = prepare(
+      impl_->database,
+      "SELECT 1 FROM trust_grants WHERE direction=1 AND issuer_device_id=? "
+      "AND subject_device_id=? AND revoked=0 AND password_generation=? "
+      "AND (expires_unix_milliseconds IS NULL OR expires_unix_milliseconds>?) LIMIT 1");
+  if (!statement) {
+    return Result<bool>::failure(*statement.error_if());
+  }
+  bind_id(statement.value_if()->get(), 1, impl_->device_id);
+  bind_id(statement.value_if()->get(), 2, peer);
+  sqlite3_bind_int64(statement.value_if()->get(), 3,
+                     static_cast<sqlite3_int64>(*generation.value_if()));
+  sqlite3_bind_int64(statement.value_if()->get(), 4,
+                     static_cast<sqlite3_int64>(now_unix_milliseconds));
+  const int result = sqlite3_step(statement.value_if()->get());
+  if (result == SQLITE_ROW) {
+    return Result<bool>::success(true);
+  }
+  if (result == SQLITE_DONE) {
+    return Result<bool>::success(false);
+  }
+  return Result<bool>::failure(sqlite_error(impl_->database, "trust_status_query_failed"));
+}
+
+Result<std::vector<DeviceId>> ProfileStore::trusted_devices(
+    std::uint64_t now_unix_milliseconds) const {
+  auto generation = password_generation();
+  if (!generation) {
+    return Result<std::vector<DeviceId>>::failure(*generation.error_if());
+  }
+  auto statement = prepare(
+      impl_->database,
+      "SELECT DISTINCT subject_device_id FROM trust_grants WHERE direction=1 "
+      "AND issuer_device_id=? AND revoked=0 AND password_generation=? "
+      "AND (expires_unix_milliseconds IS NULL OR expires_unix_milliseconds>?) "
+      "ORDER BY subject_device_id");
+  if (!statement) {
+    return Result<std::vector<DeviceId>>::failure(*statement.error_if());
+  }
+  bind_id(statement.value_if()->get(), 1, impl_->device_id);
+  sqlite3_bind_int64(statement.value_if()->get(), 2,
+                     static_cast<sqlite3_int64>(*generation.value_if()));
+  sqlite3_bind_int64(statement.value_if()->get(), 3,
+                     static_cast<sqlite3_int64>(now_unix_milliseconds));
+  std::vector<DeviceId> output;
+  while (true) {
+    const int result = sqlite3_step(statement.value_if()->get());
+    if (result == SQLITE_DONE) {
+      break;
+    }
+    if (result != SQLITE_ROW) {
+      return Result<std::vector<DeviceId>>::failure(
+          sqlite_error(impl_->database, "trusted_devices_query_failed"));
+    }
+    auto device = column_id<DeviceId>(statement.value_if()->get(), 0,
+                                      "trusted_device_id_invalid");
+    if (!device) {
+      return Result<std::vector<DeviceId>>::failure(*device.error_if());
+    }
+    output.push_back(*device.value_if());
+  }
+  return Result<std::vector<DeviceId>>::success(std::move(output));
 }
 
 Result<void> ProfileStore::mark_relay_revoked(std::string_view relay_url,

@@ -29,7 +29,7 @@ strategy is fixed now, while exact package artifacts freeze before first use:
 | Component | Strategy | Current M0 evidence | Freeze gate |
 | --- | --- | --- | --- |
 | Boost | Pin the exact modular Asio/System header closure used by M2; freeze Asio SSL integration before M3A and add Beast plus its reviewed closure before M3B WSS work. | Boost 1.88.0 Asio/System/Config/Assert/ThrowException/Predef/WinAPI commits are source-locked. | Asio complete for M2; SSL at M3A entry; Beast at M3B entry |
-| TLS backend | Use one OpenSSL line for Asio LAN TLS, Boost.Beast, and libdatachannel on Linux/Windows; record exact headers/runtime versions and package digest in release provenance. | Local probe: OpenSSL 3.5.7; not a release pin. | M3A entry |
+| TLS backend | Use the OpenSSL 3.x ABI line for Asio LAN TLS, Boost.Beast, and libdatachannel on Linux/Windows; CMake rejects other major lines, while release provenance records the exact headers/runtime package version and digest. | M3A development baseline links OpenSSL 3.0.13 on Linux; the host CLI may differ and is not treated as link evidence. | OpenSSL 3.x line frozen at M3A entry; exact package artifacts remain a release-provenance gate |
 | coturn | Run an external image/package referenced by immutable version and digest; keep its config and image provenance in the deployment tree. | Not deployed in M0. | M3B entry |
 
 This table deliberately does not claim the developer machine's packages are reproducible. A

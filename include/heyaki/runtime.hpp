@@ -135,6 +135,7 @@ using RuntimeStateCallback = std::function<Result<void>()>;
 using RuntimeUserHandler = std::function<Result<void>(const RuntimeSecurityContext&)>;
 
 namespace detail {
+class RuntimeAccess;
 class RuntimeOperationState;
 class RuntimeContextState;
 class RuntimeState;
@@ -195,6 +196,7 @@ class Runtime {
   [[nodiscard]] RuntimeShutdownReport shutdown();
 
  private:
+  friend class detail::RuntimeAccess;
   explicit Runtime(std::shared_ptr<detail::RuntimeState> state) noexcept;
 
   std::shared_ptr<detail::RuntimeState> state_;

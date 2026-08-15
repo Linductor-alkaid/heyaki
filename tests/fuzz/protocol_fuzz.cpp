@@ -1,6 +1,7 @@
 #include "fuzz_targets.hpp"
 
 #include <heyaki/operation.hpp>
+#include <heyaki/lan_protocol.hpp>
 #include <heyaki/protocol.hpp>
 #include <heyaki/wire.hpp>
 
@@ -338,6 +339,44 @@ void lan_datagram_parser(std::span<const std::byte> input) {
   const auto encoded = encode_lan_datagram(parsed.datagram->type, parsed.datagram->payload);
   if (!encoded || encoded.value_if()->size() != input.size() ||
       !std::equal(encoded.value_if()->begin(), encoded.value_if()->end(), input.begin())) {
+    std::abort();
+  }
+}
+
+void lan_hello_parser(std::span<const std::byte> input) {
+  const auto parsed = parse_lan_hello(input);
+  if (!parsed) {
+    return;
+  }
+  const auto encoded = encode_lan_hello(*parsed.value_if());
+  if (!encoded || encoded.value_if()->size() != input.size() ||
+      !std::equal(encoded.value_if()->begin(), encoded.value_if()->end(),
+                  input.begin())) {
+    std::abort();
+  }
+}
+
+void lan_presence_parser(std::span<const std::byte> input) {
+  const auto parsed = parse_lan_presence(input);
+  if (!parsed) {
+    return;
+  }
+  const auto encoded = encode_lan_presence(*parsed.value_if());
+  if (!encoded || encoded.value_if()->size() != input.size() ||
+      !std::equal(encoded.value_if()->begin(), encoded.value_if()->end(), input.begin())) {
+    std::abort();
+  }
+}
+
+void lan_signaling_frame_parser(std::span<const std::byte> input) {
+  const auto parsed = parse_lan_signaling_frame(input);
+  if (!parsed) {
+    return;
+  }
+  const auto encoded = encode_lan_signaling_frame(*parsed.value_if());
+  if (!encoded || encoded.value_if()->size() != input.size() ||
+      !std::equal(encoded.value_if()->begin(), encoded.value_if()->end(),
+                  input.begin())) {
     std::abort();
   }
 }

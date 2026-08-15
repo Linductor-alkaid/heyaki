@@ -15,7 +15,7 @@
 
 namespace heyaki {
 
-inline constexpr std::uint32_t profile_schema_version = 2U;
+inline constexpr std::uint32_t profile_schema_version = 3U;
 
 struct ProfileOpenOptions {
   std::chrono::milliseconds lock_timeout{2000};
@@ -28,6 +28,75 @@ struct ProfileInfo {
   std::string name;
   std::filesystem::path database_path;
 };
+
+enum class ConnectivityMode : std::uint8_t {
+  automatic = 1,
+  lan_only = 2,
+  relay_only = 3,
+};
+
+struct LanConfiguration {
+  ConnectivityMode connectivity_mode{ConnectivityMode::automatic};
+  bool enabled{true};
+  bool discoverable{true};
+  bool auto_connect_trusted{false};
+  std::vector<std::string> interface_preferences;
+  std::size_t interface_capacity{32U};
+  std::size_t directory_capacity{4096U};
+  std::size_t trusted_directory_reserve{128U};
+  std::size_t per_interface_directory_capacity{1024U};
+  std::size_t per_source_presence_capacity{64U};
+  std::size_t unknown_identity_capacity{512U};
+  std::size_t replay_capacity{8192U};
+  std::size_t diagnostic_capacity{1024U};
+  std::size_t provisional_connection_capacity{64U};
+  std::size_t per_source_provisional_capacity{8U};
+  std::size_t provisional_accept_rate_per_second{64U};
+  std::size_t per_source_provisional_rate{16U};
+  std::size_t pending_signaling_capacity{128U};
+  std::size_t auto_connect_capacity{16U};
+  std::size_t announcement_rate_per_second{32U};
+  std::size_t per_source_announcement_rate{8U};
+  std::chrono::milliseconds announcement_interval{5000};
+  std::chrono::milliseconds presence_lease{15000};
+  std::chrono::milliseconds announcement_jitter{500};
+  std::chrono::milliseconds interface_refresh_interval{5000};
+  std::chrono::milliseconds handshake_timeout{5000};
+  std::chrono::milliseconds hello_timeout{3000};
+  std::chrono::milliseconds route_preference_delay{250};
+  std::chrono::milliseconds shutdown_timeout{2000};
+};
+
+struct PairingPolicy {
+  std::uint64_t generation{1U};
+  bool password_pairing_enabled{true};
+  bool require_manual_approval_unknown{true};
+  std::vector<std::string> default_scopes;
+};
+
+struct LocalProfileInitialization {
+  std::string application_id;
+  PasswordVerifier password_verifier;
+  std::uint64_t password_generation{1U};
+  PairingPolicy pairing_policy;
+  LanConfiguration lan;
+};
+
+struct LocalProfileReadiness {
+  bool identity_ready{false};
+  bool endpoint_ready{false};
+  bool password_verifier_ready{false};
+  bool pairing_policy_ready{false};
+  bool lan_configuration_ready{false};
+
+  [[nodiscard]] bool ready() const noexcept {
+    return identity_ready && endpoint_ready && password_verifier_ready &&
+           pairing_policy_ready && lan_configuration_ready;
+  }
+};
+
+[[nodiscard]] Result<void> validate_lan_configuration(const LanConfiguration& configuration);
+[[nodiscard]] Result<void> validate_pairing_policy(const PairingPolicy& policy);
 
 enum class TrustGrantDirection : std::uint8_t {
   issued = 1,
@@ -89,6 +158,14 @@ class ProfileStore {
   [[nodiscard]] Result<IdentityKeyPair> load_identity() const;
 
   [[nodiscard]] Result<EndpointId> endpoint_for(std::string_view application_id);
+  [[nodiscard]] Result<EndpointId> initialize_local(
+      const LocalProfileInitialization& initialization);
+  [[nodiscard]] Result<LocalProfileReadiness> local_readiness(
+      std::string_view application_id) const;
+  [[nodiscard]] Result<void> set_lan_configuration(const LanConfiguration& configuration);
+  [[nodiscard]] Result<LanConfiguration> lan_configuration() const;
+  [[nodiscard]] Result<void> set_pairing_policy(const PairingPolicy& policy);
+  [[nodiscard]] Result<PairingPolicy> pairing_policy() const;
   [[nodiscard]] Result<void> set_password_verifier(const PasswordVerifier& verifier,
                                                    std::uint64_t password_generation);
   [[nodiscard]] Result<std::optional<PasswordVerifier>> password_verifier() const;
@@ -101,6 +178,10 @@ class ProfileStore {
                                                 std::uint64_t revoked_unix_milliseconds);
   [[nodiscard]] Result<bool> is_scope_authorized(
       const DeviceId& peer, std::string_view scope, std::uint64_t now_unix_milliseconds) const;
+  [[nodiscard]] Result<bool> is_device_trusted(
+      const DeviceId& peer, std::uint64_t now_unix_milliseconds) const;
+  [[nodiscard]] Result<std::vector<DeviceId>> trusted_devices(
+      std::uint64_t now_unix_milliseconds) const;
 
   [[nodiscard]] Result<void> mark_relay_revoked(std::string_view relay_url,
                                                 std::uint64_t enrollment_generation);

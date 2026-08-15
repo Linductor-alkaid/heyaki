@@ -11,8 +11,10 @@ namespace heyaki {
 
 inline constexpr std::size_t ed25519_public_key_bytes = 32;
 inline constexpr std::size_t ed25519_secret_key_bytes = 64;
+inline constexpr std::size_t ed25519_signature_bytes = 64;
 
 using IdentityPublicKey = std::array<std::byte, ed25519_public_key_bytes>;
+using IdentitySignature = std::array<std::byte, ed25519_signature_bytes>;
 
 class IdentityKeyPair {
  public:
@@ -45,5 +47,10 @@ class IdentityKeyPair {
 [[nodiscard]] Result<IdentityKeyPair> create_identity();
 [[nodiscard]] Result<IdentityKeyPair> import_identity(
     std::span<const std::byte> public_key, std::span<const std::byte> secret_key);
+[[nodiscard]] Result<IdentitySignature> sign_identity_message(
+    const IdentityKeyPair& identity, std::span<const std::byte> message);
+[[nodiscard]] Result<void> verify_identity_signature(
+    std::span<const std::byte> public_key, std::span<const std::byte> message,
+    std::span<const std::byte> signature);
 
 }  // namespace heyaki

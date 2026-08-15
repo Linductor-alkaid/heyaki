@@ -115,9 +115,12 @@ int prepare_migration(const std::filesystem::path& path) {
   const bool prepared = execute(
       database,
       "BEGIN IMMEDIATE;"
-      "DROP INDEX trust_grants_authorization_index;"
-      "DELETE FROM schema_migrations WHERE version=2;"
-      "PRAGMA user_version=1;"
+      "DROP TABLE pairing_policy_scopes;"
+      "DROP TABLE pairing_policy;"
+      "DROP TABLE lan_interface_preferences;"
+      "DROP TABLE lan_configuration;"
+      "DELETE FROM schema_migrations WHERE version=3;"
+      "PRAGMA user_version=2;"
       "COMMIT;"
       "PRAGMA wal_checkpoint(TRUNCATE);");
   const int closed = sqlite3_close(database);
@@ -146,13 +149,20 @@ int verify_migration(const std::filesystem::path& path) {
   const bool integrity = quick_check(database);
   const int migration_v2 =
       query_int(database, "SELECT COUNT(*) FROM schema_migrations WHERE version=2");
+  const int migration_v3 =
+      query_int(database, "SELECT COUNT(*) FROM schema_migrations WHERE version=3");
   const int authorization_index = query_int(
       database,
       "SELECT COUNT(*) FROM sqlite_schema WHERE type='index' "
       "AND name='trust_grants_authorization_index'");
+  const int lan_configuration = query_int(
+      database,
+      "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='lan_configuration'");
   const int closed = sqlite3_close(database);
-  const bool old_state = version == 1 && migration_v2 == 0 && authorization_index == 0;
-  const bool new_state = version == 2 && migration_v2 == 1 && authorization_index == 1;
+  const bool old_state = version == 2 && migration_v2 == 1 && migration_v3 == 0 &&
+                         authorization_index == 1 && lan_configuration == 0;
+  const bool new_state = version == 3 && migration_v2 == 1 && migration_v3 == 1 &&
+                         authorization_index == 1 && lan_configuration == 1;
   if (!integrity || closed != SQLITE_OK || (!old_state && !new_state)) {
     return fail("migration_partial_state_detected");
   }

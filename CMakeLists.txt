@@ -69,6 +69,11 @@ heyaki_resolve_build_commit(HEYAKI_RESOLVED_BUILD_COMMIT)
 heyaki_add_pinned_boost_asio()
 heyaki_add_vendored_sodium()
 heyaki_add_vendored_sqlite()
+find_package(OpenSSL 3.0 REQUIRED COMPONENTS SSL Crypto)
+if(OPENSSL_VERSION VERSION_GREATER_EQUAL 4.0)
+  message(FATAL_ERROR
+    "Heyaki M3A freezes the OpenSSL 3.x ABI line; got ${OPENSSL_VERSION}")
+endif()
 
 set(EXECUTOR_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(EXECUTOR_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -109,6 +114,7 @@ add_library(heyaki_core
   src/core/error.cpp
   src/core/identity.cpp
   src/core/ids.cpp
+  src/core/lan_protocol.cpp
   src/core/limits.cpp
   src/core/operation.cpp
   src/core/protocol.cpp
@@ -147,16 +153,22 @@ endif()
 heyaki_configure_target(heyaki_profile)
 
 add_library(heyaki_client
+  src/client/lan_directory.cpp
   src/client/module.cpp
+  src/client/node.cpp
   src/client/runtime.cpp)
 add_library(heyaki::client ALIAS heyaki_client)
 set_target_properties(heyaki_client PROPERTIES EXPORT_NAME client OUTPUT_NAME heyaki_client)
 target_compile_features(heyaki_client PUBLIC cxx_std_20)
 target_link_libraries(heyaki_client
   PUBLIC heyaki::profile
-  PRIVATE executor::executor heyaki::sodium)
+  PRIVATE executor::executor heyaki::sodium OpenSSL::SSL OpenSSL::Crypto)
+if(WIN32)
+  target_link_libraries(heyaki_client PRIVATE iphlpapi ws2_32)
+endif()
 heyaki_target_use_pinned_boost_asio(heyaki_client)
 heyaki_configure_target(heyaki_client)
+heyaki_enable_executor_exception_adapter_source(src/client/node.cpp)
 heyaki_enable_executor_exception_adapter_source(src/client/runtime.cpp)
 
 add_library(heyaki_services src/services/module.cpp)
@@ -190,7 +202,7 @@ if(HEYAKI_BUILD_APPS)
   heyaki_configure_target(heyaki-relay)
 
   add_executable(heyaki-tui apps/tui/main.cpp)
-  target_link_libraries(heyaki-tui PRIVATE heyaki::services)
+  target_link_libraries(heyaki-tui PRIVATE heyaki::services executor::executor)
   heyaki_configure_target(heyaki-tui)
 
   add_executable(heyaki-m2-profile-demo apps/demo/m2_profile_demo.cpp)

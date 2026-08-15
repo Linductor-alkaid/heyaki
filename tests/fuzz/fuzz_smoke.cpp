@@ -1,9 +1,11 @@
 #include "fuzz_targets.hpp"
 #include "m1_golden_vectors.hpp"
 
+#include <heyaki/lan_protocol.hpp>
 #include <heyaki/protocol.hpp>
 #include <heyaki/wire.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -106,11 +108,25 @@ int main(int argc, char** argv) {
     }
   }
 
-  const std::vector<std::byte> lan_presence_payload{
-      std::byte{0x0aU}, std::byte{0x04U}, std::byte{0x08U},
-      std::byte{0x01U}, std::byte{0x10U}, std::byte{0x01U}};
+  const auto presence_identity = heyaki::create_identity();
+  if (!presence_identity) {
+    std::cerr << "cannot create LAN presence seed identity\n";
+    return 1;
+  }
+  heyaki::EndpointId::Storage presence_endpoint{};
+  presence_endpoint[0] = std::byte{0x11U};
+  heyaki::LanPresence presence;
+  presence.endpoint_id = heyaki::EndpointId{presence_endpoint};
+  presence.boot_nonce[0] = std::byte{0x21U};
+  presence.sequence = 1U;
+  presence.tls_signaling_port = 49190U;
+  const auto signed_presence =
+      heyaki::sign_lan_presence(presence, *presence_identity.value_if());
   const auto lan_datagram =
-      heyaki::encode_lan_datagram(heyaki::LanDatagramType::presence, lan_presence_payload);
+      signed_presence
+          ? heyaki::encode_lan_presence_datagram(presence)
+          : heyaki::Result<std::vector<std::byte>>::failure(
+                *signed_presence.error_if());
   if (!lan_datagram) {
     std::cerr << "cannot encode LAN presence seed\n";
     return 1;
@@ -122,15 +138,115 @@ int main(int argc, char** argv) {
   auto oversized_lan = *lan_datagram.value_if();
   oversized_lan.resize(heyaki::max_lan_datagram_bytes + 1U, std::byte{0U});
   const std::vector lan_seeds{
-      std::pair{std::string_view{"golden-presence"}, *lan_datagram.value_if()},
+      std::pair{std::string_view{"signed-presence"}, *lan_datagram.value_if()},
       std::pair{std::string_view{"truncated-presence"}, truncated_lan},
       std::pair{std::string_view{"unknown-type"}, unknown_lan},
       std::pair{std::string_view{"oversized-datagram"}, oversized_lan},
   };
   for (const auto& [name, seed] : lan_seeds) {
     heyaki::fuzz::lan_datagram_parser(seed);
+    const auto parsed = heyaki::parse_lan_datagram(seed);
+    if (parsed.status == heyaki::LanDatagramParseStatus::parsed && parsed.datagram) {
+      heyaki::fuzz::lan_presence_parser(parsed.datagram->payload);
+    }
     if (!write_seed(corpus_root / "lan-datagram-parser", name, seed)) {
       std::cerr << "cannot write LAN datagram seed " << name << '\n';
+      return 1;
+    }
+  }
+
+  heyaki::RequestId::Storage signaling_request_bytes{};
+  signaling_request_bytes[0] = std::byte{0x71U};
+  const heyaki::LanSignalingFrame signaling_frame{
+      heyaki::LanSignalingMessageKind::signed_offer,
+      heyaki::RequestId{signaling_request_bytes},
+      {std::byte{0x01U}, std::byte{0x02U}, std::byte{0x03U}}};
+  const auto encoded_signaling =
+      heyaki::encode_lan_signaling_frame(signaling_frame);
+  if (!encoded_signaling) {
+    std::cerr << "cannot encode LAN signaling frame seed\n";
+    return 1;
+  }
+  auto truncated_signaling = *encoded_signaling.value_if();
+  truncated_signaling.pop_back();
+  auto trailing_signaling = *encoded_signaling.value_if();
+  trailing_signaling.push_back(std::byte{0U});
+  auto unknown_signaling = *encoded_signaling.value_if();
+  unknown_signaling[heyaki::lan_signaling_frame_header_bytes] = std::byte{0x7fU};
+  auto zero_request_signaling = *encoded_signaling.value_if();
+  std::fill_n(zero_request_signaling.begin() +
+                  static_cast<std::ptrdiff_t>(
+                      heyaki::lan_signaling_frame_header_bytes + 1U),
+              heyaki::RequestId::size_bytes, std::byte{0U});
+  const std::vector<std::byte> oversized_signaling_length{
+      std::byte{0x00U}, std::byte{0x01U}, std::byte{0x00U}, std::byte{0x12U}};
+  const std::vector signaling_seeds{
+      std::pair{std::string_view{"signed-offer"},
+                *encoded_signaling.value_if()},
+      std::pair{std::string_view{"truncated-frame"}, truncated_signaling},
+      std::pair{std::string_view{"trailing-bytes"}, trailing_signaling},
+      std::pair{std::string_view{"unknown-kind"}, unknown_signaling},
+      std::pair{std::string_view{"zero-request"}, zero_request_signaling},
+      std::pair{std::string_view{"oversized-length"},
+                oversized_signaling_length},
+  };
+  for (const auto& [name, seed] : signaling_seeds) {
+    heyaki::fuzz::lan_signaling_frame_parser(seed);
+    if (!write_seed(corpus_root / "lan-signaling-frame-parser", name, seed)) {
+      std::cerr << "cannot write LAN signaling seed " << name << '\n';
+      return 1;
+    }
+  }
+
+  const auto hello_sender = heyaki::create_identity();
+  const auto hello_peer = heyaki::create_identity();
+  if (!hello_sender || !hello_peer) {
+    std::cerr << "cannot create LAN hello seed identities\n";
+    return 1;
+  }
+  heyaki::EndpointId::Storage hello_sender_endpoint{};
+  hello_sender_endpoint[0] = std::byte{0x21U};
+  heyaki::EndpointId::Storage hello_peer_endpoint{};
+  hello_peer_endpoint[0] = std::byte{0x22U};
+  heyaki::LanHello hello;
+  hello.role = heyaki::LanHelloRole::initiator;
+  hello.sender_endpoint_id = heyaki::EndpointId{hello_sender_endpoint};
+  hello.peer_device_id = hello_peer.value_if()->device_id();
+  hello.peer_endpoint_id = heyaki::EndpointId{hello_peer_endpoint};
+  hello.initiator_nonce[0] = std::byte{0x31U};
+  hello.sender_tls_certificate_sha256[0] = std::byte{0x41U};
+  hello.observed_peer_tls_certificate_sha256[0] = std::byte{0x42U};
+  hello.sender_boot_nonce[0] = std::byte{0x51U};
+  const auto signed_hello =
+      heyaki::sign_lan_hello(hello, *hello_sender.value_if());
+  const auto encoded_hello =
+      signed_hello ? heyaki::encode_lan_hello(hello)
+                   : heyaki::Result<std::vector<std::byte>>::failure(
+                         *signed_hello.error_if());
+  if (!encoded_hello) {
+    std::cerr << "cannot encode LAN hello seed\n";
+    return 1;
+  }
+  auto truncated_hello = *encoded_hello.value_if();
+  truncated_hello.pop_back();
+  auto unknown_hello = *encoded_hello.value_if();
+  unknown_hello.insert(unknown_hello.end(),
+                       {std::byte{0x70U}, std::byte{0x01U}});
+  auto replaced_hello = *encoded_hello.value_if();
+  replaced_hello[replaced_hello.size() / 2U] ^= std::byte{0x01U};
+  const std::vector<std::byte> oversized_hello(
+      heyaki::max_lan_datagram_payload_bytes + 1U, std::byte{0U});
+  const std::vector hello_seeds{
+      std::pair{std::string_view{"signed-hello"}, *encoded_hello.value_if()},
+      std::pair{std::string_view{"truncated-hello"}, truncated_hello},
+      std::pair{std::string_view{"unknown-field"}, unknown_hello},
+      std::pair{std::string_view{"signature-conflict"}, replaced_hello},
+      std::pair{std::string_view{"oversized-hello"}, oversized_hello},
+  };
+  for (const auto& [name, seed] : hello_seeds) {
+    heyaki::fuzz::lan_hello_parser(seed);
+    if (!write_seed(corpus_root / "lan-hello-parser", name, seed)) {
+      std::cerr << "cannot write LAN hello seed " << name << '\n';
       return 1;
     }
   }
