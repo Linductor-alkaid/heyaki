@@ -58,6 +58,7 @@ set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(HeyakiDependencies)
 include(HeyakiProjectOptions)
+include(HeyakiVendoredRuntime)
 include(HeyakiVersion)
 
 if(HEYAKI_VERIFY_DEPENDENCIES)
@@ -65,6 +66,34 @@ if(HEYAKI_VERIFY_DEPENDENCIES)
 endif()
 
 heyaki_resolve_build_commit(HEYAKI_RESOLVED_BUILD_COMMIT)
+heyaki_add_pinned_boost_asio()
+heyaki_add_vendored_sodium()
+heyaki_add_vendored_sqlite()
+
+set(EXECUTOR_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(EXECUTOR_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(EXECUTOR_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(EXECUTOR_ENABLE_GPU OFF CACHE BOOL "" FORCE)
+set(EXECUTOR_ENABLE_CUDA OFF CACHE BOOL "" FORCE)
+set(EXECUTOR_ENABLE_OPENCL OFF CACHE BOOL "" FORCE)
+set(EXECUTOR_ENABLE_TSAN OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/executor)
+
+if(NOT HEYAKI_SANITIZER STREQUAL "none" AND
+   CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+  if(HEYAKI_SANITIZER STREQUAL "address")
+    set(heyaki_executor_sanitizer_flag -fsanitize=address)
+  elseif(HEYAKI_SANITIZER STREQUAL "undefined")
+    set(heyaki_executor_sanitizer_flag -fsanitize=undefined)
+  elseif(HEYAKI_SANITIZER STREQUAL "thread")
+    set(heyaki_executor_sanitizer_flag -fsanitize=thread)
+  endif()
+  target_compile_options(executor PRIVATE
+    "${heyaki_executor_sanitizer_flag}" -fno-omit-frame-pointer)
+  target_link_options(executor PUBLIC
+    "${heyaki_executor_sanitizer_flag}" -fno-omit-frame-pointer)
+endif()
+
 set(HEYAKI_PROTOCOL_VERSION_MAJOR 1)
 set(HEYAKI_PROTOCOL_VERSION_MINOR 0)
 set(HEYAKI_BUILD_FEATURE_RELAY ${HEYAKI_BUILD_APPS})
@@ -78,17 +107,15 @@ configure_file(
 
 add_library(heyaki_core
   src/core/error.cpp
+  src/core/identity.cpp
   src/core/ids.cpp
   src/core/limits.cpp
   src/core/operation.cpp
   src/core/protocol.cpp
   src/core/security.cpp
   src/core/signing.cpp
-  src/core/sodium_memzero.cpp
   src/core/version.cpp
-  src/core/wire.cpp
-  third_party/libsodium/src/libsodium/crypto_hash/sha256/cp/hash_sha256_cp.c
-  third_party/libsodium/src/libsodium/crypto_hash/sha256/hash_sha256.c)
+  src/core/wire.cpp)
 add_library(heyaki::core ALIAS heyaki_core)
 set_target_properties(heyaki_core PROPERTIES EXPORT_NAME core OUTPUT_NAME heyaki_core)
 target_compile_features(heyaki_core PUBLIC cxx_std_20)
@@ -98,36 +125,34 @@ target_include_directories(heyaki_core
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
     "$<BUILD_INTERFACE:${HEYAKI_GENERATED_DIR}>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
-  PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libsodium/src/libsodium/include"
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libsodium/src/libsodium/include/sodium")
-# M1 needs only DeviceId SHA-256 derivation. Compile the pinned libsodium implementation with
-# private symbol names; M2 can link the full library without duplicate public sodium symbols.
-target_compile_definitions(heyaki_core PRIVATE
-  SODIUM_STATIC
-  CONFIGURED=1
-  crypto_hash_sha256=heyaki_crypto_hash_sha256
-  crypto_hash_sha256_bytes=heyaki_crypto_hash_sha256_bytes
-  crypto_hash_sha256_final=heyaki_crypto_hash_sha256_final
-  crypto_hash_sha256_init=heyaki_crypto_hash_sha256_init
-  crypto_hash_sha256_statebytes=heyaki_crypto_hash_sha256_statebytes
-  crypto_hash_sha256_update=heyaki_crypto_hash_sha256_update
-  sodium_memzero=heyaki_sodium_memzero)
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libsodium/src/libsodium/include")
+target_link_libraries(heyaki_core PRIVATE heyaki::sodium)
 heyaki_configure_target(heyaki_core)
 
-add_library(heyaki_profile src/profile/module.cpp)
+add_library(heyaki_profile
+  src/profile/password.cpp
+  src/profile/profile_store.cpp
+  src/profile/secret_backend.cpp)
 add_library(heyaki::profile ALIAS heyaki_profile)
 set_target_properties(heyaki_profile PROPERTIES EXPORT_NAME profile OUTPUT_NAME heyaki_profile)
 target_compile_features(heyaki_profile PUBLIC cxx_std_20)
-target_link_libraries(heyaki_profile PUBLIC heyaki::core)
+target_link_libraries(heyaki_profile
+  PUBLIC heyaki::core
+  PRIVATE heyaki::sodium heyaki::sqlite)
 heyaki_configure_target(heyaki_profile)
 
-add_library(heyaki_client src/client/module.cpp)
+add_library(heyaki_client
+  src/client/module.cpp
+  src/client/runtime.cpp)
 add_library(heyaki::client ALIAS heyaki_client)
 set_target_properties(heyaki_client PROPERTIES EXPORT_NAME client OUTPUT_NAME heyaki_client)
 target_compile_features(heyaki_client PUBLIC cxx_std_20)
-target_link_libraries(heyaki_client PUBLIC heyaki::profile)
+target_link_libraries(heyaki_client
+  PUBLIC heyaki::profile
+  PRIVATE executor::executor heyaki::sodium)
+heyaki_target_use_pinned_boost_asio(heyaki_client)
 heyaki_configure_target(heyaki_client)
+heyaki_enable_executor_exception_adapter_source(src/client/runtime.cpp)
 
 add_library(heyaki_services src/services/module.cpp)
 add_library(heyaki::services ALIAS heyaki_services)
@@ -146,6 +171,8 @@ target_link_libraries(heyaki_transport_webrtc PRIVATE heyaki::core)
 heyaki_configure_target(heyaki_transport_webrtc)
 
 set(HEYAKI_INSTALL_TARGETS
+  heyaki_sodium
+  heyaki_sqlite
   heyaki_core
   heyaki_profile
   heyaki_client
@@ -161,7 +188,11 @@ if(HEYAKI_BUILD_APPS)
   target_link_libraries(heyaki-tui PRIVATE heyaki::services)
   heyaki_configure_target(heyaki-tui)
 
-  list(APPEND HEYAKI_INSTALL_TARGETS heyaki-relay heyaki-tui)
+  add_executable(heyaki-m2-profile-demo apps/demo/m2_profile_demo.cpp)
+  target_link_libraries(heyaki-m2-profile-demo PRIVATE heyaki::profile)
+  heyaki_configure_target(heyaki-m2-profile-demo)
+
+  list(APPEND HEYAKI_INSTALL_TARGETS heyaki-relay heyaki-tui heyaki-m2-profile-demo)
 endif()
 
 heyaki_add_developer_targets()
@@ -186,7 +217,9 @@ install(FILES "${HEYAKI_GENERATED_DIR}/heyaki/detail/build_config.hpp"
   DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/heyaki/detail")
 install(FILES "${HEYAKI_SBOM_FILE}" "${HEYAKI_LICENSE_MANIFEST_FILE}"
   DESTINATION "${CMAKE_INSTALL_DATADIR}/heyaki/supply-chain")
-install(FILES docs/supply-chain/m1-libsodium-sha256-notices.md
+install(FILES
+  docs/supply-chain/m1-libsodium-sha256-notices.md
+  docs/supply-chain/boost-software-license-1.0.txt
   DESTINATION "${CMAKE_INSTALL_DATADIR}/heyaki/supply-chain")
 
 set(HEYAKI_CMAKE_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/heyaki")

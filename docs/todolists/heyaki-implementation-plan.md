@@ -207,41 +207,50 @@ vectors 的跨平台 Debug/Release 字节一致性退出条件完成，M1 正式
 
 ### 5.1 Executor/Asio 集成
 
-- [ ] `M2-01` 新增 `docs/design/concurrency-and-shutdown.md`，逐项列出 runtime owner、执行上下文、通信组件、容量、完成边界和关闭顺序。
-- [ ] `M2-02` 实现进程级 runtime 装配：初始化 executor、注册 Blocking I/O worker、启动 Asio、安装 failure/comm 诊断桥接。
-- [ ] `M2-03` 为 Node 与 relay 分别明确 executor 所有权模式；库默认借用调用方配置的 executor，独立 app 在进程边界拥有 executor。
-- [ ] `M2-04` 用 Asio strand 串行化 Node/PeerSession 状态；外部 callback 通过有界 `MpscChannel` 进入，不跨线程共享可变 session state。
-- [ ] `M2-05` 为低频状态快照选择 `DoubleBuffer`，为可覆盖指标选择 `LatestMailbox`；记录 sequence、overwrite、stale 和 lag。
-- [ ] `M2-06` 为 executor 提交封装 operation ID 和安全上下文，但不复制其 task health 统计；任务异常仍由 future/failure event 观察。
+- [x] `M2-01` 新增 `docs/design/concurrency-and-shutdown.md`，逐项列出 runtime owner、执行上下文、通信组件、容量、完成边界和关闭顺序。
+- [x] `M2-02` 实现进程级 runtime 装配：初始化 executor、注册 Blocking I/O worker、启动 Asio、安装 failure/comm 诊断桥接。
+- [x] `M2-03` 为 Node 与 relay 分别明确 executor 所有权模式；库默认借用调用方配置的 executor，独立 app 在进程边界拥有 executor。
+- [x] `M2-04` 用 Asio strand 串行化 Node/PeerSession 状态；外部 callback 通过有界 `MpscChannel` 进入，不跨线程共享可变 session state。
+- [x] `M2-05` 为低频状态快照选择 `DoubleBuffer`，为可覆盖指标选择 `LatestMailbox`；记录 sequence、overwrite、stale 和 lag。
+- [x] `M2-06` 为 executor 提交封装 operation ID 和安全上下文，但不复制其 task health 统计；任务异常仍由 future/failure event 观察。
 - [ ] `M2-07` 实现固定关闭序列：停止 admission -> 停止生产者/重连定时器 -> 取消服务 -> 关闭 peer -> 注销 relay -> 停 Asio -> 有界等待任务/worker -> 刷新持久状态 -> owner shutdown executor。
-- [ ] `M2-08` 明确借用 executor 的 Node 只 drain 自己的 operation，不得关闭共享 executor；拥有者销毁依赖数据必须晚于任务收敛。
-- [ ] `M2-09` 所有 drain 和 shutdown 等待都有预算、超时状态与后续动作，不能依赖无限等待或 sleep 判断完成。
+- [x] `M2-08` 明确借用 executor 的 Node 只 drain 自己的 operation，不得关闭共享 executor；拥有者销毁依赖数据必须晚于任务收敛。
+- [x] `M2-09` 所有 drain 和 shutdown 等待都有预算、超时状态与后续动作，不能依赖无限等待或 sleep 判断完成。
 
 ### 5.2 身份与密码材料
 
-- [ ] `M2-10` 使用 libsodium 初始化安全随机、Ed25519、SHA-256、Argon2id 和常量时间比较；禁止自研密码原语。
-- [ ] `M2-11` 实现首次身份创建、已有身份加载、公私钥匹配检查和 `DeviceId` 派生验证。
+- [x] `M2-10` 使用 libsodium 初始化安全随机、Ed25519、SHA-256、Argon2id 和常量时间比较；禁止自研密码原语。
+- [x] `M2-11` 实现首次身份创建、已有身份加载、公私钥匹配检查和 `DeviceId` 派生验证。
 - [ ] `M2-12` 抽象 OS secret backend：Windows DPAPI/credential facilities、Linux 可用 key store；文件回退必须加密并检查权限。
-- [ ] `M2-13` 实现授权密码 verifier 创建、验证、参数校准、格式版本升级和敏感临时 buffer 清理。
-- [ ] `M2-14` 定义密钥不可用、secret backend 降级、权限过宽和损坏材料的稳定错误，禁止静默生成新身份覆盖旧档案。
+- [x] `M2-13` 实现授权密码 verifier 创建、验证、参数校准、格式版本升级和敏感临时 buffer 清理。
+- [x] `M2-14` 定义密钥不可用、secret backend 降级、权限过宽和损坏材料的稳定错误，禁止静默生成新身份覆盖旧档案。
 
 ### 5.3 ProfileStore 与 TrustStore
 
-- [ ] `M2-15` 冻结 ProfileStore SQLite schema：identity handle、relay enrollment、password verifier、TrustStore、grant、endpoint record、file resume、preferences。
-- [ ] `M2-16` 实现 `open_default()`、显式 profile 打开、创建、重命名和枚举；不存在时返回 `not_registered`，不隐式创建另一个身份。
-- [ ] `M2-17` 实现 schema version、向前迁移、事务回滚、损坏检测和可恢复备份；每个 migration 有 fixture 测试。
-- [ ] `M2-18` 实现同一 OS 主体的多进程文件锁/SQLite busy 策略、临时文件、flush 和原子替换；锁超时返回 `profile_locked`。
-- [ ] `M2-19` 按 `application_id` 创建并持久化随机 `EndpointId`，验证同 profile 多应用得到同 `DeviceId`、不同 endpoint。
-- [ ] `M2-20` 实现 TrustGrant/TrustStore 的写入、查询、撤销、过期和 password generation 索引，目标本地状态始终为最终裁决。
-- [ ] `M2-21` 对 profile 导出、删除和 relay 吊销建立不同 API；删除操作在 TUI 中不得把本地删除伪装成远端吊销。
+- [x] `M2-15` 冻结 ProfileStore SQLite schema：identity handle、relay enrollment、password verifier、TrustStore、grant、endpoint record、file resume、preferences。
+- [x] `M2-16` 实现 `open_default()`、显式 profile 打开、创建、重命名和枚举；不存在时返回 `not_registered`，不隐式创建另一个身份。
+- [x] `M2-17` 实现 schema version、向前迁移、事务回滚、损坏检测和可恢复备份；每个 migration 有 fixture 测试。
+- [x] `M2-18` 实现同一 OS 主体的多进程文件锁/SQLite busy 策略、临时文件、flush 和原子替换；锁超时返回 `profile_locked`。
+- [x] `M2-19` 按 `application_id` 创建并持久化随机 `EndpointId`，验证同 profile 多应用得到同 `DeviceId`、不同 endpoint。
+- [x] `M2-20` 实现 TrustGrant/TrustStore 的写入、查询、撤销、过期和 password generation 索引，目标本地状态始终为最终裁决。
+- [x] `M2-21` 对 profile 导出、删除和 relay 吊销建立不同 API；删除操作在 TUI 中不得把本地删除伪装成远端吊销。
 
 ### M2 测试与退出条件
 
-- [ ] executor overload、提交拒绝、任务异常、callback 异常、关闭期间提交和 drain timeout 均可通过既定事实源观察。
+- [x] executor overload、提交拒绝、任务异常、callback 异常、关闭期间提交和 drain timeout 均可通过既定事实源观察。
 - [ ] ASAN/TSAN 覆盖 callback bridge、Node 状态转换、并发 profile 打开和 shutdown，无悬空 buffer 或数据竞争。
 - [ ] 进程在每个 ProfileStore 事务点被强制终止后，重启得到旧版本或完整新版本，不出现半写状态。
 - [ ] 私钥不可用、profile 权限过宽、schema 过新、锁超时和磁盘满均返回稳定错误且不破坏原数据。
-- [ ] M2 demo 能创建 profile、重启后保持相同 `DeviceId`，两个 application ID 获得稳定且不同的 `EndpointId`。
+- [x] M2 demo 能创建 profile、重启后保持相同 `DeviceId`，两个 application ID 获得稳定且不同的 `EndpointId`。
+
+M2 本地验证记录（2026-08-15）：Linux GCC 13.3 的 Debug `-Werror` 与禁异常全量构建
+均通过 18 项 CTest，安装后 consumer 和 15 个直接依赖 pin 的供应链检查通过。ASAN 下
+`heyaki_m2_profile`、`heyaki_m2_runtime` 2/2 实际通过；TSAN 目标成功构建，但当前宿主在进程
+启动时因 `ThreadSanitizer: unexpected memory mapping` 明确 skip，尚不能勾选竞态退出条件。
+demo 连续打开同一 profile 后保持相同 `DeviceId`，两个 application ID 的 `EndpointId` 各自
+稳定且彼此不同。M2 仍未完成的门禁是实际 service/peer/relay/persistence 关闭 hook、Linux
+Secret Service/keyring backend、逐事务点崩溃注入、磁盘满保护和可运行宿主上的 TSAN；这些
+完成前不准入 M3。
 
 ---
 

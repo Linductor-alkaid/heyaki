@@ -1,15 +1,16 @@
-# M1 libsodium SHA-256 Notices
+# Pinned libsodium Notices
 
-M1 compiles the SHA-256 implementation from pinned libsodium 1.0.20 into `heyaki_core` for
-`DeviceId` derivation. The compiled source set is:
+Heyaki builds a static, source-selected subset of pinned libsodium 1.0.20 as `heyaki_sodium`.
+M1 first used its SHA-256 implementation for `DeviceId` derivation; M2 extends the same pinned
+library to Ed25519, secure random generation, Argon2id, constant-time comparison,
+XChaCha20-Poly1305, and secure memory clearing. The authoritative compiled source list is in
+`cmake/HeyakiVendoredRuntime.cmake`.
 
-- `src/libsodium/crypto_hash/sha256/hash_sha256.c` under the libsodium ISC license;
-- `src/libsodium/crypto_hash/sha256/cp/hash_sha256_cp.c` under the BSD 2-Clause license below; and
-- a Heyaki-local private-symbol secure-zero bridge.
+The selected libsodium sources are covered by the upstream ISC license. The bundled
+`crypto_hash/sha256/cp/hash_sha256_cp.c` implementation additionally carries the BSD 2-Clause
+license reproduced below.
 
-The symbols are renamed to a Heyaki-private prefix so M2 can link the complete pinned libsodium
-library without duplicate public symbols. This notice is installed with the generated SBOM and license
-manifest.
+This notice is installed with the generated SBOM and license manifest.
 
 ## ISC License
 

@@ -1,5 +1,9 @@
 @PACKAGE_INIT@
 
+include(CMakeFindDependencyMacro)
+
+find_dependency(Threads)
+find_dependency(executor CONFIG)
+
 include("${CMAKE_CURRENT_LIST_DIR}/heyakiTargets.cmake")
 check_required_components(heyaki)
-

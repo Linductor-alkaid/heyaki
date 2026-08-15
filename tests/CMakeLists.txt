@@ -152,9 +152,32 @@ target_compile_definitions(heyaki_unit_tests PRIVATE
 heyaki_configure_target(heyaki_unit_tests)
 heyaki_add_runtime_test(heyaki_unit heyaki_unit_tests "unit;protocol;security")
 
+add_executable(heyaki_m2_profile_tests unit/m2_profile_test.cpp)
+target_link_libraries(heyaki_m2_profile_tests PRIVATE
+  heyaki::profile
+  heyaki::sqlite
+  GTest::gtest_main)
+target_compile_definitions(heyaki_m2_profile_tests PRIVATE
+  "HEYAKI_M2_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}\""
+  "HEYAKI_M2_PROFILE_V1_FIXTURE=\"${CMAKE_CURRENT_SOURCE_DIR}/fixtures/profile_store_v1.sql\"")
+heyaki_configure_target(heyaki_m2_profile_tests)
+heyaki_add_runtime_test(
+  heyaki_m2_profile heyaki_m2_profile_tests "unit;profile;security")
+
+add_executable(heyaki_m2_runtime_tests unit/m2_runtime_test.cpp)
+target_link_libraries(heyaki_m2_runtime_tests PRIVATE
+  heyaki::client
+  executor::executor
+  GTest::gtest_main)
+heyaki_configure_target(heyaki_m2_runtime_tests)
+heyaki_enable_executor_exception_adapter_source(unit/m2_runtime_test.cpp)
+heyaki_add_runtime_test(
+  heyaki_m2_runtime heyaki_m2_runtime_tests "unit;runtime;concurrency")
+
 set(heyaki_public_header_sources)
 foreach(public_header IN ITEMS
-    error identity ids limits operation protocol security signing time version wire)
+    error identity ids limits operation password profile_store protocol runtime secret_backend
+    security signing time version wire)
   set(header_source
     "${HEYAKI_TEST_GENERATED_DIR}/${public_header}_header_standalone.cpp")
   file(GENERATE OUTPUT "${header_source}"

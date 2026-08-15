@@ -1,8 +1,5 @@
-#include <heyaki/identity.hpp>
+#include <heyaki/ids.hpp>
 
-#include <sodium/crypto_hash_sha256.h>
-
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -101,6 +98,7 @@ std::string to_string(const OperationId& id) { return encode_identifier(id, "hyo
 std::string to_string(const MessageId& id) { return encode_identifier(id, "hym1_"); }
 std::string to_string(const RequestId& id) { return encode_identifier(id, "hyr1_"); }
 std::string to_string(const TransferId& id) { return encode_identifier(id, "hyt1_"); }
+std::string to_string(const GrantId& id) { return encode_identifier(id, "hyg1_"); }
 
 IdentifierDecodeResult<DeviceId> parse_device_id(std::string_view text) {
   return decode_identifier<DeviceId>(text, "hy1_");
@@ -123,6 +121,9 @@ IdentifierDecodeResult<RequestId> parse_request_id(std::string_view text) {
 IdentifierDecodeResult<TransferId> parse_transfer_id(std::string_view text) {
   return decode_identifier<TransferId>(text, "hyt1_");
 }
+IdentifierDecodeResult<GrantId> parse_grant_id(std::string_view text) {
+  return decode_identifier<GrantId>(text, "hyg1_");
+}
 
 std::string_view identifier_decode_error_name(IdentifierDecodeError error) noexcept {
   switch (error) {
@@ -138,21 +139,6 @@ std::string_view identifier_decode_error_name(IdentifierDecodeError error) noexc
       return "non_canonical";
   }
   return "invalid_character";
-}
-
-Result<DeviceId> derive_device_id(std::span<const std::byte> public_key) {
-  if (public_key.size() != ed25519_public_key_bytes) {
-    return Result<DeviceId>::failure(
-        Error{ErrorCode::identity, "identity", "invalid_public_key_length"});
-  }
-
-  DeviceId::Storage digest{};
-  const auto* input = reinterpret_cast<const unsigned char*>(public_key.data());
-  auto* output = reinterpret_cast<unsigned char*>(digest.data());
-  if (crypto_hash_sha256(output, input, public_key.size()) != 0) {
-    return Result<DeviceId>::failure(Error{ErrorCode::internal, "identity", "sha256_failed"});
-  }
-  return Result<DeviceId>::success(DeviceId{digest});
 }
 
 }  // namespace heyaki

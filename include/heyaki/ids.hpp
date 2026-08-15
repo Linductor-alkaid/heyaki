@@ -19,6 +19,7 @@ enum class IdentifierKind : std::uint8_t {
   message,
   request,
   transfer,
+  grant,
 };
 
 template <IdentifierKind Kind, std::size_t Size>
@@ -55,6 +56,7 @@ using OperationId = Identifier<IdentifierKind::operation, 16>;
 using MessageId = Identifier<IdentifierKind::message, 16>;
 using RequestId = Identifier<IdentifierKind::request, 16>;
 using TransferId = Identifier<IdentifierKind::transfer, 16>;
+using GrantId = Identifier<IdentifierKind::grant, 16>;
 
 enum class IdentifierDecodeError : std::uint8_t {
   none,
@@ -79,6 +81,7 @@ struct IdentifierDecodeResult {
 [[nodiscard]] std::string to_string(const MessageId& id);
 [[nodiscard]] std::string to_string(const RequestId& id);
 [[nodiscard]] std::string to_string(const TransferId& id);
+[[nodiscard]] std::string to_string(const GrantId& id);
 
 [[nodiscard]] IdentifierDecodeResult<DeviceId> parse_device_id(std::string_view text);
 [[nodiscard]] IdentifierDecodeResult<EndpointId> parse_endpoint_id(std::string_view text);
@@ -87,6 +90,7 @@ struct IdentifierDecodeResult {
 [[nodiscard]] IdentifierDecodeResult<MessageId> parse_message_id(std::string_view text);
 [[nodiscard]] IdentifierDecodeResult<RequestId> parse_request_id(std::string_view text);
 [[nodiscard]] IdentifierDecodeResult<TransferId> parse_transfer_id(std::string_view text);
+[[nodiscard]] IdentifierDecodeResult<GrantId> parse_grant_id(std::string_view text);
 
 [[nodiscard]] std::string_view identifier_decode_error_name(IdentifierDecodeError error) noexcept;
 

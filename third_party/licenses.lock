@@ -1,6 +1,11 @@
 # name|SPDX expression|license file relative to repository root
 FTXUI|MIT|third_party/FTXUI/LICENSE
 executor|MIT|third_party/executor/LICENSE
+boost-asio|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
+boost-system|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
+boost-config|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
+boost-assert|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
+boost-throw_exception|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
 libdatachannel|MPL-2.0|third_party/libdatachannel/LICENSE
 libsodium|ISC AND BSD-2-Clause|docs/supply-chain/m1-libsodium-sha256-notices.md
 protobuf|BSD-3-Clause|third_party/protobuf/LICENSE

@@ -40,6 +40,12 @@ enum class ErrorCode : std::uint16_t {
   remote_error = 22,
   outcome_unknown = 23,
   internal = 24,
+  secret_unavailable = 25,
+  secret_backend_degraded = 26,
+  profile_permissions = 27,
+  profile_corrupt = 28,
+  schema_too_new = 29,
+  storage = 30,
 };
 
 class Error {

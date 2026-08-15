@@ -8,6 +8,11 @@
 
 FTXUI|https://github.com/ArthurSonzogni/FTXUI.git|989917eba88b7b67bf2b7e40fbdbe5bba66c23d5|989917eba88b7b67bf2b7e40fbdbe5bba66c23d5|false|runtime
 executor|https://github.com/Linductor-alkaid/executor.git|e9dc36d8a7d5277a0c23adcdcb307a28fc73b2e3|e9dc36d8a7d5277a0c23adcdcb307a28fc73b2e3|false|runtime
+boost-asio|https://github.com/boostorg/asio.git|boost-1.88.0|8ce699c7d8c10a7d3e6187bc98244d1d2f2958c8|false|runtime
+boost-system|https://github.com/boostorg/system.git|boost-1.88.0|7a49a5d80d08a2a0176067ba6dbf496d579ab491|false|runtime
+boost-config|https://github.com/boostorg/config.git|boost-1.88.0|4e9d5a3a95418d9ca623d38f5c772d485c2c2baf|false|runtime
+boost-assert|https://github.com/boostorg/assert.git|boost-1.88.0|5dcb2af5213ae132b7531e45e7f93258cc33ffd8|false|runtime
+boost-throw_exception|https://github.com/boostorg/throw_exception.git|boost-1.88.0|f3d4d55f52894fda75ef2915dc122e3133b97b45|false|runtime
 libdatachannel|https://github.com/paullouisageneau/libdatachannel.git|v0.23.2|9e6a13abbb6846c003d817d0387b6706466e2b03|true|runtime
 libsodium|https://github.com/jedisct1/libsodium.git|1.0.20-RELEASE|9511c982fb1d046470a8b42aa36556cdb7da15de|false|runtime
 protobuf|https://github.com/protocolbuffers/protobuf.git|v31.1|74211c0dfc2777318ab53c2cd2c317a2ef9012de|true|runtime

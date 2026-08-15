@@ -100,8 +100,8 @@ foreach(line IN LISTS dependency_lines)
 endforeach()
 
 list(LENGTH direct_package_names direct_package_count)
-if(NOT direct_package_count EQUAL 10)
-  message(FATAL_ERROR "Expected 10 direct pinned packages, found ${direct_package_count}")
+if(NOT direct_package_count EQUAL 15)
+  message(FATAL_ERROR "Expected 15 direct pinned packages, found ${direct_package_count}")
 endif()
 
 file(STRINGS "${HEYAKI_TRANSITIVE_DEPENDENCY_LOCK}" transitive_lines)

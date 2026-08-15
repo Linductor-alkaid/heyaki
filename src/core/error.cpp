@@ -77,6 +77,18 @@ std::string_view error_code_name(ErrorCode code) noexcept {
       return "outcome_unknown";
     case ErrorCode::internal:
       return "internal";
+    case ErrorCode::secret_unavailable:
+      return "secret_unavailable";
+    case ErrorCode::secret_backend_degraded:
+      return "secret_backend_degraded";
+    case ErrorCode::profile_permissions:
+      return "profile_permissions";
+    case ErrorCode::profile_corrupt:
+      return "profile_corrupt";
+    case ErrorCode::schema_too_new:
+      return "schema_too_new";
+    case ErrorCode::storage:
+      return "storage";
   }
   return "internal";
 }

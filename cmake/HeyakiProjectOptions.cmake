@@ -36,6 +36,13 @@ function(heyaki_configure_target target_name)
     if(HEYAKI_WARNINGS_AS_ERRORS)
       target_compile_options(${target_name} PRIVATE -Werror)
     endif()
+    if(HEYAKI_SANITIZER STREQUAL "thread" AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+      # GCC warns that ThreadSanitizer does not instrument atomic fences. Boost.Asio
+      # intentionally uses those fences, so retain the diagnostic without letting
+      # this toolchain limitation suppress the rest of the TSAN run.
+      target_compile_options(${target_name} PRIVATE
+        "$<$<COMPILE_LANGUAGE:CXX>:-Wno-error=tsan>")
+    endif()
     if(NOT HEYAKI_ENABLE_EXCEPTIONS)
       target_compile_options(${target_name} PRIVATE
         "$<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions>")
@@ -72,6 +79,24 @@ function(heyaki_configure_target target_name)
   if(HEYAKI_ENABLE_IWYU)
     set_property(TARGET ${target_name} PROPERTY CXX_INCLUDE_WHAT_YOU_USE
       "${HEYAKI_IWYU_EXECUTABLE}")
+  endif()
+endfunction()
+
+function(heyaki_enable_executor_exception_adapter_source source_file)
+  if(HEYAKI_ENABLE_EXCEPTIONS)
+    return()
+  endif()
+
+  # Executor's public futures and communication headers contain exception
+  # guards. Keep exceptions enabled only in translation units that absorb that
+  # contract and expose Heyaki Result/status values to the rest of the build.
+  if(MSVC)
+    set_property(SOURCE "${source_file}" APPEND PROPERTY COMPILE_OPTIONS
+      /EHsc
+      /U_HAS_EXCEPTIONS
+      /D_HAS_EXCEPTIONS=1)
+  elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+    set_property(SOURCE "${source_file}" APPEND PROPERTY COMPILE_OPTIONS -fexceptions)
   endif()
 endfunction()
 
