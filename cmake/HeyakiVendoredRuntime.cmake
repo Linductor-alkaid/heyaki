@@ -31,12 +31,14 @@ function(heyaki_write_sqlite_msvc_generation_script
   cmake_path(NATIVE_PATH sqlite_source_dir_native NORMALIZE sqlite_source_dir_native)
   cmake_path(NATIVE_PATH sqlite_makefile_native NORMALIZE sqlite_makefile_native)
   file(WRITE "${output_file}"
-    "@echo off\r\n"
-    "call \"${vcvarsall_native}\" ${vcvars_arch}\r\n"
-    "if errorlevel 1 exit /b %errorlevel%\r\n"
+    "@echo off\n"
+    "echo [heyaki-sqlite] initializing MSVC environment\n"
+    "call \"${vcvarsall_native}\" ${vcvars_arch}\n"
+    "if errorlevel 1 exit /b 1\n"
+    "echo [heyaki-sqlite] generating SQLite amalgamation\n"
     "nmake /NOLOGO /f \"${sqlite_makefile_native}\" "
-      "\"TOP=${sqlite_source_dir_native}\" sqlite3.c sqlite3.h\r\n"
-    "exit /b %errorlevel%\r\n")
+      "\"TOP=${sqlite_source_dir_native}\" sqlite3.c sqlite3.h\n"
+    "exit /b %errorlevel%\n")
 endfunction()
 
 function(heyaki_add_pinned_boost_asio)
@@ -248,11 +250,14 @@ function(heyaki_add_vendored_sqlite)
           "${sqlite_vcvars_arch}"
           "${sqlite_source_dir}")
         execute_process(
-          COMMAND "${heyaki_cmd_executable}" /d /s /c generate-amalgamation.bat
+          COMMAND "${heyaki_cmd_executable}" /d /c call generate-amalgamation.bat
           WORKING_DIRECTORY "${sqlite_build_dir}"
           RESULT_VARIABLE sqlite_generate_result
           OUTPUT_VARIABLE sqlite_generate_stdout
           ERROR_VARIABLE sqlite_generate_stderr)
+        if(NOT sqlite_generate_result EQUAL 0)
+          file(READ "${sqlite_generate_script}" sqlite_generate_script_contents)
+        endif()
       else()
         message(FATAL_ERROR
           "Could not locate nmake for SQLite generation. Configure from an MSVC developer "
@@ -277,7 +282,8 @@ function(heyaki_add_vendored_sqlite)
       message(FATAL_ERROR
         "Pinned SQLite amalgamation generation failed: ${sqlite_generate_result}\n"
         "stdout:\n${sqlite_generate_stdout}\n"
-        "stderr:\n${sqlite_generate_stderr}")
+        "stderr:\n${sqlite_generate_stderr}\n"
+        "script:\n${sqlite_generate_script_contents}")
     endif()
   endif()
 

@@ -37,7 +37,9 @@ cmake_path(NATIVE_PATH vcvarsall_native NORMALIZE vcvarsall_native)
 cmake_path(NATIVE_PATH sqlite_source_dir_native NORMALIZE sqlite_source_dir_native)
 cmake_path(NATIVE_PATH sqlite_makefile_native NORMALIZE sqlite_makefile_native)
 foreach(expected_command IN ITEMS
+    "echo [heyaki-sqlite] initializing MSVC environment"
     "call \"${vcvarsall_native}\" x64"
+    "echo [heyaki-sqlite] generating SQLite amalgamation"
     "nmake /NOLOGO /f \"${sqlite_makefile_native}\" \"TOP=${sqlite_source_dir_native}\" sqlite3.c sqlite3.h")
   string(FIND "${script_contents}" "${expected_command}" command_index)
   if(command_index EQUAL -1)
