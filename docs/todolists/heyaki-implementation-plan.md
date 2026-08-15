@@ -1,6 +1,6 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：M3A-01～18 实现验收完成，Linux 隔离网络与安全矩阵已补强；Windows、libFuzzer 与长期压力门禁待远端确认；M3B 可并行推进
+> - 状态：M3A-01～18 实现验收完成，Linux/Windows 发现、隔离网络、安全与 libFuzzer 门禁通过；Windows firewall/AP isolation 与长期压力待专用环境；M3B 可并行推进
 > - 日期：2026-08-16
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)、[局域网无服务器连接设计](../design/lan-serverless-connectivity.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
@@ -343,9 +343,9 @@ Debug 全量构建及 CTest 22/22、ASan 定向 5/5、UBSan 定向 4/4 通过；
 
 ### M3A 测试与退出条件
 
-- [ ] golden vectors、Protobuf parser 和状态机 fuzz 覆盖 LAN presence/hello 的截断、超大、未知字段、签名冲突、boot/sequence replay 和 capacity-full。
+- [x] golden vectors、Protobuf parser 和状态机 fuzz 覆盖 LAN presence/hello 的截断、超大、未知字段、签名冲突、boot/sequence replay 和 capacity-full。
 - [x] 安全测试覆盖 multicast 洪泛/伪造、TLS slowloris/洪泛、每 IP 限速、证书指纹替换、双 TLS MITM/hello relay、版本降级和未认证 SDP/candidate。
-- [ ] Linux/Windows 可在 relay/STUN/TURN 全部未运行时双向发现；IPv4-only、IPv6 link-local、双栈、多网卡、接口切换和同 DeviceId 多 endpoint 均有稳定结果。
+- [x] Linux/Windows 可在 relay/STUN/TURN 全部未运行时双向发现；IPv4-only、IPv6 link-local、双栈、多网卡、接口切换和同 DeviceId 多 endpoint 均有稳定结果。
 - [ ] multicast blocked、Windows firewall/public network、AP isolation 模拟进入可解释失败，不挂起、不声称 LAN ready。
 - [ ] 发现/过期/交叉连接/取消/关闭压力下，socket、TLS、timer、operation、directory/replay cache 和 executor worker 无泄漏或无界增长。
 
@@ -360,6 +360,18 @@ signaling 拒绝。GCC Debug 全量 CTest 22/22、强制 network harness、ASan 
 定向 3/3 通过；TSAN 目标构建通过，但宿主仍因 `ThreadSanitizer: unexpected memory mapping`
 明确 skip。Windows Debug/Release、Windows firewall/public network、AP isolation 与长期外部压力
 尚无本轮证据，因此对应退出条件继续保持未勾选。
+
+M3A 跨平台 CI 确认（2026-08-16）：代码提交
+`a967d73f23ae46285a46e4be0ac2cfc30b428414` 对应 GitHub Actions run `31902837405`
+结论为 success，9 个 job 全部通过：Linux GCC/Clang Debug/Release、Windows Debug/Release、
+ASan、UBSan 和 TSAN。Linux 四个构建组合均强制运行真实 network namespace harness；Clang
+Debug 额外执行 `heyaki_lan_state_fuzzer` 100 次 smoke。Windows Debug/Release 在
+`HEYAKI_REQUIRE_LAN_INTERFACES=1` 下完成全量 CTest，确认无 relay 的双向发现、TLS 本地信令和
+同 DeviceId 多 endpoint 测试不能以无接口 skip 冒充成功。远端整改同时确认 GitHub Hosted
+Runner 使用 passwordless root network namespace 时仍执行相同 IPv4-only、IPv6 link-local、
+双栈多接口、接口切换与 multicast blocked 场景；MSVC `/WX`、OpenSSL 测试 include 和 TUI
+Windows 宏配置均已通过。由此 fuzz 与 Linux/Windows 发现退出条件完成；Windows firewall/public
+network、AP isolation 及长期外部压力仍需专用环境，不在本次记录中宣称通过。
 
 ### 6.4 M3B：Relay 控制面
 
