@@ -50,7 +50,7 @@ function(heyaki_write_sqlite_msvc_generation_script
 endfunction()
 
 function(heyaki_add_pinned_boost_asio)
-  set(boost_modules asio system config assert throw_exception winapi)
+  set(boost_modules asio system config assert throw_exception predef winapi)
   set(boost_include_dirs)
   foreach(boost_module IN LISTS boost_modules)
     set(boost_root "${CMAKE_CURRENT_SOURCE_DIR}/third_party/boost-${boost_module}")

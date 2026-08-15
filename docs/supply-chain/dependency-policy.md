@@ -28,7 +28,7 @@ strategy is fixed now, while exact package artifacts freeze before first use:
 
 | Component | Strategy | Current M0 evidence | Freeze gate |
 | --- | --- | --- | --- |
-| Boost | Pin the exact modular Asio/System header closure used by M2; freeze Asio SSL integration before M3A and add Beast plus its reviewed closure before M3B WSS work. | Boost 1.88.0 Asio/System/Config/Assert/ThrowException/WinAPI commits are source-locked. | Asio complete for M2; SSL at M3A entry; Beast at M3B entry |
+| Boost | Pin the exact modular Asio/System header closure used by M2; freeze Asio SSL integration before M3A and add Beast plus its reviewed closure before M3B WSS work. | Boost 1.88.0 Asio/System/Config/Assert/ThrowException/Predef/WinAPI commits are source-locked. | Asio complete for M2; SSL at M3A entry; Beast at M3B entry |
 | TLS backend | Use one OpenSSL line for Asio LAN TLS, Boost.Beast, and libdatachannel on Linux/Windows; record exact headers/runtime versions and package digest in release provenance. | Local probe: OpenSSL 3.5.7; not a release pin. | M3A entry |
 | coturn | Run an external image/package referenced by immutable version and digest; keep its config and image provenance in the deployment tree. | Not deployed in M0. | M3B entry |
 
@@ -44,7 +44,7 @@ license file exists, and emits an SPDX 2.3 tag-value document plus a Markdown li
 Generation fails for a missing, duplicate, extra, or malformed package/license record. CTest also
 checks all expected packages and parent/submodule relationships.
 
-The inventory covers 16 direct pins and the 5 recursive libdatachannel submodules. Abseil is pinned
+The inventory covers 17 direct pins and the 5 recursive libdatachannel submodules. Abseil is pinned
 as the build/runtime dependency required by the pinned Protobuf 31.1 Lite toolchain. The
 [M0 linkage and license audit](m0-linkage-license-audit.md) confirms that current installed Heyaki
 artifacts do not yet link or redistribute pinned third-party code. Before any milestone first links a

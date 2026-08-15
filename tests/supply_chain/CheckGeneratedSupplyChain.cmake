@@ -2,7 +2,7 @@ file(READ "${HEYAKI_SBOM_FILE}" sbom)
 file(READ "${HEYAKI_LICENSE_MANIFEST_FILE}" license_manifest)
 
 foreach(package IN ITEMS
-    FTXUI executor boost-asio boost-system boost-config boost-assert boost-throw_exception boost-winapi
+    FTXUI executor boost-asio boost-system boost-config boost-assert boost-throw_exception boost-predef boost-winapi
     libdatachannel libsodium protobuf abseil-cpp blake3 sqlite googletest zstd
     nlohmann-json libjuice libsrtp plog usrsctp)
   if(NOT sbom MATCHES "PackageName: ${package}(\n|$)")
