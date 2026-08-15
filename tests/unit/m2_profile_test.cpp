@@ -2,16 +2,22 @@
 #include <heyaki/password.hpp>
 #include <heyaki/profile_store.hpp>
 
+#include <executor/comm/channel.hpp>
+#include <executor/comm/phase_gate.hpp>
+#include <executor/executor.hpp>
+
 #include <gtest/gtest.h>
 #include <sqlite3.h>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iterator>
 #include <string>
 #include <vector>
@@ -19,6 +25,7 @@
 #ifndef _WIN32
 #include <fcntl.h>
 #include <sys/file.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #else
@@ -27,6 +34,18 @@
 
 namespace heyaki {
 namespace {
+
+SecretBackendOptions encrypted_file_secret_options() {
+  SecretBackendOptions options;
+  options.prefer_os_backend = false;
+  return options;
+}
+
+ProfileOpenOptions encrypted_file_profile_options() {
+  ProfileOpenOptions options;
+  options.secret_backend = encrypted_file_secret_options();
+  return options;
+}
 
 bool create_v1_profile_fixture(const std::filesystem::path& database_path,
                                bool remove_trust_grants,
@@ -42,7 +61,8 @@ bool create_v1_profile_fixture(const std::filesystem::path& database_path,
   }
 #endif
   auto secrets = open_default_secret_backend(
-      database_path.parent_path() / (database_path.filename().string() + ".secrets"));
+      database_path.parent_path() / (database_path.filename().string() + ".secrets"),
+      encrypted_file_secret_options());
   auto identity = create_identity();
   if (!secrets || !identity) {
     return false;
@@ -155,13 +175,46 @@ class M2ProfileTest : public ::testing::Test {
  protected:
   void SetUp() override {
     root_ = std::filesystem::path{HEYAKI_M2_TEST_STATE_DIR} / "profile-store";
-    std::error_code ignored;
-    std::filesystem::remove_all(root_, ignored);
+    cleanup();
     std::filesystem::create_directories(root_);
   }
 
-  void TearDown() override {
+  void TearDown() override { cleanup(); }
+
+  void cleanup() {
     std::error_code ignored;
+    if (!std::filesystem::exists(root_, ignored)) {
+      return;
+    }
+    std::vector<std::filesystem::path> databases;
+    for (std::filesystem::recursive_directory_iterator iterator{root_, ignored}, end;
+         !ignored && iterator != end; iterator.increment(ignored)) {
+      if (iterator->is_regular_file(ignored) && iterator->path().filename() == "profile.sqlite") {
+        databases.push_back(iterator->path());
+      }
+    }
+    for (const auto& database : databases) {
+      (void)ProfileStore::delete_local(database);
+    }
+
+    ignored.clear();
+    std::vector<std::filesystem::path> external_secret_roots;
+    for (std::filesystem::recursive_directory_iterator iterator{root_, ignored}, end;
+         !ignored && iterator != end; iterator.increment(ignored)) {
+      if (iterator->is_regular_file(ignored) && iterator->path().filename() == "store.id") {
+        external_secret_roots.push_back(iterator->path().parent_path());
+      }
+    }
+    for (const auto& secret_root : external_secret_roots) {
+      SecretBackendOptions options;
+      options.create_if_missing = false;
+      auto backend = open_default_secret_backend(secret_root, options);
+      if (backend) {
+        (void)(*backend.value_if())->erase_all();
+      }
+    }
+
+    ignored.clear();
     std::filesystem::remove_all(root_, ignored);
   }
 
@@ -247,16 +300,91 @@ TEST_F(M2ProfileTest, SecretBackendAcceptsMaximumLabelAndRejectsInvalidHandle) {
   EXPECT_TRUE((*backend.value_if())->erase(*handle.value_if()));
 }
 
+TEST_F(M2ProfileTest, CanForceEncryptedFileFallback) {
+  const auto secret_root = root_ / "forced-file-secrets";
+  auto backend = open_default_secret_backend(secret_root, encrypted_file_secret_options());
+  ASSERT_TRUE(backend) << backend.error_if()->safe_detail();
+  EXPECT_EQ((*backend.value_if())->security(),
+            SecretBackendSecurity::encrypted_file_fallback);
+  EXPECT_TRUE(std::filesystem::exists(secret_root / "master.key"));
+  EXPECT_FALSE(std::filesystem::exists(secret_root / "store.id"));
+  ASSERT_TRUE((*backend.value_if())->erase_all());
+  EXPECT_FALSE(std::filesystem::exists(secret_root));
+}
+
+TEST_F(M2ProfileTest, ExistingEncryptedFileBackendIsNeverSilentlySwitched) {
+  const auto secret_root = root_ / "existing-file-secrets";
+  auto created = open_default_secret_backend(secret_root, encrypted_file_secret_options());
+  ASSERT_TRUE(created) << created.error_if()->safe_detail();
+
+  SecretBackendOptions reopen_options;
+  reopen_options.create_if_missing = false;
+  auto reopened = open_default_secret_backend(secret_root, reopen_options);
+  ASSERT_TRUE(reopened) << reopened.error_if()->safe_detail();
+  EXPECT_EQ((*reopened.value_if())->security(),
+            SecretBackendSecurity::encrypted_file_fallback);
+
+  reopen_options.allow_encrypted_file_fallback = false;
+  auto forbidden = open_default_secret_backend(secret_root, reopen_options);
+  ASSERT_FALSE(forbidden);
+  EXPECT_EQ(forbidden.error_if()->code(), ErrorCode::secret_backend_degraded);
+  ASSERT_TRUE((*created.value_if())->erase_all());
+}
+
+TEST_F(M2ProfileTest, RejectsConfigurationWithoutAnAllowedSecretBackend) {
+  SecretBackendOptions options;
+  options.prefer_os_backend = false;
+  options.allow_encrypted_file_fallback = false;
+  auto backend = open_default_secret_backend(root_ / "forbidden-secrets", options);
+  ASSERT_FALSE(backend);
+  EXPECT_EQ(backend.error_if()->code(), ErrorCode::secret_backend_degraded);
+  EXPECT_EQ(backend.error_if()->safe_detail(), "encrypted_file_fallback_forbidden");
+}
+
+#ifdef __linux__
+TEST_F(M2ProfileTest, UsesSecretServiceWhenAvailable) {
+  const auto secret_root = root_ / "secret-service";
+  SecretBackendOptions options;
+  options.allow_encrypted_file_fallback = false;
+  auto backend = open_default_secret_backend(secret_root, options);
+  if (!backend && backend.error_if()->code() == ErrorCode::secret_backend_degraded) {
+    GTEST_SKIP() << "Secret Service is unavailable";
+  }
+  ASSERT_TRUE(backend) << backend.error_if()->safe_detail();
+  ASSERT_EQ((*backend.value_if())->security(), SecretBackendSecurity::os_protected);
+  const std::array<std::byte, 4U> secret{
+      std::byte{1U}, std::byte{2U}, std::byte{3U}, std::byte{4U}};
+  auto handle = (*backend.value_if())->store("integration", secret);
+  ASSERT_TRUE(handle) << handle.error_if()->safe_detail();
+  options.prefer_os_backend = false;
+  options.allow_encrypted_file_fallback = true;
+  options.create_if_missing = false;
+  auto reopened = open_default_secret_backend(secret_root, options);
+  ASSERT_TRUE(reopened) << reopened.error_if()->safe_detail();
+  ASSERT_EQ((*reopened.value_if())->security(), SecretBackendSecurity::os_protected);
+  auto loaded = (*reopened.value_if())->load(*handle.value_if());
+  ASSERT_TRUE(loaded) << loaded.error_if()->safe_detail();
+  EXPECT_TRUE(std::equal(loaded.value_if()->begin(), loaded.value_if()->end(), secret.begin()));
+  ASSERT_TRUE((*reopened.value_if())->erase_all());
+  auto missing = (*reopened.value_if())->load(*handle.value_if());
+  ASSERT_FALSE(missing);
+  EXPECT_EQ(missing.error_if()->code(), ErrorCode::secret_unavailable);
+}
+#endif
+
 TEST_F(M2ProfileTest, PersistsIdentityAndDistinctApplicationEndpoints) {
   auto created = ProfileStore::create(profile_path());
   ASSERT_TRUE(created) << created.error_if()->safe_detail();
   const DeviceId device_id = created.value_if()->device_id();
 #ifdef _WIN32
-  constexpr auto expected_secret_security = SecretBackendSecurity::os_protected;
+  EXPECT_EQ(created.value_if()->secret_backend_security(), SecretBackendSecurity::os_protected);
 #else
-  constexpr auto expected_secret_security = SecretBackendSecurity::encrypted_file_fallback;
-#endif
+  const auto secret_root = profile_path().parent_path() / "profile.sqlite.secrets";
+  const auto expected_secret_security = std::filesystem::exists(secret_root / "store.id")
+                                            ? SecretBackendSecurity::os_protected
+                                            : SecretBackendSecurity::encrypted_file_fallback;
   EXPECT_EQ(created.value_if()->secret_backend_security(), expected_secret_security);
+#endif
 
   auto endpoint_a = created.value_if()->endpoint_for("com.example.alpha");
   auto endpoint_a_again = created.value_if()->endpoint_for("com.example.alpha");
@@ -351,9 +479,12 @@ TEST_F(M2ProfileTest, RejectsProfileWithPermissionsThatAreTooWide) {
 TEST_F(M2ProfileTest, ExportAndLocalDeleteAreDistinctFromRelayRevocation) {
   const auto exported_path = root_ / "export" / "profile.sqlite";
   DeviceId original_device_id;
+  const auto options = encrypted_file_profile_options();
   {
-    auto profile = ProfileStore::create(profile_path());
+    auto profile = ProfileStore::create(profile_path(), options);
     ASSERT_TRUE(profile);
+    ASSERT_EQ(profile.value_if()->secret_backend_security(),
+              SecretBackendSecurity::encrypted_file_fallback);
     original_device_id = profile.value_if()->device_id();
     ASSERT_TRUE(profile.value_if()->mark_relay_revoked("wss://relay.example.invalid", 4U));
     ASSERT_TRUE(profile.value_if()->export_to(exported_path));
@@ -362,10 +493,42 @@ TEST_F(M2ProfileTest, ExportAndLocalDeleteAreDistinctFromRelayRevocation) {
   auto exported = ProfileStore::open(exported_path);
   ASSERT_TRUE(exported) << exported.error_if()->safe_detail();
   EXPECT_EQ(exported.value_if()->device_id(), original_device_id);
+  EXPECT_EQ(exported.value_if()->secret_backend_security(),
+            SecretBackendSecurity::encrypted_file_fallback);
   ASSERT_TRUE(ProfileStore::delete_local(profile_path()));
   EXPECT_FALSE(std::filesystem::exists(profile_path()));
   EXPECT_TRUE(std::filesystem::exists(exported_path));
 }
+
+#ifdef __linux__
+TEST_F(M2ProfileTest, SecretServiceProfileExportsAndDeletesWithoutOrphans) {
+  const auto exported_path = root_ / "os-export" / "profile.sqlite";
+  ProfileOpenOptions options;
+  options.secret_backend.allow_encrypted_file_fallback = false;
+  auto profile = ProfileStore::create(profile_path(), options);
+  if (!profile && profile.error_if()->code() == ErrorCode::secret_backend_degraded) {
+    GTEST_SKIP() << "Secret Service is unavailable";
+  }
+  ASSERT_TRUE(profile) << profile.error_if()->safe_detail();
+  ASSERT_EQ(profile.value_if()->secret_backend_security(), SecretBackendSecurity::os_protected);
+  const auto original_device_id = profile.value_if()->device_id();
+  ASSERT_TRUE(profile.value_if()->export_to(exported_path));
+  profile = Result<ProfileStore>::failure(
+      Error{ErrorCode::internal, "test", "release_profile"});
+
+  auto exported = ProfileStore::open(exported_path);
+  ASSERT_TRUE(exported) << exported.error_if()->safe_detail();
+  EXPECT_EQ(exported.value_if()->device_id(), original_device_id);
+  EXPECT_EQ(exported.value_if()->secret_backend_security(), SecretBackendSecurity::os_protected);
+  exported = Result<ProfileStore>::failure(
+      Error{ErrorCode::internal, "test", "release_profile"});
+
+  ASSERT_TRUE(ProfileStore::delete_local(profile_path()));
+  ASSERT_TRUE(ProfileStore::delete_local(exported_path));
+  EXPECT_FALSE(std::filesystem::exists(profile_path()));
+  EXPECT_FALSE(std::filesystem::exists(exported_path));
+}
+#endif
 
 TEST_F(M2ProfileTest, RejectsSchemaThatIsNewerThanTheLibrary) {
   {
@@ -435,7 +598,7 @@ TEST_F(M2ProfileTest, RollsBackFailedV1MigrationAndPreservesBackup) {
 TEST_F(M2ProfileTest, ReportsUnavailablePrivateKeyWithoutReplacingIdentity) {
   DeviceId original_device_id;
   {
-    auto profile = ProfileStore::create(profile_path());
+    auto profile = ProfileStore::create(profile_path(), encrypted_file_profile_options());
     ASSERT_TRUE(profile);
     original_device_id = profile.value_if()->device_id();
   }
@@ -481,6 +644,90 @@ TEST_F(M2ProfileTest, ReportsCorruptDatabase) {
   EXPECT_EQ(reopened.error_if()->code(), ErrorCode::profile_corrupt);
 }
 
+#ifndef _WIN32
+TEST_F(M2ProfileTest, DiskFullRollsBackTransactionAndPreservesExistingProfile) {
+  DeviceId original_device_id;
+  EndpointId original_endpoint;
+  {
+    auto profile = ProfileStore::create(profile_path());
+    ASSERT_TRUE(profile) << profile.error_if()->safe_detail();
+    original_device_id = profile.value_if()->device_id();
+    auto endpoint = profile.value_if()->endpoint_for("com.example.disk-full");
+    ASSERT_TRUE(endpoint);
+    original_endpoint = *endpoint.value_if();
+  }
+  auto profile = ProfileStore::open(profile_path());
+  ASSERT_TRUE(profile) << profile.error_if()->safe_detail();
+  GrantId::Storage grant_bytes{};
+  grant_bytes[0] = std::byte{0x44U};
+  DeviceId::Storage subject_bytes{};
+  subject_bytes[0] = std::byte{0x55U};
+  TrustGrantRecord grant{
+      .grant_id = GrantId{grant_bytes},
+      .direction = TrustGrantDirection::issued,
+      .issuer = profile.value_if()->device_id(),
+      .subject = DeviceId{subject_bytes},
+      .scopes = {},
+      .password_generation = 1U,
+      .issued_unix_milliseconds = 1000U,
+      .expires_unix_milliseconds = std::nullopt,
+      .signature = std::vector<std::byte>(4096U, std::byte{0x5aU}),
+      .revoked = false};
+  grant.scopes.reserve(256U);
+  for (std::size_t index = 0U; index < 256U; ++index) {
+    grant.scopes.push_back("scope." + std::to_string(index) + "." + std::string(220U, 'x'));
+  }
+
+  struct rlimit original_limit {};
+  if (::getrlimit(RLIMIT_FSIZE, &original_limit) != 0) {
+    GTEST_SKIP() << "RLIMIT_FSIZE unavailable";
+  }
+  struct sigaction original_signal {};
+  struct sigaction ignore_signal {};
+  ignore_signal.sa_handler = SIG_IGN;
+  sigemptyset(&ignore_signal.sa_mask);
+  if (::sigaction(SIGXFSZ, &ignore_signal, &original_signal) != 0) {
+    GTEST_SKIP() << "SIGXFSZ control unavailable";
+  }
+  std::error_code wal_error;
+  const auto wal_path = profile_path().string() + "-wal";
+  const auto wal_size = std::filesystem::exists(wal_path, wal_error)
+                            ? std::filesystem::file_size(wal_path, wal_error)
+                            : 0U;
+  if (wal_error) {
+    (void)::sigaction(SIGXFSZ, &original_signal, nullptr);
+    GTEST_SKIP() << "Cannot inspect SQLite WAL size";
+  }
+  struct rlimit limited = original_limit;
+  const auto failure_limit = static_cast<rlim_t>(wal_size + 32U * 1024U);
+  limited.rlim_cur = std::min<rlim_t>(original_limit.rlim_max, failure_limit);
+  if (::setrlimit(RLIMIT_FSIZE, &limited) != 0) {
+    (void)::sigaction(SIGXFSZ, &original_signal, nullptr);
+    GTEST_SKIP() << "RLIMIT_FSIZE cannot be lowered";
+  }
+  const auto written = profile.value_if()->put_trust_grant(grant);
+  const int limit_restored = ::setrlimit(RLIMIT_FSIZE, &original_limit);
+  const int signal_restored = ::sigaction(SIGXFSZ, &original_signal, nullptr);
+  ASSERT_EQ(limit_restored, 0);
+  ASSERT_EQ(signal_restored, 0);
+  ASSERT_FALSE(written);
+  EXPECT_EQ(written.error_if()->code(), ErrorCode::storage);
+  EXPECT_EQ(written.error_if()->safe_detail(), "sqlite_statement_failed");
+
+  profile = Result<ProfileStore>::failure(
+      Error{ErrorCode::internal, "test", "release_profile"});
+  auto reopened = ProfileStore::open(profile_path());
+  ASSERT_TRUE(reopened) << reopened.error_if()->safe_detail();
+  EXPECT_EQ(reopened.value_if()->device_id(), original_device_id);
+  auto endpoint = reopened.value_if()->endpoint_for("com.example.disk-full");
+  ASSERT_TRUE(endpoint);
+  EXPECT_EQ(*endpoint.value_if(), original_endpoint);
+  auto stored_grant = reopened.value_if()->trust_grant(GrantId{grant_bytes});
+  ASSERT_TRUE(stored_grant);
+  EXPECT_FALSE(stored_grant.value_if()->has_value());
+}
+#endif
+
 TEST_F(M2ProfileTest, ReportsProfileLockTimeout) {
   {
     auto profile = ProfileStore::create(profile_path());
@@ -515,6 +762,68 @@ TEST_F(M2ProfileTest, ReportsProfileLockTimeout) {
   ASSERT_EQ(::flock(lock_file, LOCK_UN), 0);
   ASSERT_EQ(::close(lock_file), 0);
 #endif
+}
+
+TEST_F(M2ProfileTest, ConcurrentProfileOpensPreserveOneIdentity) {
+  const auto options = encrypted_file_profile_options();
+  DeviceId expected_device_id;
+  {
+    auto profile = ProfileStore::create(profile_path(), options);
+    ASSERT_TRUE(profile) << profile.error_if()->safe_detail();
+    expected_device_id = profile.value_if()->device_id();
+  }
+
+  executor::Executor task_executor;
+  executor::ExecutorConfig executor_config;
+  executor_config.min_threads = 4U;
+  executor_config.max_threads = 4U;
+  executor_config.queue_capacity = 8U;
+  ASSERT_TRUE(task_executor.initialize_ex(executor_config));
+
+  executor::comm::ChannelOptions channel_options;
+  channel_options.capacity = 4U;
+  channel_options.name = "profile-open-started";
+  executor::comm::MpscChannel<std::size_t> started(channel_options);
+  executor::comm::PhaseGate release("profile-open-release");
+  std::vector<std::future<Result<ProfileStore>>> futures;
+  futures.reserve(4U);
+  for (std::size_t index = 0U; index < 4U; ++index) {
+    futures.push_back(task_executor.submit_auto([&, index, options] {
+      if (!started.send_for(index, std::chrono::seconds{2})) {
+        return Result<ProfileStore>::failure(
+            Error{ErrorCode::timeout, "test", "profile_open_start_timeout"});
+      }
+      if (!release.wait_for(1U, std::chrono::seconds{2})) {
+        return Result<ProfileStore>::failure(
+            Error{ErrorCode::timeout, "test", "profile_open_release_timeout"});
+      }
+      return ProfileStore::open(profile_path(), options);
+    }));
+  }
+
+  bool all_started = true;
+  for (std::size_t index = 0U; index < 4U; ++index) {
+    std::size_t started_index = 0U;
+    all_started = static_cast<bool>(
+                      started.receive_for(started_index, std::chrono::seconds{2})) &&
+                  all_started;
+  }
+  EXPECT_TRUE(all_started);
+  EXPECT_TRUE(release.advance_to(1U));
+
+  std::vector<Result<ProfileStore>> opened_profiles;
+  opened_profiles.reserve(futures.size());
+  for (auto& future : futures) {
+    opened_profiles.push_back(future.get());
+  }
+  (void)task_executor.shutdown(true);
+
+  for (const auto& profile : opened_profiles) {
+    ASSERT_TRUE(profile) << profile.error_if()->safe_detail();
+    EXPECT_EQ(profile.value_if()->device_id(), expected_device_id);
+    EXPECT_EQ(profile.value_if()->secret_backend_security(),
+              SecretBackendSecurity::encrypted_file_fallback);
+  }
 }
 
 }  // namespace

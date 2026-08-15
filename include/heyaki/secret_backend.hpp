@@ -23,6 +23,7 @@ struct SecretHandle {
 };
 
 struct SecretBackendOptions {
+  bool prefer_os_backend{true};
   bool allow_encrypted_file_fallback{true};
   bool create_if_missing{true};
 };
@@ -37,6 +38,7 @@ class SecretBackend {
   [[nodiscard]] virtual Result<std::vector<std::byte>> load(
       const SecretHandle& handle) const = 0;
   [[nodiscard]] virtual Result<void> erase(const SecretHandle& handle) = 0;
+  [[nodiscard]] virtual Result<void> erase_all() = 0;
 };
 
 [[nodiscard]] Result<std::shared_ptr<SecretBackend>> open_default_secret_backend(

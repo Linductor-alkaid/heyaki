@@ -43,17 +43,34 @@ bool valid_runtime_text(std::string_view value, std::size_t maximum_size,
 }
 
 Result<void> validate_config(const RuntimeConfig& config) {
-  if (config.callback_capacity == 0U || config.executor_queue_capacity == 0U ||
+  if (config.callback_capacity == 0U || config.shutdown_hook_capacity == 0U ||
+      config.executor_queue_capacity == 0U ||
       config.executor_min_threads == 0U ||
       config.executor_max_threads < config.executor_min_threads ||
       !valid_runtime_text(config.worker_name, 64U, false) ||
       config.worker_start_timeout.count() < 0 || config.callback_drain_timeout.count() < 0 ||
+      config.producer_stop_timeout.count() < 0 ||
+      config.service_cancel_timeout.count() < 0 || config.peer_close_timeout.count() < 0 ||
+      config.relay_unregister_timeout.count() < 0 ||
       config.operation_drain_timeout.count() < 0 || config.worker_stop_timeout.count() < 0 ||
+      config.persistence_flush_timeout.count() < 0 ||
       config.executor_drain_timeout.count() < 0) {
     return Result<void>::failure(
         Error{ErrorCode::configuration, "runtime", "invalid_runtime_configuration"});
   }
   return Result<void>::success();
+}
+
+bool valid_shutdown_stage(RuntimeShutdownStage stage) noexcept {
+  switch (stage) {
+    case RuntimeShutdownStage::stop_producers:
+    case RuntimeShutdownStage::cancel_services:
+    case RuntimeShutdownStage::close_peers:
+    case RuntimeShutdownStage::unregister_relay:
+    case RuntimeShutdownStage::flush_persistence:
+      return true;
+  }
+  return false;
 }
 
 Result<void> validate_security_context(const RuntimeSecurityContext& security) {
@@ -85,6 +102,15 @@ executor::comm::ChannelOptions callback_channel_options(std::size_t capacity) {
   options.drop_policy = executor::comm::DropPolicy::RejectNewest;
   options.enable_stats = true;
   options.name = "heyaki-runtime-callbacks";
+  return options;
+}
+
+executor::comm::ChannelOptions shutdown_hook_channel_options(std::size_t capacity) {
+  executor::comm::ChannelOptions options;
+  options.capacity = capacity;
+  options.drop_policy = executor::comm::DropPolicy::RejectNewest;
+  options.enable_stats = true;
+  options.name = "heyaki-runtime-shutdown-hooks";
   return options;
 }
 
@@ -265,6 +291,7 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
         executor_(owned_executor_ ? owned_executor_.get() : borrowed_executor),
         ownership_(ownership), config_(std::move(config)),
         callbacks_(callback_channel_options(config_.callback_capacity)),
+        shutdown_hooks_(shutdown_hook_channel_options(config_.shutdown_hook_capacity)),
         diagnostics_(std::make_shared<RuntimeDiagnostics>()),
         core_state_(RuntimeCoreState{.ownership = ownership_, .phase = RuntimePhase::stopped},
                     "heyaki-runtime-state") {}
@@ -272,6 +299,7 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
   ~RuntimeState() {
     admission_open_.store(false, std::memory_order_release);
     callbacks_.close();
+    shutdown_hooks_.close();
     work_guard_.reset();
     io_.stop();
     if (!worker_.name().empty()) {
@@ -322,6 +350,26 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
     auto context = std::make_shared<RuntimeContextState>(shared_from_this(), kind,
                                                          std::move(name), io_);
     return Result<RuntimeContext>::success(RuntimeContext{std::move(context)});
+  }
+
+  Result<void> register_shutdown_hook(RuntimeShutdownHook hook) {
+    if (!admission_open_.load(std::memory_order_acquire)) {
+      return Result<void>::failure(
+          Error{ErrorCode::cancelled, "runtime", "runtime_admission_closed"});
+    }
+    if (!valid_shutdown_stage(hook.stage) || !valid_runtime_text(hook.name, 64U, false) ||
+        !hook.begin) {
+      return Result<void>::failure(
+          Error{ErrorCode::configuration, "runtime", "invalid_shutdown_hook"});
+    }
+    if (!shutdown_hooks_.try_send(std::move(hook))) {
+      const bool closed = shutdown_hooks_.is_closed() ||
+                          !admission_open_.load(std::memory_order_acquire);
+      return Result<void>::failure(
+          Error{closed ? ErrorCode::cancelled : ErrorCode::resource_exhausted, "runtime",
+                closed ? "runtime_admission_closed" : "shutdown_hook_capacity_exhausted"});
+    }
+    return Result<void>::success();
   }
 
   Result<RuntimeOperation> enqueue(const std::shared_ptr<RuntimeContextState>& context,
@@ -425,6 +473,12 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
     RuntimeShutdownReport report;
     admission_open_.store(false, std::memory_order_release);
     publish_phase(RuntimePhase::stopping_admission);
+    shutdown_hooks_.close();
+    auto shutdown_hooks = collect_shutdown_hooks();
+    run_shutdown_stage(RuntimeShutdownStage::stop_producers, shutdown_hooks, report);
+    run_shutdown_stage(RuntimeShutdownStage::cancel_services, shutdown_hooks, report);
+    run_shutdown_stage(RuntimeShutdownStage::close_peers, shutdown_hooks, report);
+    run_shutdown_stage(RuntimeShutdownStage::unregister_relay, shutdown_hooks, report);
     callbacks_.close();
     publish_phase(RuntimePhase::draining);
 
@@ -459,6 +513,7 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
     cancel_callbacks_left_after_worker_stop(report);
     drain_tracked_tasks(report);
     cancel_pending_operations(report);
+    run_shutdown_stage(RuntimeShutdownStage::flush_persistence, shutdown_hooks, report);
 
     if (ownership_ == RuntimeOwnership::owned) {
       const auto waited = executor_->wait_for_completion_ex(config_.executor_drain_timeout);
@@ -476,9 +531,99 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
   RuntimeOwnership ownership() const noexcept { return ownership_; }
 
  private:
+  struct StartedShutdownHook {
+    std::size_t report_index{};
+    RuntimeShutdownCompletion completion;
+  };
+
   void publish_phase(RuntimePhase phase) noexcept {
     phase_.store(phase, std::memory_order_release);
     (void)core_state_.try_publish(RuntimeCoreState{.ownership = ownership_, .phase = phase});
+  }
+
+  std::chrono::milliseconds shutdown_stage_timeout(RuntimeShutdownStage stage) const noexcept {
+    switch (stage) {
+      case RuntimeShutdownStage::stop_producers:
+        return config_.producer_stop_timeout;
+      case RuntimeShutdownStage::cancel_services:
+        return config_.service_cancel_timeout;
+      case RuntimeShutdownStage::close_peers:
+        return config_.peer_close_timeout;
+      case RuntimeShutdownStage::unregister_relay:
+        return config_.relay_unregister_timeout;
+      case RuntimeShutdownStage::flush_persistence:
+        return config_.persistence_flush_timeout;
+    }
+    return std::chrono::milliseconds{0};
+  }
+
+  std::vector<RuntimeShutdownHook> collect_shutdown_hooks() {
+    std::vector<RuntimeShutdownHook> hooks;
+    hooks.reserve(shutdown_hooks_.size_approx());
+    RuntimeShutdownHook hook;
+    while (shutdown_hooks_.try_receive(hook)) {
+      hooks.push_back(std::move(hook));
+    }
+    return hooks;
+  }
+
+  void run_shutdown_stage(RuntimeShutdownStage stage,
+                          const std::vector<RuntimeShutdownHook>& hooks,
+                          RuntimeShutdownReport& report) {
+    std::vector<StartedShutdownHook> started;
+    started.reserve(hooks.size());
+    for (const auto& hook : hooks) {
+      if (hook.stage != stage) {
+        continue;
+      }
+      const std::size_t report_index = report.hooks.size();
+      report.hooks.push_back(RuntimeShutdownHookReport{
+          .stage = stage,
+          .name = hook.name,
+          .outcome = RuntimeShutdownHookOutcome::success,
+          .error = std::nullopt});
+      try {
+        auto completion = hook.begin();
+        if (!completion) {
+          report.hooks[report_index].outcome = RuntimeShutdownHookOutcome::error;
+          report.hooks[report_index].error = *completion.error_if();
+          continue;
+        }
+        if (!completion.value_if()->valid()) {
+          report.hooks[report_index].outcome = RuntimeShutdownHookOutcome::error;
+          report.hooks[report_index].error =
+              Error{ErrorCode::internal, "runtime", "shutdown_hook_completion_invalid"};
+          continue;
+        }
+        started.push_back(StartedShutdownHook{
+            .report_index = report_index, .completion = std::move(*completion.value_if())});
+      } catch (...) {
+        report.hooks[report_index].outcome = RuntimeShutdownHookOutcome::error;
+        report.hooks[report_index].error =
+            Error{ErrorCode::internal, "runtime", "shutdown_hook_begin_exception"};
+      }
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + shutdown_stage_timeout(stage);
+    for (auto& hook : started) {
+      if (hook.completion.wait_until(deadline) != std::future_status::ready) {
+        report.hooks[hook.report_index].outcome = RuntimeShutdownHookOutcome::timed_out;
+        report.hooks[hook.report_index].error =
+            Error{ErrorCode::timeout, "runtime", "shutdown_hook_timeout"};
+        continue;
+      }
+      try {
+        const auto& result = hook.completion.get();
+        if (!result) {
+          report.hooks[hook.report_index].outcome = RuntimeShutdownHookOutcome::error;
+          report.hooks[hook.report_index].error = *result.error_if();
+        }
+      } catch (...) {
+        report.hooks[hook.report_index].outcome = RuntimeShutdownHookOutcome::error;
+        report.hooks[hook.report_index].error =
+            Error{ErrorCode::internal, "runtime", "shutdown_hook_completion_exception"};
+      }
+    }
   }
 
   void register_operation(const std::shared_ptr<RuntimeOperationState>& operation) {
@@ -708,6 +853,7 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
   std::optional<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>
       work_guard_;
   executor::comm::MpscChannel<RuntimeCallbackEvent> callbacks_;
+  executor::comm::MpscChannel<RuntimeShutdownHook> shutdown_hooks_;
   std::shared_ptr<RuntimeDiagnostics> diagnostics_;
   executor::comm::DoubleBuffer<RuntimeCoreState> core_state_;
   executor::WorkerHandle worker_;
@@ -877,6 +1023,14 @@ Result<RuntimeContext> Runtime::create_context(RuntimeContextKind kind, std::str
   return state_->create_context(kind, std::move(name));
 }
 
+Result<void> Runtime::register_shutdown_hook(RuntimeShutdownHook hook) {
+  if (!state_) {
+    return Result<void>::failure(
+        Error{ErrorCode::configuration, "runtime", "runtime_not_initialized"});
+  }
+  return state_->register_shutdown_hook(std::move(hook));
+}
+
 RuntimeSnapshot Runtime::snapshot() const {
   return state_ ? state_->snapshot() : RuntimeSnapshot{};
 }
@@ -902,6 +1056,35 @@ std::string_view runtime_phase_name(RuntimePhase phase) noexcept {
       return "failed";
   }
   return "failed";
+}
+
+std::string_view runtime_shutdown_stage_name(RuntimeShutdownStage stage) noexcept {
+  switch (stage) {
+    case RuntimeShutdownStage::stop_producers:
+      return "stop_producers";
+    case RuntimeShutdownStage::cancel_services:
+      return "cancel_services";
+    case RuntimeShutdownStage::close_peers:
+      return "close_peers";
+    case RuntimeShutdownStage::unregister_relay:
+      return "unregister_relay";
+    case RuntimeShutdownStage::flush_persistence:
+      return "flush_persistence";
+  }
+  return "unknown";
+}
+
+std::string_view runtime_shutdown_hook_outcome_name(
+    RuntimeShutdownHookOutcome outcome) noexcept {
+  switch (outcome) {
+    case RuntimeShutdownHookOutcome::success:
+      return "success";
+    case RuntimeShutdownHookOutcome::error:
+      return "error";
+    case RuntimeShutdownHookOutcome::timed_out:
+      return "timed_out";
+  }
+  return "unknown";
 }
 
 }  // namespace heyaki

@@ -38,6 +38,37 @@ namespace {
 constexpr int profile_application_id = 1213808976;
 constexpr std::string_view profile_database_name = "profile.sqlite";
 
+void profile_fault_injection_point(std::string_view point) noexcept {
+#ifdef HEYAKI_PROFILE_FAULT_INJECTION
+  const char* requested = std::getenv("HEYAKI_PROFILE_FAULT_POINT");
+  if (requested != nullptr && point == requested) {
+    std::_Exit(86);
+  }
+#else
+  (void)point;
+#endif
+}
+
+void profile_scope_fault_injection_point(std::size_t scope_index) noexcept {
+#ifdef HEYAKI_PROFILE_FAULT_INJECTION
+  switch (scope_index) {
+    case 1U:
+      profile_fault_injection_point("trust_grant.after_scope_1");
+      break;
+    case 2U:
+      profile_fault_injection_point("trust_grant.after_scope_2");
+      break;
+    case 3U:
+      profile_fault_injection_point("trust_grant.after_scope_3");
+      break;
+    default:
+      break;
+  }
+#else
+  (void)scope_index;
+#endif
+}
+
 Error sqlite_error(sqlite3* database, const char* detail, int code = SQLITE_ERROR) {
   if (database != nullptr) {
     code = sqlite3_extended_errcode(database);
@@ -627,6 +658,7 @@ Result<void> write_database_copy(sqlite3* source, const std::filesystem::path& d
     remove_database_artifacts(temporary);
     return replaced;
   }
+  remove_database_artifacts(temporary);
   return Result<void>::success();
 }
 
@@ -655,16 +687,19 @@ Result<void> migrate_database(sqlite3* database, const std::filesystem::path& da
     if (!begin) {
       return begin;
     }
+    profile_fault_injection_point("schema.after_begin");
     const auto schema = execute(database, schema_v1);
     if (!schema) {
       (void)execute(database, "ROLLBACK");
       return schema;
     }
+    profile_fault_injection_point("schema.after_apply");
     const auto commit = execute(database, "COMMIT");
     if (!commit) {
       (void)execute(database, "ROLLBACK");
       return commit;
     }
+    profile_fault_injection_point("schema.after_commit");
     *version.value_if() = 1;
   } else if (*application_id.value_if() != profile_application_id) {
     return Result<void>::failure(
@@ -702,16 +737,19 @@ Result<void> migrate_database(sqlite3* database, const std::filesystem::path& da
     if (!begin) {
       return begin;
     }
+    profile_fault_injection_point("migration.after_begin");
     const auto applied = execute(database, migration);
     if (!applied) {
       (void)execute(database, "ROLLBACK");
       return applied;
     }
+    profile_fault_injection_point("migration.after_apply");
     const auto commit = execute(database, "COMMIT");
     if (!commit) {
       (void)execute(database, "ROLLBACK");
       return commit;
     }
+    profile_fault_injection_point("migration.after_commit");
     *version.value_if() = target_version;
   }
   valid = validate_database(database);
@@ -1113,7 +1151,32 @@ Result<void> ProfileStore::delete_local(const std::filesystem::path& database_pa
   if (!lock) {
     return Result<void>::failure(*lock.error_if());
   }
+  const auto secret_root = secret_root_for(database_path);
   std::error_code error;
+  const bool secret_root_exists = std::filesystem::exists(secret_root, error);
+  if (error) {
+    return Result<void>::failure(filesystem_error("profile_secret_stat_failed", error));
+  }
+  if (secret_root_exists) {
+    SecretBackendOptions options;
+    options.create_if_missing = false;
+    auto secrets = open_default_secret_backend(secret_root, options);
+    if (secrets) {
+      const auto erased = (*secrets.value_if())->erase_all();
+      if (!erased) {
+        return erased;
+      }
+    } else {
+      const bool external_store = std::filesystem::exists(secret_root / "store.id", error);
+      if (error) {
+        return Result<void>::failure(filesystem_error("profile_secret_stat_failed", error));
+      }
+      if (external_store) {
+        return Result<void>::failure(*secrets.error_if());
+      }
+    }
+  }
+
   std::filesystem::remove(database_path, error);
   if (error) {
     return Result<void>::failure(filesystem_error("profile_delete_failed", error));
@@ -1122,7 +1185,7 @@ Result<void> ProfileStore::delete_local(const std::filesystem::path& database_pa
   error.clear();
   std::filesystem::remove(database_path.string() + "-shm", error);
   error.clear();
-  std::filesystem::remove_all(secret_root_for(database_path), error);
+  std::filesystem::remove_all(secret_root, error);
   if (error) {
     return Result<void>::failure(filesystem_error("profile_secret_delete_failed", error));
   }
@@ -1350,6 +1413,7 @@ Result<void> ProfileStore::put_trust_grant(const TrustGrantRecord& input_grant) 
   if (!begin) {
     return begin;
   }
+  profile_fault_injection_point("trust_grant.after_begin");
   auto statement = prepare(
       impl_->database,
       "INSERT INTO trust_grants(grant_id, direction, issuer_device_id, subject_device_id, "
@@ -1387,6 +1451,7 @@ Result<void> ProfileStore::put_trust_grant(const TrustGrantRecord& input_grant) 
     (void)execute(impl_->database, "ROLLBACK");
     return written;
   }
+  profile_fault_injection_point("trust_grant.after_grant");
   auto delete_scopes = prepare(impl_->database, "DELETE FROM trust_grant_scopes WHERE grant_id=?");
   if (!delete_scopes) {
     (void)execute(impl_->database, "ROLLBACK");
@@ -1398,6 +1463,8 @@ Result<void> ProfileStore::put_trust_grant(const TrustGrantRecord& input_grant) 
     (void)execute(impl_->database, "ROLLBACK");
     return written;
   }
+  profile_fault_injection_point("trust_grant.after_scope_delete");
+  std::size_t scope_index = 0U;
   for (const auto& scope : grant.scopes) {
     auto insert_scope = prepare(
         impl_->database, "INSERT INTO trust_grant_scopes(grant_id, scope) VALUES(?, ?)");
@@ -1412,10 +1479,16 @@ Result<void> ProfileStore::put_trust_grant(const TrustGrantRecord& input_grant) 
       (void)execute(impl_->database, "ROLLBACK");
       return written;
     }
+    ++scope_index;
+    profile_scope_fault_injection_point(scope_index);
   }
+  profile_fault_injection_point("trust_grant.before_commit");
   const auto committed = execute(impl_->database, "COMMIT");
   if (!committed) {
     (void)execute(impl_->database, "ROLLBACK");
+  }
+  if (committed) {
+    profile_fault_injection_point("trust_grant.after_commit");
   }
   return committed;
 }
@@ -1585,60 +1658,126 @@ Result<void> ProfileStore::export_to(const std::filesystem::path& destination) c
   }
   const auto temporary = destination.string() + ".tmp." + random_suffix();
   const auto destination_secrets = secret_root_for(destination);
-  const auto temporary_secrets = destination_secrets.string() + ".tmp." + random_suffix();
   std::error_code existence_error;
-  if (std::filesystem::exists(destination, existence_error) ||
-      std::filesystem::exists(destination_secrets, existence_error)) {
+  const bool destination_exists = std::filesystem::exists(destination, existence_error);
+  if (existence_error) {
+    return Result<void>::failure(filesystem_error("profile_export_stat_failed", existence_error));
+  }
+  const bool destination_secrets_exist =
+      std::filesystem::exists(destination_secrets, existence_error);
+  if (existence_error) {
+    return Result<void>::failure(filesystem_error("profile_export_stat_failed", existence_error));
+  }
+  if (destination_exists || destination_secrets_exist) {
     return Result<void>::failure(
         Error{ErrorCode::configuration, "profile", "profile_export_exists"});
   }
+
+  auto identity = load_identity();
+  if (!identity) {
+    return Result<void>::failure(*identity.error_if());
+  }
+  SecretBackendOptions secret_options;
+  const bool source_uses_os_backend =
+      impl_->secrets->security() == SecretBackendSecurity::os_protected;
+  secret_options.prefer_os_backend = source_uses_os_backend;
+  secret_options.allow_encrypted_file_fallback = !source_uses_os_backend;
+  auto destination_backend = open_default_secret_backend(destination_secrets, secret_options);
+  if (!destination_backend) {
+    return Result<void>::failure(*destination_backend.error_if());
+  }
+  auto destination_handle =
+      (*destination_backend.value_if())->store("identity-ed25519",
+                                               identity.value_if()->secret_key());
+  if (!destination_handle) {
+    (void)(*destination_backend.value_if())->erase_all();
+    std::error_code ignored;
+    std::filesystem::remove_all(destination_secrets, ignored);
+    return Result<void>::failure(*destination_handle.error_if());
+  }
+  const auto cleanup = [&]() {
+    (void)(*destination_backend.value_if())->erase_all();
+    std::error_code ignored;
+    std::filesystem::remove_all(destination_secrets, ignored);
+    remove_database_artifacts(temporary);
+  };
+
   sqlite3* output = nullptr;
   const int opened = sqlite3_open_v2(temporary.c_str(), &output,
                                      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
   if (opened != SQLITE_OK) {
+    const auto error = sqlite_error(output, "profile_export_open_failed", opened);
     if (output != nullptr) {
       sqlite3_close_v2(output);
     }
-    return Result<void>::failure(sqlite_error(output, "profile_export_open_failed", opened));
+    cleanup();
+    return Result<void>::failure(error);
+  }
+  const auto configured = execute(output, "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;");
+  if (!configured) {
+    sqlite3_close_v2(output);
+    cleanup();
+    return configured;
   }
   sqlite3_backup* backup = sqlite3_backup_init(output, "main", impl_->database, "main");
   if (backup == nullptr) {
     const auto error = sqlite_error(output, "profile_export_backup_failed");
     sqlite3_close_v2(output);
+    cleanup();
     return Result<void>::failure(error);
   }
   const int copied = sqlite3_backup_step(backup, -1);
   const int finished = sqlite3_backup_finish(backup);
-  const int closed = sqlite3_close_v2(output);
-  if ((copied != SQLITE_DONE && copied != SQLITE_OK) || finished != SQLITE_OK ||
-      closed != SQLITE_OK) {
-    std::error_code ignored;
-    std::filesystem::remove(temporary, ignored);
+  if (copied != SQLITE_DONE || finished != SQLITE_OK) {
+    sqlite3_close_v2(output);
+    cleanup();
     return Result<void>::failure(
         Error{ErrorCode::storage, "profile", "profile_export_backup_failed"});
   }
+
+  std::optional<Error> update_error;
+  {
+    auto update = prepare(output, "UPDATE identity SET secret_handle=? WHERE singleton=1");
+    if (!update) {
+      update_error = *update.error_if();
+    } else {
+      sqlite3_bind_text(update.value_if()->get(), 1,
+                        destination_handle.value_if()->value.c_str(), -1, SQLITE_TRANSIENT);
+      const auto updated = step_done(*update.value_if());
+      if (!updated || sqlite3_changes(output) != 1) {
+        update_error =
+            updated ? Error{ErrorCode::profile_corrupt, "profile", "identity_not_initialized"}
+                    : *updated.error_if();
+      }
+    }
+  }
+  if (update_error) {
+    sqlite3_close_v2(output);
+    cleanup();
+    return Result<void>::failure(std::move(*update_error));
+  }
+  const int closed = sqlite3_close_v2(output);
+  if (closed != SQLITE_OK) {
+    cleanup();
+    return Result<void>::failure(
+        Error{ErrorCode::storage, "profile", "profile_export_close_failed", closed});
+  }
   const auto permissions = set_private_file_permissions(temporary);
   if (!permissions) {
+    cleanup();
     return permissions;
   }
-  std::error_code error;
-  std::filesystem::copy(secret_root_for(impl_->path), temporary_secrets,
-                        std::filesystem::copy_options::recursive, error);
-  if (error) {
-    std::filesystem::remove(temporary, error);
-    return Result<void>::failure(filesystem_error("profile_export_secret_copy_failed", error));
-  }
-  std::filesystem::rename(temporary_secrets, destination_secrets, error);
-  if (error) {
-    std::filesystem::remove(temporary, error);
-    std::filesystem::remove_all(temporary_secrets, error);
-    return Result<void>::failure(filesystem_error("profile_export_secret_replace_failed", error));
+  const auto verified = verify_database_file(temporary, static_cast<int>(profile_schema_version));
+  if (!verified) {
+    cleanup();
+    return verified;
   }
   const auto replaced = atomic_replace_file(temporary, destination);
   if (!replaced) {
-    std::filesystem::remove_all(destination_secrets, error);
+    cleanup();
     return replaced;
   }
+  remove_database_artifacts(temporary);
   return Result<void>::success();
 }
 

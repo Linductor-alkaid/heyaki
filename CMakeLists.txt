@@ -139,6 +139,11 @@ target_compile_features(heyaki_profile PUBLIC cxx_std_20)
 target_link_libraries(heyaki_profile
   PUBLIC heyaki::core
   PRIVATE heyaki::sodium heyaki::sqlite)
+if(WIN32)
+  target_link_libraries(heyaki_profile PRIVATE crypt32)
+elseif(CMAKE_DL_LIBS)
+  target_link_libraries(heyaki_profile PRIVATE ${CMAKE_DL_LIBS})
+endif()
 heyaki_configure_target(heyaki_profile)
 
 add_library(heyaki_client

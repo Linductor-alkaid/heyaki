@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <memory>
 #include <optional>
 #include <string>
@@ -37,15 +38,35 @@ enum class RuntimePhase : std::uint8_t {
   failed,
 };
 
+enum class RuntimeShutdownStage : std::uint8_t {
+  stop_producers,
+  cancel_services,
+  close_peers,
+  unregister_relay,
+  flush_persistence,
+};
+
+enum class RuntimeShutdownHookOutcome : std::uint8_t {
+  success,
+  error,
+  timed_out,
+};
+
 struct RuntimeConfig {
   std::size_t callback_capacity{1024U};
+  std::size_t shutdown_hook_capacity{64U};
   std::size_t executor_queue_capacity{1024U};
   std::size_t executor_min_threads{2U};
   std::size_t executor_max_threads{4U};
   std::chrono::milliseconds worker_start_timeout{1000};
   std::chrono::milliseconds callback_drain_timeout{2000};
+  std::chrono::milliseconds producer_stop_timeout{2000};
+  std::chrono::milliseconds service_cancel_timeout{3000};
+  std::chrono::milliseconds peer_close_timeout{3000};
+  std::chrono::milliseconds relay_unregister_timeout{2000};
   std::chrono::milliseconds operation_drain_timeout{5000};
   std::chrono::milliseconds worker_stop_timeout{2000};
+  std::chrono::milliseconds persistence_flush_timeout{2000};
   std::chrono::milliseconds executor_drain_timeout{5000};
   std::string worker_name{"heyaki-asio"};
 };
@@ -82,6 +103,23 @@ struct RuntimeSnapshot {
   bool worker_running{false};
 };
 
+using RuntimeShutdownCompletion = std::shared_future<Result<void>>;
+using RuntimeShutdownHookCallback =
+    std::function<Result<RuntimeShutdownCompletion>()>;
+
+struct RuntimeShutdownHook {
+  RuntimeShutdownStage stage{RuntimeShutdownStage::stop_producers};
+  std::string name;
+  RuntimeShutdownHookCallback begin;
+};
+
+struct RuntimeShutdownHookReport {
+  RuntimeShutdownStage stage{RuntimeShutdownStage::stop_producers};
+  std::string name;
+  RuntimeShutdownHookOutcome outcome{RuntimeShutdownHookOutcome::success};
+  std::optional<Error> error;
+};
+
 struct RuntimeShutdownReport {
   RuntimePhase final_phase{RuntimePhase::stopped};
   bool callback_drain_timed_out{false};
@@ -90,6 +128,7 @@ struct RuntimeShutdownReport {
   bool executor_drain_timed_out{false};
   bool executor_shutdown_performed{false};
   std::vector<OperationId> incomplete_operations;
+  std::vector<RuntimeShutdownHookReport> hooks;
 };
 
 using RuntimeStateCallback = std::function<Result<void>()>;
@@ -151,6 +190,7 @@ class Runtime {
   [[nodiscard]] RuntimeOwnership ownership() const noexcept;
   [[nodiscard]] Result<RuntimeContext> create_context(RuntimeContextKind kind,
                                                       std::string name);
+  [[nodiscard]] Result<void> register_shutdown_hook(RuntimeShutdownHook hook);
   [[nodiscard]] RuntimeSnapshot snapshot() const;
   [[nodiscard]] RuntimeShutdownReport shutdown();
 
@@ -161,5 +201,8 @@ class Runtime {
 };
 
 [[nodiscard]] std::string_view runtime_phase_name(RuntimePhase phase) noexcept;
+[[nodiscard]] std::string_view runtime_shutdown_stage_name(RuntimeShutdownStage stage) noexcept;
+[[nodiscard]] std::string_view runtime_shutdown_hook_outcome_name(
+    RuntimeShutdownHookOutcome outcome) noexcept;
 
 }  // namespace heyaki

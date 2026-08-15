@@ -5,10 +5,13 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <future>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -36,6 +39,13 @@ bool wait_until(const std::function<bool()>& predicate, std::chrono::millisecond
     std::this_thread::yield();
   }
   return predicate();
+}
+
+RuntimeShutdownCompletion ready_shutdown_completion(Result<void> result) {
+  std::promise<Result<void>> promise;
+  auto completion = promise.get_future().share();
+  promise.set_value(std::move(result));
+  return completion;
 }
 
 TEST(M2RuntimeTest, OwnedRuntimeSerializesContextAndDispatchesHandlers) {
@@ -179,6 +189,104 @@ TEST(M2RuntimeTest, BorrowedRuntimeLeavesCallerExecutorRunning) {
   EXPECT_EQ(executor_snapshot.lifecycle, executor::ExecutorLifecycleState::Running);
   EXPECT_TRUE(executor_snapshot.async.is_running);
   (void)executor.shutdown(true);
+}
+
+TEST(M2RuntimeTest, ShutdownHooksRunInFixedOrderAndFlushAfterAsioStops) {
+  RuntimeConfig config;
+  config.worker_name = "heyaki-shutdown-order";
+  auto runtime = Runtime::create_owned(config);
+  ASSERT_TRUE(runtime) << runtime.error_if()->safe_detail();
+
+  std::vector<RuntimeShutdownStage> order;
+  bool pre_flush_worker_running = true;
+  bool flush_worker_running = true;
+  const std::array stages{
+      RuntimeShutdownStage::stop_producers, RuntimeShutdownStage::cancel_services,
+      RuntimeShutdownStage::close_peers, RuntimeShutdownStage::unregister_relay,
+      RuntimeShutdownStage::flush_persistence};
+  for (const auto stage : stages) {
+    const auto registered = runtime.value_if()->register_shutdown_hook(RuntimeShutdownHook{
+        .stage = stage,
+        .name = std::string{runtime_shutdown_stage_name(stage)},
+        .begin = [&, stage] {
+          order.push_back(stage);
+          if (stage == RuntimeShutdownStage::unregister_relay) {
+            pre_flush_worker_running = runtime.value_if()->snapshot().worker_running;
+          } else if (stage == RuntimeShutdownStage::flush_persistence) {
+            flush_worker_running = runtime.value_if()->snapshot().worker_running;
+          }
+          return Result<RuntimeShutdownCompletion>::success(
+              ready_shutdown_completion(Result<void>::success()));
+        }});
+    ASSERT_TRUE(registered) << registered.error_if()->safe_detail();
+  }
+
+  const auto report = runtime.value_if()->shutdown();
+  EXPECT_EQ(order, std::vector<RuntimeShutdownStage>(stages.begin(), stages.end()));
+  EXPECT_TRUE(pre_flush_worker_running);
+  EXPECT_FALSE(flush_worker_running);
+  ASSERT_EQ(report.hooks.size(), stages.size());
+  for (std::size_t index = 0U; index < report.hooks.size(); ++index) {
+    EXPECT_EQ(report.hooks[index].stage, stages[index]);
+    EXPECT_EQ(report.hooks[index].outcome, RuntimeShutdownHookOutcome::success);
+    EXPECT_FALSE(report.hooks[index].error.has_value());
+  }
+}
+
+TEST(M2RuntimeTest, ShutdownHookFailuresTimeoutsAndAdmissionAreObservable) {
+  RuntimeConfig config;
+  config.worker_name = "heyaki-shutdown-failures";
+  config.shutdown_hook_capacity = 2U;
+  config.producer_stop_timeout = 1ms;
+  auto runtime = Runtime::create_owned(config);
+  ASSERT_TRUE(runtime) << runtime.error_if()->safe_detail();
+
+  auto never_completed = std::make_shared<std::promise<Result<void>>>();
+  auto never_ready = never_completed->get_future().share();
+  auto failed = runtime.value_if()->register_shutdown_hook(RuntimeShutdownHook{
+      .stage = RuntimeShutdownStage::stop_producers,
+      .name = "failed-producer",
+      .begin = [] {
+        return Result<RuntimeShutdownCompletion>::failure(
+            Error{ErrorCode::storage, "test", "producer_stop_failed"});
+      }});
+  ASSERT_TRUE(failed);
+  auto timed_out = runtime.value_if()->register_shutdown_hook(RuntimeShutdownHook{
+      .stage = RuntimeShutdownStage::stop_producers,
+      .name = "slow-producer",
+      .begin = [never_completed, never_ready] {
+        (void)never_completed;
+        return Result<RuntimeShutdownCompletion>::success(never_ready);
+      }});
+  ASSERT_TRUE(timed_out);
+  auto over_capacity = runtime.value_if()->register_shutdown_hook(RuntimeShutdownHook{
+      .stage = RuntimeShutdownStage::stop_producers,
+      .name = "extra-producer",
+      .begin = [] {
+        return Result<RuntimeShutdownCompletion>::success(
+            ready_shutdown_completion(Result<void>::success()));
+      }});
+  ASSERT_FALSE(over_capacity);
+  EXPECT_EQ(over_capacity.error_if()->code(), ErrorCode::resource_exhausted);
+
+  const auto report = runtime.value_if()->shutdown();
+  ASSERT_EQ(report.hooks.size(), 2U);
+  EXPECT_EQ(report.hooks[0].outcome, RuntimeShutdownHookOutcome::error);
+  ASSERT_TRUE(report.hooks[0].error.has_value());
+  EXPECT_EQ(report.hooks[0].error->code(), ErrorCode::storage);
+  EXPECT_EQ(report.hooks[1].outcome, RuntimeShutdownHookOutcome::timed_out);
+  ASSERT_TRUE(report.hooks[1].error.has_value());
+  EXPECT_EQ(report.hooks[1].error->code(), ErrorCode::timeout);
+
+  auto after_shutdown = runtime.value_if()->register_shutdown_hook(RuntimeShutdownHook{
+      .stage = RuntimeShutdownStage::flush_persistence,
+      .name = "late-flush",
+      .begin = [] {
+        return Result<RuntimeShutdownCompletion>::success(
+            ready_shutdown_completion(Result<void>::success()));
+      }});
+  ASSERT_FALSE(after_shutdown);
+  EXPECT_EQ(after_shutdown.error_if()->code(), ErrorCode::cancelled);
 }
 
 #if defined(__cpp_exceptions)

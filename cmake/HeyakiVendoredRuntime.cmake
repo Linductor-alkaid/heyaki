@@ -1,5 +1,44 @@
 include_guard(GLOBAL)
 
+function(heyaki_visual_studio_platform_to_vcvars_arch output_variable platform_name)
+  set(normalized_platform "${platform_name}")
+  string(REGEX REPLACE ",.*$" "" normalized_platform "${normalized_platform}")
+  string(STRIP "${normalized_platform}" normalized_platform)
+  string(TOLOWER "${normalized_platform}" normalized_platform)
+
+  if(normalized_platform STREQUAL "win32" OR normalized_platform STREQUAL "x86")
+    set(vcvars_arch x86)
+  elseif(normalized_platform STREQUAL "x64" OR normalized_platform STREQUAL "amd64")
+    set(vcvars_arch x64)
+  elseif(normalized_platform STREQUAL "arm")
+    set(vcvars_arch arm)
+  elseif(normalized_platform STREQUAL "arm64")
+    set(vcvars_arch arm64)
+  else()
+    message(FATAL_ERROR
+      "Unsupported Visual Studio platform for SQLite generation: ${platform_name}")
+  endif()
+
+  set(${output_variable} "${vcvars_arch}" PARENT_SCOPE)
+endfunction()
+
+function(heyaki_write_sqlite_msvc_generation_script
+    output_file vcvarsall_file vcvars_arch sqlite_source_dir)
+  set(vcvarsall_native "${vcvarsall_file}")
+  set(sqlite_source_dir_native "${sqlite_source_dir}")
+  set(sqlite_makefile_native "${sqlite_source_dir}/Makefile.msc")
+  cmake_path(NATIVE_PATH vcvarsall_native NORMALIZE vcvarsall_native)
+  cmake_path(NATIVE_PATH sqlite_source_dir_native NORMALIZE sqlite_source_dir_native)
+  cmake_path(NATIVE_PATH sqlite_makefile_native NORMALIZE sqlite_makefile_native)
+  file(WRITE "${output_file}"
+    "@echo off\r\n"
+    "call \"${vcvarsall_native}\" ${vcvars_arch}\r\n"
+    "if errorlevel 1 exit /b %errorlevel%\r\n"
+    "nmake /NOLOGO /f \"${sqlite_makefile_native}\" "
+      "\"TOP=${sqlite_source_dir_native}\" sqlite3.c sqlite3.h\r\n"
+    "exit /b %errorlevel%\r\n")
+endfunction()
+
 function(heyaki_add_pinned_boost_asio)
   set(boost_modules asio system config assert throw_exception)
   set(boost_include_dirs)
@@ -169,14 +208,56 @@ function(heyaki_add_vendored_sqlite)
 
   if(NOT EXISTS "${sqlite_c}" OR NOT EXISTS "${sqlite_h}")
     if(MSVC)
-      find_program(HEYAKI_NMAKE_EXECUTABLE NAMES nmake REQUIRED)
-      execute_process(
-        COMMAND "${HEYAKI_NMAKE_EXECUTABLE}"
-          /f "${sqlite_source_dir}/Makefile.msc"
-          "TOP=${sqlite_source_dir}"
-          sqlite3.c sqlite3.h
-        WORKING_DIRECTORY "${sqlite_build_dir}"
-        RESULT_VARIABLE sqlite_generate_result)
+      find_program(heyaki_nmake_executable NAMES nmake NO_CACHE)
+      if(heyaki_nmake_executable)
+        execute_process(
+          COMMAND "${heyaki_nmake_executable}"
+            /NOLOGO
+            /f "${sqlite_source_dir}/Makefile.msc"
+            "TOP=${sqlite_source_dir}"
+            sqlite3.c sqlite3.h
+          WORKING_DIRECTORY "${sqlite_build_dir}"
+          RESULT_VARIABLE sqlite_generate_result
+          OUTPUT_VARIABLE sqlite_generate_stdout
+          ERROR_VARIABLE sqlite_generate_stderr)
+      elseif(CMAKE_GENERATOR MATCHES "^Visual Studio ")
+        set(sqlite_vcvarsall
+          "${CMAKE_GENERATOR_INSTANCE}/VC/Auxiliary/Build/vcvarsall.bat")
+        if(NOT CMAKE_GENERATOR_INSTANCE OR NOT EXISTS "${sqlite_vcvarsall}")
+          message(FATAL_ERROR
+            "Could not locate vcvarsall.bat for the selected Visual Studio instance: "
+            "${CMAKE_GENERATOR_INSTANCE}")
+        endif()
+
+        set(sqlite_vs_platform "${CMAKE_GENERATOR_PLATFORM}")
+        if(NOT sqlite_vs_platform AND DEFINED CMAKE_VS_PLATFORM_NAME)
+          set(sqlite_vs_platform "${CMAKE_VS_PLATFORM_NAME}")
+        endif()
+        heyaki_visual_studio_platform_to_vcvars_arch(
+          sqlite_vcvars_arch "${sqlite_vs_platform}")
+
+        find_program(heyaki_cmd_executable NAMES cmd.exe cmd NO_CACHE)
+        if(NOT heyaki_cmd_executable)
+          message(FATAL_ERROR "Could not locate cmd.exe for SQLite generation")
+        endif()
+
+        set(sqlite_generate_script "${sqlite_build_dir}/generate-amalgamation.bat")
+        heyaki_write_sqlite_msvc_generation_script(
+          "${sqlite_generate_script}"
+          "${sqlite_vcvarsall}"
+          "${sqlite_vcvars_arch}"
+          "${sqlite_source_dir}")
+        execute_process(
+          COMMAND "${heyaki_cmd_executable}" /d /s /c generate-amalgamation.bat
+          WORKING_DIRECTORY "${sqlite_build_dir}"
+          RESULT_VARIABLE sqlite_generate_result
+          OUTPUT_VARIABLE sqlite_generate_stdout
+          ERROR_VARIABLE sqlite_generate_stderr)
+      else()
+        message(FATAL_ERROR
+          "Could not locate nmake for SQLite generation. Configure from an MSVC developer "
+          "environment or use a Visual Studio CMake generator.")
+      endif()
     else()
       find_program(HEYAKI_MAKE_EXECUTABLE NAMES gmake make REQUIRED)
       execute_process(
@@ -193,7 +274,10 @@ function(heyaki_add_vendored_sqlite)
         RESULT_VARIABLE sqlite_generate_result)
     endif()
     if(NOT sqlite_generate_result EQUAL 0)
-      message(FATAL_ERROR "Pinned SQLite amalgamation generation failed: ${sqlite_generate_result}")
+      message(FATAL_ERROR
+        "Pinned SQLite amalgamation generation failed: ${sqlite_generate_result}\n"
+        "stdout:\n${sqlite_generate_stdout}\n"
+        "stderr:\n${sqlite_generate_stderr}")
     endif()
   endif()
 

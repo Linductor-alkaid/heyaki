@@ -156,13 +156,51 @@ add_executable(heyaki_m2_profile_tests unit/m2_profile_test.cpp)
 target_link_libraries(heyaki_m2_profile_tests PRIVATE
   heyaki::profile
   heyaki::sqlite
+  executor::executor
   GTest::gtest_main)
 target_compile_definitions(heyaki_m2_profile_tests PRIVATE
   "HEYAKI_M2_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}\""
   "HEYAKI_M2_PROFILE_V1_FIXTURE=\"${CMAKE_CURRENT_SOURCE_DIR}/fixtures/profile_store_v1.sql\"")
 heyaki_configure_target(heyaki_m2_profile_tests)
+heyaki_enable_executor_exception_adapter_source(unit/m2_profile_test.cpp)
 heyaki_add_runtime_test(
   heyaki_m2_profile heyaki_m2_profile_tests "unit;profile;security")
+
+add_library(heyaki_profile_fault_injection STATIC
+  ../src/profile/password.cpp
+  ../src/profile/profile_store.cpp
+  ../src/profile/secret_backend.cpp)
+target_compile_definitions(heyaki_profile_fault_injection PRIVATE
+  HEYAKI_PROFILE_FAULT_INJECTION=1)
+target_link_libraries(heyaki_profile_fault_injection
+  PUBLIC heyaki::core
+  PRIVATE heyaki::sodium heyaki::sqlite)
+if(WIN32)
+  target_link_libraries(heyaki_profile_fault_injection PRIVATE crypt32)
+elseif(CMAKE_DL_LIBS)
+  target_link_libraries(heyaki_profile_fault_injection PRIVATE ${CMAKE_DL_LIBS})
+endif()
+heyaki_configure_target(heyaki_profile_fault_injection)
+
+add_executable(heyaki_m2_profile_crash_probe profile/profile_crash_probe.cpp)
+target_link_libraries(heyaki_m2_profile_crash_probe PRIVATE
+  heyaki_profile_fault_injection
+  heyaki::sqlite)
+heyaki_configure_target(heyaki_m2_profile_crash_probe)
+add_test(
+  NAME heyaki_profile_crash_recovery
+  COMMAND "${CMAKE_COMMAND}"
+    "-DHEYAKI_PROFILE_CRASH_PROBE=$<TARGET_FILE:heyaki_m2_profile_crash_probe>"
+    "-DHEYAKI_PROFILE_CRASH_STATE_DIR=${HEYAKI_TEST_STATE_DIR}/profile-crash"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/profile/RunProfileCrashTest.cmake")
+set_tests_properties(heyaki_profile_crash_recovery PROPERTIES
+  LABELS "integration;profile;security")
+if(NOT HEYAKI_SANITIZER STREQUAL "none" AND
+   NOT HEYAKI_REQUIRE_SANITIZER_RUNTIME)
+  set_tests_properties(heyaki_profile_crash_recovery PROPERTIES
+    SKIP_REGULAR_EXPRESSION
+      "LeakSanitizer does not work under ptrace;ThreadSanitizer: unexpected memory mapping")
+endif()
 
 add_executable(heyaki_m2_runtime_tests unit/m2_runtime_test.cpp)
 target_link_libraries(heyaki_m2_runtime_tests PRIVATE
@@ -317,6 +355,14 @@ add_test(
     "-DHEYAKI_BASH_EXECUTABLE=${HEYAKI_BASH_EXECUTABLE}"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/supply_chain/CheckCrlfDependencyLock.cmake")
 set_tests_properties(heyaki_dependency_lock_crlf PROPERTIES LABELS "security")
+
+add_test(
+  NAME heyaki_msvc_sqlite_generation
+  COMMAND "${CMAKE_COMMAND}"
+    "-DHEYAKI_VENDORED_RUNTIME_MODULE=${CMAKE_CURRENT_SOURCE_DIR}/../cmake/HeyakiVendoredRuntime.cmake"
+    "-DHEYAKI_TEST_WORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/msvc-sqlite-generation-work"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/build/CheckMsvcSqliteGeneration.cmake")
+set_tests_properties(heyaki_msvc_sqlite_generation PROPERTIES LABELS "build;windows")
 
 add_test(
   NAME heyaki_supply_chain_inventory
