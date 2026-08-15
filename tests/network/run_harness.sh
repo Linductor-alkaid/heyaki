@@ -26,13 +26,28 @@ for heyaki_tool in unshare ip nft tc sysctl timeout; do
 done
 
 if [[ "${HEYAKI_NETWORK_HARNESS_CHILD:-0}" != "1" ]]; then
-  if ! unshare --user --map-root-user --net true >/dev/null 2>&1; then
-    skip "user/network namespaces are unavailable to this test process"
+  if [[ ${EUID} -eq 0 ]]; then
+    unshare --net true >/dev/null 2>&1 || \
+      skip "network namespaces are unavailable to this test process"
+    exec unshare --net \
+      env HEYAKI_NETWORK_HARNESS_CHILD=1 \
+        HEYAKI_REQUIRE_NETWORK_HARNESS="${HEYAKI_REQUIRE_NETWORK_HARNESS:-0}" \
+        bash "$0" "${heyaki_m3a_test}"
   fi
-  exec unshare --user --map-root-user --net \
-    env HEYAKI_NETWORK_HARNESS_CHILD=1 \
-      HEYAKI_REQUIRE_NETWORK_HARNESS="${HEYAKI_REQUIRE_NETWORK_HARNESS:-0}" \
-      bash "$0" "${heyaki_m3a_test}"
+  if unshare --user --map-root-user --net true >/dev/null 2>&1; then
+    exec unshare --user --map-root-user --net \
+      env HEYAKI_NETWORK_HARNESS_CHILD=1 \
+        HEYAKI_REQUIRE_NETWORK_HARNESS="${HEYAKI_REQUIRE_NETWORK_HARNESS:-0}" \
+        bash "$0" "${heyaki_m3a_test}"
+  fi
+  if command -v sudo >/dev/null 2>&1 &&
+     sudo -n unshare --net true >/dev/null 2>&1; then
+    exec sudo -n unshare --net \
+      env HEYAKI_NETWORK_HARNESS_CHILD=1 \
+        HEYAKI_REQUIRE_NETWORK_HARNESS="${HEYAKI_REQUIRE_NETWORK_HARNESS:-0}" \
+        bash "$0" "${heyaki_m3a_test}"
+  fi
+  skip "user/network namespaces are unavailable to this test process"
 fi
 
 ip link set lo up 2>/dev/null || \
