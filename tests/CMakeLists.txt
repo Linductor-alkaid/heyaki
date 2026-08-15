@@ -266,7 +266,8 @@ add_executable(heyaki_m3a_lan_tests unit/m3a_lan_test.cpp)
 target_link_libraries(heyaki_m3a_lan_tests PRIVATE
   heyaki::client
   executor::executor
-  GTest::gtest_main)
+  GTest::gtest_main
+  OpenSSL::SSL)
 heyaki_target_use_pinned_boost_asio(heyaki_m3a_lan_tests)
 heyaki_configure_target(heyaki_m3a_lan_tests)
 target_compile_definitions(heyaki_m3a_lan_tests PRIVATE

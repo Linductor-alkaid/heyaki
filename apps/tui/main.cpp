@@ -18,12 +18,13 @@
 #include <sstream>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <utility>
 #include <vector>
 
 #ifdef _WIN32
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #else
 #include <termios.h>
@@ -269,6 +270,7 @@ heyaki::Result<void> wait_for_authenticated(heyaki::Node& node,
                                            heyaki::DeviceEndpointKey peer,
                                            std::chrono::milliseconds timeout) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
+  executor::comm::PhaseGate poll{"heyaki-tui-authentication-poll"};
   while (std::chrono::steady_clock::now() < deadline) {
     if (connection_authenticated(node, peer)) {
       return heyaki::Result<void>::success();
@@ -283,7 +285,7 @@ heyaki::Result<void> wait_for_authenticated(heyaki::Node& node,
     if (failed != connections.end() && failed->error) {
       return heyaki::Result<void>::failure(*failed->error);
     }
-    std::this_thread::yield();
+    (void)poll.wait_for(1U, std::chrono::milliseconds{1});
   }
   return heyaki::Result<void>::failure(
       heyaki::Error{heyaki::ErrorCode::timeout, "tui",
