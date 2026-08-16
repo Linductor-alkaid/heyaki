@@ -77,7 +77,7 @@ struct RelayDatabaseSnapshot {
 
 class RelayDatabase {
  public:
-  class Impl;
+  struct Impl;
 
   RelayDatabase(RelayDatabase&&) noexcept;
   RelayDatabase& operator=(RelayDatabase&&) noexcept;

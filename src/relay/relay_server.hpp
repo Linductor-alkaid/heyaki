@@ -49,7 +49,7 @@ struct RelayServerShutdownReport {
 
 class RelayServer {
  public:
-  class Impl;
+  struct Impl;
 
   RelayServer(RelayServer&&) noexcept;
   RelayServer& operator=(RelayServer&&) noexcept;

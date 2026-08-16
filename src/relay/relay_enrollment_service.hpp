@@ -40,7 +40,7 @@ struct RelayEnrollmentServiceDiagnostics {
 
 class RelayEnrollmentService {
  public:
-  class Impl;
+  struct Impl;
 
   RelayEnrollmentService(RelayEnrollmentService&&) noexcept;
   RelayEnrollmentService& operator=(RelayEnrollmentService&&) noexcept;
