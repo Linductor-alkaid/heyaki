@@ -166,9 +166,6 @@ struct RelayWssClient::Impl : std::enable_shared_from_this<RelayWssClient::Impl>
   ~Impl() {
     received.close();
     outgoing.close();
-    if (owned_runtime) {
-      (void)owned_runtime->shutdown();
-    }
   }
 
   Result<void> initialize() {
@@ -575,11 +572,18 @@ RelayWssClient::RelayWssClient(std::shared_ptr<Impl> impl) noexcept
 RelayWssClient::RelayWssClient(RelayWssClient&&) noexcept = default;
 RelayWssClient& RelayWssClient::operator=(RelayWssClient&& other) noexcept {
   if (this != &other) {
+    if (impl_ && impl_->owned_runtime) {
+      (void)impl_->owned_runtime->shutdown();
+    }
     impl_ = std::move(other.impl_);
   }
   return *this;
 }
-RelayWssClient::~RelayWssClient() = default;
+RelayWssClient::~RelayWssClient() {
+  if (impl_ && impl_->owned_runtime) {
+    (void)impl_->owned_runtime->shutdown();
+  }
+}
 
 Result<RelayWssClient> RelayWssClient::create(RelayWssClientConfig config,
                                               Runtime* runtime) {
