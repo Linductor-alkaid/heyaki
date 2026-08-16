@@ -257,7 +257,13 @@ if(HEYAKI_BUILD_APPS)
   target_link_libraries(heyaki-m2-profile-demo PRIVATE heyaki::profile)
   heyaki_configure_target(heyaki-m2-profile-demo)
 
-  list(APPEND HEYAKI_INSTALL_TARGETS heyaki-relay heyaki-tui heyaki-m2-profile-demo)
+  add_executable(heyaki-m3b-relay-demo apps/demo/m3b_relay_demo.cpp)
+  target_link_libraries(heyaki-m3b-relay-demo PRIVATE heyaki::relay executor::executor)
+  heyaki_configure_target(heyaki-m3b-relay-demo)
+  heyaki_enable_executor_exception_adapter_source(apps/demo/m3b_relay_demo.cpp)
+
+  list(APPEND HEYAKI_INSTALL_TARGETS heyaki-relay heyaki-tui heyaki-m2-profile-demo
+       heyaki-m3b-relay-demo)
 endif()
 
 heyaki_add_developer_targets()

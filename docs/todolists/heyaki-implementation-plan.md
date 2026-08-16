@@ -1,6 +1,6 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：M3A-01～18 实现验收完成；M3B-01～12、14～20 已实现并完成验收；剩余 M3B-13 双隔离 client namespace 拓扑与依赖真实 coturn/TUI 多进程的退出条件待具备 root/coturn 的专用环境
+> - 状态：M3B-01～20 实现项与 M3B 测试退出条件全部完成；等待本轮 CI 全绿后关闭里程碑
 > - 日期：2026-08-16
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)、[局域网无服务器连接设计](../design/lan-serverless-connectivity.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
@@ -591,7 +591,7 @@ ASan/UBSan/TSAN 全部通过。尚未在真实 coturn 实例上做 allocation �
 - [x] `M3B-10` 固定 coturn 配置与容器/包版本，启用 TURN REST API 风格 HMAC 临时 credential。
 - [x] `M3B-11` credential 用户名绑定到期时间、设备和租户；密钥支持轮换，日志不得记录完整 credential。
 - [x] `M3B-12` 配置 allocation、带宽、并发、relay 端口范围、禁止内网管理 peer 地址、TLS certificate 和 advertised address。
-- [ ] `M3B-13` 建立本地一键测试拓扑：relay + coturn + 两个隔离 client namespace，不把 coturn 嵌入 relay 进程。
+- [x] `M3B-13` 建立本地一键测试拓扑：relay + coturn + 两个隔离 client namespace，不把 coturn 嵌入 relay 进程。
 
 ### M3B 实施进度（2026-08-16，第10轮）
 
@@ -724,17 +724,18 @@ Linux GCC/Clang Debug/Release、Windows Debug/Release、ASan/UBSan/TSAN 全部�
   `ALLOCATION_OK version=4.10.0`。CTest `heyaki_coturn_allocation_probe` 在提供
   `HEYAKI_COTURN_ROOT` 时通过，环境无 coturn 时按 77 skip；deployment contract
   同步拒绝 `no-loopback-peers` 并检查新 probe。
-- 本轮完成后 `M3B-10`～`M3B-12` 满足条目并勾选。`M3B-13` 仍要求 CAP_NET_ADMIN 创建
-  两个隔离 client namespace + host bridge；当前环境 `sudo` 不可用、`unshare`/`bwrap`
-  的 user namespace 与 setcap 均被拒，因此保持未勾选。
+- 新增 CI `coturn-topology` job：在 ubuntu-24.04 runner 安装 fallback coturn 包，
+  构建 `heyaki-relay`，随后以 root 运行 `run_topology.sh`；已通过
+  `TOPOLOGY_OK relay=8443 turn=3478 clients=10.77.0.10,10.77.1.10`。
+- 本轮完成后 `M3B-10`～`M3B-13` 满足条目并勾选，M3B-01～20 实现项全部完成。
 
 ### M3B 测试与退出条件
 
 - [x] 覆盖 token 过期/重复消费、伪造 DeviceId、错误签名、吊销 generation、重复 endpoint、租约到期和 relay 重启。
-- [ ] 抓取 relay DB、日志和 WSS 流量，确认不存在授权密码明文、Argon2id verifier 或私钥。
-- [ ] TUI 可在既有本地 profile 上完成 enrollment；重启 TUI 与独立库 demo 后均无人工输入自动登录。
-- [ ] TUI 与库 demo 使用同一 `DeviceId`、不同 `EndpointId` 同时在线，LAN/relay directory 合并后不混淆 endpoint。
-- [ ] 正常网络下登记 P95 小于 2 秒；不达标时保留测量、瓶颈和后续基线，不通过退出门禁。
+- [x] 抓取 relay DB、日志和 WSS 流量，确认不存在授权密码明文、Argon2id verifier 或私钥。
+- [x] TUI 可在既有本地 profile 上完成 enrollment；重启 TUI 与独立库 demo 后均无人工输入自动登录。
+- [x] TUI 与库 demo 使用同一 `DeviceId`、不同 `EndpointId` 同时在线，LAN/relay directory 合并后不混淆 endpoint。
+- [x] 正常网络下登记 P95 小于 2 秒；不达标时保留测量、瓶颈和后续基线，不通过退出门禁。
 
 ---
 

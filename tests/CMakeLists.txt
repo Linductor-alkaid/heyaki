@@ -483,6 +483,19 @@ set_tests_properties(heyaki_network_harness PROPERTIES
   SKIP_RETURN_CODE 77
   TIMEOUT 180)
 
+add_test(
+  NAME heyaki_m3b_relay_onboarding_harness
+  COMMAND "${HEYAKI_BASH_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/network/run_m3b_relay_onboarding_harness.sh"
+    --relay-bin "$<TARGET_FILE:heyaki-relay>"
+    --tui-bin "$<TARGET_FILE:heyaki-tui>"
+    --demo-bin "$<TARGET_FILE:heyaki-m3b-relay-demo>"
+    --work-dir "${HEYAKI_TEST_STATE_DIR}/m3b-onboarding")
+set_tests_properties(heyaki_m3b_relay_onboarding_harness PROPERTIES
+  LABELS "network;relay;tui;security"
+  SKIP_RETURN_CODE 77
+  TIMEOUT 120)
+
 if(WIN32)
   find_program(HEYAKI_POWERSHELL_EXECUTABLE NAMES pwsh powershell REQUIRED)
   add_test(

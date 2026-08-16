@@ -1442,5 +1442,62 @@ TEST(M3BRelayWssClientTest, NodeReconnectsAfterRelayRestart) {
   EXPECT_TRUE(restarted_server.value_if()->shutdown().stopped);
 }
 
+TEST(M3BRelayWssClientTest, EnrollmentLatencyP95UnderTwoSeconds) {
+  TemporaryDirectory directory{"m3b-wss-enrollment-latency"};
+  ASSERT_TRUE(write_test_certificate(directory.path()));
+  const std::string token = "TEST-ONLY-enrollment-latency-token-0123456789";
+  const auto now = now_milliseconds();
+  {
+    auto database = RelayDatabase::open(directory.path() / "relay.sqlite");
+    ASSERT_TRUE(database) << database.error_if()->safe_detail();
+    ASSERT_TRUE(database.value_if()->create_bootstrap_token(
+        "tenant-a", token, now + 120U * 1000U, 100U));
+  }
+  auto server = RelayServer::create(server_config(directory.path()));
+  ASSERT_TRUE(server) << server.error_if()->safe_detail();
+  ASSERT_TRUE(wait_until(
+      [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
+  const auto port = server.value_if()->snapshot().listen_port;
+  const std::string relay_url = "wss://127.0.0.1:" + std::to_string(port);
+  auto pin = certificate_pin(directory.path() / "test-only-cert.pem");
+  ASSERT_TRUE(pin);
+  const std::vector<std::byte> pin_vector(pin->begin(), pin->end());
+  auto identity = create_identity();
+  ASSERT_TRUE(identity) << identity.error_if()->safe_detail();
+  EndpointId::Storage endpoint_bytes{};
+  endpoint_bytes[0] = std::byte{0x5aU};
+  const EndpointId endpoint_id{endpoint_bytes};
+
+  RelayEnrollmentWssTransportConfig transport;
+  transport.relay_url = relay_url;
+  transport.relay_pin = pin_vector;
+  transport.tls_ca_file = std::nullopt;
+  transport.tls_verify_peer = false;
+  transport.connect_timeout = 3s;
+  transport.handshake_timeout = 3s;
+  transport.close_timeout = 2s;
+  transport.runtime = RuntimeConfig{};
+
+  std::vector<double> samples;
+  samples.reserve(12U);
+  for (std::size_t index = 0U; index < 12U; ++index) {
+    const auto begin = std::chrono::steady_clock::now();
+    auto enrolled = enroll_relay_over_wss(
+        transport, *identity.value_if(), endpoint_id, "tenant-a", token,
+        now + index);
+    const auto elapsed = std::chrono::steady_clock::now() - begin;
+    ASSERT_TRUE(enrolled) << enrolled.error_if()->safe_detail();
+    EXPECT_EQ(enrolled.value_if()->enrollment_generation, 1U);
+    samples.push_back(std::chrono::duration<double, std::milli>(elapsed).count());
+  }
+  std::sort(samples.begin(), samples.end());
+  const auto p95_index = std::min(samples.size() - 1U, samples.size() * 95U / 100U);
+  const auto p95 = samples[p95_index];
+  std::cout << "M3B enrollment latency ms p95=" << p95
+            << " min=" << samples.front() << " max=" << samples.back() << "\n";
+  EXPECT_LT(p95, 2000.0);
+  EXPECT_TRUE(server.value_if()->shutdown().stopped);
+}
+
 }  // namespace
 }  // namespace heyaki

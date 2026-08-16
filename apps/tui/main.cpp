@@ -763,6 +763,20 @@ int run_tui(const Options& options) {
 
   UiState state;
   if (options.status_only) {
+    const auto relay_enabled = node->snapshot().relay.enabled;
+    if (relay_enabled) {
+      const auto deadline = std::chrono::steady_clock::now() + 3s;
+      executor::comm::PhaseGate poll{"heyaki-tui-relay-status"};
+      while (std::chrono::steady_clock::now() < deadline) {
+        const auto relay_state = node->snapshot().relay.state;
+        if (relay_state == heyaki::RelayNodeState::ready ||
+            relay_state == heyaki::RelayNodeState::failed ||
+            relay_state == heyaki::RelayNodeState::stopped) {
+          break;
+        }
+        (void)poll.wait_for(1U, std::chrono::milliseconds{1});
+      }
+    }
     render_node(options.profile_name, *node, *bridge, state,
                 lan.value_if()->pending_signaling_capacity);
     (void)node->shutdown();
