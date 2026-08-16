@@ -708,6 +708,27 @@ Linux GCC/Clang Debug/Release、Windows Debug/Release、ASan/UBSan/TSAN 全部�
 本轮完成后 `M3B-05`～`M3B-09` 与 `M3B-15`～`M3B-20` 满足条目并勾选；真实 coturn allocation
 和隔离拓扑仍受当前环境无 root/coturn 限制，`M3B-10`～`M3B-13` 与对应退出条件保持未勾选。
 
+### M3B 实施进度（2026-08-16，第15轮）
+
+第十五轮补齐 M3B 测试退出条件：
+
+- 新增 `heyaki-m3b-relay-demo`：初始化/复用本地 profile、写入 relay bootstrap token，
+  并以库应用身份自动登录持有 Node；同一 profile 可同时承载 TUI 与 demo 两个 endpoint。
+- 新增 `tests/network/run_m3b_relay_onboarding_harness.sh` 与 Python pty driver：
+  在既有本地 profile 上通过 `heyaki-tui` 完成真实 relay enrollment；随后不输入凭据重启
+  TUI `--status` 与独立库 demo，验证两者自动登录、`DeviceId` 相同且 `EndpointId` 不同。
+  TUI `--status` 对 relay ready 做最多 3 秒有界等待。
+- harness 使用无 root Python TCP 代理抓取真实 WSS 字节流，并扫描 relay DB、relay 日志与
+  WSS 抓包，确认不出现授权密码明文、Argon2id verifier 或私钥。
+- `heyaki_m3b_relay` 新增 relay 重启后 Node 自动重连测试，以及真实 WSS enrollment P95
+  测量（本地 P95 约 17ms，阈值 2000ms）；测试现为 72/72。
+- 本机 GCC Debug `-Werror` 全量 CTest 29/29（2 项环境 skip）；`HEYAKI_COTURN_ROOT`
+  指向 pinned 4.10.0 rootfs 时 allocation probe 通过。
+- GitHub Actions run `31961219500` 结论 success：Linux GCC/Clang Debug/Release、
+  Windows Debug/Release、ASan/UBSan/TSAN 全部通过；新增 `coturn-topology` job 输出
+  `TOPOLOGY_OK`，Linux/Windows 测试均运行 M3B onboarding harness。
+- M3B 测试退出条件全部勾选，里程碑关闭。
+
 ### M3B 实施进度（2026-08-16，第14轮）
 
 第十四轮用 pinned coturn 4.10.0 镜像完成真实 TURN REST allocation 验收：
