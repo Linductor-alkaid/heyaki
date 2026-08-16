@@ -215,6 +215,7 @@ heyaki_configure_target(heyaki_relay)
 heyaki_enable_executor_exception_adapter_source(src/relay/relay_server.cpp)
 if(MSVC)
   set_source_files_properties(
+    src/client/relay_wss_client.cpp
     src/relay/relay_database.cpp
     src/relay/relay_server.cpp
     PROPERTIES COMPILE_OPTIONS "/bigobj")
