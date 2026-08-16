@@ -593,6 +593,23 @@ ASan/UBSan/TSAN 全部通过。尚未在真实 coturn 实例上做 allocation �
 - [ ] `M3B-12` 配置 allocation、带宽、并发、relay 端口范围、禁止内网管理 peer 地址、TLS certificate 和 advertised address。
 - [ ] `M3B-13` 建立本地一键测试拓扑：relay + coturn + 两个隔离 client namespace，不把 coturn 嵌入 relay 进程。
 
+### M3B 实施进度（2026-08-16，第10轮）
+
+第十轮推进 M3B-14 设备端 WSS client：
+
+- 新增 `src/client/relay_wss_client.hpp/.cpp`：executor-managed Beast/Asio WSS client。
+  TLS peer/hostname 验证、可选 CA file、可选 32 字节证书 pin、连接/握手/关闭 deadline。
+- 安全错误分类：DNS/连接失败 -> `relay_unavailable`，TLS 验证/pin 失败 -> `authentication`，
+  超时 -> `timeout`，取消 -> `cancelled`，WebSocket/transport 错误保持稳定分类。
+- 有界通信：接收与发送均使用 `executor::comm::MpscChannel`，满载显式拒绝；
+  发送串行化于 strand，关闭时 close channels。连接状态通过 `DoubleBuffer` 发布。
+- 测试新增 4 项：TLS pin 匹配 + health 接收、错误 pin、无信任 CA 的 peer 验证失败、
+  非法 URL/空或超大 payload。relay 测试现含 48 项。
+
+本机验证：GCC Debug 全量 CTest 27/27（2 项环境 skip），Release relay 48/48，
+`-Werror`/禁异常构建通过，ASan/UBSan 定向 relay 测试通过，TSAN（关闭 ASLR）relay 48/48。
+enrollment/login 协议尚未通过该 client 跑端到端，因此 `M3B-14` 保持未勾选。
+
 ### 6.6 M3B：客户端 enrollment 与 TUI
 
 - [ ] `M3B-14` 实现设备端 WSS client、证书/主机名校验、可选 relay pin 和安全错误分类。

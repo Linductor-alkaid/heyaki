@@ -157,6 +157,7 @@ add_library(heyaki_client
   src/client/lan_directory.cpp
   src/client/module.cpp
   src/client/node.cpp
+  src/client/relay_wss_client.cpp
   src/client/runtime.cpp)
 add_library(heyaki::client ALIAS heyaki_client)
 set_target_properties(heyaki_client PROPERTIES EXPORT_NAME client OUTPUT_NAME heyaki_client)
@@ -167,9 +168,10 @@ target_link_libraries(heyaki_client
 if(WIN32)
   target_link_libraries(heyaki_client PRIVATE iphlpapi ws2_32)
 endif()
-heyaki_target_use_pinned_boost_asio(heyaki_client)
+heyaki_target_use_pinned_boost_beast(heyaki_client)
 heyaki_configure_target(heyaki_client)
 heyaki_enable_executor_exception_adapter_source(src/client/node.cpp)
+heyaki_enable_executor_exception_adapter_source(src/client/relay_wss_client.cpp)
 heyaki_enable_executor_exception_adapter_source(src/client/runtime.cpp)
 
 add_library(heyaki_services src/services/module.cpp)

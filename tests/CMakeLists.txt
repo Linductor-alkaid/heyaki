@@ -278,6 +278,7 @@ heyaki_add_runtime_test(
 add_executable(heyaki_m3b_relay_tests
   unit/m3b_relay_test.cpp
   unit/m3b_relay_database_test.cpp
+  unit/m3b_relay_wss_client_test.cpp
   unit/m3b_relay_endpoint_test.cpp
   unit/m3b_relay_enrollment_test.cpp
   unit/m3b_relay_enrollment_service_test.cpp
@@ -294,6 +295,8 @@ target_link_libraries(heyaki_m3b_relay_tests PRIVATE
   OpenSSL::SSL
   OpenSSL::Crypto)
 heyaki_target_use_pinned_boost_beast(heyaki_m3b_relay_tests)
+target_include_directories(heyaki_m3b_relay_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/client")
 heyaki_configure_target(heyaki_m3b_relay_tests)
 heyaki_enable_executor_exception_adapter_source(unit/m3b_relay_test.cpp)
 target_compile_definitions(heyaki_m3b_relay_tests PRIVATE
