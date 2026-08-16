@@ -582,8 +582,9 @@ ASan/UBSan/TSAN 全部通过。尚未在真实 coturn 实例上做 allocation �
 - 新增 CTest `heyaki_coturn_topology_check`：环境缺少 root/namespace/coturn 时按 77 skip；
   具备环境时验证脚本与二进制可用性。部署 contract 同步检查新配置项和拓扑脚本关键行为。
 - 全量 CTest 现为 27 项；本机网络 harness 与 coturn topology 按环境限制 skip，其余全通过。
-  尚未在具备 CAP_NET_ADMIN 且安装 coturn 的专用环境执行完整拓扑，因此
-  `M3B-12`/`M3B-13` 保持未勾选。
+  GitHub Actions run `31933990848` 结论 success：Linux GCC/Clang Debug/Release、
+  Windows Debug/Release、ASan/UBSan/TSAN 全部通过。尚未在具备 CAP_NET_ADMIN 且安装
+  coturn 的专用环境执行完整拓扑，因此 `M3B-12`/`M3B-13` 保持未勾选。
 
 ### 6.5 M3B：TURN credential 与部署
 
