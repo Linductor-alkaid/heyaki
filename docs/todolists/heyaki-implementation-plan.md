@@ -702,6 +702,9 @@ Windows Debug/Release、ASan/UBSan/TSAN 全部通过。
 验证：GCC Debug `-Werror` 全量 CTest 27/27；`heyaki_m3b_relay` 70/70，新增 WSS 登录/心跳/
 endpoint publish/query、吊销会话关闭、真实 ProfileStore enrollment + 幂等重试、Node 自动登录
 与 profile 重启自动登录、同设备多 endpoint 查询及 control payload golden-byte 测试。
+`_GLIBCXX_DEBUG` 与定向 TSAN（关闭 ASLR）70/70 通过，修复了 WSS 异步 handler 生命周期和
+owned runtime 关闭线程归属问题。GitHub Actions run `31957570954` 结论 success：
+Linux GCC/Clang Debug/Release、Windows Debug/Release、ASan/UBSan/TSAN 全部通过。
 本轮完成后 `M3B-05`～`M3B-09` 与 `M3B-15`～`M3B-20` 满足条目并勾选；真实 coturn allocation
 和隔离拓扑仍受当前环境无 root/coturn 限制，`M3B-10`～`M3B-13` 与对应退出条件保持未勾选。
 
