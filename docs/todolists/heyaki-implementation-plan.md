@@ -629,8 +629,9 @@ Windows Debug/Release、ASan/UBSan/TSAN 全部通过。enrollment/login 协议�
 
 本机验证：GCC Debug 全量 CTest 27/27（2 项环境 skip），Release relay 52/52，
 `-Werror`/禁异常构建通过，ASan/UBSan/TSAN 均覆盖 relay 与新增 profile 测试。
-真实 WSS exchange 尚未接入（exchange 为可注入 transport），因此
-`M3B-15`/`M3B-16` 保持未勾选。
+GitHub Actions run `31938772323` 结论 success：Linux GCC/Clang Debug/Release、
+Windows Debug/Release、ASan/UBSan/TSAN 全部通过。真实 WSS exchange 尚未接入
+（exchange 为可注入 transport），因此 `M3B-15`/`M3B-16` 保持未勾选。
 
 ### 6.6 M3B：客户端 enrollment 与 TUI
 
