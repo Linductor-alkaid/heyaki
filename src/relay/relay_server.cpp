@@ -1,6 +1,9 @@
 #include "relay_server.hpp"
 
 #include "client/runtime_access.hpp"
+#include "relay_enrollment_service.hpp"
+
+#include <heyaki/relay_wss_control.hpp>
 
 #include <executor/comm.hpp>
 
@@ -12,6 +15,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/beast/ssl.hpp>
+#include <boost/beast/core/buffers_to_string.hpp>
 #include <boost/beast/http/empty_body.hpp>
 #include <boost/beast/http/parser.hpp>
 #include <boost/beast/http/read.hpp>
@@ -19,11 +23,14 @@
 #include <boost/beast/websocket.hpp>
 
 #include <openssl/ssl.h>
+#include <sodium.h>
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <future>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <set>
@@ -40,6 +47,30 @@ using boost::asio::ip::tcp;
 Error relay_error(ErrorCode code, const char* detail,
                   std::optional<std::int64_t> underlying = std::nullopt) {
   return Error{code, "relay", detail, underlying};
+}
+
+std::uint64_t unix_milliseconds_now() noexcept {
+  const auto count = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+  return count > 0 ? static_cast<std::uint64_t>(count) : 0U;
+}
+
+Result<std::string> tenant_rate_key(std::string_view tenant) {
+  std::array<unsigned char, crypto_hash_sha256_BYTES> digest{};
+  if (crypto_hash_sha256(
+          digest.data(), reinterpret_cast<const unsigned char*>(tenant.data()),
+          static_cast<unsigned long long>(tenant.size())) != 0) {
+    return Result<std::string>::failure(
+        relay_error(ErrorCode::internal, "tenant_rate_key_failed"));
+  }
+  static constexpr char hex[] = "0123456789abcdef";
+  std::string output(digest.size() * 2U, '0');
+  for (std::size_t index = 0U; index < digest.size(); ++index) {
+    output[index * 2U] = hex[digest[index] >> 4U];
+    output[index * 2U + 1U] = hex[digest[index] & 0x0fU];
+  }
+  return Result<std::string>::success(std::move(output));
 }
 
 bool is_shutting_down(RelayServerState state) noexcept {
@@ -81,7 +112,13 @@ struct RelayServer::Impl : std::enable_shared_from_this<RelayServer::Impl> {
                            bool handshake_timeout, bool handshake_error,
                            bool protocol_rejected);
   void session_send_health(const std::shared_ptr<RelaySession>& session);
+  void session_start_control(const std::shared_ptr<RelaySession>& session);
+  void session_handle_control(const std::shared_ptr<RelaySession>& session,
+                              std::span<const std::byte> payload, bool binary);
   void session_reject_policy(const std::shared_ptr<RelaySession>& session);
+  Result<void> admit_control_request(const RelaySession& session,
+                                     std::string_view tenant = {},
+                                     bool include_base_scopes = true);
   Result<RuntimeShutdownCompletion> begin_shutdown();
   void finish_shutdown();
   void request_stop();
@@ -98,6 +135,8 @@ struct RelayServer::Impl : std::enable_shared_from_this<RelayServer::Impl> {
   boost::asio::signal_set signals;
   std::optional<RelayDatabase> database;
   std::optional<RelayRateLimiter> rate_limiter;
+  std::optional<RelayEnrollmentService> enrollment_service;
+  RelayId relay_id{};
   executor::comm::DoubleBuffer<RelayServerSnapshot> snapshots;
   std::set<std::shared_ptr<RelaySession>> sessions;
   std::promise<Result<void>> shutdown_promise;
@@ -107,17 +146,21 @@ struct RelayServer::Impl : std::enable_shared_from_this<RelayServer::Impl> {
   std::atomic<bool> stop_requested{false};
 
   std::size_t connection_capacity{};
+  std::uint64_t next_connection_id{1U};
   RelayServerSnapshot current;
 };
 
 class RelaySession : public std::enable_shared_from_this<RelaySession> {
  public:
   RelaySession(tcp::socket socket, boost::asio::ssl::context& tls_context,
-               std::shared_ptr<RelayServer::Impl> server)
+               std::shared_ptr<RelayServer::Impl> server, std::string connection_id_value,
+               std::string source_ip_value)
       : websocket(std::move(socket), tls_context),
         timer(websocket.get_executor()),
-        server(std::move(server)) {
-    websocket.read_message_max(1024U);
+        server(std::move(server)),
+        connection_id(std::move(connection_id_value)),
+        source_ip(std::move(source_ip_value)) {
+    websocket.read_message_max(max_relay_wss_control_frame_bytes);
     parser.header_limit(8192U);
     parser.body_limit(0U);
   }
@@ -178,6 +221,8 @@ class RelaySession : public std::enable_shared_from_this<RelaySession> {
     if (auto owner = server.lock()) {
       if (request_path == owner->config.health_path) {
         owner->session_send_health(shared_from_this());
+      } else if (request_path == relay_wss_control_path) {
+        owner->session_start_control(shared_from_this());
       } else {
         owner->session_reject_policy(shared_from_this());
       }
@@ -187,6 +232,7 @@ class RelaySession : public std::enable_shared_from_this<RelaySession> {
   }
 
   void send_health() {
+    websocket.text(true);
     websocket.async_write(
         boost::asio::buffer(response),
         [self = shared_from_this()](boost::system::error_code error,
@@ -213,6 +259,102 @@ class RelaySession : public std::enable_shared_from_this<RelaySession> {
         [self = shared_from_this()](boost::system::error_code close_error) {
           self->on_closed(close_error);
         });
+  }
+
+  void start_control() {
+    websocket.binary(true);
+    read_control();
+  }
+
+  void read_control() {
+    websocket.async_read(
+        buffer, [self = shared_from_this()](boost::system::error_code error,
+                                            std::size_t /*bytes_transferred*/) {
+          self->on_control_read(error);
+        });
+  }
+
+  void on_control_read(boost::system::error_code error) {
+    if (error) {
+      if (error == boost::beast::websocket::error::closed ||
+          error == boost::asio::error::operation_aborted) {
+        on_closed(error);
+      } else {
+        fail(false);
+      }
+      return;
+    }
+    const bool binary = !websocket.got_text();
+    const std::string bytes = boost::beast::buffers_to_string(buffer.data());
+    buffer.consume(buffer.size());
+    if (auto owner = server.lock()) {
+      owner->session_handle_control(
+          shared_from_this(),
+          std::span<const std::byte>{reinterpret_cast<const std::byte*>(bytes.data()),
+                                     bytes.size()},
+          binary);
+    } else {
+      close_socket();
+    }
+  }
+
+  void send_control(RelayWssControlType type, std::span<const std::byte> payload,
+                    bool close_after_write = false, bool protocol_error = false) {
+    auto encoded = encode_relay_wss_control_frame(type, payload);
+    if (!encoded) {
+      fail(false);
+      return;
+    }
+    response_bytes = std::move(*encoded.value_if());
+    close_after_control_write = close_after_write;
+    control_protocol_error = protocol_error;
+    websocket.binary(true);
+    websocket.async_write(
+        boost::asio::buffer(response_bytes),
+        [self = shared_from_this()](boost::system::error_code error,
+                                    std::size_t /*bytes_transferred*/) {
+          self->on_control_written(error);
+        });
+  }
+
+  void send_error(const Error& error, bool protocol_error) {
+    auto payload = encode_relay_wss_control_error(error.code(), error.safe_detail());
+    if (!payload) {
+      fail(false);
+      return;
+    }
+    send_control(RelayWssControlType::control_error, *payload.value_if(), true,
+                 protocol_error);
+  }
+
+  void on_control_written(boost::system::error_code error) {
+    response_bytes.clear();
+    if (error) {
+      fail(false);
+      return;
+    }
+    if (!close_after_control_write) {
+      read_control();
+      return;
+    }
+    websocket.async_close(
+        control_protocol_error ? boost::beast::websocket::close_code::policy_error
+                               : boost::beast::websocket::close_code::normal,
+        [self = shared_from_this()](boost::system::error_code close_error) {
+          self->on_control_closed(close_error);
+        });
+  }
+
+  void on_control_closed(boost::system::error_code error) {
+    if (finished.exchange(true)) {
+      return;
+    }
+    close_socket();
+    if (auto owner = server.lock()) {
+      owner->on_session_finished(shared_from_this(), false, false,
+                                 control_protocol_error);
+    }
+    (void)error;
   }
 
   void on_closed(boost::system::error_code /*error*/) {
@@ -263,6 +405,18 @@ class RelaySession : public std::enable_shared_from_this<RelaySession> {
   std::weak_ptr<RelayServer::Impl> server;
   std::string request_path;
   std::string response{"ok\n"};
+  std::vector<std::byte> response_bytes;
+  std::string connection_id;
+  std::string source_ip;
+  enum class ControlState : std::uint8_t {
+    awaiting_challenge,
+    awaiting_enrollment,
+    enrolled,
+  };
+  ControlState control_state{ControlState::awaiting_challenge};
+  std::optional<EnrollmentChallengeNonce> control_challenge_nonce;
+  bool close_after_control_write{false};
+  bool control_protocol_error{false};
   bool handshake_complete{false};
   std::atomic<bool> finished{false};
 };
@@ -360,6 +514,22 @@ Result<void> RelayServer::Impl::initialize() {
   rate_limiter.emplace(std::move(*limits.value_if()));
   current.rate_limits = rate_limiter->diagnostics();
 
+  X509* certificate = SSL_CTX_get0_certificate(tls_context.native_handle());
+  unsigned int relay_id_size = 0U;
+  if (certificate == nullptr ||
+      X509_digest(certificate, EVP_sha256(),
+                  reinterpret_cast<unsigned char*>(relay_id.data()),
+                  &relay_id_size) != 1 ||
+      relay_id_size != relay_id.size() || relay_id == RelayId{}) {
+    return Result<void>::failure(relay_error(ErrorCode::configuration,
+                                             "relay_id_derivation_failed"));
+  }
+  auto enrollment = RelayEnrollmentService::create(&*database, relay_id);
+  if (!enrollment) {
+    return Result<void>::failure(*enrollment.error_if());
+  }
+  enrollment_service.emplace(std::move(*enrollment.value_if()));
+
   if (config.install_signal_handlers) {
     signals.add(SIGINT, error);
     if (!error) {
@@ -417,7 +587,7 @@ void RelayServer::Impl::start_accept() {
     return;
   }
   acceptor.async_accept(
-      boost::asio::make_strand(strand),
+      strand,
       [weak = weak_from_this()](boost::system::error_code error, tcp::socket socket) {
         if (auto self = weak.lock()) {
           self->on_accept(error, std::move(socket));
@@ -450,8 +620,12 @@ void RelayServer::Impl::on_accept(boost::system::error_code error,
     return;
   }
 
-  auto session = std::make_shared<RelaySession>(std::move(socket), tls_context,
-                                                shared_from_this());
+  boost::system::error_code endpoint_error;
+  const auto remote = socket.remote_endpoint(endpoint_error);
+  const std::string source_ip = endpoint_error ? "unknown" : remote.address().to_string();
+  const std::string connection_id = std::to_string(next_connection_id++);
+  auto session = std::make_shared<RelaySession>(
+      std::move(socket), tls_context, shared_from_this(), connection_id, source_ip);
   sessions.insert(session);
   current.active_sessions = sessions.size();
   publish();
@@ -480,15 +654,181 @@ void RelayServer::Impl::on_session_finished(
 void RelayServer::Impl::session_send_health(
     const std::shared_ptr<RelaySession>& session) {
   ++current.health_checks;
-  current.websocket_accepted = current.health_checks + current.protocol_rejected;
+  ++current.websocket_accepted;
   publish();
   session->send_health();
+}
+
+void RelayServer::Impl::session_start_control(
+    const std::shared_ptr<RelaySession>& session) {
+  ++current.websocket_accepted;
+  ++current.control_sessions;
+  publish();
+  session->start_control();
+}
+
+Result<void> RelayServer::Impl::admit_control_request(
+    const RelaySession& session, std::string_view tenant,
+    bool include_base_scopes) {
+  if (!rate_limiter) {
+    return Result<void>::failure(
+        relay_error(ErrorCode::cancelled, "relay_rate_limiter_unavailable"));
+  }
+  auto admitted = Result<void>::success();
+  if (include_base_scopes) {
+    auto connection_admitted =
+        rate_limiter->check_connection(session.connection_id);
+    auto request_admitted = rate_limiter->check_request();
+    auto ip_admitted = rate_limiter->check_ip(session.source_ip);
+    if (!connection_admitted) {
+      admitted = Result<void>::failure(*connection_admitted.error_if());
+    } else if (!request_admitted) {
+      admitted = Result<void>::failure(*request_admitted.error_if());
+    } else if (!ip_admitted) {
+      admitted = Result<void>::failure(*ip_admitted.error_if());
+    }
+  }
+  if (admitted && !tenant.empty()) {
+    auto key = tenant_rate_key(tenant);
+    if (!key) {
+      admitted = Result<void>::failure(*key.error_if());
+    } else {
+      admitted = rate_limiter->check_tenant(*key.value_if());
+    }
+  }
+  current.rate_limits = rate_limiter->diagnostics();
+  if (!admitted) {
+    ++current.control_rejected;
+  }
+  publish();
+  return admitted;
+}
+
+void RelayServer::Impl::session_handle_control(
+    const std::shared_ptr<RelaySession>& session, std::span<const std::byte> payload,
+    bool binary) {
+  auto admitted = admit_control_request(*session);
+  if (!admitted) {
+    session->send_error(*admitted.error_if(), false);
+    return;
+  }
+  if (!binary) {
+    ++current.control_rejected;
+    publish();
+    session->send_error(
+        relay_error(ErrorCode::protocol, "relay_control_binary_required"), true);
+    return;
+  }
+  auto frame = parse_relay_wss_control_frame(payload);
+  if (!frame) {
+    ++current.control_rejected;
+    publish();
+    session->send_error(*frame.error_if(), true);
+    return;
+  }
+
+  if (session->control_state == RelaySession::ControlState::awaiting_challenge) {
+    if (frame.value_if()->type != RelayWssControlType::enrollment_challenge ||
+        !frame.value_if()->payload.empty()) {
+      ++current.control_rejected;
+      publish();
+      session->send_error(relay_error(ErrorCode::protocol,
+                                      "enrollment_challenge_request_invalid"), true);
+      return;
+    }
+    auto challenge = enrollment_service->begin_challenge(unix_milliseconds_now());
+    if (!challenge) {
+      ++current.control_rejected;
+      publish();
+      session->send_error(*challenge.error_if(), false);
+      return;
+    }
+    auto parsed_challenge = parse_enrollment_challenge(*challenge.value_if());
+    if (!parsed_challenge) {
+      ++current.control_rejected;
+      publish();
+      session->send_error(relay_error(ErrorCode::internal,
+                                      "enrollment_challenge_encoding_failed"), false);
+      return;
+    }
+    session->control_challenge_nonce = parsed_challenge.value_if()->nonce;
+    session->control_state = RelaySession::ControlState::awaiting_enrollment;
+    ++current.enrollment_challenges;
+    publish();
+    session->send_control(RelayWssControlType::enrollment_challenge_response,
+                          *challenge.value_if());
+    return;
+  }
+
+  if (session->control_state == RelaySession::ControlState::awaiting_enrollment) {
+    if (frame.value_if()->type != RelayWssControlType::enrollment_request) {
+      ++current.control_rejected;
+      publish();
+      session->send_error(relay_error(ErrorCode::protocol,
+                                      "enrollment_request_expected"), true);
+      return;
+    }
+    auto parsed = parse_enrollment_request(frame.value_if()->payload);
+    if (!parsed) {
+      ++current.control_rejected;
+      publish();
+      session->send_error(*parsed.error_if(), true);
+      return;
+    }
+    if (!session->control_challenge_nonce ||
+        parsed.value_if()->challenge_nonce != *session->control_challenge_nonce) {
+      ++current.control_rejected;
+      publish();
+      session->send_error(relay_error(ErrorCode::authentication,
+                                      "enrollment_challenge_session_mismatch"), false);
+      return;
+    }
+    auto tenant_admitted = admit_control_request(
+        *session, parsed.value_if()->tenant, false);
+    if (!tenant_admitted) {
+      session->send_error(*tenant_admitted.error_if(), false);
+      return;
+    }
+    auto completed = enrollment_service->complete(frame.value_if()->payload,
+                                                   unix_milliseconds_now());
+    if (!completed) {
+      ++current.control_rejected;
+      current.database = database->snapshot();
+      publish();
+      session->send_error(*completed.error_if(), false);
+      return;
+    }
+    RelayWssEnrollmentResult result{
+        .tenant = completed.value_if()->tenant,
+        .enrollment_generation = completed.value_if()->enrollment_generation,
+        .token_remaining_uses_after =
+            completed.value_if()->token_remaining_uses_after.value_or(0U)};
+    auto encoded = encode_relay_wss_enrollment_result(result);
+    if (!encoded) {
+      ++current.control_rejected;
+      publish();
+      session->send_error(*encoded.error_if(), false);
+      return;
+    }
+    session->control_state = RelaySession::ControlState::enrolled;
+    ++current.enrollments_completed;
+    current.database = database->snapshot();
+    publish();
+    session->send_control(RelayWssControlType::enrollment_result,
+                          *encoded.value_if());
+    return;
+  }
+
+  ++current.control_rejected;
+  publish();
+  session->send_error(relay_error(ErrorCode::protocol,
+                                  "enrollment_already_completed"), true);
 }
 
 void RelayServer::Impl::session_reject_policy(
     const std::shared_ptr<RelaySession>& session) {
   ++current.protocol_rejected;
-  current.websocket_accepted = current.health_checks + current.protocol_rejected;
+  ++current.websocket_accepted;
   publish();
   session->reject_policy();
 }

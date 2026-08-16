@@ -159,6 +159,7 @@ add_library(heyaki_client
   src/client/node.cpp
   src/client/relay_enrollment_client.cpp
   src/client/relay_wss_client.cpp
+  src/client/relay_wss_control.cpp
   src/client/runtime.cpp)
 add_library(heyaki::client ALIAS heyaki_client)
 set_target_properties(heyaki_client PROPERTIES EXPORT_NAME client OUTPUT_NAME heyaki_client)

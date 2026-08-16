@@ -2,6 +2,8 @@
 
 #include "runtime_access.hpp"
 
+#include <heyaki/relay_wss_control.hpp>
+
 #include <executor/comm.hpp>
 
 #include <boost/asio/connect.hpp>
@@ -176,6 +178,7 @@ struct RelayWssClient::Impl : std::enable_shared_from_this<RelayWssClient::Impl>
     current.host = parsed.value_if()->host;
     current.port = parsed.value_if()->port;
     current.path = parsed.value_if()->path;
+    websocket.read_message_max(max_relay_wss_control_frame_bytes);
     return Result<void>::success();
   }
 
@@ -366,6 +369,7 @@ void RelayWssClient::Impl::on_handshake(boost::system::error_code error) {
     return;
   }
   (void)timer.cancel();
+  websocket.binary(true);
   current.state = RelayWssState::ready;
   publish();
   try {
@@ -392,8 +396,14 @@ void RelayWssClient::Impl::start_read() {
 void RelayWssClient::Impl::on_read(boost::system::error_code error,
                                    std::size_t bytes_transferred) {
   if (error) {
-    if (error != boost::beast::websocket::error::closed &&
-        error != boost::asio::error::operation_aborted &&
+    if (error == boost::beast::websocket::error::closed) {
+      boost::system::error_code ignored;
+      boost::beast::get_lowest_layer(websocket).socket().close(ignored);
+      received.close();
+      outgoing.close();
+      current.state = RelayWssState::disconnected;
+      publish();
+    } else if (error != boost::asio::error::operation_aborted &&
         current.state != RelayWssState::closing &&
         current.state != RelayWssState::disconnected && !failed) {
       fail(classify_error(error));
@@ -468,6 +478,14 @@ void RelayWssClient::Impl::on_write(boost::system::error_code error,
 std::shared_future<Result<void>> RelayWssClient::Impl::begin_close() {
   if (!close_completion.valid()) {
     close_completion = close_promise.get_future().share();
+  }
+  if (!close_pending && current.state == RelayWssState::disconnected) {
+    close_pending = true;
+    try {
+      close_promise.set_value(Result<void>::success());
+    } catch (...) {
+    }
+    return close_completion;
   }
   if (!close_pending && current.state != RelayWssState::disconnected &&
       current.state != RelayWssState::failed) {
@@ -687,7 +705,7 @@ Result<void> RelayWssClient::send(std::span<const std::byte> payload) {
   if (impl_->snapshots.load().value.state != RelayWssState::ready) {
     return Result<void>::failure(wss_error(ErrorCode::cancelled, "wss_not_ready"));
   }
-  if (payload.empty() || payload.size() > 64U * 1024U) {
+  if (payload.empty() || payload.size() > max_relay_wss_control_frame_bytes) {
     return Result<void>::failure(wss_error(ErrorCode::configuration, "wss_payload_invalid"));
   }
   std::vector<std::byte> copy(payload.begin(), payload.end());

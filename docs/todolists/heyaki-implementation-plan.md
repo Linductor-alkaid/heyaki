@@ -643,6 +643,32 @@ Windows Debug/Release、ASan/UBSan/TSAN 全部通过。真实 WSS exchange 尚�
 - [ ] `M3B-19` TUI Relay 视图展示 enrollment、租约、重连、endpoint 来源和需要人工处理的状态；本机/LAN 视图在 relay 不可用时仍可操作。
 - [ ] `M3B-20` TUI renderer 只消费有界 `UiEvent` 通道；高频状态使用 latest-only 聚合，关闭时先取消 operation 再释放 profile。
 
+### M3B 实施进度（2026-08-16，第12轮）
+
+第十二轮把 enrollment 从独立 service 接入真实 TLS/WSS 控制路径：
+
+- 新增公共 `relay_wss_control.hpp/.cpp`，冻结 `/control` 二进制 envelope、64 KiB 总上限、
+  enrollment challenge/request/result 与结构化 `control_error`，并同步 normative enrollment
+  v1 Protobuf schema；parser 拒绝未知 type、长度不符、非规范 Protobuf、非法 UTF-8、未知错误码
+  和不安全 detail。
+- `RelayServer` 以 TLS certificate SHA-256 派生非零 relay ID，新增严格两步 enrollment session；
+  challenge 绑定发起 WSS session，签名/身份/capability 校验、bootstrap token 竞争消费、
+  device/audit 事务和结果响应现已通过同一连接闭环。错误只返回稳定 code/safe token，
+  不回显 token 或数据库内容。
+- `/control` 的所有 session 复用 executor 托管 Asio runtime 的 relay strand，SQLite、challenge
+  TTL 表、限流器和 server snapshot 不跨 strand 并发访问；未新增线程、锁或私有执行循环。
+  每个消息在解析前计入 connection/global request/IP 限流，合法 enrollment 再以 tenant 的
+  SHA-256 派生键计 tenant 限流，避免 UTF-8 tenant 受限流 key 文本格式影响。
+- server snapshot 新增 control session、challenge、完成与拒绝计数；WSS client 默认发送 binary。
+  新增控制 envelope 单元测试和真实 TLS/WSS enrollment 集成测试，覆盖成功登记、证书 pin 与
+  relay ID 绑定、四维限流计数、签名篡改结构化拒绝，以及失败时 device/audit 不变。
+
+本机验证：GCC Debug `-Werror` 全量 CTest 27/27（coturn 拓扑 1 项环境 skip），relay 58/58；
+禁异常 `heyaki-relay` 与公开头独立编译通过，ASan/UBSan/TSAN 定向 relay 测试各 1/1 通过。
+自动登录、heartbeat/lease、endpoint publish/query 和真实 ProfileStore enrollment exchange
+仍未接入 `/control`，因此 `M3B-04`、`M3B-09`、`M3B-14`～`M3B-16` 继续保持未勾选；
+完整跨平台 CI 待本轮推送。
+
 ### M3B 测试与退出条件
 
 - [ ] 覆盖 token 过期/重复消费、伪造 DeviceId、错误签名、吊销 generation、重复 endpoint、租约到期和 relay 重启。

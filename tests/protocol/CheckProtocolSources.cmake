@@ -12,9 +12,12 @@ foreach(required_variable IN ITEMS
 endforeach()
 
 foreach(schema_contract IN ITEMS
+    "common|enum ErrorCode"
     "discovery|message LanPresence"
     "discovery|uint64 sequence = 7"
     "enrollment|message EndpointRecord"
+    "enrollment|message EnrollmentResult"
+    "enrollment|message ControlError"
     "enrollment|message ServiceManifest"
     "signaling|bytes initiator_nonce = 5"
     "signaling|optional bytes responder_nonce = 7"

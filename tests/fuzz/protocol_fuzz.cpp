@@ -393,6 +393,8 @@ void protobuf_schema_parser(std::span<const std::byte> input) {
   parse_protobuf<protocol::discovery::v1::LanPresence>(input);
   parse_protobuf<protocol::enrollment::v1::EnrollmentChallenge>(input);
   parse_protobuf<protocol::enrollment::v1::EnrollmentRequest>(input);
+  parse_protobuf<protocol::enrollment::v1::EnrollmentResult>(input);
+  parse_protobuf<protocol::enrollment::v1::ControlError>(input);
   parse_protobuf<protocol::enrollment::v1::EnrollmentRecord>(input);
   parse_protobuf<protocol::enrollment::v1::EndpointRecord>(input);
   parse_protobuf<protocol::enrollment::v1::ServiceManifest>(input);

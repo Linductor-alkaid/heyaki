@@ -24,6 +24,17 @@ message EnrollmentRequest {
   heyaki.protocol.common.v1.Signature signature = 9;
 }
 
+message EnrollmentResult {
+  string tenant = 1;
+  uint64 enrollment_generation = 2;
+  uint64 token_remaining_uses_after = 3;
+}
+
+message ControlError {
+  heyaki.protocol.common.v1.ErrorCode error_code = 1;
+  string safe_detail = 2;
+}
+
 message EnrollmentRecord {
   heyaki.protocol.common.v1.DeviceEndpoint endpoint = 1;
   bytes relay_id = 2;

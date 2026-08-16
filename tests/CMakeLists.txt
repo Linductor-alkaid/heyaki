@@ -281,6 +281,7 @@ add_executable(heyaki_m3b_relay_tests
   unit/m3b_relay_test.cpp
   unit/m3b_relay_database_test.cpp
   unit/m3b_relay_wss_client_test.cpp
+  unit/m3b_relay_wss_control_test.cpp
   unit/m3b_relay_endpoint_test.cpp
   unit/m3b_relay_enrollment_client_test.cpp
   unit/m3b_relay_enrollment_test.cpp
@@ -292,6 +293,7 @@ add_executable(heyaki_m3b_relay_tests
   unit/m3b_relay_turn_credentials_test.cpp)
 target_link_libraries(heyaki_m3b_relay_tests PRIVATE
   heyaki::relay
+  heyaki_protocol_lite
   executor::executor
   heyaki::sqlite
   GTest::gtest_main
@@ -309,7 +311,7 @@ heyaki_add_runtime_test(
 
 set(heyaki_public_header_sources)
 foreach(public_header IN ITEMS
-    error identity ids lan_directory lan_protocol limits node operation password profile_store protocol relay_enrollment_client runtime secret_backend
+    error identity ids lan_directory lan_protocol limits node operation password profile_store protocol relay_enrollment_client relay_wss_control runtime secret_backend
     security signing time version wire)
   set(header_source
     "${HEYAKI_TEST_GENERATED_DIR}/${public_header}_header_standalone.cpp")

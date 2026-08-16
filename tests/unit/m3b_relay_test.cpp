@@ -203,6 +203,7 @@ TEST(M3BRelayConfigTest, RejectsDuplicateUnknownAndOutOfRangeKeys) {
       std::string_view{"max_connections = 0\n"},
       std::string_view{"handshake_timeout_milliseconds = 99\n"},
       std::string_view{"health_path = no-leading-slash\n"},
+      std::string_view{"health_path = /control\n"},
   };
   for (std::size_t index = 0U; index < contents.size(); ++index) {
     write_config(directory.path(), contents[index]);

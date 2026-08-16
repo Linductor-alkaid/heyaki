@@ -31,6 +31,10 @@ struct RelayServerSnapshot {
   std::uint64_t tcp_accepted{};
   std::uint64_t websocket_accepted{};
   std::uint64_t health_checks{};
+  std::uint64_t control_sessions{};
+  std::uint64_t enrollment_challenges{};
+  std::uint64_t enrollments_completed{};
+  std::uint64_t control_rejected{};
   std::uint64_t capacity_rejected{};
   std::uint64_t handshake_timeouts{};
   std::uint64_t handshake_failed{};

@@ -46,6 +46,40 @@ Base32 has no padding. Upper-case input, non-zero unused trailing bits, aliases,
 prefixes, and wrong lengths are rejected. `DeviceId` is exactly `SHA-256(raw Ed25519 public key)`.
 Only the full 32-byte value participates in protocol comparison, storage keys, signatures, and ACLs.
 
+### 1.2 Relay WSS control envelope
+
+Relay device control uses binary WebSocket messages on `/control`. Each WebSocket message contains
+exactly one envelope and has a hard maximum of 64 KiB:
+
+```text
+offset  size  field
+0       1     control type
+1       4     payload length, unsigned big-endian
+5       N     payload
+```
+
+The payload length MUST equal the remaining WebSocket message bytes. Fragment reassembly is owned by
+the WebSocket implementation, but a reassembled message larger than 64 KiB is rejected before
+application parsing. Text messages, unknown control types, trailing bytes, and non-canonical nested
+Protobuf values are protocol errors. The initial enrollment flow is strictly ordered:
+
+```text
+enrollment_challenge(empty)
+  -> enrollment_challenge_response(EnrollmentChallenge)
+  -> enrollment_request(EnrollmentRequest)
+  -> enrollment_result(tenant, generation, remaining token uses)
+```
+
+The nested payloads are the normative Protobuf messages in
+`heyaki.protocol.enrollment.v1`: `EnrollmentChallenge`, `EnrollmentRequest`, `EnrollmentResult`,
+and `ControlError`. `ControlError` carries only a stable `ErrorCode` numeric value and a bounded
+`safe_detail`; it never carries a bootstrap token, private key, password, verifier, or raw database
+error. Authentication, capacity, and rate-limit rejection sends `control_error` and closes normally.
+Invalid shape/order sends `control_error` and closes with WebSocket policy error. Every received
+message is charged to the connection, global-request, and source-IP rate limits before parsing; a
+valid enrollment request is additionally charged to the tenant limit using a SHA-256-derived
+bounded key. A challenge is accepted only by the WSS session that requested it.
+
 ## 2. Frame encoding
 
 Every transport channel carries a sequence of frames:

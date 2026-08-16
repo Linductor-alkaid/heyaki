@@ -1,5 +1,11 @@
 #include "relay_server.hpp"
+#include "relay_database.hpp"
+#include "relay_enrollment.hpp"
 #include "relay_wss_client.hpp"
+
+#include <heyaki/identity.hpp>
+#include <heyaki/protocol.hpp>
+#include <heyaki/relay_wss_control.hpp>
 
 #include <gtest/gtest.h>
 
@@ -146,6 +152,84 @@ bool wait_until(const std::function<bool()>& predicate, std::chrono::millisecond
   return predicate();
 }
 
+std::uint64_t now_milliseconds() {
+  return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::system_clock::now().time_since_epoch())
+                                        .count());
+}
+
+Result<RelayWssControlFrame> receive_control(RelayWssClient& client) {
+  auto received = client.receive(3s);
+  if (!received) {
+    return Result<RelayWssControlFrame>::failure(*received.error_if());
+  }
+  if (received.value_if()->text) {
+    return Result<RelayWssControlFrame>::failure(
+        Error{ErrorCode::protocol, "test", "control_response_not_binary"});
+  }
+  return parse_relay_wss_control_frame(received.value_if()->payload);
+}
+
+Result<void> send_control(RelayWssClient& client, RelayWssControlType type,
+                          std::span<const std::byte> payload = {}) {
+  auto frame = encode_relay_wss_control_frame(type, payload);
+  if (!frame) {
+    return Result<void>::failure(*frame.error_if());
+  }
+  return client.send(*frame.value_if());
+}
+
+Result<EnrollmentRequest> make_enrollment_request(
+    const IdentityKeyPair& identity, const EnrollmentChallenge& challenge,
+    std::string_view token, std::string_view tenant = "tenant-a",
+    bool tamper_signature = false) {
+  EnrollmentRequest request;
+  request.device_id = identity.device_id();
+  EndpointId::Storage endpoint_bytes{};
+  endpoint_bytes[0U] = std::byte{0x42U};
+  request.endpoint_id = EndpointId{endpoint_bytes};
+  request.identity_public_key = identity.public_key();
+  request.challenge_nonce = challenge.nonce;
+  request.tenant = std::string{tenant};
+  request.bootstrap_token = std::string{token};
+  request.protocol_version = current_protocol_version;
+  request.supported.bits = known_capability_bits;
+  request.required.bits = static_cast<std::uint64_t>(Capability::enrollment);
+  request.expires_unix_milliseconds = challenge.expires_unix_milliseconds - 1U;
+  auto signed_request = sign_enrollment_request(request, challenge.relay_id, identity);
+  if (!signed_request) {
+    return Result<EnrollmentRequest>::failure(*signed_request.error_if());
+  }
+  if (tamper_signature) {
+    request.signature[0U] ^= std::byte{0x01U};
+  }
+  return Result<EnrollmentRequest>::success(std::move(request));
+}
+
+Result<RelayWssClient> connect_control_client(const std::filesystem::path& root,
+                                              std::uint16_t port) {
+  auto pin = certificate_pin(root / "test-only-cert.pem");
+  if (!pin) {
+    return Result<RelayWssClient>::failure(
+        Error{ErrorCode::internal, "test", "certificate_pin_failed"});
+  }
+  RelayWssClientConfig config;
+  config.url = "wss://127.0.0.1:" + std::to_string(port) +
+               std::string{relay_wss_control_path};
+  config.relay_pin = pin;
+  config.tls_verify_peer = false;
+  config.runtime.worker_name = "heyaki-m3b-wss-control-client";
+  auto client = RelayWssClient::create(std::move(config));
+  if (!client) {
+    return client;
+  }
+  auto connected = client.value_if()->connect(3s);
+  if (!connected) {
+    return Result<RelayWssClient>::failure(*connected.error_if());
+  }
+  return client;
+}
+
 TEST(M3BRelayWssClientTest, ConnectsWithTlsPinAndReceivesHealth) {
   TemporaryDirectory directory{"m3b-wss-client"};
   ASSERT_TRUE(write_test_certificate(directory.path()));
@@ -256,6 +340,249 @@ TEST(M3BRelayWssClientTest, RejectsInvalidUrlsAndPayloads) {
   const std::vector<std::byte> large(70000U);
   EXPECT_FALSE(client.value_if()->send(large));
   (void)server.value_if()->shutdown();
+}
+
+TEST(M3BRelayWssClientTest, EnrollsThroughBinaryControlPath) {
+  TemporaryDirectory directory{"m3b-wss-control-enrollment"};
+  ASSERT_TRUE(write_test_certificate(directory.path()));
+  const std::string token = "TEST-ONLY-wss-enrollment-token-0123456789";
+  const std::string tenant = "\xe7\xa7\x9f\xe6\x88\xb7-a";
+  const auto now = now_milliseconds();
+  {
+    auto database = RelayDatabase::open(directory.path() / "relay.sqlite");
+    ASSERT_TRUE(database) << database.error_if()->safe_detail();
+    auto created = database.value_if()->create_bootstrap_token(
+        tenant, token, now + 60U * 1000U, 1U);
+    ASSERT_TRUE(created) << created.error_if()->safe_detail();
+  }
+
+  auto server = RelayServer::create(server_config(directory.path()));
+  ASSERT_TRUE(server) << server.error_if()->safe_detail();
+  ASSERT_TRUE(wait_until(
+      [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
+  auto client = connect_control_client(
+      directory.path(), server.value_if()->snapshot().listen_port);
+  ASSERT_TRUE(client) << client.error_if()->safe_detail();
+
+  auto challenge_request = send_control(
+      *client.value_if(), RelayWssControlType::enrollment_challenge);
+  ASSERT_TRUE(challenge_request) << challenge_request.error_if()->safe_detail();
+  auto challenge_frame = receive_control(*client.value_if());
+  ASSERT_TRUE(challenge_frame) << challenge_frame.error_if()->safe_detail();
+  ASSERT_EQ(challenge_frame.value_if()->type,
+            RelayWssControlType::enrollment_challenge_response);
+  auto challenge = parse_enrollment_challenge(challenge_frame.value_if()->payload);
+  ASSERT_TRUE(challenge) << challenge.error_if()->safe_detail();
+  const auto pin = certificate_pin(directory.path() / "test-only-cert.pem");
+  ASSERT_TRUE(pin);
+  EXPECT_EQ(challenge.value_if()->relay_id, *pin);
+
+  auto identity = create_identity();
+  ASSERT_TRUE(identity) << identity.error_if()->safe_detail();
+  auto request = make_enrollment_request(
+      *identity.value_if(), *challenge.value_if(), token, tenant);
+  ASSERT_TRUE(request) << request.error_if()->safe_detail();
+  auto request_bytes = encode_enrollment_request(*request.value_if());
+  ASSERT_TRUE(request_bytes) << request_bytes.error_if()->safe_detail();
+  auto sent = send_control(*client.value_if(),
+                           RelayWssControlType::enrollment_request,
+                           *request_bytes.value_if());
+  ASSERT_TRUE(sent) << sent.error_if()->safe_detail();
+
+  auto result_frame = receive_control(*client.value_if());
+  ASSERT_TRUE(result_frame) << result_frame.error_if()->safe_detail();
+  ASSERT_EQ(result_frame.value_if()->type,
+            RelayWssControlType::enrollment_result);
+  auto result = parse_relay_wss_enrollment_result(result_frame.value_if()->payload);
+  ASSERT_TRUE(result) << result.error_if()->safe_detail();
+  EXPECT_EQ(result.value_if()->tenant, tenant);
+  EXPECT_EQ(result.value_if()->enrollment_generation, 1U);
+  EXPECT_EQ(result.value_if()->token_remaining_uses_after, 0U);
+
+  ASSERT_TRUE(wait_until(
+      [&] {
+        const auto snapshot = server.value_if()->snapshot();
+        return snapshot.enrollments_completed == 1U &&
+               snapshot.database.device_count == 1U &&
+               snapshot.database.device_audit_count == 2U;
+      },
+      2s));
+  const auto snapshot = server.value_if()->snapshot();
+  EXPECT_EQ(snapshot.control_sessions, 1U);
+  EXPECT_EQ(snapshot.enrollment_challenges, 1U);
+  EXPECT_EQ(snapshot.control_rejected, 0U);
+  EXPECT_EQ(snapshot.rate_limits.connection.allowed, 2U);
+  EXPECT_EQ(snapshot.rate_limits.request.allowed, 2U);
+  EXPECT_EQ(snapshot.rate_limits.tenant.allowed, 1U);
+  EXPECT_EQ(snapshot.rate_limits.ip.allowed, 2U);
+
+  EXPECT_TRUE(client.value_if()->close(3s));
+  EXPECT_TRUE(server.value_if()->shutdown().stopped);
+}
+
+TEST(M3BRelayWssClientTest, RejectsTamperedEnrollmentOverControlPath) {
+  TemporaryDirectory directory{"m3b-wss-control-reject"};
+  ASSERT_TRUE(write_test_certificate(directory.path()));
+  const std::string token = "TEST-ONLY-wss-reject-token-0123456789";
+  const auto now = now_milliseconds();
+  {
+    auto database = RelayDatabase::open(directory.path() / "relay.sqlite");
+    ASSERT_TRUE(database) << database.error_if()->safe_detail();
+    ASSERT_TRUE(database.value_if()->create_bootstrap_token(
+        "tenant-a", token, now + 60U * 1000U, 1U));
+  }
+  auto server = RelayServer::create(server_config(directory.path()));
+  ASSERT_TRUE(server) << server.error_if()->safe_detail();
+  ASSERT_TRUE(wait_until(
+      [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
+  auto client = connect_control_client(
+      directory.path(), server.value_if()->snapshot().listen_port);
+  ASSERT_TRUE(client) << client.error_if()->safe_detail();
+
+  ASSERT_TRUE(send_control(*client.value_if(),
+                           RelayWssControlType::enrollment_challenge));
+  auto challenge_frame = receive_control(*client.value_if());
+  ASSERT_TRUE(challenge_frame) << challenge_frame.error_if()->safe_detail();
+  auto challenge = parse_enrollment_challenge(challenge_frame.value_if()->payload);
+  ASSERT_TRUE(challenge) << challenge.error_if()->safe_detail();
+  auto identity = create_identity();
+  ASSERT_TRUE(identity) << identity.error_if()->safe_detail();
+  auto request = make_enrollment_request(
+      *identity.value_if(), *challenge.value_if(), token, "tenant-a", true);
+  ASSERT_TRUE(request) << request.error_if()->safe_detail();
+  auto request_bytes = encode_enrollment_request(*request.value_if());
+  ASSERT_TRUE(request_bytes) << request_bytes.error_if()->safe_detail();
+  ASSERT_TRUE(send_control(*client.value_if(),
+                           RelayWssControlType::enrollment_request,
+                           *request_bytes.value_if()));
+
+  auto error_frame = receive_control(*client.value_if());
+  ASSERT_TRUE(error_frame) << error_frame.error_if()->safe_detail();
+  ASSERT_EQ(error_frame.value_if()->type, RelayWssControlType::control_error);
+  auto remote_error = parse_relay_wss_control_error(error_frame.value_if()->payload);
+  ASSERT_TRUE(remote_error) << remote_error.error_if()->safe_detail();
+  EXPECT_EQ(remote_error.value_if()->code, ErrorCode::authentication);
+  EXPECT_EQ(remote_error.value_if()->safe_detail,
+            "signature_verification_failed");
+  ASSERT_TRUE(wait_until(
+      [&] {
+        return server.value_if()->snapshot().control_rejected == 1U &&
+               client.value_if()->snapshot().state == RelayWssState::disconnected;
+      },
+      2s));
+  EXPECT_EQ(server.value_if()->snapshot().database.device_count, 0U);
+  EXPECT_EQ(server.value_if()->snapshot().database.device_audit_count, 0U);
+
+  EXPECT_TRUE(client.value_if()->close(3s));
+  EXPECT_TRUE(server.value_if()->shutdown().stopped);
+}
+
+TEST(M3BRelayWssClientTest, ChargesEveryBaseRateLimitBeforeRejecting) {
+  TemporaryDirectory directory{"m3b-wss-control-rate-limit"};
+  ASSERT_TRUE(write_test_certificate(directory.path()));
+  auto config = server_config(directory.path());
+  config.rate_limits.connection.capacity = 1U;
+  config.rate_limits.connection.window = 60s;
+  auto server = RelayServer::create(std::move(config));
+  ASSERT_TRUE(server) << server.error_if()->safe_detail();
+  ASSERT_TRUE(wait_until(
+      [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
+  auto client = connect_control_client(
+      directory.path(), server.value_if()->snapshot().listen_port);
+  ASSERT_TRUE(client) << client.error_if()->safe_detail();
+
+  ASSERT_TRUE(send_control(*client.value_if(),
+                           RelayWssControlType::enrollment_challenge));
+  auto challenge = receive_control(*client.value_if());
+  ASSERT_TRUE(challenge) << challenge.error_if()->safe_detail();
+  ASSERT_TRUE(send_control(*client.value_if(),
+                           RelayWssControlType::enrollment_challenge));
+  auto rejected = receive_control(*client.value_if());
+  ASSERT_TRUE(rejected) << rejected.error_if()->safe_detail();
+  ASSERT_EQ(rejected.value_if()->type, RelayWssControlType::control_error);
+  auto remote_error = parse_relay_wss_control_error(rejected.value_if()->payload);
+  ASSERT_TRUE(remote_error) << remote_error.error_if()->safe_detail();
+  EXPECT_EQ(remote_error.value_if()->code, ErrorCode::resource_exhausted);
+
+  ASSERT_TRUE(wait_until(
+      [&] {
+        return client.value_if()->snapshot().state ==
+               RelayWssState::disconnected;
+      },
+      2s));
+  const auto limits = server.value_if()->snapshot().rate_limits;
+  EXPECT_EQ(limits.connection.allowed, 1U);
+  EXPECT_EQ(limits.connection.rejected, 1U);
+  EXPECT_EQ(limits.request.allowed, 2U);
+  EXPECT_EQ(limits.ip.allowed, 2U);
+
+  EXPECT_TRUE(client.value_if()->close(3s));
+  EXPECT_TRUE(server.value_if()->shutdown().stopped);
+}
+
+TEST(M3BRelayWssClientTest, BindsEnrollmentChallengeToControlSession) {
+  TemporaryDirectory directory{"m3b-wss-control-session-binding"};
+  ASSERT_TRUE(write_test_certificate(directory.path()));
+  const std::string token = "TEST-ONLY-wss-session-token-0123456789";
+  const auto now = now_milliseconds();
+  {
+    auto database = RelayDatabase::open(directory.path() / "relay.sqlite");
+    ASSERT_TRUE(database) << database.error_if()->safe_detail();
+    ASSERT_TRUE(database.value_if()->create_bootstrap_token(
+        "tenant-a", token, now + 60U * 1000U, 1U));
+  }
+  auto server = RelayServer::create(server_config(directory.path()));
+  ASSERT_TRUE(server) << server.error_if()->safe_detail();
+  ASSERT_TRUE(wait_until(
+      [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
+  const auto port = server.value_if()->snapshot().listen_port;
+  auto first_client = connect_control_client(directory.path(), port);
+  auto second_client = connect_control_client(directory.path(), port);
+  ASSERT_TRUE(first_client) << first_client.error_if()->safe_detail();
+  ASSERT_TRUE(second_client) << second_client.error_if()->safe_detail();
+
+  ASSERT_TRUE(send_control(*first_client.value_if(),
+                           RelayWssControlType::enrollment_challenge));
+  ASSERT_TRUE(receive_control(*first_client.value_if()));
+  ASSERT_TRUE(send_control(*second_client.value_if(),
+                           RelayWssControlType::enrollment_challenge));
+  auto second_challenge_frame = receive_control(*second_client.value_if());
+  ASSERT_TRUE(second_challenge_frame)
+      << second_challenge_frame.error_if()->safe_detail();
+  auto second_challenge =
+      parse_enrollment_challenge(second_challenge_frame.value_if()->payload);
+  ASSERT_TRUE(second_challenge) << second_challenge.error_if()->safe_detail();
+  auto identity = create_identity();
+  ASSERT_TRUE(identity) << identity.error_if()->safe_detail();
+  auto request = make_enrollment_request(
+      *identity.value_if(), *second_challenge.value_if(), token, "tenant-a");
+  ASSERT_TRUE(request) << request.error_if()->safe_detail();
+  auto request_bytes = encode_enrollment_request(*request.value_if());
+  ASSERT_TRUE(request_bytes) << request_bytes.error_if()->safe_detail();
+
+  ASSERT_TRUE(send_control(*first_client.value_if(),
+                           RelayWssControlType::enrollment_request,
+                           *request_bytes.value_if()));
+  auto rejected = receive_control(*first_client.value_if());
+  ASSERT_TRUE(rejected) << rejected.error_if()->safe_detail();
+  ASSERT_EQ(rejected.value_if()->type, RelayWssControlType::control_error);
+  auto remote_error = parse_relay_wss_control_error(rejected.value_if()->payload);
+  ASSERT_TRUE(remote_error) << remote_error.error_if()->safe_detail();
+  EXPECT_EQ(remote_error.value_if()->code, ErrorCode::authentication);
+  EXPECT_EQ(remote_error.value_if()->safe_detail,
+            "enrollment_challenge_session_mismatch");
+
+  ASSERT_TRUE(send_control(*second_client.value_if(),
+                           RelayWssControlType::enrollment_request,
+                           *request_bytes.value_if()));
+  auto completed = receive_control(*second_client.value_if());
+  ASSERT_TRUE(completed) << completed.error_if()->safe_detail();
+  ASSERT_EQ(completed.value_if()->type, RelayWssControlType::enrollment_result);
+  EXPECT_TRUE(parse_relay_wss_enrollment_result(completed.value_if()->payload));
+
+  EXPECT_TRUE(first_client.value_if()->close(3s));
+  EXPECT_TRUE(second_client.value_if()->close(3s));
+  EXPECT_TRUE(server.value_if()->shutdown().stopped);
 }
 
 }  // namespace

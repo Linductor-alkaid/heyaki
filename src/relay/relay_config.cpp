@@ -1,6 +1,7 @@
 #include "relay_config.hpp"
 
 #include <heyaki/error.hpp>
+#include <heyaki/relay_wss_control.hpp>
 
 #include <algorithm>
 #include <cerrno>
@@ -91,7 +92,8 @@ Result<void> validate_relay_server_config(const RelayServerConfig& config) {
   if (!valid_listen_address(config.listen_address) ||
       config.tls_certificate_file.empty() || config.tls_private_key_file.empty() ||
       config.database_file.empty() ||
-      !valid_health_path(config.health_path) || config.max_connections == 0U ||
+      !valid_health_path(config.health_path) ||
+      config.health_path == relay_wss_control_path || config.max_connections == 0U ||
       config.max_connections > 65536U ||
       config.handshake_timeout.count() < 100 || config.handshake_timeout.count() > 60000 ||
       config.shutdown_timeout.count() < 100 || config.shutdown_timeout.count() > 60000) {
