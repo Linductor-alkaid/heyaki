@@ -2528,7 +2528,20 @@ Result<Node> Node::create(NodeConfig config) {
     }
     return Result<Node>::failure(*initialized.error_if());
   }
-  impl->begin();
+  auto weak = std::weak_ptr<Node::Impl>{impl};
+  try {
+    boost::asio::post(impl->strand, [weak] {
+      if (auto self = weak.lock()) {
+        self->begin();
+      }
+    });
+  } catch (...) {
+    if (impl->owned_runtime) {
+      (void)impl->owned_runtime->shutdown();
+    }
+    return Result<Node>::failure(node_error(ErrorCode::internal,
+                                            "node_begin_post_failed"));
+  }
   return Result<Node>::success(Node{std::move(impl)});
 }
 
