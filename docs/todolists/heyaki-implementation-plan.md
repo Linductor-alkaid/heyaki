@@ -495,8 +495,10 @@ ASan/UBSan/TSAN 全部通过。WSS 控制消息尚未接入，完整 M3B 验收�
   tenant 冲突与非法配置。relay 测试现含 31 项。
 
 本机验证：GCC Debug 全量 CTest 25/25，Release relay 31/31，`-Werror`/禁异常构建通过，
-ASan/UBSan 定向 relay 测试通过，TSAN（关闭 ASLR）relay 31/31。WSS heartbeat 消息尚未接入，
-完整 M3B 验收未完成，因此 `M3B-07` 保持未勾选。
+ASan/UBSan 定向 relay 测试通过，TSAN（关闭 ASLR）relay 31/31。GitHub Actions run
+`31928348709` 结论 success：Linux GCC/Clang Debug/Release、Windows Debug/Release、
+ASan/UBSan/TSAN 全部通过。WSS heartbeat 消息尚未接入，完整 M3B 验收未完成，因此
+`M3B-07` 保持未勾选。
 
 ### 6.5 M3B：TURN credential 与部署
 
