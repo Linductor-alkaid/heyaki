@@ -667,7 +667,8 @@ Windows Debug/Release、ASan/UBSan/TSAN 全部通过。真实 WSS exchange 尚�
 禁异常 `heyaki-relay` 与公开头独立编译通过，ASan/UBSan/TSAN 定向 relay 测试各 1/1 通过。
 自动登录、heartbeat/lease、endpoint publish/query 和真实 ProfileStore enrollment exchange
 仍未接入 `/control`，因此 `M3B-04`、`M3B-09`、`M3B-14`～`M3B-16` 继续保持未勾选；
-完整跨平台 CI 待本轮推送。
+GitHub Actions run `31944662316` 结论 success：Linux GCC/Clang Debug/Release、
+Windows Debug/Release、ASan/UBSan/TSAN 全部通过。
 
 ### M3B 测试与退出条件
 
