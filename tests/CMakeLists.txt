@@ -284,7 +284,8 @@ add_executable(heyaki_m3b_relay_tests
   unit/m3b_relay_lease_test.cpp
   unit/m3b_relay_login_test.cpp
   unit/m3b_relay_rate_limiter_test.cpp
-  unit/m3b_relay_ttl_test.cpp)
+  unit/m3b_relay_ttl_test.cpp
+  unit/m3b_relay_turn_credentials_test.cpp)
 target_link_libraries(heyaki_m3b_relay_tests PRIVATE
   heyaki::relay
   executor::executor
@@ -488,6 +489,14 @@ if(WIN32)
     SKIP_RETURN_CODE 77
     TIMEOUT 90)
 endif()
+
+add_test(
+  NAME heyaki_coturn_deployment_contract
+  COMMAND "${CMAKE_COMMAND}"
+    "-DHEYAKI_COTURN_DIR=${CMAKE_CURRENT_SOURCE_DIR}/../deploy/coturn"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/deployment/CheckCoturnDeployment.cmake")
+set_tests_properties(heyaki_coturn_deployment_contract PROPERTIES
+  LABELS "relay;network;security")
 
 add_test(
   NAME heyaki_dependency_lock_crlf

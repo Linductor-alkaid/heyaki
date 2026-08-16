@@ -1,0 +1,17 @@
+services:
+  turn:
+    image: coturn/coturn:4.10.0-debian@sha256:f4c2af06c3c535c4f49d64e14d484104e7e4fcc98c4cb83d6e1544f64d1e6158
+    container_name: heyaki-coturn
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      TURN_SECRET: "${HEYAKI_TURN_SECRET:?HEYAKI_TURN_SECRET must be set}"
+    volumes:
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - turn-logs:/var/log/coturn
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+    cap_add:
+      - NET_BIND_SERVICE
+volumes:
+  turn-logs:

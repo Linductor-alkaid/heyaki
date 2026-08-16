@@ -543,6 +543,29 @@ ASan/UBSan 定向 relay 测试通过，TSAN（关闭 ASLR）relay 39/39。GitHub
 ASan/UBSan/TSAN 全部通过。WSS 控制消息尚未接入，完整 M3B 验收未完成，因此
 `M3B-09` 保持未勾选。
 
+### M3B 实施进度（2026-08-16，第8轮）
+
+第八轮推进 M3B-10/M3B-11 TURN credential 与 coturn 部署基线：
+
+- 新增 `relay_turn_credentials.hpp/.cpp`：TURN REST API HMAC-SHA1/base64 实现，
+  使用 coturn 官方 known vector 验证；username 格式
+  `<expiry_unix_seconds>:<tenant>:<DeviceId>`，password 只在 credential 对象中返回。
+- 密钥轮换：最多 4 个 secret generation，新签发使用最新 generation，旧 generation 在
+  其 TTL 内继续验证；替换/淘汰采用有界向量与 `sodium_memzero` 清理旧 secret。
+- 服务端校验：过期、篡改、缺 secret、非法 tenant/secret 均返回稳定错误；diagnostics
+  记录 issued/validated/validation_rejected/active generations。
+- 新增 `deploy/coturn/`：README 固定 `coturn/coturn:4.10.0-debian` 与 immutable digest
+  `sha256:f4c2af06c3c535c4f49d64e14d484104e7e4fcc98c4cb83d6e1544f64d1e6158`；
+  `turnserver.conf` 启用 `use-auth-secret`、TLS 5349、受限 peer 网段、端口范围/配额；
+  `docker-compose.yml` 使用 digest 拉取且不提交真实 secret；env example 通过环境变量注入。
+- 新增 CTest `heyaki_coturn_deployment_contract` 检查 pin、config 关键项与“不提交真实
+  static-auth-secret”。
+- 测试新增 5 项 TURN credential 测试。relay 测试现含 44 项，全量 CTest 26/26。
+
+本机验证：GCC Debug 全量 CTest 26/26，Release relay 44/44，`-Werror`/禁异常构建通过，
+ASan/UBSan 定向 relay 测试通过，TSAN（关闭 ASLR）relay 44/44。尚未在真实 coturn 实例上
+做 allocation 端到端验证，因此 `M3B-10`/`M3B-11` 保持未勾选。
+
 ### 6.5 M3B：TURN credential 与部署
 
 - [ ] `M3B-10` 固定 coturn 配置与容器/包版本，启用 TURN REST API 风格 HMAC 临时 credential。
