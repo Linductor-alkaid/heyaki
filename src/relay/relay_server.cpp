@@ -97,6 +97,7 @@ struct RelayServer::Impl : std::enable_shared_from_this<RelayServer::Impl> {
   tcp::acceptor acceptor;
   boost::asio::signal_set signals;
   std::optional<RelayDatabase> database;
+  std::optional<RelayRateLimiter> rate_limiter;
   executor::comm::DoubleBuffer<RelayServerSnapshot> snapshots;
   std::set<std::shared_ptr<RelaySession>> sessions;
   std::promise<Result<void>> shutdown_promise;
@@ -352,6 +353,12 @@ Result<void> RelayServer::Impl::initialize() {
     database.emplace(std::move(*file_database.value_if()));
     current.database = database->snapshot();
   }
+  auto limits = RelayRateLimiter::create(config.rate_limits);
+  if (!limits) {
+    return Result<void>::failure(*limits.error_if());
+  }
+  rate_limiter.emplace(std::move(*limits.value_if()));
+  current.rate_limits = rate_limiter->diagnostics();
 
   if (config.install_signal_handlers) {
     signals.add(SIGINT, error);

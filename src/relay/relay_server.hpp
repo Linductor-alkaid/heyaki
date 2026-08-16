@@ -36,6 +36,7 @@ struct RelayServerSnapshot {
   std::uint64_t handshake_failed{};
   std::uint64_t protocol_rejected{};
   RelayDatabaseSnapshot database;
+  RelayRateLimitDiagnostics rate_limits;
   bool stop_requested{false};
   std::optional<Error> last_error;
 };

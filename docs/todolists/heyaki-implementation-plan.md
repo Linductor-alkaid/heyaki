@@ -521,6 +521,26 @@ ASan/UBSan 定向 relay 测试通过，TSAN（关闭 ASLR）relay 35/35。GitHub
 ASan/UBSan/TSAN 全部通过。WSS endpoint 注册/查询消息尚未接入，完整 M3B 验收未完成，
 因此 `M3B-08` 保持未勾选。
 
+### M3B 实施进度（2026-08-16，第7轮）
+
+第七轮推进 M3B-09 速率限制：
+
+- 新增 `relay_rate_limiter.hpp/.cpp`：四个独立 token bucket 维度——
+  connection（按连接 ID）、request（全局）、tenant（按租户）、ip（按来源 IP）。
+  每维度有 capacity/window/max_keys，默认 policy 覆盖 16/s、256/s、64/s、32/s。
+- 每个 bucket 使用整数 micro-token 精确补水和消耗；key 表有硬上限，新 key 在满载时
+  先按 entry TTL 清理，仍满则拒绝并计 `capacity_rejected`；普通超限返回
+  `resource_exhausted/rate_limit_exceeded`。diagnostics 记录 allowed/rejected/
+  capacity_rejected/current/peak。
+- `RelayServerConfig` 增加 `rate_limits`，`RelayServer` 启动时创建 limiter 并把四个维度
+  指标发布到快照，供后续 WSS handler 统一调用。
+- 测试新增 4 项：四维度 token 限制、key 表容量拒绝、idle prune、非法 policy/key。
+  relay 测试现含 39 项。
+
+本机验证：GCC Debug 全量 CTest 25/25，Release relay 39/39，`-Werror`/禁异常构建通过，
+ASan/UBSan 定向 relay 测试通过，TSAN（关闭 ASLR）relay 39/39。WSS 控制消息尚未接入，
+完整 M3B 验收未完成，因此 `M3B-09` 保持未勾选。
+
 ### 6.5 M3B：TURN credential 与部署
 
 - [ ] `M3B-10` 固定 coturn 配置与容器/包版本，启用 TURN REST API 风格 HMAC 临时 credential。

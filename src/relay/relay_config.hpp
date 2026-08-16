@@ -1,5 +1,7 @@
 #pragma once
 
+#include "relay_rate_limiter.hpp"
+
 #include <heyaki/runtime.hpp>
 
 #include <chrono>
@@ -21,6 +23,7 @@ struct RelayServerConfig {
   std::chrono::milliseconds handshake_timeout{5000};
   std::chrono::milliseconds shutdown_timeout{2000};
   bool install_signal_handlers{true};
+  RelayRateLimitPolicy rate_limits;
   RuntimeConfig runtime;
 };
 
