@@ -112,6 +112,8 @@ TEST(Signing, EverySignedDomainAcceptsItsFrozenFieldShape) {
   expect_shape(heyaki::SigningDomain::enrollment,
                {32U, 16U, 32U, 32U, 32U, 1U, 4U, 4U, 8U, 8U, 8U});
   expect_shape(heyaki::SigningDomain::enrollment_record, {32U, 16U, 32U, 1U, 8U, 8U});
+  expect_shape(heyaki::SigningDomain::relay_login,
+               {32U, 16U, 32U, 32U, 32U, 1U, 4U, 4U, 8U, 8U, 8U, 8U});
   expect_shape(heyaki::SigningDomain::endpoint_record, {32U, 16U, 1U, 8U, 32U, 8U});
   expect_shape(heyaki::SigningDomain::service_manifest, {32U, 16U, 8U, 32U, 8U});
   expect_shape(heyaki::SigningDomain::offer,
@@ -158,6 +160,9 @@ TEST(Signing, TextFieldsRequireNonemptyCanonicalUtf8) {
 
   EXPECT_TRUE(canonicalize_text(heyaki::SigningDomain::enrollment, 5U,
                                 {32U, 16U, 32U, 32U, 32U, 1U, 4U, 4U, 8U, 8U, 8U},
+                                valid_utf8));
+  EXPECT_TRUE(canonicalize_text(heyaki::SigningDomain::relay_login, 5U,
+                                {32U, 16U, 32U, 32U, 32U, 1U, 4U, 4U, 8U, 8U, 8U, 8U},
                                 valid_utf8));
   EXPECT_FALSE(canonicalize_text(heyaki::SigningDomain::enrollment, 5U,
                                  {32U, 16U, 32U, 32U, 32U, 1U, 4U, 4U, 8U, 8U, 8U},

@@ -280,6 +280,7 @@ add_executable(heyaki_m3b_relay_tests
   unit/m3b_relay_database_test.cpp
   unit/m3b_relay_enrollment_test.cpp
   unit/m3b_relay_enrollment_service_test.cpp
+  unit/m3b_relay_login_test.cpp
   unit/m3b_relay_ttl_test.cpp)
 target_link_libraries(heyaki_m3b_relay_tests PRIVATE
   heyaki::relay

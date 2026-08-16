@@ -49,6 +49,10 @@ constexpr std::array enrollment_rules{FieldRule{32U}, FieldRule{16U}, FieldRule{
                                       FieldRule{8U},  FieldRule{8U}};
 constexpr std::array enrollment_record_rules{FieldRule{32U}, FieldRule{16U}, FieldRule{32U},
                                              variable, FieldRule{8U}, FieldRule{8U}};
+constexpr std::array relay_login_rules{
+    FieldRule{32U}, FieldRule{16U}, FieldRule{32U}, FieldRule{32U},
+    FieldRule{32U}, variable,      FieldRule{4U},  FieldRule{4U},
+    FieldRule{8U},  FieldRule{8U}, FieldRule{8U},  FieldRule{8U}};
 constexpr std::array endpoint_record_rules{FieldRule{32U}, FieldRule{16U}, variable,
                                            FieldRule{8U}, FieldRule{32U}, FieldRule{8U}};
 constexpr std::array service_manifest_rules{FieldRule{32U}, FieldRule{16U}, FieldRule{8U},
@@ -237,6 +241,9 @@ bool matches_field_shape(SigningDomain domain, std::span<const CanonicalField> f
     case SigningDomain::enrollment_record:
       return matches_rules(fields, enrollment_record_rules) &&
              is_nonempty_utf8(fields[3U].value);
+    case SigningDomain::relay_login:
+      return matches_rules(fields, relay_login_rules) &&
+             is_nonempty_utf8(fields[5U].value);
     case SigningDomain::endpoint_record:
       return matches_rules(fields, endpoint_record_rules) &&
              is_nonempty_utf8(fields[2U].value);
@@ -288,6 +295,8 @@ std::string_view signing_domain_separator(SigningDomain domain) noexcept {
       return "heyaki.enrollment.v1";
     case SigningDomain::enrollment_record:
       return "heyaki.enrollment-record.v1";
+    case SigningDomain::relay_login:
+      return "heyaki.relay-login.v1";
     case SigningDomain::endpoint_record:
       return "heyaki.endpoint-record.v1";
     case SigningDomain::service_manifest:

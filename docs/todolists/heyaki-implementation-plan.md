@@ -458,6 +458,26 @@ relay SQLite 改用 DELETE journal、MSVC `/bigobj`，以及把既有 Node begin
 TSAN 竞争。WSS 控制消息尚未接入这些 service，完整 M3B 验收未完成，因此
 `M3B-04`/`M3B-05` 保持未勾选。
 
+### M3B 实施进度（2026-08-16，第4轮）
+
+第四轮推进 M3B-06 自动登录 challenge-response：
+
+- 冻结 `heyaki.relay-login.v1` signing domain：12 个 canonical 字段在 enrollment 基础上
+  增加 enrollment generation；wire 文档签名域表已同步，signing 单元测试覆盖 shape/UTF-8。
+- 新增 `relay_login.hpp/.cpp`：`RelayLoginChallenge`/`RelayLoginRequest` 的 Protobuf 编码与
+  严格解析、canonical signing，以及验证链（公钥派生 `DeviceId`、challenge nonce/过期、
+  请求过期、capability negotiation、Ed25519 签名、数据库 device 公钥/tenant 匹配、状态与
+  enrollment generation）。
+- 新增 `relay_login_service.hpp/.cpp`：有界单次 challenge 表；authenticate 不再要求
+  bootstrap token 或授权密码，成功写 `device_login` audit，拒绝尝试写 `device_login_rejected`；
+  diagnostics 区分 unknown challenge、validation、device 与 audit 失败。
+- 测试新增 login challenge/request round-trip、成功认证与审计、错误 generation/tenant/
+  已吊销设备/错误签名，以及 parser 拒绝重复、未知、截断字段。relay 测试现含 27 项。
+
+本机验证：GCC Debug 全量 CTest 25/25，Release relay 27/27，`-Werror`/禁异常构建通过，
+ASan/UBSan 定向 relay 测试通过，TSAN（关闭 ASLR）relay 27/27。WSS 控制消息尚未接入，
+完整 M3B 验收未完成，因此 `M3B-06` 保持未勾选。
+
 ### 6.5 M3B：TURN credential 与部署
 
 - [ ] `M3B-10` 固定 coturn 配置与容器/包版本，启用 TURN REST API 风格 HMAC 临时 credential。

@@ -15,6 +15,7 @@ namespace heyaki {
 enum class SigningDomain : std::uint8_t {
   enrollment,
   enrollment_record,
+  relay_login,
   endpoint_record,
   service_manifest,
   offer,

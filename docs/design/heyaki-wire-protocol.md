@@ -221,6 +221,7 @@ range.
 | --- | --- | --- |
 | `heyaki.enrollment.v1` | 1 ID32 device, 2 ID16 endpoint, 3 raw 32-byte identity public key, 4 raw 32-byte relay ID, 5 NONCE32 challenge, 6 TEXT tenant, 7 U32 major, 8 U32 minor, 9 U64 supported bits, 10 U64 required bits, 11 U64 expiry | enrolling device |
 | `heyaki.enrollment-record.v1` | 1 ID32 device, 2 ID16 endpoint, 3 raw 32-byte relay ID, 4 TEXT tenant, 5 U64 generation, 6 U64 issued time | relay |
+| `heyaki.relay-login.v1` | 1 ID32 device, 2 ID16 endpoint, 3 raw 32-byte identity public key, 4 raw 32-byte relay ID, 5 NONCE32 challenge, 6 TEXT tenant, 7 U32 major, 8 U32 minor, 9 U64 supported bits, 10 U64 required bits, 11 U64 expiry, 12 U64 enrollment generation | logging-in device |
 | `heyaki.endpoint-record.v1` | 1 ID32 device, 2 ID16 endpoint, 3 TEXT application ID, 4 U64 record generation, 5 HASH32 manifest, 6 U64 expiry | device |
 | `heyaki.service-manifest.v1` | 1 ID32 device, 2 ID16 endpoint, 3 U64 manifest generation, 4 HASH32 canonical manifest, 5 U64 expiry | device |
 | `heyaki.offer.v1` | 1 initiator ID32, 2 initiator ID16 endpoint, 3 responder ID32, 4 responder ID16 endpoint, 5 ID16 request, 6 ID16 session, 7 NONCE32 initiator nonce, 8 U64 expiry, 9 exact SDP bytes, 10 raw 32-byte DTLS fingerprint | initiator |
