@@ -61,7 +61,7 @@ struct RelayWssSnapshot {
 
 class RelayWssClient {
  public:
-  class Impl;
+  struct Impl;
 
   RelayWssClient(RelayWssClient&&) noexcept;
   RelayWssClient& operator=(RelayWssClient&&) noexcept;
