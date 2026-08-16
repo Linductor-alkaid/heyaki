@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <filesystem>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -107,6 +108,50 @@ using LanSignalingValidator =
 using LanSignalingHandler =
     std::function<Result<void>(const LanSignalingMessage& message)>;
 
+enum class RelayNodeState : std::uint8_t {
+  disabled,
+  starting,
+  ready,
+  degraded,
+  failed,
+  stopped,
+};
+
+struct RelayNodeConfig {
+  bool enabled{true};
+  std::string relay_url;
+  std::optional<std::vector<std::byte>> relay_pin;
+  std::string tenant;
+  std::uint64_t enrollment_generation{1U};
+  std::optional<std::filesystem::path> tls_ca_file;
+  bool tls_verify_peer{true};
+  std::chrono::milliseconds connect_timeout{5000};
+  std::chrono::milliseconds handshake_timeout{5000};
+  std::chrono::milliseconds close_timeout{2000};
+  std::chrono::milliseconds heartbeat_interval{15000};
+  std::chrono::milliseconds lease_duration{45000};
+  std::size_t missed_heartbeat_limit{3U};
+  std::chrono::milliseconds minimum_backoff{1000};
+  std::chrono::milliseconds maximum_backoff{60000};
+  std::chrono::milliseconds poll_interval{100};
+  std::size_t receive_capacity{64U};
+  std::size_t send_capacity{64U};
+};
+
+struct RelayNodeSnapshot {
+  bool enabled{false};
+  RelayNodeState state{RelayNodeState::disabled};
+  std::string relay_url;
+  std::string tenant;
+  std::uint64_t enrollment_generation{};
+  std::uint64_t lease_generation{};
+  std::uint64_t heartbeats_sent{};
+  std::uint64_t heartbeats_missed{};
+  std::uint64_t reconnect_count{};
+  std::chrono::milliseconds backoff{};
+  std::optional<Error> last_error;
+};
+
 struct NodeSnapshot {
   bool local_initialized{false};
   DeviceId device_id;
@@ -121,6 +166,7 @@ struct NodeSnapshot {
   std::uint64_t announcements_sent{};
   std::uint64_t datagrams_received{};
   std::uint64_t datagrams_rejected{};
+  RelayNodeSnapshot relay;
   LanResourceSnapshot resources;
   std::optional<Error> last_error;
 };
@@ -133,6 +179,7 @@ struct NodeConfig {
   RuntimeConfig runtime_config;
   LanSignalingValidator signaling_validator;
   LanSignalingHandler signaling_handler;
+  std::optional<RelayNodeConfig> relay_override;
 };
 
 struct NodeShutdownReport {
@@ -168,6 +215,7 @@ class Node {
 };
 
 [[nodiscard]] std::string_view lan_readiness_state_name(LanReadinessState state) noexcept;
+[[nodiscard]] std::string_view relay_node_state_name(RelayNodeState state) noexcept;
 [[nodiscard]] bool is_lan_offer_owner(DeviceEndpointKey local,
                                       DeviceEndpointKey peer) noexcept;
 [[nodiscard]] Result<SignalingRouteKind> select_signaling_route(

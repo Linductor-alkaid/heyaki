@@ -1,5 +1,6 @@
 #include <heyaki/node.hpp>
 #include <heyaki/password.hpp>
+#include <heyaki/relay_enrollment_client.hpp>
 #include <heyaki/profile_store.hpp>
 #include <heyaki/version.hpp>
 
@@ -140,6 +141,35 @@ heyaki::Result<std::string> read_secret(std::string_view prompt) {
   return heyaki::Result<std::string>::success(std::move(value));
 }
 
+std::string_view relay_state_name(heyaki::RelayNodeState state) noexcept {
+  return heyaki::relay_node_state_name(state);
+}
+
+void print_error(const heyaki::Error& error);
+
+void render_relay(const heyaki::RelayNodeSnapshot& relay) {
+  if (!relay.enabled) {
+    std::cout << "RELAY   disabled\n";
+    return;
+  }
+  std::cout << "RELAY   " << relay_state_name(relay.state) << "  url=" << relay.relay_url
+            << "  tenant=" << relay.tenant
+            << "  generation=" << relay.enrollment_generation
+            << "  lease=" << relay.lease_generation
+            << "  heartbeat=" << relay.heartbeats_sent
+            << "  missed=" << relay.heartbeats_missed
+            << "  reconnect=" << relay.reconnect_count;
+  if (relay.backoff.count() > 0) {
+    std::cout << "  backoff=" << relay.backoff.count() << "ms";
+  }
+  std::cout << '\n';
+  if (relay.last_error) {
+    std::cout << "        ";
+    print_error(*relay.last_error);
+    std::cout << '\n';
+  }
+}
+
 std::string_view connectivity_mode_name(heyaki::ConnectivityMode mode) noexcept {
   switch (mode) {
     case heyaki::ConnectivityMode::automatic:
@@ -264,6 +294,7 @@ void render_uninitialized(std::string_view profile_name,
   std::cout << "HEYAKI  profile=" << profile_name << "\n\n";
   std::cout << "LOCAL   not-initialized\n";
   std::cout << "LAN     stopped\n";
+  std::cout << "RELAY   disabled\n";
   std::cout << "PAIRING unavailable\n";
   if (error) {
     std::cout << "FAILURE ";
@@ -290,6 +321,7 @@ void render_node(std::string_view profile_name, const heyaki::Node& node,
     std::cout << "closed";
   }
   std::cout << '\n';
+  render_relay(snapshot.relay);
 
   std::cout << "\nINTERFACES\n";
   if (snapshot.interfaces.empty()) {
@@ -529,6 +561,61 @@ heyaki::Result<heyaki::LocalProfileInitialization> read_local_initialization(
       });
 }
 
+heyaki::Result<void> enroll_relay_from_tui(heyaki::ProfileStore& profile,
+                                             std::string_view profile_name) {
+  auto existing = profile.relay_enrollments();
+  if (!existing) {
+    return heyaki::Result<void>::failure(*existing.error_if());
+  }
+  if (!existing.value_if()->empty()) {
+    render_uninitialized(profile_name);
+    return heyaki::Result<void>::success();
+  }
+  std::cout << "relay URL [wss://relay.example:8443]> " << std::flush;
+  std::string relay_url;
+  if (!std::getline(std::cin, relay_url) || relay_url.empty()) {
+    return heyaki::Result<void>::failure(
+        heyaki::Error{heyaki::ErrorCode::cancelled, "tui", "relay_url_cancelled"});
+  }
+  std::cout << "tenant [default]> " << std::flush;
+  std::string tenant;
+  if (!std::getline(std::cin, tenant)) {
+    return heyaki::Result<void>::failure(
+        heyaki::Error{heyaki::ErrorCode::cancelled, "tui", "relay_tenant_cancelled"});
+  }
+  if (tenant.empty()) {
+    tenant = "default";
+  }
+  auto token = read_secret("bootstrap token: ");
+  if (!token) {
+    return heyaki::Result<void>::failure(*token.error_if());
+  }
+  heyaki::RelayEnrollmentClientConfig config;
+  config.profile = &profile;
+  config.application_id = std::string{application_id};
+  config.relay_url = relay_url;
+  config.tenant = tenant;
+  config.auto_connect = true;
+  config.wss_transport = heyaki::RelayEnrollmentWssTransportConfig{
+      .relay_url = relay_url,
+      .relay_pin = std::nullopt,
+      .tls_ca_file = std::nullopt,
+      .tls_verify_peer = true,
+      .connect_timeout = 5s,
+      .handshake_timeout = 5s,
+      .close_timeout = 2s,
+      .runtime = heyaki::RuntimeConfig{}};
+  auto enrolled = heyaki::enroll_relay_profile(
+      config, *token.value_if(), static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::system_clock::now().time_since_epoch()).count()));
+  wipe_string(*token.value_if());
+  if (!enrolled) {
+    return heyaki::Result<void>::failure(*enrolled.error_if());
+  }
+  return heyaki::Result<void>::success();
+}
+
 int run_tui(const Options& options) {
   auto opened = heyaki::ProfileStore::open_default(options.profile_name);
   std::optional<heyaki::ProfileStore> profile;
@@ -655,42 +742,80 @@ int run_tui(const Options& options) {
     }
     return heyaki::Result<void>::success();
   };
-  auto node = heyaki::Node::create(
-      heyaki::NodeConfig{.profile = &*profile,
-                         .runtime = nullptr,
-                         .application_id = std::string{application_id},
-                         .lan_override = std::nullopt,
-                         .runtime_config = heyaki::RuntimeConfig{},
-                         .signaling_validator = {},
-                         .signaling_handler = std::move(handler)});
-  if (!node) {
-    render_uninitialized(options.profile_name, *node.error_if());
+  auto make_node = [&]() {
+    return heyaki::Node::create(
+        heyaki::NodeConfig{.profile = &*profile,
+                           .runtime = nullptr,
+                           .application_id = std::string{application_id},
+                           .lan_override = std::nullopt,
+                           .runtime_config = heyaki::RuntimeConfig{},
+                           .signaling_validator = {},
+                           .signaling_handler = handler,
+                           .relay_override = std::nullopt});
+  };
+  std::optional<heyaki::Node> node;
+  auto created_node = make_node();
+  if (!created_node) {
+    render_uninitialized(options.profile_name, *created_node.error_if());
     return 1;
   }
+  node.emplace(std::move(*created_node.value_if()));
 
   UiState state;
   if (options.status_only) {
-    render_node(options.profile_name, *node.value_if(), *bridge, state,
+    render_node(options.profile_name, *node, *bridge, state,
                 lan.value_if()->pending_signaling_capacity);
-    (void)node.value_if()->shutdown();
+    (void)node->shutdown();
     return 0;
   }
 
   bool running = true;
   while (running) {
     std::cout << "\x1b[2J\x1b[H";
-    render_node(options.profile_name, *node.value_if(), *bridge, state,
+    render_node(options.profile_name, *node, *bridge, state,
                 lan.value_if()->pending_signaling_capacity);
-    std::cout << "\ncommand [refresh|connect N|pair N|accept N|deny N|close N|quit]> "
+    std::cout << "\ncommand [refresh|relay|connect N|pair N|accept N|deny N|close N|quit]> "
               << std::flush;
     std::string line;
     if (!std::getline(std::cin, line)) {
       break;
     }
-    run_command(std::move(line), *node.value_if(), state, running);
+    std::istringstream probe{line};
+    std::string first_command;
+    probe >> first_command;
+    if (first_command == "relay") {
+      auto enrolled = enroll_relay_from_tui(*profile, options.profile_name);
+      if (!enrolled) {
+        state.command_status.clear();
+        state.command_error = *enrolled.error_if();
+        continue;
+      }
+      const auto stopped = node->shutdown();
+      if (!stopped.stopped) {
+        state.command_status.clear();
+        state.command_error =
+            heyaki::Error{heyaki::ErrorCode::timeout, "tui",
+                          "relay_node_restart_timeout"};
+        node.reset();
+        bridge->events.close();
+        return 1;
+      }
+      node.reset();
+      auto recreated = make_node();
+      if (!recreated) {
+        render_uninitialized(options.profile_name, *recreated.error_if());
+        bridge->events.close();
+        return 1;
+      }
+      node.emplace(std::move(*recreated.value_if()));
+      state.command_status = "relay-enrolled";
+      state.command_error.reset();
+      continue;
+    }
+    run_command(std::move(line), *node, state, running);
   }
   bridge->events.close();
-  const auto shutdown = node.value_if()->shutdown();
+  const auto shutdown = node->shutdown();
   return shutdown.stopped ? 0 : 1;
 }
 

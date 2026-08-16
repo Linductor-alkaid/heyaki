@@ -160,7 +160,10 @@ add_library(heyaki_client
   src/client/relay_enrollment_client.cpp
   src/client/relay_wss_client.cpp
   src/client/relay_wss_control.cpp
-  src/client/runtime.cpp)
+  src/client/runtime.cpp
+  src/relay/relay_endpoint.cpp
+  src/relay/relay_enrollment.cpp
+  src/relay/relay_login.cpp)
 add_library(heyaki::client ALIAS heyaki_client)
 set_target_properties(heyaki_client PROPERTIES EXPORT_NAME client OUTPUT_NAME heyaki_client)
 target_compile_features(heyaki_client PUBLIC cxx_std_20)
@@ -195,10 +198,8 @@ heyaki_configure_target(heyaki_transport_webrtc)
 add_library(heyaki_relay
   src/relay/relay_config.cpp
   src/relay/relay_database.cpp
-  src/relay/relay_endpoint.cpp
-  src/relay/relay_enrollment.cpp
+  src/relay/relay_endpoint_directory.cpp
   src/relay/relay_enrollment_service.cpp
-  src/relay/relay_login.cpp
   src/relay/relay_login_service.cpp
   src/relay/relay_lease_table.cpp
   src/relay/relay_rate_limiter.cpp
@@ -219,6 +220,9 @@ if(MSVC)
   set_source_files_properties(
     src/client/relay_wss_client.cpp
     src/relay/relay_database.cpp
+    src/relay/relay_endpoint.cpp
+    src/relay/relay_enrollment.cpp
+    src/relay/relay_login.cpp
     src/relay/relay_server.cpp
     PROPERTIES COMPILE_OPTIONS "/bigobj")
 endif()

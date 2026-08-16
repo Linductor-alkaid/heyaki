@@ -2,6 +2,10 @@
 
 #include "client/runtime_access.hpp"
 #include "relay_enrollment_service.hpp"
+#include "relay_endpoint.hpp"
+#include "relay_endpoint_directory.hpp"
+#include "relay_lease_table.hpp"
+#include "relay_login_service.hpp"
 
 #include <heyaki/relay_wss_control.hpp>
 
@@ -25,6 +29,7 @@
 #include <openssl/ssl.h>
 #include <sodium.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -119,6 +124,18 @@ struct RelayServer::Impl : std::enable_shared_from_this<RelayServer::Impl> {
   Result<void> admit_control_request(const RelaySession& session,
                                      std::string_view tenant = {},
                                      bool include_base_scopes = true);
+  Result<void> require_active_device(const std::shared_ptr<RelaySession>& session,
+                                     std::uint64_t now_unix_milliseconds);
+  void session_handle_logged_in(const std::shared_ptr<RelaySession>& session,
+                                RelayWssControlType type,
+                                std::span<const std::byte> payload);
+  void session_cleanup(const std::shared_ptr<RelaySession>& session);
+  void session_handle_heartbeat(const std::shared_ptr<RelaySession>& session,
+                                std::span<const std::byte> payload);
+  void session_handle_endpoint_publish(const std::shared_ptr<RelaySession>& session,
+                                       std::span<const std::byte> payload);
+  void session_handle_endpoint_query(const std::shared_ptr<RelaySession>& session,
+                                     std::span<const std::byte> payload);
   Result<RuntimeShutdownCompletion> begin_shutdown();
   void finish_shutdown();
   void request_stop();
@@ -136,6 +153,9 @@ struct RelayServer::Impl : std::enable_shared_from_this<RelayServer::Impl> {
   std::optional<RelayDatabase> database;
   std::optional<RelayRateLimiter> rate_limiter;
   std::optional<RelayEnrollmentService> enrollment_service;
+  std::optional<RelayLoginService> login_service;
+  std::optional<RelayLeaseTable> lease_table;
+  std::optional<RelayEndpointDirectory> endpoint_directory;
   RelayId relay_id{};
   executor::comm::DoubleBuffer<RelayServerSnapshot> snapshots;
   std::set<std::shared_ptr<RelaySession>> sessions;
@@ -411,10 +431,22 @@ class RelaySession : public std::enable_shared_from_this<RelaySession> {
   enum class ControlState : std::uint8_t {
     awaiting_challenge,
     awaiting_enrollment,
+    awaiting_login,
     enrolled,
+    logged_in,
+  };
+  enum class PendingChallengeKind : std::uint8_t {
+    none,
+    enrollment,
+    login,
   };
   ControlState control_state{ControlState::awaiting_challenge};
+  PendingChallengeKind challenge_kind{PendingChallengeKind::none};
   std::optional<EnrollmentChallengeNonce> control_challenge_nonce;
+  std::optional<DeviceId> logged_in_device_id;
+  std::optional<EndpointId> logged_in_endpoint_id;
+  std::string logged_in_tenant;
+  std::uint64_t logged_in_generation{};
   bool close_after_control_write{false};
   bool control_protocol_error{false};
   bool handshake_complete{false};
@@ -530,6 +562,26 @@ Result<void> RelayServer::Impl::initialize() {
   }
   enrollment_service.emplace(std::move(*enrollment.value_if()));
 
+  auto login = RelayLoginService::create(&*database, relay_id);
+  if (!login) {
+    return Result<void>::failure(*login.error_if());
+  }
+  login_service.emplace(std::move(*login.value_if()));
+
+  auto leases = RelayLeaseTable::create(config.lease);
+  if (!leases) {
+    return Result<void>::failure(*leases.error_if());
+  }
+  lease_table.emplace(std::move(*leases.value_if()));
+
+  auto endpoints = RelayEndpointDirectory::create(config.endpoint_directory);
+  if (!endpoints) {
+    return Result<void>::failure(*endpoints.error_if());
+  }
+  endpoint_directory.emplace(std::move(*endpoints.value_if()));
+  current.leases = lease_table->diagnostics();
+  current.endpoints = endpoint_directory->diagnostics();
+
   if (config.install_signal_handlers) {
     signals.add(SIGINT, error);
     if (!error) {
@@ -636,6 +688,7 @@ void RelayServer::Impl::on_accept(boost::system::error_code error,
 void RelayServer::Impl::on_session_finished(
     const std::shared_ptr<RelaySession>& session, bool handshake_timeout,
     bool handshake_error, bool protocol_rejected) {
+  session_cleanup(session);
   const auto erased = sessions.erase(session);
   if (erased == 0U) {
     return;
@@ -726,17 +779,29 @@ void RelayServer::Impl::session_handle_control(
     session->send_error(*frame.error_if(), true);
     return;
   }
+  const auto type = frame.value_if()->type;
 
   if (session->control_state == RelaySession::ControlState::awaiting_challenge) {
-    if (frame.value_if()->type != RelayWssControlType::enrollment_challenge ||
+    const bool enrollment_challenge =
+        type == RelayWssControlType::enrollment_challenge;
+    const bool login_challenge = type == RelayWssControlType::login_challenge;
+    if ((!enrollment_challenge && !login_challenge) ||
         !frame.value_if()->payload.empty()) {
       ++current.control_rejected;
       publish();
-      session->send_error(relay_error(ErrorCode::protocol,
-                                      "enrollment_challenge_request_invalid"), true);
+      session->send_error(
+          relay_error(ErrorCode::protocol, "relay_control_challenge_request_invalid"), true);
       return;
     }
-    auto challenge = enrollment_service->begin_challenge(unix_milliseconds_now());
+
+    Result<std::vector<std::byte>> challenge =
+        Result<std::vector<std::byte>>::failure(
+            relay_error(ErrorCode::cancelled, "relay_challenge_service_unavailable"));
+    if (enrollment_challenge && enrollment_service) {
+      challenge = enrollment_service->begin_challenge(unix_milliseconds_now());
+    } else if (login_challenge && login_service) {
+      challenge = login_service->begin_challenge(unix_milliseconds_now());
+    }
     if (!challenge) {
       ++current.control_rejected;
       publish();
@@ -747,25 +812,39 @@ void RelayServer::Impl::session_handle_control(
     if (!parsed_challenge) {
       ++current.control_rejected;
       publish();
-      session->send_error(relay_error(ErrorCode::internal,
-                                      "enrollment_challenge_encoding_failed"), false);
+      session->send_error(
+          relay_error(ErrorCode::internal, "relay_challenge_encoding_failed"), false);
       return;
     }
     session->control_challenge_nonce = parsed_challenge.value_if()->nonce;
-    session->control_state = RelaySession::ControlState::awaiting_enrollment;
-    ++current.enrollment_challenges;
+    if (enrollment_challenge) {
+      session->challenge_kind = RelaySession::PendingChallengeKind::enrollment;
+      session->control_state = RelaySession::ControlState::awaiting_enrollment;
+      ++current.enrollment_challenges;
+    } else {
+      session->challenge_kind = RelaySession::PendingChallengeKind::login;
+      session->control_state = RelaySession::ControlState::awaiting_login;
+      ++current.login_challenges;
+    }
+    current.enrollment = enrollment_service
+                             ? enrollment_service->diagnostics()
+                             : RelayEnrollmentServiceDiagnostics{};
+    current.login = login_service ? login_service->diagnostics()
+                                  : RelayLoginServiceDiagnostics{};
     publish();
-    session->send_control(RelayWssControlType::enrollment_challenge_response,
-                          *challenge.value_if());
+    session->send_control(
+        enrollment_challenge ? RelayWssControlType::enrollment_challenge_response
+                             : RelayWssControlType::login_challenge_response,
+        *challenge.value_if());
     return;
   }
 
   if (session->control_state == RelaySession::ControlState::awaiting_enrollment) {
-    if (frame.value_if()->type != RelayWssControlType::enrollment_request) {
+    if (type != RelayWssControlType::enrollment_request) {
       ++current.control_rejected;
       publish();
-      session->send_error(relay_error(ErrorCode::protocol,
-                                      "enrollment_request_expected"), true);
+      session->send_error(
+          relay_error(ErrorCode::protocol, "enrollment_request_expected"), true);
       return;
     }
     auto parsed = parse_enrollment_request(frame.value_if()->payload);
@@ -775,25 +854,30 @@ void RelayServer::Impl::session_handle_control(
       session->send_error(*parsed.error_if(), true);
       return;
     }
-    if (!session->control_challenge_nonce ||
+    if (session->challenge_kind != RelaySession::PendingChallengeKind::enrollment ||
+        !session->control_challenge_nonce ||
         parsed.value_if()->challenge_nonce != *session->control_challenge_nonce) {
       ++current.control_rejected;
       publish();
-      session->send_error(relay_error(ErrorCode::authentication,
-                                      "enrollment_challenge_session_mismatch"), false);
+      session->send_error(
+          relay_error(ErrorCode::authentication,
+                      "enrollment_challenge_session_mismatch"),
+          false);
       return;
     }
-    auto tenant_admitted = admit_control_request(
-        *session, parsed.value_if()->tenant, false);
+    auto tenant_admitted =
+        admit_control_request(*session, parsed.value_if()->tenant, false);
     if (!tenant_admitted) {
       session->send_error(*tenant_admitted.error_if(), false);
       return;
     }
-    auto completed = enrollment_service->complete(frame.value_if()->payload,
-                                                   unix_milliseconds_now());
+    auto completed =
+        enrollment_service->complete(frame.value_if()->payload, unix_milliseconds_now());
     if (!completed) {
       ++current.control_rejected;
       current.database = database->snapshot();
+      current.enrollment =
+          enrollment_service->diagnostics();
       publish();
       session->send_error(*completed.error_if(), false);
       return;
@@ -811,18 +895,413 @@ void RelayServer::Impl::session_handle_control(
       return;
     }
     session->control_state = RelaySession::ControlState::enrolled;
+    session->challenge_kind = RelaySession::PendingChallengeKind::none;
+    session->control_challenge_nonce.reset();
     ++current.enrollments_completed;
     current.database = database->snapshot();
+    current.enrollment = enrollment_service->diagnostics();
     publish();
     session->send_control(RelayWssControlType::enrollment_result,
                           *encoded.value_if());
     return;
   }
 
+  if (session->control_state == RelaySession::ControlState::awaiting_login) {
+    if (type != RelayWssControlType::login_request) {
+      ++current.control_rejected;
+      publish();
+      session->send_error(relay_error(ErrorCode::protocol, "login_request_expected"),
+                          true);
+      return;
+    }
+    auto parsed = parse_relay_login_request(frame.value_if()->payload);
+    if (!parsed) {
+      ++current.control_rejected;
+      publish();
+      session->send_error(*parsed.error_if(), true);
+      return;
+    }
+    if (session->challenge_kind != RelaySession::PendingChallengeKind::login ||
+        !session->control_challenge_nonce ||
+        parsed.value_if()->challenge_nonce != *session->control_challenge_nonce) {
+      ++current.control_rejected;
+      publish();
+      session->send_error(
+          relay_error(ErrorCode::authentication, "login_challenge_session_mismatch"),
+          false);
+      return;
+    }
+    auto tenant_admitted =
+        admit_control_request(*session, parsed.value_if()->tenant, false);
+    if (!tenant_admitted) {
+      session->send_error(*tenant_admitted.error_if(), false);
+      return;
+    }
+    auto authenticated = login_service->authenticate(frame.value_if()->payload,
+                                                     unix_milliseconds_now());
+    if (!authenticated) {
+      ++current.control_rejected;
+      current.database = database->snapshot();
+      current.login = login_service->diagnostics();
+      publish();
+      session->send_error(*authenticated.error_if(), false);
+      return;
+    }
+    session->control_state = RelaySession::ControlState::logged_in;
+    session->challenge_kind = RelaySession::PendingChallengeKind::none;
+    session->control_challenge_nonce.reset();
+    session->logged_in_device_id = authenticated.value_if()->device_id;
+    session->logged_in_endpoint_id = authenticated.value_if()->endpoint_id;
+    session->logged_in_tenant = authenticated.value_if()->tenant;
+    session->logged_in_generation =
+        authenticated.value_if()->enrollment_generation;
+    ++current.logins_completed;
+    current.database = database->snapshot();
+    current.login = login_service->diagnostics();
+    publish();
+
+    RelayWssLoginResult result{
+        .tenant = authenticated.value_if()->tenant,
+        .enrollment_generation =
+            authenticated.value_if()->enrollment_generation,
+        .lease_milliseconds =
+            static_cast<std::uint32_t>(config.lease.default_lease.count())};
+    auto encoded = encode_relay_wss_login_result(result);
+    if (!encoded) {
+      ++current.control_rejected;
+      publish();
+      session->send_error(*encoded.error_if(), false);
+      return;
+    }
+    session->send_control(RelayWssControlType::login_result, *encoded.value_if());
+    return;
+  }
+
+  if (session->control_state == RelaySession::ControlState::logged_in) {
+    if (type != RelayWssControlType::heartbeat &&
+        type != RelayWssControlType::endpoint_publish &&
+        type != RelayWssControlType::endpoint_query) {
+      ++current.control_rejected;
+      publish();
+      session->send_error(
+          relay_error(ErrorCode::protocol, "relay_logged_in_message_invalid"), true);
+      return;
+    }
+    auto tenant_admitted =
+        admit_control_request(*session, session->logged_in_tenant, false);
+    if (!tenant_admitted) {
+      session->send_error(*tenant_admitted.error_if(), false);
+      return;
+    }
+    auto active = require_active_device(session, unix_milliseconds_now());
+    if (!active) {
+      session->send_error(*active.error_if(), false);
+      return;
+    }
+    session_handle_logged_in(session, type, frame.value_if()->payload);
+    return;
+  }
+
   ++current.control_rejected;
   publish();
-  session->send_error(relay_error(ErrorCode::protocol,
-                                  "enrollment_already_completed"), true);
+  session->send_error(
+      relay_error(ErrorCode::protocol, "relay_control_session_already_completed"), true);
+}
+
+Result<void> RelayServer::Impl::require_active_device(
+    const std::shared_ptr<RelaySession>& session,
+    std::uint64_t /*now_unix_milliseconds*/) {
+  if (!session->logged_in_device_id || !session->logged_in_endpoint_id) {
+    return Result<void>::failure(
+        relay_error(ErrorCode::authentication, "relay_session_not_logged_in"));
+  }
+  if (!config.close_revoked_sessions) {
+    return Result<void>::success();
+  }
+  auto device = database->device(*session->logged_in_device_id);
+  if (!device) {
+    return Result<void>::failure(*device.error_if());
+  }
+  if (!device.value_if()->has_value()) {
+    return Result<void>::failure(
+        relay_error(ErrorCode::enrollment_revoked, "relay_device_unknown"));
+  }
+  const auto& record = device.value_if()->value();
+  if (record.status != RelayDeviceStatus::active ||
+      record.enrollment_generation != session->logged_in_generation ||
+      record.tenant != session->logged_in_tenant) {
+    return Result<void>::failure(
+        relay_error(ErrorCode::enrollment_revoked,
+                    "relay_device_revoked_or_generation_changed"));
+  }
+  return Result<void>::success();
+}
+
+void RelayServer::Impl::session_cleanup(
+    const std::shared_ptr<RelaySession>& session) {
+  if (session->logged_in_device_id && session->logged_in_endpoint_id &&
+      session->control_state == RelaySession::ControlState::logged_in) {
+    const RelayLeaseKey key{.device_id = *session->logged_in_device_id,
+                            .endpoint_id = *session->logged_in_endpoint_id};
+    if (lease_table) {
+      (void)lease_table->remove(key);
+      current.leases = lease_table->diagnostics();
+    }
+    if (endpoint_directory) {
+      (void)endpoint_directory->remove(
+        RelayEndpointKey{.device_id = key.device_id,
+                         .endpoint_id = key.endpoint_id});
+      current.endpoints = endpoint_directory->diagnostics();
+    }
+    session->control_state = RelaySession::ControlState::enrolled;
+  }
+}
+
+void RelayServer::Impl::session_handle_logged_in(
+    const std::shared_ptr<RelaySession>& session, RelayWssControlType type,
+    std::span<const std::byte> payload) {
+  switch (type) {
+    case RelayWssControlType::heartbeat:
+      session_handle_heartbeat(session, payload);
+      return;
+    case RelayWssControlType::endpoint_publish:
+      session_handle_endpoint_publish(session, payload);
+      return;
+    case RelayWssControlType::endpoint_query:
+      session_handle_endpoint_query(session, payload);
+      return;
+    default:
+      session->send_error(
+          relay_error(ErrorCode::protocol, "relay_logged_in_message_invalid"), true);
+      return;
+  }
+}
+
+void RelayServer::Impl::session_handle_heartbeat(
+    const std::shared_ptr<RelaySession>& session,
+    std::span<const std::byte> payload) {
+  auto parsed = parse_relay_wss_heartbeat_request(payload);
+  if (!parsed) {
+    ++current.control_rejected;
+    publish();
+    session->send_error(*parsed.error_if(), true);
+    return;
+  }
+  if (!session->logged_in_device_id || !session->logged_in_endpoint_id ||
+      !lease_table) {
+    session->send_error(
+        relay_error(ErrorCode::authentication, "relay_session_not_logged_in"), false);
+    return;
+  }
+  const auto requested = parsed.value_if()->lease_milliseconds.value_or(0U);
+  const auto before = std::chrono::steady_clock::now();
+  auto heartbeat = lease_table->heartbeat(
+      RelayLeaseKey{.device_id = *session->logged_in_device_id,
+                    .endpoint_id = *session->logged_in_endpoint_id},
+      session->logged_in_tenant,
+      std::chrono::milliseconds{static_cast<std::int64_t>(requested)}, before);
+  if (!heartbeat) {
+    session->send_error(*heartbeat.error_if(), false);
+    return;
+  }
+  const auto granted = std::max<std::int64_t>(
+      1, std::chrono::duration_cast<std::chrono::milliseconds>(
+             heartbeat.value_if()->expires_at - before)
+             .count());
+  RelayWssHeartbeatAck ack{
+      .lease_generation = heartbeat.value_if()->lease_generation,
+      .granted_lease_milliseconds = static_cast<std::uint32_t>(granted)};
+  auto encoded = encode_relay_wss_heartbeat_ack(ack);
+  if (!encoded) {
+    session->send_error(*encoded.error_if(), false);
+    return;
+  }
+  ++current.heartbeats;
+  current.leases = lease_table->diagnostics();
+  publish();
+  session->send_control(RelayWssControlType::heartbeat_ack,
+                        *encoded.value_if());
+}
+
+void RelayServer::Impl::session_handle_endpoint_publish(
+    const std::shared_ptr<RelaySession>& session,
+    std::span<const std::byte> payload) {
+  auto parsed_publish = parse_relay_wss_endpoint_publish(payload);
+  if (!parsed_publish) {
+    ++current.control_rejected;
+    publish();
+    session->send_error(*parsed_publish.error_if(), true);
+    return;
+  }
+  auto record =
+      parse_relay_endpoint_record(parsed_publish.value_if()->endpoint_record);
+  if (!record) {
+    ++current.control_rejected;
+    publish();
+    session->send_error(*record.error_if(), true);
+    return;
+  }
+  std::optional<RelayServiceManifest> manifest;
+  if (parsed_publish.value_if()->service_manifest) {
+    auto parsed_manifest =
+        parse_relay_service_manifest(*parsed_publish.value_if()->service_manifest);
+    if (!parsed_manifest) {
+      ++current.control_rejected;
+      publish();
+      session->send_error(*parsed_manifest.error_if(), true);
+      return;
+    }
+    manifest = std::move(*parsed_manifest.value_if());
+  }
+  if (!session->logged_in_device_id || !session->logged_in_endpoint_id) {
+    session->send_error(
+        relay_error(ErrorCode::authentication, "relay_session_not_logged_in"), false);
+    return;
+  }
+  const RelayLeaseKey key{.device_id = *session->logged_in_device_id,
+                          .endpoint_id = *session->logged_in_endpoint_id};
+  const RelayEndpointKey endpoint_key{.device_id = key.device_id,
+                                      .endpoint_id = key.endpoint_id};
+  if (record.value_if()->endpoint != endpoint_key) {
+    ++current.control_rejected;
+    publish();
+    session->send_error(
+        relay_error(ErrorCode::authentication, "endpoint_record_session_mismatch"),
+        false);
+    return;
+  }
+  if (!lease_table ||
+      !lease_table->get(key, std::chrono::steady_clock::now())) {
+    session->send_error(
+        relay_error(ErrorCode::permission, "endpoint_lease_required"), false);
+    return;
+  }
+  auto device = database->device(*session->logged_in_device_id);
+  if (!device || !device.value_if()->has_value()) {
+    const auto error = device ? relay_error(ErrorCode::authentication,
+                                            "endpoint_device_unknown")
+                              : *device.error_if();
+    session->send_error(error, false);
+    return;
+  }
+  if (!endpoint_directory) {
+    session->send_error(
+        relay_error(ErrorCode::cancelled, "endpoint_directory_unavailable"), false);
+    return;
+  }
+  const auto now_wall = unix_milliseconds_now();
+  const auto now_steady = std::chrono::steady_clock::now();
+  auto published = endpoint_directory->publish(
+      *record.value_if(), manifest, device.value_if()->value(),
+      session->logged_in_tenant, now_wall, now_steady);
+  if (!published) {
+    ++current.control_rejected;
+    current.endpoints = endpoint_directory->diagnostics();
+    publish();
+    session->send_error(*published.error_if(), false);
+    return;
+  }
+  RelayWssEndpointPublishAck ack{
+      .record_generation = record.value_if()->record_generation};
+  auto encoded = encode_relay_wss_endpoint_publish_ack(ack);
+  if (!encoded) {
+    session->send_error(*encoded.error_if(), false);
+    return;
+  }
+  ++current.endpoint_publications;
+  current.endpoints = endpoint_directory->diagnostics();
+  publish();
+  session->send_control(RelayWssControlType::endpoint_publish_ack,
+                        *encoded.value_if());
+}
+
+void RelayServer::Impl::session_handle_endpoint_query(
+    const std::shared_ptr<RelaySession>& session,
+    std::span<const std::byte> payload) {
+  auto parsed = parse_relay_wss_endpoint_query(payload);
+  if (!parsed) {
+    ++current.control_rejected;
+    publish();
+    session->send_error(*parsed.error_if(), true);
+    return;
+  }
+  if (!lease_table || !endpoint_directory) {
+    session->send_error(
+        relay_error(ErrorCode::cancelled, "relay_directory_unavailable"), false);
+    return;
+  }
+  const auto now_steady = std::chrono::steady_clock::now();
+  lease_table->expire(now_steady);
+  endpoint_directory->expire(now_steady);
+  auto online = lease_table->online_tenant(session->logged_in_tenant, now_steady);
+  if (online.size() > config.endpoint_query_max_results) {
+    ++current.control_rejected;
+    session->send_error(
+        relay_error(ErrorCode::resource_exhausted,
+                    "endpoint_query_result_capacity_exceeded"),
+        false);
+    return;
+  }
+  const auto now_wall = unix_milliseconds_now();
+  RelayWssEndpointQueryResult result;
+  for (const auto& lease : online) {
+    if (parsed.value_if()->device_id &&
+        lease.key.device_id != *parsed.value_if()->device_id) {
+      continue;
+    }
+    if (parsed.value_if()->endpoint_id &&
+        lease.key.endpoint_id != *parsed.value_if()->endpoint_id) {
+      continue;
+    }
+    auto entry = endpoint_directory->get(
+        RelayEndpointKey{.device_id = lease.key.device_id,
+                         .endpoint_id = lease.key.endpoint_id},
+        now_steady);
+    if (!entry) {
+      continue;
+    }
+    auto publication = publish_relay_endpoint(
+        entry->record, entry->manifest, config.endpoint_exposure, now_wall);
+    if (!publication) {
+      continue;
+    }
+    RelayWssEndpointPublication wire_publication;
+    wire_publication.device_id = publication.value_if()->endpoint.device_id;
+    wire_publication.endpoint_id = publication.value_if()->endpoint.endpoint_id;
+    wire_publication.application_id = publication.value_if()->application_id;
+    wire_publication.record_generation = publication.value_if()->record_generation;
+    wire_publication.manifest_generation = publication.value_if()->manifest_generation;
+    wire_publication.manifest_sha256 = publication.value_if()->manifest_sha256;
+    wire_publication.expires_unix_milliseconds =
+        publication.value_if()->expires_unix_milliseconds;
+    const auto lease_remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+        lease.expires_at - now_steady);
+    const auto lease_expiry = lease_remaining.count() > 0
+        ? now_wall + static_cast<std::uint64_t>(lease_remaining.count())
+        : now_wall;
+    wire_publication.lease_expires_unix_milliseconds = lease_expiry;
+    result.endpoints.push_back(std::move(wire_publication));
+  }
+  auto encoded = encode_relay_wss_endpoint_query_result(result);
+  if (!encoded) {
+    session->send_error(*encoded.error_if(), false);
+    return;
+  }
+  if (encoded.value_if()->size() >
+      max_relay_wss_control_frame_bytes - relay_wss_control_header_bytes) {
+    ++current.control_rejected;
+    session->send_error(
+        relay_error(ErrorCode::resource_exhausted,
+                    "endpoint_query_result_frame_too_large"),
+        false);
+    return;
+  }
+  ++current.endpoint_queries;
+  current.leases = lease_table->diagnostics();
+  current.endpoints = endpoint_directory->diagnostics();
+  publish();
+  session->send_control(RelayWssControlType::endpoint_query_result,
+                        *encoded.value_if());
 }
 
 void RelayServer::Impl::session_reject_policy(

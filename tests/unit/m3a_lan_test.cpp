@@ -277,7 +277,8 @@ NodeConfig node_config(ProfileStore& profile, std::string application_id,
                     .lan_override = std::nullopt,
                     .runtime_config = RuntimeConfig{},
                     .signaling_validator = std::move(validator),
-                    .signaling_handler = std::move(handler)};
+                    .signaling_handler = std::move(handler),
+                    .relay_override = std::nullopt};
 }
 
 RequestId request_id(std::uint8_t tag) {

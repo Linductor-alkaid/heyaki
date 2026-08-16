@@ -1,5 +1,6 @@
 #include "relay_database.hpp"
 #include "relay_endpoint.hpp"
+#include "relay_endpoint_directory.hpp"
 
 #include <gtest/gtest.h>
 
@@ -235,6 +236,82 @@ TEST(M3BRelayEndpointTest, ParserRejectsDuplicateUnknownAndTruncatedFields) {
   EXPECT_FALSE(parse_relay_service_manifest(
       std::span<const std::byte>{manifest_bytes.value_if()->data(),
                                  manifest_bytes.value_if()->size() - 2U}));
+}
+
+TEST(M3BRelayEndpointTest, DirectoryBoundedPublishGetExpiryAndRemoval) {
+  auto identity = create_identity();
+  ASSERT_TRUE(identity) << identity.error_if()->safe_detail();
+  const auto now = now_milliseconds();
+  auto record = make_record(*identity.value_if(), now);
+  auto manifest = make_manifest(*identity.value_if(), record, now);
+
+  RelayDeviceRecord device;
+  device.device_id = identity.value_if()->device_id();
+  device.public_key = identity.value_if()->public_key();
+  device.tenant = "tenant-a";
+  device.display_name = "device";
+  device.enrollment_generation = 1U;
+  device.status = RelayDeviceStatus::active;
+
+  auto directory = RelayEndpointDirectory::create(RelayEndpointDirectoryConfig{
+      .capacity = 2U, .maximum_ttl = std::chrono::seconds{60}});
+  ASSERT_TRUE(directory) << directory.error_if()->safe_detail();
+  ASSERT_TRUE(directory.value_if()->publish(record, manifest, device, "tenant-a",
+                                            now + 1U));
+  auto stored = directory.value_if()->get(record.endpoint);
+  ASSERT_TRUE(stored);
+  EXPECT_EQ(stored->tenant, "tenant-a");
+  EXPECT_TRUE(stored->manifest);
+  EXPECT_EQ(directory.value_if()->diagnostics().published, 1U);
+
+  EXPECT_TRUE(directory.value_if()->remove(record.endpoint));
+  EXPECT_FALSE(directory.value_if()->get(record.endpoint));
+  EXPECT_EQ(directory.value_if()->diagnostics().removed, 1U);
+
+  ASSERT_TRUE(directory.value_if()->publish(record, manifest, device, "tenant-a",
+                                            now + 1U));
+  EXPECT_TRUE(directory.value_if()->publish(record, manifest, device, "tenant-b",
+                                            now + 2U)
+                  .error_if());
+  EXPECT_EQ(directory.value_if()->diagnostics().tenant_conflict_rejected, 1U);
+
+  record.record_generation = 0U;
+  EXPECT_TRUE(directory.value_if()->publish(record, manifest, device, "tenant-a",
+                                            now + 3U)
+                  .error_if());
+  EXPECT_GE(directory.value_if()->diagnostics().validation_rejected, 1U);
+}
+
+TEST(M3BRelayEndpointTest, DirectoryRejectsOldAndConflictingGeneration) {
+  auto identity = create_identity();
+  ASSERT_TRUE(identity) << identity.error_if()->safe_detail();
+  const auto now = now_milliseconds();
+  auto first = make_record(*identity.value_if(), now);
+  auto directory = RelayEndpointDirectory::create();
+  ASSERT_TRUE(directory) << directory.error_if()->safe_detail();
+
+  RelayDeviceRecord device;
+  device.device_id = identity.value_if()->device_id();
+  device.public_key = identity.value_if()->public_key();
+  device.tenant = "tenant-a";
+  device.display_name = "device";
+  device.enrollment_generation = 1U;
+  device.status = RelayDeviceStatus::active;
+
+  auto second = first;
+  second.record_generation = 2U;
+  ASSERT_TRUE(sign_relay_endpoint_record(second, *identity.value_if()));
+  ASSERT_TRUE(directory.value_if()->publish(second, std::nullopt, device,
+                                            "tenant-a", now + 1U));
+  ASSERT_TRUE(directory.value_if()->publish(first, std::nullopt, device,
+                                            "tenant-a", now + 2U)
+                  .error_if());
+
+  auto conflict = second;
+  conflict.application_id = "com.example.other";
+  ASSERT_TRUE(sign_relay_endpoint_record(conflict, *identity.value_if()));
+  EXPECT_FALSE(directory.value_if()->publish(conflict, std::nullopt, device,
+                                             "tenant-a", now + 3U));
 }
 
 }  // namespace

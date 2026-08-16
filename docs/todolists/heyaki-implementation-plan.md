@@ -1,6 +1,6 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：M3A-01～18 实现验收完成，Linux/Windows 发现、隔离网络、安全与 libFuzzer 门禁通过；Windows firewall/AP isolation 与长期压力待专用环境；M3B 可并行推进
+> - 状态：M3A-01～18 实现验收完成；M3B-01～09、14～20 已实现并完成本机/定向 sanitizer 验收，真实 coturn allocation 与隔离拓扑（M3B-10～13）及对应退出条件待具备 root/coturn 的专用环境
 > - 日期：2026-08-16
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)、[局域网无服务器连接设计](../design/lan-serverless-connectivity.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
@@ -387,15 +387,15 @@ signaling operation/callback、通信队列、directory/replay cache 与 executo
 
 ### 6.4 M3B：Relay 控制面
 
-- [ ] `M3B-01` 实现 `heyaki-relay` TLS 1.3/WSS 服务骨架、健康检查、配置加载和有界 graceful shutdown。
-- [ ] `M3B-02` 实现 SQLite 表 `devices`、`bootstrap_tokens`、`device_audit` 及迁移；在线 presence 和 pending signaling 仅保存在有界 TTL 内存结构。
-- [ ] `M3B-03` 实现 bootstrap token 哈希、tenant 绑定、过期、使用次数和竞争消费事务。
-- [ ] `M3B-04` 实现 enrollment challenge-response，验证公钥派生 `DeviceId`、签名、token、`EndpointId` 和最小 capability。
-- [ ] `M3B-05` 实现设备吊销、enrollment generation 与审计；吊销后拒绝新登录，现有连接行为由配置明确。
-- [ ] `M3B-06` 实现自动登录 challenge-response，不要求 bootstrap token 或授权密码，但每次校验随机 challenge、generation 和状态。
-- [ ] `M3B-07` 实现 `(DeviceId, EndpointId)` 租约、心跳、到期、同设备多 endpoint 和同租户在线查询。
-- [ ] `M3B-08` 对 endpoint record/service manifest 验证设备签名、大小和字段上限，只暴露租户策略允许的最小信息。
-- [ ] `M3B-09` 为 enrollment/login/query/heartbeat 设置连接、请求、tenant 和 IP 级速率限制及明确拒绝指标。
+- [x] `M3B-01` 实现 `heyaki-relay` TLS 1.3/WSS 服务骨架、健康检查、配置加载和有界 graceful shutdown。
+- [x] `M3B-02` 实现 SQLite 表 `devices`、`bootstrap_tokens`、`device_audit` 及迁移；在线 presence 和 pending signaling 仅保存在有界 TTL 内存结构。
+- [x] `M3B-03` 实现 bootstrap token 哈希、tenant 绑定、过期、使用次数和竞争消费事务。
+- [x] `M3B-04` 实现 enrollment challenge-response，验证公钥派生 `DeviceId`、签名、token、`EndpointId` 和最小 capability。
+- [x] `M3B-05` 实现设备吊销、enrollment generation 与审计；吊销后拒绝新登录，现有连接行为由配置明确。
+- [x] `M3B-06` 实现自动登录 challenge-response，不要求 bootstrap token 或授权密码，但每次校验随机 challenge、generation 和状态。
+- [x] `M3B-07` 实现 `(DeviceId, EndpointId)` 租约、心跳、到期、同设备多 endpoint 和同租户在线查询。
+- [x] `M3B-08` 对 endpoint record/service manifest 验证设备签名、大小和字段上限，只暴露租户策略允许的最小信息。
+- [x] `M3B-09` 为 enrollment/login/query/heartbeat 设置连接、请求、tenant 和 IP 级速率限制及明确拒绝指标。
 
 ### M3B 实施进度（2026-08-16）
 
@@ -635,13 +635,13 @@ Windows Debug/Release、ASan/UBSan/TSAN 全部通过。真实 WSS exchange 尚�
 
 ### 6.6 M3B：客户端 enrollment 与 TUI
 
-- [ ] `M3B-14` 实现设备端 WSS client、证书/主机名校验、可选 relay pin 和安全错误分类。
-- [ ] `M3B-15` 实现可选 relay enrollment API：只使用现有本地身份/endpoint，提交成功 record 后原子写 ProfileStore，不重新生成身份或 verifier。
-- [ ] `M3B-16` 只有 enrollment 持久化成功才报告完成；失败时撤销或标记服务端半完成 enrollment 以便安全重试。
-- [ ] `M3B-17` 实现自动登录、15 秒默认心跳、3 次丢失离线和带 jitter 的有界指数退避；安全错误停止自动重试，relay 失败不关闭 LAN readiness。
-- [ ] `M3B-18` TUI onboarding 将“创建本地身份”和“连接 Relay”分成明确步骤，密码控件隐藏内容且不进入 history/log。
-- [ ] `M3B-19` TUI Relay 视图展示 enrollment、租约、重连、endpoint 来源和需要人工处理的状态；本机/LAN 视图在 relay 不可用时仍可操作。
-- [ ] `M3B-20` TUI renderer 只消费有界 `UiEvent` 通道；高频状态使用 latest-only 聚合，关闭时先取消 operation 再释放 profile。
+- [x] `M3B-14` 实现设备端 WSS client、证书/主机名校验、可选 relay pin 和安全错误分类。
+- [x] `M3B-15` 实现可选 relay enrollment API：只使用现有本地身份/endpoint，提交成功 record 后原子写 ProfileStore，不重新生成身份或 verifier。
+- [x] `M3B-16` 只有 enrollment 持久化成功才报告完成；失败时撤销或标记服务端半完成 enrollment 以便安全重试。
+- [x] `M3B-17` 实现自动登录、15 秒默认心跳、3 次丢失离线和带 jitter 的有界指数退避；安全错误停止自动重试，relay 失败不关闭 LAN readiness。
+- [x] `M3B-18` TUI onboarding 将“创建本地身份”和“连接 Relay”分成明确步骤，密码控件隐藏内容且不进入 history/log。
+- [x] `M3B-19` TUI Relay 视图展示 enrollment、租约、重连、endpoint 来源和需要人工处理的状态；本机/LAN 视图在 relay 不可用时仍可操作。
+- [x] `M3B-20` TUI renderer 只消费有界 `UiEvent` 通道；高频状态使用 latest-only 聚合，关闭时先取消 operation 再释放 profile。
 
 ### M3B 实施进度（2026-08-16，第12轮）
 
@@ -665,10 +665,45 @@ Windows Debug/Release、ASan/UBSan/TSAN 全部通过。真实 WSS exchange 尚�
 
 本机验证：GCC Debug `-Werror` 全量 CTest 27/27（coturn 拓扑 1 项环境 skip），relay 58/58；
 禁异常 `heyaki-relay` 与公开头独立编译通过，ASan/UBSan/TSAN 定向 relay 测试各 1/1 通过。
-自动登录、heartbeat/lease、endpoint publish/query 和真实 ProfileStore enrollment exchange
-仍未接入 `/control`，因此 `M3B-04`、`M3B-09`、`M3B-14`～`M3B-16` 继续保持未勾选；
+本轮完成后，`M3B-01`～`M3B-04` 与 `M3B-14` 已满足条目并勾选。自动登录、
+heartbeat/lease、endpoint publish/query 和真实 ProfileStore enrollment exchange 仍未接入
+`/control`，因此 `M3B-05`～`M3B-09` 与 `M3B-15`～`M3B-20` 继续保持未勾选；真实 coturn
+allocation 和隔离拓扑尚未完成，`M3B-10`～`M3B-13` 同样保持未勾选。
 GitHub Actions run `31944662316` 结论 success：Linux GCC/Clang Debug/Release、
 Windows Debug/Release、ASan/UBSan/TSAN 全部通过。
+
+### M3B 实施进度（2026-08-16，第13轮）
+
+第十三轮把自动登录、租约、endpoint directory 与客户端 onboarding 闭环接入 `/control`：
+
+- `relay_wss_control` 增加 `login_challenge/login_request/login_result`、
+  `heartbeat/heartbeat_ack`、`endpoint_publish/endpoint_publish_ack`、
+  `endpoint_query/endpoint_query_result`，并新增 normative
+  `proto/heyaki/relay/v1/relay_control.proto`；编码器与生成的 Protobuf Lite 消息逐字节一致，
+  parser 拒绝重复/未知/截断/非规范字段。
+- `RelayServer` 增加 login service、lease table 与有界 endpoint directory 的 WSS 状态机：
+  challenge 会话绑定、登录 tenant/generation/吊销校验、45 秒默认租约、heartbeat 刷新、
+  同设备多 endpoint、同租户查询、默认最小 exposure policy、记录签名与 manifest 绑定、
+  connection 关闭时清理 lease/record；`close_revoked_sessions` 配置决定已登录会话在吊销后
+  是否被下一次控制消息关闭。快照补齐 login/lease/endpoint 计数与诊断。
+- enrollment/login/endpoint 协议 codec 移入 `heyaki_client`，`enroll_relay_profile` 在没有注入
+  exchange 时使用真实 TLS/WSS 路径完成 challenge/request/result；服务端对同租户同身份
+  enrollment 幂等，持久化失败后的安全重试不再要求剩余 token。
+- `Node` 从 `ProfileStore` 的 auto-connect enrollment 或 `relay_override` 启动自动登录：
+  复用同一 executor-managed Asio runtime 的 strand 与三个定时器，实现 15 秒默认心跳、3 次丢失
+  离线、带 jitter 的有界指数退避、安全错误停止重试；relay 失败只更新 relay 状态，不关闭
+  LAN readiness。`RelayWssClient` 增加非阻塞 `start_connect`/`try_receive`，不新增线程或
+  私有执行循环。
+- `heyaki-tui` 把 `relay` 作为本地初始化后的独立 onboarding 步骤；bootstrap token 继续使用
+  隐藏输入并立即擦除。状态/交互视图显示 `RELAY` 状态、url、tenant、generation、lease、
+  heartbeat/missed、reconnect 与 backoff；LAN 视图在 relay 不可用时保持可操作。UI 仍只消费
+  有界 `UiEvent` channel，relay 高频状态经 `DoubleBuffer` latest-only 聚合。
+
+验证：GCC Debug `-Werror` 全量 CTest 27/27；`heyaki_m3b_relay` 70/70，新增 WSS 登录/心跳/
+endpoint publish/query、吊销会话关闭、真实 ProfileStore enrollment + 幂等重试、Node 自动登录
+与 profile 重启自动登录、同设备多 endpoint 查询及 control payload golden-byte 测试。
+本轮完成后 `M3B-05`～`M3B-09` 与 `M3B-15`～`M3B-20` 满足条目并勾选；真实 coturn allocation
+和隔离拓扑仍受当前环境无 root/coturn 限制，`M3B-10`～`M3B-13` 与对应退出条件保持未勾选。
 
 ### M3B 测试与退出条件
 

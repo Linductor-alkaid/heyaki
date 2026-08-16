@@ -70,15 +70,39 @@ enrollment_challenge(empty)
   -> enrollment_result(tenant, generation, remaining token uses)
 ```
 
+After a device has an active enrollment it opens a new `/control` connection and uses the ordered
+auto-login flow:
+
+```text
+login_challenge(empty)
+  -> login_challenge_response(EnrollmentChallenge)
+  -> login_request(RelayLoginRequest)
+  -> login_result(RelayLoginResult)
+
+heartbeat(HeartbeatRequest) -> heartbeat_ack(HeartbeatAck)
+endpoint_publish(EndpointPublish) -> endpoint_publish_ack(EndpointPublishAck)
+endpoint_query(EndpointQuery) -> endpoint_query_result(EndpointQueryResult)
+```
+
+Enrollment and login challenges are accepted only by the WSS session that requested them. A logged-in
+session is bound to its authenticated `(DeviceId, EndpointId)` and tenant; heartbeat extends the
+bounded in-memory lease, endpoint publish stores only validated signed records in a bounded TTL
+directory, and endpoint query returns only online endpoints in the caller tenant under the configured
+tenant exposure policy. Revoked devices are rejected at login; by default a revoked device also loses
+its existing control session on the next authenticated message.
+
 The nested payloads are the normative Protobuf messages in
-`heyaki.protocol.enrollment.v1`: `EnrollmentChallenge`, `EnrollmentRequest`, `EnrollmentResult`,
-and `ControlError`. `ControlError` carries only a stable `ErrorCode` numeric value and a bounded
+`heyaki.protocol.enrollment.v1` (`EnrollmentChallenge`, `EnrollmentRequest`, `EnrollmentResult`,
+`EndpointRecord`, `ServiceManifest`, and `ControlError`) and
+`heyaki.protocol.relay.v1` (`LoginResult`, `HeartbeatRequest`, `HeartbeatAck`,
+`EndpointPublish`, `EndpointPublishAck`, `EndpointQuery`, `EndpointPublication`, and
+`EndpointQueryResult`). `ControlError` carries only a stable `ErrorCode` numeric value and a bounded
 `safe_detail`; it never carries a bootstrap token, private key, password, verifier, or raw database
 error. Authentication, capacity, and rate-limit rejection sends `control_error` and closes normally.
 Invalid shape/order sends `control_error` and closes with WebSocket policy error. Every received
 message is charged to the connection, global-request, and source-IP rate limits before parsing; a
-valid enrollment request is additionally charged to the tenant limit using a SHA-256-derived
-bounded key. A challenge is accepted only by the WSS session that requested it.
+valid enrollment/login/publish/query request is additionally charged to the tenant limit using a
+SHA-256-derived bounded key.
 
 ## 2. Frame encoding
 

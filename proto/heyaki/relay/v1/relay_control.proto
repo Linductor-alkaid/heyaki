@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package heyaki.protocol.relay.v1;
+
+option optimize_for = LITE_RUNTIME;
+
+// Relay WSS control-plane messages after the enrollment flow.
+// The control envelope is intentionally not a Protobuf message itself; these
+// messages are the bounded payloads of relay_wss_control.hpp.
+message LoginResult {
+  string tenant = 1;
+  uint64 enrollment_generation = 2;
+  uint32 lease_milliseconds = 3; // Bounded to 1..120000.
+}
+
+message HeartbeatRequest {
+  optional uint32 lease_milliseconds = 1; // Absent or zero selects server default.
+}
+
+message HeartbeatAck {
+  uint64 lease_generation = 1;
+  uint32 granted_lease_milliseconds = 2;
+}
+
+message EndpointPublish {
+  bytes endpoint_record = 1;       // Serialized enrollment.v1.EndpointRecord, <= 16 KiB.
+  optional bytes service_manifest = 2; // Serialized enrollment.v1.ServiceManifest, <= 16 KiB.
+}
+
+message EndpointPublishAck {
+  uint64 record_generation = 1;
+}
+
+message EndpointQuery {
+  optional bytes device_id = 1;   // Exactly 32 bytes when present.
+  optional bytes endpoint_id = 2; // Exactly 16 bytes when present; requires device_id.
+}
+
+message EndpointPublication {
+  bytes device_id = 1;            // Exactly 32 bytes.
+  bytes endpoint_id = 2;          // Exactly 16 bytes.
+  optional string application_id = 3;
+  optional uint64 record_generation = 4;
+  optional uint64 manifest_generation = 5;
+  optional bytes manifest_sha256 = 6; // Exactly 32 bytes when present.
+  optional uint64 expires_unix_milliseconds = 7;
+  optional uint64 lease_expires_unix_milliseconds = 8;
+}
+
+message EndpointQueryResult {
+  repeated EndpointPublication endpoints = 1;
+}

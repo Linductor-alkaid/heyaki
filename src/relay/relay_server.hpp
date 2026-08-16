@@ -2,6 +2,10 @@
 
 #include "relay_config.hpp"
 #include "relay_database.hpp"
+#include "relay_endpoint_directory.hpp"
+#include "relay_enrollment_service.hpp"
+#include "relay_lease_table.hpp"
+#include "relay_login_service.hpp"
 
 #include <heyaki/error.hpp>
 
@@ -39,8 +43,17 @@ struct RelayServerSnapshot {
   std::uint64_t handshake_timeouts{};
   std::uint64_t handshake_failed{};
   std::uint64_t protocol_rejected{};
+  std::uint64_t login_challenges{};
+  std::uint64_t logins_completed{};
+  std::uint64_t heartbeats{};
+  std::uint64_t endpoint_publications{};
+  std::uint64_t endpoint_queries{};
   RelayDatabaseSnapshot database;
   RelayRateLimitDiagnostics rate_limits;
+  RelayLeaseDiagnostics leases;
+  RelayEndpointDirectoryDiagnostics endpoints;
+  RelayLoginServiceDiagnostics login;
+  RelayEnrollmentServiceDiagnostics enrollment;
   bool stop_requested{false};
   std::optional<Error> last_error;
 };

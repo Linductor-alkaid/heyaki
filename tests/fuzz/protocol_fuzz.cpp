@@ -12,6 +12,7 @@
 #include "heyaki/file/v1/file.pb.h"
 #include "heyaki/message/v1/message.pb.h"
 #include "heyaki/pairing/v1/pairing.pb.h"
+#include "heyaki/relay/v1/relay_control.pb.h"
 #include "heyaki/rpc/v1/rpc.pb.h"
 #include "heyaki/session/v1/session.pb.h"
 #include "heyaki/shell/v1/shell.pb.h"
@@ -398,6 +399,14 @@ void protobuf_schema_parser(std::span<const std::byte> input) {
   parse_protobuf<protocol::enrollment::v1::EnrollmentRecord>(input);
   parse_protobuf<protocol::enrollment::v1::EndpointRecord>(input);
   parse_protobuf<protocol::enrollment::v1::ServiceManifest>(input);
+  parse_protobuf<protocol::relay::v1::LoginResult>(input);
+  parse_protobuf<protocol::relay::v1::HeartbeatRequest>(input);
+  parse_protobuf<protocol::relay::v1::HeartbeatAck>(input);
+  parse_protobuf<protocol::relay::v1::EndpointPublish>(input);
+  parse_protobuf<protocol::relay::v1::EndpointPublishAck>(input);
+  parse_protobuf<protocol::relay::v1::EndpointQuery>(input);
+  parse_protobuf<protocol::relay::v1::EndpointPublication>(input);
+  parse_protobuf<protocol::relay::v1::EndpointQueryResult>(input);
   parse_protobuf<protocol::signaling::v1::SignalBinding>(input);
   parse_protobuf<protocol::signaling::v1::SignedOffer>(input);
   parse_protobuf<protocol::signaling::v1::SignedAnswer>(input);

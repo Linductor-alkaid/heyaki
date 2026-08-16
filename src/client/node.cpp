@@ -1,6 +1,10 @@
 #include <heyaki/node.hpp>
 
 #include "runtime_access.hpp"
+#include "relay_wss_client.hpp"
+#include "../relay/relay_login.hpp"
+
+#include <heyaki/relay_wss_control.hpp>
 
 #include <executor/comm.hpp>
 
@@ -33,6 +37,7 @@
 #include <deque>
 #include <future>
 #include <limits>
+#include <random>
 #include <map>
 #include <memory>
 #include <optional>
@@ -381,6 +386,45 @@ bool is_signed_signaling_kind(LanSignalingMessageKind kind) noexcept {
 
 }  // namespace
 
+static std::string relay_control_url(std::string relay_url) {
+  while (relay_url.size() > 1U && relay_url.back() == '/') {
+    relay_url.pop_back();
+  }
+  if (relay_url.ends_with(relay_wss_control_path)) {
+    return relay_url;
+  }
+  relay_url.append(relay_wss_control_path);
+  return relay_url;
+}
+
+Result<void> validate_relay_node_config(const RelayNodeConfig& config) {
+  if (!config.enabled) {
+    return Result<void>::success();
+  }
+  if (config.relay_url.empty() || config.relay_url.size() > 2048U ||
+      config.tenant.empty() || config.tenant.size() > 128U ||
+      (config.relay_pin && config.relay_pin->size() != relay_tls_pin_bytes) ||
+      config.enrollment_generation == 0U ||
+      config.connect_timeout.count() <= 0 || config.handshake_timeout.count() <= 0 ||
+      config.close_timeout.count() <= 0 || config.heartbeat_interval.count() < 1000 ||
+      config.lease_duration.count() < 1000 ||
+      config.lease_duration > std::chrono::milliseconds{120000} ||
+      config.missed_heartbeat_limit == 0U || config.missed_heartbeat_limit > 64U ||
+      config.minimum_backoff.count() < 100 || config.maximum_backoff < config.minimum_backoff ||
+      config.poll_interval.count() < 10 || config.poll_interval.count() > 1000 ||
+      config.receive_capacity == 0U || config.send_capacity == 0U) {
+    return Result<void>::failure(
+        node_error(ErrorCode::configuration, "relay_node_config_invalid"));
+  }
+  return Result<void>::success();
+}
+
+bool is_relay_security_error(const Error& error) noexcept {
+  return error.code() == ErrorCode::authentication ||
+         error.code() == ErrorCode::enrollment_revoked ||
+         error.code() == ErrorCode::permission;
+}
+
 class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
  public:
   struct DiscoverySocket : public std::enable_shared_from_this<DiscoverySocket> {
@@ -723,19 +767,31 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     source_state_capacity_full,
   };
 
+  enum class RelayLoginPhase : std::uint8_t {
+    disabled,
+    connecting,
+    awaiting_challenge,
+    awaiting_login,
+    ready,
+    failed,
+    stopped,
+  };
+
   Impl(ProfileStore& profile, std::optional<Runtime> owned_runtime, Runtime* borrowed_runtime,
        std::string application_id, LanConfiguration lan, IdentityKeyPair identity,
        EndpointId endpoint_id, EndpointDirectory directory,
        boost::asio::any_io_executor executor, std::set<DeviceId> trusted_devices,
        LanSignalingValidator signaling_validator,
-       LanSignalingHandler signaling_handler)
+       LanSignalingHandler signaling_handler,
+       std::optional<RelayNodeConfig> relay_override)
       : profile(profile), owned_runtime(std::move(owned_runtime)),
         runtime(this->owned_runtime ? &*this->owned_runtime : borrowed_runtime),
         application_id(std::move(application_id)), lan(std::move(lan)),
         identity(std::move(identity)), endpoint_id(endpoint_id), boot_nonce(make_boot_nonce()),
         directory(std::move(directory)), strand(boost::asio::make_strand(std::move(executor))),
         announce_timer(strand), expiry_timer(strand), interface_timer(strand),
-        readiness_timer(strand),
+        readiness_timer(strand), relay_poll_timer(strand), relay_heartbeat_timer(strand),
+        relay_reconnect_timer(strand),
         scan_results(scan_channel_options()), snapshots(NodeSnapshot{}, "heyaki-node-snapshot"),
         endpoint_snapshots(std::vector<EndpointDirectoryEntrySnapshot>{},
                            "heyaki-endpoint-snapshot"),
@@ -747,7 +803,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
                             "heyaki-lan-signaling-snapshot"),
         stopped("heyaki-node-stopped"), trusted_devices(std::move(trusted_devices)),
         signaling_validator(std::move(signaling_validator)),
-        signaling_handler(std::move(signaling_handler)) {}
+        signaling_handler(std::move(signaling_handler)),
+        relay_override(std::move(relay_override)) {}
 
   static LanBootNonce make_boot_nonce() {
     LanBootNonce value{};
@@ -768,6 +825,18 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     snapshots.publish(initial);
     endpoint_snapshots.publish({});
     signaling_snapshots.publish({});
+
+    const auto relay_initialized = initialize_relay();
+    if (!relay_initialized) {
+      update_snapshot([&](NodeSnapshot& snapshot) {
+        snapshot.relay.enabled = true;
+        snapshot.relay.state = RelayNodeState::failed;
+        snapshot.relay.last_error = *relay_initialized.error_if();
+      });
+      if (relay_override && relay_override->enabled) {
+        return relay_initialized;
+      }
+    }
 
     if (!initial.lan_enabled) {
       return register_shutdown_hooks();
@@ -829,6 +898,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   }
 
   void begin() {
+    begin_relay();
     if (!snapshots.load().value.lan_enabled) {
       return;
     }
@@ -841,6 +911,466 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     schedule_expiry();
     schedule_interface_refresh();
     publish_resource_snapshot();
+  }
+
+  Result<void> initialize_relay() {
+    if (relay_override) {
+      relay = *relay_override;
+    } else {
+      auto enrollments = profile.relay_enrollments();
+      if (!enrollments) {
+        return Result<void>::failure(*enrollments.error_if());
+      }
+      const auto found = std::find_if(
+          enrollments.value_if()->begin(), enrollments.value_if()->end(),
+          [](const RelayEnrollmentRecord& enrollment) {
+            return enrollment.auto_connect && !enrollment.revoked;
+          });
+      if (found == enrollments.value_if()->end()) {
+        relay.enabled = false;
+        relay_phase = RelayLoginPhase::disabled;
+        return Result<void>::success();
+      }
+      relay.enabled = true;
+      relay.relay_url = found->relay_url;
+      relay.relay_pin = found->relay_pin;
+      relay.tenant = found->tenant;
+      relay.enrollment_generation = found->enrollment_generation;
+      if (relay.relay_pin) {
+        relay.tls_verify_peer = false;
+      }
+    }
+    auto valid = validate_relay_node_config(relay);
+    if (!valid) {
+      return valid;
+    }
+    if (!relay.enabled) {
+      relay_phase = RelayLoginPhase::disabled;
+      return Result<void>::success();
+    }
+    relay_phase = RelayLoginPhase::connecting;
+    update_snapshot([&](NodeSnapshot& snapshot) {
+      snapshot.relay.enabled = true;
+      snapshot.relay.relay_url = relay.relay_url;
+      snapshot.relay.tenant = relay.tenant;
+      snapshot.relay.enrollment_generation = relay.enrollment_generation;
+      snapshot.relay.state = RelayNodeState::starting;
+    });
+    return Result<void>::success();
+  }
+
+  void begin_relay() {
+    if (!relay.enabled) {
+      return;
+    }
+    schedule_relay_poll();
+    start_relay_connect();
+  }
+
+  void start_relay_connect() {
+    if (!relay.enabled || relay_phase == RelayLoginPhase::failed ||
+        relay_phase == RelayLoginPhase::stopped) {
+      return;
+    }
+    relay_phase = RelayLoginPhase::connecting;
+    relay_challenge.reset();
+    relay_client.reset();
+
+    RelayWssClientConfig config;
+    config.url = relay_control_url(relay.relay_url);
+    if (relay.relay_pin) {
+      RelayTlsPin pin{};
+      if (relay.relay_pin->size() != pin.size()) {
+        relay_failed(node_error(ErrorCode::configuration, "relay_pin_invalid"), true);
+        return;
+      }
+      std::copy_n(relay.relay_pin->begin(), pin.size(), pin.begin());
+      config.relay_pin = pin;
+    }
+    config.tls_ca_file = relay.tls_ca_file;
+    config.tls_verify_peer = relay.tls_verify_peer;
+    config.receive_capacity = relay.receive_capacity;
+    config.send_capacity = relay.send_capacity;
+    config.connect_timeout = relay.connect_timeout;
+    config.handshake_timeout = relay.handshake_timeout;
+    config.close_timeout = relay.close_timeout;
+    config.runtime = RuntimeConfig{};
+    auto client = RelayWssClient::create(std::move(config), runtime);
+    if (!client) {
+      relay_failed(*client.error_if(), is_relay_security_error(*client.error_if()));
+      return;
+    }
+    relay_client.emplace(std::move(*client.value_if()));
+    auto started = relay_client->start_connect();
+    if (!started) {
+      relay_failed(*started.error_if(), is_relay_security_error(*started.error_if()));
+      return;
+    }
+    update_snapshot([](NodeSnapshot& snapshot) {
+      snapshot.relay.state = RelayNodeState::starting;
+      snapshot.relay.last_error.reset();
+    });
+    schedule_relay_poll();
+  }
+
+  void schedule_relay_poll() {
+    if (relay_poll_timer_active || !relay.enabled ||
+        relay_phase == RelayLoginPhase::failed ||
+        relay_phase == RelayLoginPhase::stopped) {
+      return;
+    }
+    relay_poll_timer_active = true;
+    relay_poll_timer.expires_after(relay.poll_interval);
+    auto weak = weak_from_this();
+    relay_poll_timer.async_wait([weak](const boost::system::error_code& error) {
+      if (!error) {
+        if (auto self = weak.lock()) {
+          self->relay_poll_timer_active = false;
+          self->relay_poll();
+        }
+      } else if (auto self = weak.lock()) {
+        self->relay_poll_timer_active = false;
+      }
+    });
+  }
+
+  void relay_poll() {
+    if (!relay.enabled || relay_phase == RelayLoginPhase::failed ||
+        relay_phase == RelayLoginPhase::stopped ||
+        relay_phase == RelayLoginPhase::disabled || !relay_client) {
+      return;
+    }
+    if (relay_phase == RelayLoginPhase::connecting) {
+      const auto snapshot = relay_client->snapshot();
+      if (snapshot.state == RelayWssState::ready) {
+        relay_phase = RelayLoginPhase::awaiting_challenge;
+        auto sent = send_relay_control(RelayWssControlType::login_challenge);
+        if (!sent) {
+          relay_failed(*sent.error_if(), false);
+          return;
+        }
+      } else if (snapshot.state == RelayWssState::failed) {
+        const auto error = snapshot.last_error.value_or(
+            Error{ErrorCode::relay_unavailable, "relay", "relay_connect_failed"});
+        relay_failed(error, is_relay_security_error(error));
+        return;
+      }
+      schedule_relay_poll();
+      return;
+    }
+
+    RelayWssMessage message;
+    while (true) {
+      auto received = relay_client->try_receive(message);
+      if (!received) {
+        relay_failed(*received.error_if(), false);
+        return;
+      }
+      if (*received.value_if() == RelayWssReceiveStatus::closed) {
+        const auto snapshot = relay_client->snapshot();
+        const auto error = snapshot.last_error.value_or(
+            Error{ErrorCode::relay_unavailable, "relay", "relay_connection_closed"});
+        relay_failed(error, is_relay_security_error(error));
+        return;
+      }
+      if (*received.value_if() == RelayWssReceiveStatus::empty) {
+        break;
+      }
+      handle_relay_message(message);
+      if (relay_phase == RelayLoginPhase::failed ||
+          relay_phase == RelayLoginPhase::connecting) {
+        return;
+      }
+    }
+
+    const auto snapshot = relay_client->snapshot();
+    if (snapshot.state == RelayWssState::failed ||
+        snapshot.state == RelayWssState::disconnected) {
+      const auto error = snapshot.last_error.value_or(
+          Error{ErrorCode::relay_unavailable, "relay", "relay_connection_lost"});
+      relay_failed(error, is_relay_security_error(error));
+      return;
+    }
+    schedule_relay_poll();
+  }
+
+  void handle_relay_message(const RelayWssMessage& message) {
+    if (message.text) {
+      relay_failed(node_error(ErrorCode::protocol, "relay_control_text_frame"), true);
+      return;
+    }
+    auto frame = parse_relay_wss_control_frame(message.payload);
+    if (!frame) {
+      relay_failed(*frame.error_if(), true);
+      return;
+    }
+    const auto type = frame.value_if()->type;
+    if (type == RelayWssControlType::control_error) {
+      auto remote = parse_relay_wss_control_error(frame.value_if()->payload);
+      if (!remote) {
+        relay_failed(*remote.error_if(), true);
+        return;
+      }
+      const Error error{remote.value_if()->code, "relay", remote.value_if()->safe_detail};
+      relay_failed(error, is_relay_security_error(error));
+      return;
+    }
+    if (relay_phase == RelayLoginPhase::awaiting_challenge) {
+      if (type != RelayWssControlType::login_challenge_response) {
+        relay_failed(node_error(ErrorCode::protocol, "relay_login_challenge_expected"), true);
+        return;
+      }
+      auto challenge = parse_enrollment_challenge(frame.value_if()->payload);
+      if (!challenge) {
+        relay_failed(*challenge.error_if(), true);
+        return;
+      }
+      relay_challenge = std::move(*challenge.value_if());
+      RelayLoginRequest request;
+      request.device_id = identity.device_id();
+      request.endpoint_id = endpoint_id;
+      request.identity_public_key = identity.public_key();
+      request.challenge_nonce = relay_challenge->nonce;
+      request.tenant = relay.tenant;
+      request.enrollment_generation = relay.enrollment_generation;
+      request.protocol_version = current_protocol_version;
+      request.supported.bits = known_capability_bits;
+      request.required.bits = static_cast<std::uint64_t>(Capability::enrollment);
+      const auto now = unix_milliseconds_now();
+      request.expires_unix_milliseconds =
+          std::min(now + 30U * 1000U,
+                   relay_challenge->expires_unix_milliseconds - 1U);
+      auto signed_request =
+          sign_relay_login_request(request, relay_challenge->relay_id, identity);
+      if (!signed_request) {
+        relay_failed(*signed_request.error_if(), true);
+        return;
+      }
+      auto encoded = encode_relay_login_request(request);
+      if (!encoded) {
+        relay_failed(*encoded.error_if(), true);
+        return;
+      }
+      relay_phase = RelayLoginPhase::awaiting_login;
+      auto sent = send_relay_control(RelayWssControlType::login_request,
+                                     *encoded.value_if());
+      if (!sent) {
+        relay_failed(*sent.error_if(), false);
+      }
+      return;
+    }
+    if (relay_phase == RelayLoginPhase::awaiting_login) {
+      if (type != RelayWssControlType::login_result) {
+        relay_failed(node_error(ErrorCode::protocol, "relay_login_result_expected"), true);
+        return;
+      }
+      auto result = parse_relay_wss_login_result(frame.value_if()->payload);
+      if (!result) {
+        relay_failed(*result.error_if(), true);
+        return;
+      }
+      if (result.value_if()->tenant != relay.tenant) {
+        relay_failed(node_error(ErrorCode::authentication, "relay_login_tenant_mismatch"),
+                     true);
+        return;
+      }
+      relay_phase = RelayLoginPhase::ready;
+      relay_lease_generation = 0U;
+      relay_lease_deadline =
+          std::chrono::steady_clock::now() +
+          std::chrono::milliseconds{result.value_if()->lease_milliseconds};
+      relay_heartbeats_missed = 0U;
+      relay_heartbeat_pending = false;
+      relay_reconnect_attempt = 0U;
+      relay_backoff = relay.minimum_backoff;
+      update_snapshot([&](NodeSnapshot& snapshot) {
+        snapshot.relay.state = RelayNodeState::ready;
+        snapshot.relay.enrollment_generation =
+            result.value_if()->enrollment_generation;
+        snapshot.relay.lease_generation = relay_lease_generation;
+        snapshot.relay.last_error.reset();
+      });
+      arm_relay_heartbeat();
+      return;
+    }
+    if (relay_phase == RelayLoginPhase::ready &&
+        type == RelayWssControlType::heartbeat_ack) {
+      auto ack = parse_relay_wss_heartbeat_ack(frame.value_if()->payload);
+      if (!ack) {
+        relay_failed(*ack.error_if(), true);
+        return;
+      }
+      relay_lease_generation = ack.value_if()->lease_generation;
+      relay_lease_deadline =
+          std::chrono::steady_clock::now() +
+          std::chrono::milliseconds{ack.value_if()->granted_lease_milliseconds};
+      relay_heartbeats_missed = 0U;
+      relay_heartbeat_pending = false;
+      update_snapshot([&](NodeSnapshot& snapshot) {
+        snapshot.relay.lease_generation = relay_lease_generation;
+      });
+      return;
+    }
+    if (relay_phase == RelayLoginPhase::ready) {
+      relay_failed(node_error(ErrorCode::protocol, "relay_unexpected_control_frame"), true);
+    }
+  }
+
+  void relay_failed(Error error, bool security_error) {
+    if (relay_phase == RelayLoginPhase::stopped ||
+        relay_phase == RelayLoginPhase::disabled) {
+      return;
+    }
+    relay_client.reset();
+    relay_heartbeat_pending = false;
+    boost::system::error_code ignored;
+    (void)relay_heartbeat_timer.cancel();
+    relay_heartbeat_timer_active = false;
+    if (security_error) {
+      relay_phase = RelayLoginPhase::failed;
+      (void)relay_poll_timer.cancel();
+      relay_poll_timer_active = false;
+      update_snapshot([&](NodeSnapshot& snapshot) {
+        snapshot.relay.state = RelayNodeState::failed;
+        snapshot.relay.last_error = std::move(error);
+      });
+      return;
+    }
+    relay_phase = RelayLoginPhase::connecting;
+    ++relay_reconnect_count;
+    schedule_relay_reconnect();
+    update_snapshot([&](NodeSnapshot& snapshot) {
+      snapshot.relay.state = RelayNodeState::degraded;
+      snapshot.relay.last_error = std::move(error);
+      snapshot.relay.reconnect_count = relay_reconnect_count;
+      snapshot.relay.backoff = relay_backoff;
+    });
+  }
+
+  void schedule_relay_reconnect() {
+    if (relay_phase != RelayLoginPhase::connecting || !relay.enabled) {
+      return;
+    }
+    relay_reconnect_timer.cancel();
+    std::uint64_t base = static_cast<std::uint64_t>(relay_backoff.count());
+    if (relay_reconnect_attempt > 0U) {
+      base = std::min<std::uint64_t>(
+          static_cast<std::uint64_t>(relay.maximum_backoff.count()),
+          base * 2U);
+    }
+    base = std::max<std::uint64_t>(
+        static_cast<std::uint64_t>(relay.minimum_backoff.count()), base);
+    std::uint64_t jitter = 0U;
+    if (base > 0U) {
+      const auto cap = base / 4U;
+      jitter = cap == 0U ? 0U : static_cast<std::uint64_t>(randombytes_uniform(
+                                    static_cast<std::uint32_t>(cap + 1U)));
+    }
+    relay_backoff = std::chrono::milliseconds{
+        static_cast<std::int64_t>(std::min<std::uint64_t>(
+            static_cast<std::uint64_t>(relay.maximum_backoff.count()),
+            base + jitter))};
+    ++relay_reconnect_attempt;
+    relay_reconnect_timer.expires_after(relay_backoff);
+    auto weak = weak_from_this();
+    relay_reconnect_timer.async_wait([weak](const boost::system::error_code& error) {
+      if (!error) {
+        if (auto self = weak.lock()) {
+          self->start_relay_connect();
+        }
+      }
+    });
+  }
+
+  void arm_relay_heartbeat() {
+    if (relay_phase != RelayLoginPhase::ready || relay_heartbeat_timer_active) {
+      return;
+    }
+    relay_heartbeat_timer_active = true;
+    relay_heartbeat_timer.expires_after(relay.heartbeat_interval);
+    auto weak = weak_from_this();
+    relay_heartbeat_timer.async_wait([weak](const boost::system::error_code& error) {
+      if (auto self = weak.lock()) {
+        self->relay_heartbeat_timer_active = false;
+        if (!error) {
+          self->relay_heartbeat_tick();
+        }
+      }
+    });
+  }
+
+  void relay_heartbeat_tick() {
+    if (relay_phase != RelayLoginPhase::ready) {
+      return;
+    }
+    if (relay_heartbeat_pending) {
+      ++relay_heartbeats_missed;
+      update_snapshot([&](NodeSnapshot& snapshot) {
+        snapshot.relay.heartbeats_missed = relay_heartbeats_missed;
+      });
+    }
+    if (relay_heartbeats_missed >= relay.missed_heartbeat_limit) {
+      relay_failed(Error{ErrorCode::relay_unavailable, "relay",
+                         "relay_heartbeat_lost"},
+                   false);
+      return;
+    }
+    RelayWssHeartbeatRequest request;
+    request.lease_milliseconds =
+        static_cast<std::uint32_t>(relay.lease_duration.count());
+    auto encoded = encode_relay_wss_heartbeat_request(request);
+    if (!encoded) {
+      relay_failed(*encoded.error_if(), true);
+      return;
+    }
+    auto sent = send_relay_control(RelayWssControlType::heartbeat,
+                                   *encoded.value_if());
+    if (!sent) {
+      relay_failed(*sent.error_if(), false);
+      return;
+    }
+    relay_heartbeat_pending = true;
+    ++relay_heartbeats_sent;
+    update_snapshot([&](NodeSnapshot& snapshot) {
+      snapshot.relay.heartbeats_sent = relay_heartbeats_sent;
+    });
+    arm_relay_heartbeat();
+  }
+
+  void stop_relay() {
+    if (relay_phase == RelayLoginPhase::stopped ||
+        relay_phase == RelayLoginPhase::disabled) {
+      relay_client.reset();
+      return;
+    }
+    relay_phase = RelayLoginPhase::stopped;
+    boost::system::error_code ignored;
+    (void)relay_poll_timer.cancel();
+    (void)relay_heartbeat_timer.cancel();
+    (void)relay_reconnect_timer.cancel();
+    relay_poll_timer_active = false;
+    relay_heartbeat_timer_active = false;
+    relay_challenge.reset();
+    if (relay_client) {
+      (void)relay_client->start_close();
+      relay_client.reset();
+    }
+    update_snapshot([](NodeSnapshot& snapshot) {
+      snapshot.relay.state = RelayNodeState::stopped;
+    });
+  }
+
+  Result<void> send_relay_control(RelayWssControlType type,
+                                  std::span<const std::byte> payload = {}) {
+    if (!relay_client) {
+      return Result<void>::failure(
+          node_error(ErrorCode::cancelled, "relay_client_unavailable"));
+    }
+    auto frame = encode_relay_wss_control_frame(type, payload);
+    if (!frame) {
+      return Result<void>::failure(*frame.error_if());
+    }
+    return relay_client->send(*frame.value_if());
   }
 
   Result<void> initialize_tls() {
@@ -2289,6 +2819,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     SignalingCommand discarded_command;
     while (signaling_commands.try_receive(discarded_command)) {
     }
+    stop_relay();
     boost::system::error_code ignored;
     try {
       (void)announce_timer.cancel();
@@ -2411,6 +2942,23 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   boost::asio::steady_timer expiry_timer;
   boost::asio::steady_timer interface_timer;
   boost::asio::steady_timer readiness_timer;
+  boost::asio::steady_timer relay_poll_timer;
+  boost::asio::steady_timer relay_heartbeat_timer;
+  boost::asio::steady_timer relay_reconnect_timer;
+  RelayNodeConfig relay;
+  std::optional<RelayWssClient> relay_client;
+  std::optional<EnrollmentChallenge> relay_challenge;
+  RelayLoginPhase relay_phase{RelayLoginPhase::disabled};
+  SteadyTime relay_lease_deadline{};
+  std::uint64_t relay_lease_generation{};
+  std::uint64_t relay_heartbeats_sent{};
+  std::uint64_t relay_heartbeats_missed{};
+  bool relay_heartbeat_pending{false};
+  std::uint64_t relay_reconnect_count{};
+  std::size_t relay_reconnect_attempt{};
+  std::chrono::milliseconds relay_backoff{1000};
+  bool relay_poll_timer_active{false};
+  bool relay_heartbeat_timer_active{false};
   executor::comm::MpscChannel<InterfaceScanResult> scan_results;
   executor::comm::DoubleBuffer<NodeSnapshot> snapshots;
   executor::comm::DoubleBuffer<std::vector<EndpointDirectoryEntrySnapshot>> endpoint_snapshots;
@@ -2421,6 +2969,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   std::set<DeviceId> trusted_devices;
   LanSignalingValidator signaling_validator;
   LanSignalingHandler signaling_handler;
+  std::optional<RelayNodeConfig> relay_override;
   std::map<std::uint64_t, std::shared_ptr<TlsConnection>> connections;
   std::map<DeviceEndpointKey, std::uint64_t> active_connections;
   std::map<DeviceEndpointKey, std::uint64_t> auto_connect_connections;
@@ -2520,7 +3069,7 @@ Result<Node> Node::create(NodeConfig config) {
       std::move(*lan.value_if()), std::move(*identity.value_if()), *endpoint.value_if(),
       std::move(*directory.value_if()), std::move(*executor.value_if()),
       std::move(trusted_set), std::move(config.signaling_validator),
-      std::move(config.signaling_handler));
+      std::move(config.signaling_handler), std::move(config.relay_override));
   auto initialized = impl->initialize();
   if (!initialized) {
     if (impl->owned_runtime) {
@@ -2673,6 +3222,24 @@ std::string_view lan_readiness_state_name(LanReadinessState state) noexcept {
       return "stopped";
   }
   return "failed";
+}
+
+std::string_view relay_node_state_name(RelayNodeState state) noexcept {
+  switch (state) {
+    case RelayNodeState::disabled:
+      return "disabled";
+    case RelayNodeState::starting:
+      return "starting";
+    case RelayNodeState::ready:
+      return "ready";
+    case RelayNodeState::degraded:
+      return "degraded";
+    case RelayNodeState::failed:
+      return "failed";
+    case RelayNodeState::stopped:
+      return "stopped";
+  }
+  return "unknown";
 }
 
 bool is_lan_offer_owner(DeviceEndpointKey local, DeviceEndpointKey peer) noexcept {

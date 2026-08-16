@@ -194,6 +194,43 @@ TEST(M3BRelayConfigTest, LoadsAndValidatesFile) {
   EXPECT_TRUE(validate_relay_server_config(*loaded.value_if()));
 }
 
+TEST(M3BRelayConfigTest, LoadsRelayControlPolicyKeys) {
+  TemporaryDirectory directory{"m3b-relay-config-control"};
+  {
+    std::ofstream cert{directory.path() / "relay-cert.pem", std::ios::binary | std::ios::trunc};
+    std::ofstream key{directory.path() / "relay-key.pem", std::ios::binary | std::ios::trunc};
+    cert << "test";
+    key << "test";
+  }
+  write_config(directory.path(),
+               "tls_certificate_file = relay-cert.pem\n"
+               "tls_private_key_file = relay-key.pem\n"
+               "database_file = relay.sqlite\n"
+               "lease_default_milliseconds = 15000\n"
+               "lease_maximum_milliseconds = 60000\n"
+               "lease_capacity = 32\n"
+               "lease_per_device_endpoint_capacity = 4\n"
+               "lease_per_tenant_device_capacity = 16\n"
+               "endpoint_directory_capacity = 128\n"
+               "endpoint_query_max_results = 64\n"
+               "close_revoked_sessions = true\n"
+               "endpoint_expose_application_id = true\n"
+               "endpoint_expose_record_generation = true\n"
+               "endpoint_expose_manifest_sha256 = false\n"
+               "endpoint_expose_manifest_generation = false\n");
+  auto loaded = load_relay_config_file(directory.path() / "relay.conf");
+  ASSERT_TRUE(loaded) << loaded.error_if()->safe_detail();
+  EXPECT_EQ(loaded.value_if()->lease.default_lease, 15000ms);
+  EXPECT_EQ(loaded.value_if()->lease.maximum_lease, 60000ms);
+  EXPECT_EQ(loaded.value_if()->lease.capacity, 32U);
+  EXPECT_EQ(loaded.value_if()->endpoint_query_max_results, 64U);
+  EXPECT_TRUE(loaded.value_if()->close_revoked_sessions);
+  EXPECT_TRUE(loaded.value_if()->endpoint_exposure.expose_application_id);
+  EXPECT_TRUE(loaded.value_if()->endpoint_exposure.expose_record_generation);
+  EXPECT_FALSE(loaded.value_if()->endpoint_exposure.expose_manifest_sha256);
+  EXPECT_TRUE(validate_relay_server_config(*loaded.value_if()));
+}
+
 TEST(M3BRelayConfigTest, RejectsDuplicateUnknownAndOutOfRangeKeys) {
   TemporaryDirectory directory{"m3b-relay-config-invalid"};
   const std::array contents{
@@ -203,6 +240,9 @@ TEST(M3BRelayConfigTest, RejectsDuplicateUnknownAndOutOfRangeKeys) {
       std::string_view{"max_connections = 0\n"},
       std::string_view{"handshake_timeout_milliseconds = 99\n"},
       std::string_view{"health_path = no-leading-slash\n"},
+      std::string_view{"lease_default_milliseconds = 60000\nlease_maximum_milliseconds = 30000\n"},
+      std::string_view{"close_revoked_sessions = maybe\n"},
+      std::string_view{"endpoint_query_max_results = 0\n"},
       std::string_view{"health_path = /control\n"},
   };
   for (std::size_t index = 0U; index < contents.size(); ++index) {

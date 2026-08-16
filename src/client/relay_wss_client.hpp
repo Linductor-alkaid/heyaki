@@ -40,6 +40,12 @@ enum class RelayWssState : std::uint8_t {
   failed,
 };
 
+enum class RelayWssReceiveStatus : std::uint8_t {
+  message,
+  empty,
+  closed,
+};
+
 struct RelayWssMessage {
   bool text{false};
   std::vector<std::byte> payload;
@@ -75,9 +81,12 @@ class RelayWssClient {
 
   [[nodiscard]] Result<void> connect(std::chrono::milliseconds timeout =
                                          std::chrono::milliseconds{5000});
+  [[nodiscard]] Result<void> start_connect();
+  [[nodiscard]] Result<RelayWssReceiveStatus> try_receive(RelayWssMessage& message);
   [[nodiscard]] Result<void> send(std::span<const std::byte> payload);
   [[nodiscard]] Result<RelayWssMessage> receive(
       std::chrono::milliseconds timeout = std::chrono::milliseconds{5000});
+  [[nodiscard]] Result<void> start_close();
   [[nodiscard]] Result<void> close(std::chrono::milliseconds timeout =
                                        std::chrono::milliseconds{2000});
   [[nodiscard]] RelayWssSnapshot snapshot() const;

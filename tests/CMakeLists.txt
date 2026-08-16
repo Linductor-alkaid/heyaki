@@ -464,12 +464,12 @@ if(HEYAKI_BUILD_APPS)
     set_tests_properties(heyaki_tui_local_status PROPERTIES
       ENVIRONMENT "LOCALAPPDATA=${HEYAKI_TEST_STATE_DIR}/tui-status"
       LABELS "tui;lan"
-      PASS_REGULAR_EXPRESSION "LOCAL   not-initialized;LAN     stopped;PAIRING unavailable")
+      PASS_REGULAR_EXPRESSION "LOCAL   not-initialized;LAN     stopped;RELAY   disabled;PAIRING unavailable")
   else()
     set_tests_properties(heyaki_tui_local_status PROPERTIES
       ENVIRONMENT "XDG_STATE_HOME=${HEYAKI_TEST_STATE_DIR}/tui-status"
       LABELS "tui;lan"
-      PASS_REGULAR_EXPRESSION "LOCAL   not-initialized;LAN     stopped;PAIRING unavailable")
+      PASS_REGULAR_EXPRESSION "LOCAL   not-initialized;LAN     stopped;RELAY   disabled;PAIRING unavailable")
   endif()
 endif()
 

@@ -698,6 +698,35 @@ Result<void> RelayWssClient::connect(std::chrono::milliseconds timeout) {
   }
 }
 
+Result<void> RelayWssClient::start_connect() {
+  if (!impl_) {
+    return Result<void>::failure(wss_error(ErrorCode::cancelled, "wss_not_initialized"));
+  }
+  auto completion = impl_->begin_connect();
+  if (!completion.valid()) {
+    return Result<void>::failure(wss_error(ErrorCode::cancelled,
+                                           "wss_connect_start_failed"));
+  }
+  return Result<void>::success();
+}
+
+Result<RelayWssReceiveStatus> RelayWssClient::try_receive(
+    RelayWssMessage& message) {
+  if (!impl_) {
+    return Result<RelayWssReceiveStatus>::failure(
+        wss_error(ErrorCode::cancelled, "wss_not_initialized"));
+  }
+  if (impl_->received.try_receive(message)) {
+    return Result<RelayWssReceiveStatus>::success(RelayWssReceiveStatus::message);
+  }
+  const auto snapshot = impl_->snapshots.load().value;
+  if (snapshot.state == RelayWssState::failed ||
+      snapshot.state == RelayWssState::disconnected) {
+    return Result<RelayWssReceiveStatus>::success(RelayWssReceiveStatus::closed);
+  }
+  return Result<RelayWssReceiveStatus>::success(RelayWssReceiveStatus::empty);
+}
+
 Result<void> RelayWssClient::send(std::span<const std::byte> payload) {
   if (!impl_) {
     return Result<void>::failure(wss_error(ErrorCode::cancelled, "wss_not_initialized"));
@@ -740,6 +769,18 @@ Result<RelayWssMessage> RelayWssClient::receive(std::chrono::milliseconds timeou
             : wss_error(ErrorCode::cancelled, "wss_receive_closed"));
   }
   return Result<RelayWssMessage>::success(std::move(message));
+}
+
+Result<void> RelayWssClient::start_close() {
+  if (!impl_) {
+    return Result<void>::failure(wss_error(ErrorCode::cancelled, "wss_not_initialized"));
+  }
+  auto completion = impl_->begin_close();
+  if (!completion.valid()) {
+    return Result<void>::failure(wss_error(ErrorCode::cancelled,
+                                           "wss_close_start_failed"));
+  }
+  return Result<void>::success();
 }
 
 Result<void> RelayWssClient::close(std::chrono::milliseconds timeout) {

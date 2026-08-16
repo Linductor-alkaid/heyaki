@@ -1,9 +1,18 @@
 #include "relay_server.hpp"
 #include "relay_database.hpp"
 #include "relay_enrollment.hpp"
+#include "relay_endpoint.hpp"
+#include "relay_login.hpp"
 #include "relay_wss_client.hpp"
 
 #include <heyaki/identity.hpp>
+#include <heyaki/node.hpp>
+#include <heyaki/password.hpp>
+#include <heyaki/profile_store.hpp>
+#include <heyaki/relay_enrollment_client.hpp>
+
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/ip/tcp.hpp>
 #include <heyaki/protocol.hpp>
 #include <heyaki/relay_wss_control.hpp>
 
@@ -30,6 +39,10 @@
 #include <thread>
 #include <vector>
 #include <string_view>
+
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 
 namespace heyaki {
 namespace {
@@ -204,6 +217,49 @@ Result<EnrollmentRequest> make_enrollment_request(
     request.signature[0U] ^= std::byte{0x01U};
   }
   return Result<EnrollmentRequest>::success(std::move(request));
+}
+
+Result<RelayLoginRequest> make_login_request(
+    const IdentityKeyPair& identity, const EnrollmentChallenge& challenge,
+    std::uint64_t generation, std::uint64_t now, std::uint8_t endpoint_byte,
+    std::string_view tenant = "tenant-a") {
+  RelayLoginRequest request;
+  request.device_id = identity.device_id();
+  EndpointId::Storage endpoint{};
+  endpoint[0] = static_cast<std::byte>(endpoint_byte);
+  request.endpoint_id = EndpointId{endpoint};
+  request.identity_public_key = identity.public_key();
+  request.challenge_nonce = challenge.nonce;
+  request.tenant = std::string{tenant};
+  request.protocol_version = current_protocol_version;
+  request.supported.bits = known_capability_bits;
+  request.required.bits = static_cast<std::uint64_t>(Capability::enrollment);
+  request.enrollment_generation = generation;
+  request.expires_unix_milliseconds = now + 30U * 1000U;
+  auto signature = sign_relay_login_request(request, challenge.relay_id, identity);
+  if (!signature) {
+    return Result<RelayLoginRequest>::failure(*signature.error_if());
+  }
+  return Result<RelayLoginRequest>::success(std::move(request));
+}
+
+Result<RelayEndpointRecord> make_endpoint_record(
+    const IdentityKeyPair& identity, std::uint8_t endpoint_byte,
+    std::uint64_t now, std::uint64_t generation = 1U) {
+  RelayEndpointRecord record;
+  EndpointId::Storage endpoint{};
+  endpoint[0] = static_cast<std::byte>(endpoint_byte);
+  record.endpoint = RelayEndpointKey{.device_id = identity.device_id(),
+                                     .endpoint_id = EndpointId{endpoint}};
+  record.application_id = "com.example.device";
+  record.record_generation = generation;
+  record.manifest_sha256[0] = std::byte{0x5aU};
+  record.expires_unix_milliseconds = now + 60U * 1000U;
+  auto signature = sign_relay_endpoint_record(record, identity);
+  if (!signature) {
+    return Result<RelayEndpointRecord>::failure(*signature.error_if());
+  }
+  return Result<RelayEndpointRecord>::success(std::move(record));
 }
 
 Result<RelayWssClient> connect_control_client(const std::filesystem::path& root,
@@ -582,6 +638,703 @@ TEST(M3BRelayWssClientTest, BindsEnrollmentChallengeToControlSession) {
 
   EXPECT_TRUE(first_client.value_if()->close(3s));
   EXPECT_TRUE(second_client.value_if()->close(3s));
+  EXPECT_TRUE(server.value_if()->shutdown().stopped);
+}
+
+TEST(M3BRelayWssClientTest, LogsInHeartbeatsPublishesAndQueriesEndpoint) {
+  TemporaryDirectory directory{"m3b-wss-control-login"};
+  ASSERT_TRUE(write_test_certificate(directory.path()));
+  auto identity = create_identity();
+  ASSERT_TRUE(identity) << identity.error_if()->safe_detail();
+  const auto now = now_milliseconds();
+  {
+    auto database = RelayDatabase::open(directory.path() / "relay.sqlite");
+    ASSERT_TRUE(database) << database.error_if()->safe_detail();
+    RelayDeviceRecord device;
+    device.device_id = identity.value_if()->device_id();
+    device.public_key = identity.value_if()->public_key();
+    device.tenant = "tenant-a";
+    device.display_name = "device";
+    device.enrollment_generation = 1U;
+    device.status = RelayDeviceStatus::active;
+    ASSERT_TRUE(database.value_if()->enroll_device(device, now));
+  }
+
+  auto server = RelayServer::create(server_config(directory.path()));
+  ASSERT_TRUE(server) << server.error_if()->safe_detail();
+  ASSERT_TRUE(wait_until(
+      [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
+  const auto port = server.value_if()->snapshot().listen_port;
+  auto client = connect_control_client(directory.path(), port);
+  ASSERT_TRUE(client) << client.error_if()->safe_detail();
+
+  ASSERT_TRUE(send_control(*client.value_if(),
+                           RelayWssControlType::login_challenge));
+  auto challenge_frame = receive_control(*client.value_if());
+  ASSERT_TRUE(challenge_frame) << challenge_frame.error_if()->safe_detail();
+  ASSERT_EQ(challenge_frame.value_if()->type,
+            RelayWssControlType::login_challenge_response);
+  auto challenge = parse_enrollment_challenge(challenge_frame.value_if()->payload);
+  ASSERT_TRUE(challenge) << challenge.error_if()->safe_detail();
+
+  auto login = make_login_request(*identity.value_if(), *challenge.value_if(),
+                                  1U, now, 0x61U);
+  ASSERT_TRUE(login) << login.error_if()->safe_detail();
+  auto login_bytes = encode_relay_login_request(*login.value_if());
+  ASSERT_TRUE(login_bytes) << login_bytes.error_if()->safe_detail();
+  ASSERT_TRUE(send_control(*client.value_if(),
+                           RelayWssControlType::login_request,
+                           *login_bytes.value_if()));
+  auto login_frame = receive_control(*client.value_if());
+  ASSERT_TRUE(login_frame) << login_frame.error_if()->safe_detail();
+  ASSERT_EQ(login_frame.value_if()->type, RelayWssControlType::login_result);
+  auto login_result = parse_relay_wss_login_result(login_frame.value_if()->payload);
+  ASSERT_TRUE(login_result) << login_result.error_if()->safe_detail();
+  EXPECT_EQ(login_result.value_if()->tenant, "tenant-a");
+  EXPECT_EQ(login_result.value_if()->enrollment_generation, 1U);
+  EXPECT_GE(login_result.value_if()->lease_milliseconds, 1000U);
+
+  RelayWssHeartbeatRequest heartbeat_request;
+  heartbeat_request.lease_milliseconds = 15000U;
+  auto heartbeat_bytes =
+      encode_relay_wss_heartbeat_request(heartbeat_request);
+  ASSERT_TRUE(heartbeat_bytes) << heartbeat_bytes.error_if()->safe_detail();
+  ASSERT_TRUE(send_control(*client.value_if(),
+                           RelayWssControlType::heartbeat,
+                           *heartbeat_bytes.value_if()));
+  auto heartbeat_frame = receive_control(*client.value_if());
+  ASSERT_TRUE(heartbeat_frame) << heartbeat_frame.error_if()->safe_detail();
+  ASSERT_EQ(heartbeat_frame.value_if()->type, RelayWssControlType::heartbeat_ack);
+  auto heartbeat_ack =
+      parse_relay_wss_heartbeat_ack(heartbeat_frame.value_if()->payload);
+  ASSERT_TRUE(heartbeat_ack) << heartbeat_ack.error_if()->safe_detail();
+  EXPECT_NE(heartbeat_ack.value_if()->lease_generation, 0U);
+  EXPECT_GE(heartbeat_ack.value_if()->granted_lease_milliseconds, 15000U);
+
+  auto record = make_endpoint_record(*identity.value_if(), 0x61U, now);
+  ASSERT_TRUE(record) << record.error_if()->safe_detail();
+  auto record_bytes = encode_relay_endpoint_record(*record.value_if());
+  ASSERT_TRUE(record_bytes) << record_bytes.error_if()->safe_detail();
+  RelayWssEndpointPublish publish;
+  publish.endpoint_record = std::move(*record_bytes.value_if());
+  auto publish_bytes = encode_relay_wss_endpoint_publish(publish);
+  ASSERT_TRUE(publish_bytes) << publish_bytes.error_if()->safe_detail();
+  ASSERT_TRUE(send_control(*client.value_if(),
+                           RelayWssControlType::endpoint_publish,
+                           *publish_bytes.value_if()));
+  auto publish_frame = receive_control(*client.value_if());
+  ASSERT_TRUE(publish_frame) << publish_frame.error_if()->safe_detail();
+  ASSERT_EQ(publish_frame.value_if()->type,
+            RelayWssControlType::endpoint_publish_ack);
+  auto publish_ack =
+      parse_relay_wss_endpoint_publish_ack(publish_frame.value_if()->payload);
+  ASSERT_TRUE(publish_ack) << publish_ack.error_if()->safe_detail();
+  EXPECT_EQ(publish_ack.value_if()->record_generation, 1U);
+
+  RelayWssEndpointQuery query;
+  auto query_bytes = encode_relay_wss_endpoint_query(query);
+  ASSERT_TRUE(query_bytes) << query_bytes.error_if()->safe_detail();
+  ASSERT_TRUE(send_control(*client.value_if(),
+                           RelayWssControlType::endpoint_query,
+                           *query_bytes.value_if()));
+  auto query_frame = receive_control(*client.value_if());
+  ASSERT_TRUE(query_frame) << query_frame.error_if()->safe_detail();
+  ASSERT_EQ(query_frame.value_if()->type,
+            RelayWssControlType::endpoint_query_result);
+  auto query_result =
+      parse_relay_wss_endpoint_query_result(query_frame.value_if()->payload);
+  ASSERT_TRUE(query_result) << query_result.error_if()->safe_detail();
+  ASSERT_EQ(query_result.value_if()->endpoints.size(), 1U);
+  const auto& published = query_result.value_if()->endpoints[0U];
+  EXPECT_EQ(published.device_id, identity.value_if()->device_id());
+  EXPECT_EQ(published.endpoint_id, record.value_if()->endpoint.endpoint_id);
+  EXPECT_FALSE(published.application_id) << "default exposure policy is minimal";
+  EXPECT_FALSE(published.record_generation);
+  EXPECT_TRUE(published.expires_unix_milliseconds);
+  EXPECT_TRUE(published.lease_expires_unix_milliseconds);
+
+  const auto snapshot = server.value_if()->snapshot();
+  EXPECT_GE(snapshot.login_challenges, 1U);
+  EXPECT_GE(snapshot.logins_completed, 1U);
+  EXPECT_GE(snapshot.heartbeats, 1U);
+  EXPECT_GE(snapshot.endpoint_publications, 1U);
+  EXPECT_GE(snapshot.endpoint_queries, 1U);
+  EXPECT_GE(snapshot.leases.current_entries, 1U);
+
+  ASSERT_TRUE(client.value_if()->close(3s));
+  ASSERT_TRUE(wait_until(
+      [&] {
+        const auto current = server.value_if()->snapshot();
+        return current.active_sessions == 0U &&
+               current.leases.current_entries == 0U;
+      },
+      2s));
+  EXPECT_TRUE(server.value_if()->shutdown().stopped);
+}
+
+TEST(M3BRelayWssClientTest, RejectsRevokedLoginAndClosesExistingControlSession) {
+  TemporaryDirectory directory{"m3b-wss-control-revoked"};
+  ASSERT_TRUE(write_test_certificate(directory.path()));
+  auto identity = create_identity();
+  ASSERT_TRUE(identity) << identity.error_if()->safe_detail();
+  const auto now = now_milliseconds();
+  {
+    auto database = RelayDatabase::open(directory.path() / "relay.sqlite");
+    ASSERT_TRUE(database) << database.error_if()->safe_detail();
+    RelayDeviceRecord device;
+    device.device_id = identity.value_if()->device_id();
+    device.public_key = identity.value_if()->public_key();
+    device.tenant = "tenant-a";
+    device.display_name = "device";
+    device.enrollment_generation = 1U;
+    device.status = RelayDeviceStatus::active;
+    ASSERT_TRUE(database.value_if()->enroll_device(device, now));
+  }
+  auto server = RelayServer::create(server_config(directory.path()));
+  ASSERT_TRUE(server) << server.error_if()->safe_detail();
+  ASSERT_TRUE(wait_until(
+      [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
+  const auto port = server.value_if()->snapshot().listen_port;
+  auto client = connect_control_client(directory.path(), port);
+  ASSERT_TRUE(client) << client.error_if()->safe_detail();
+  ASSERT_TRUE(send_control(*client.value_if(),
+                           RelayWssControlType::login_challenge));
+  auto challenge_frame = receive_control(*client.value_if());
+  ASSERT_TRUE(challenge_frame) << challenge_frame.error_if()->safe_detail();
+  auto challenge = parse_enrollment_challenge(challenge_frame.value_if()->payload);
+  ASSERT_TRUE(challenge) << challenge.error_if()->safe_detail();
+  auto login = make_login_request(*identity.value_if(), *challenge.value_if(),
+                                  1U, now, 0x62U);
+  ASSERT_TRUE(login) << login.error_if()->safe_detail();
+  auto login_bytes = encode_relay_login_request(*login.value_if());
+  ASSERT_TRUE(login_bytes) << login_bytes.error_if()->safe_detail();
+  ASSERT_TRUE(send_control(*client.value_if(),
+                           RelayWssControlType::login_request,
+                           *login_bytes.value_if()));
+  auto login_frame = receive_control(*client.value_if());
+  ASSERT_TRUE(login_frame) << login_frame.error_if()->safe_detail();
+  ASSERT_EQ(login_frame.value_if()->type, RelayWssControlType::login_result);
+  ASSERT_TRUE(send_control(*client.value_if(),
+                           RelayWssControlType::heartbeat));
+  auto heartbeat_frame = receive_control(*client.value_if());
+  ASSERT_TRUE(heartbeat_frame) << heartbeat_frame.error_if()->safe_detail();
+  ASSERT_EQ(heartbeat_frame.value_if()->type, RelayWssControlType::heartbeat_ack);
+
+  {
+    auto revoker = RelayDatabase::open(directory.path() / "relay.sqlite");
+    ASSERT_TRUE(revoker) << revoker.error_if()->safe_detail();
+    ASSERT_TRUE(revoker.value_if()->revoke_device(
+        identity.value_if()->device_id(), 2U, now + 60U * 1000U));
+  }
+
+  ASSERT_TRUE(send_control(*client.value_if(),
+                           RelayWssControlType::heartbeat));
+  auto revoked_frame = receive_control(*client.value_if());
+  ASSERT_TRUE(revoked_frame) << revoked_frame.error_if()->safe_detail();
+  ASSERT_EQ(revoked_frame.value_if()->type, RelayWssControlType::control_error);
+  auto revoked_error =
+      parse_relay_wss_control_error(revoked_frame.value_if()->payload);
+  ASSERT_TRUE(revoked_error) << revoked_error.error_if()->safe_detail();
+  EXPECT_EQ(revoked_error.value_if()->code, ErrorCode::enrollment_revoked);
+
+  ASSERT_TRUE(wait_until(
+      [&] { return server.value_if()->snapshot().active_sessions == 0U; }, 2s));
+  EXPECT_TRUE(server.value_if()->shutdown().stopped);
+}
+
+TEST(M3BRelayWssClientTest, SameDeviceMultipleEndpointsShareTenantDirectory) {
+  TemporaryDirectory directory{"m3b-wss-control-multi-endpoint"};
+  ASSERT_TRUE(write_test_certificate(directory.path()));
+  auto identity = create_identity();
+  ASSERT_TRUE(identity) << identity.error_if()->safe_detail();
+  const auto now = now_milliseconds();
+  {
+    auto database = RelayDatabase::open(directory.path() / "relay.sqlite");
+    ASSERT_TRUE(database) << database.error_if()->safe_detail();
+    RelayDeviceRecord device;
+    device.device_id = identity.value_if()->device_id();
+    device.public_key = identity.value_if()->public_key();
+    device.tenant = "tenant-a";
+    device.display_name = "device";
+    device.enrollment_generation = 1U;
+    device.status = RelayDeviceStatus::active;
+    ASSERT_TRUE(database.value_if()->enroll_device(device, now));
+  }
+  auto server = RelayServer::create(server_config(directory.path()));
+  ASSERT_TRUE(server) << server.error_if()->safe_detail();
+  ASSERT_TRUE(wait_until(
+      [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
+  const auto port = server.value_if()->snapshot().listen_port;
+  auto first = connect_control_client(directory.path(), port);
+  auto second = connect_control_client(directory.path(), port);
+  ASSERT_TRUE(first) << first.error_if()->safe_detail();
+  ASSERT_TRUE(second) << second.error_if()->safe_detail();
+
+  const auto login_endpoint = [&](RelayWssClient& client,
+                                  std::uint8_t endpoint_byte) {
+    EXPECT_TRUE(send_control(client, RelayWssControlType::login_challenge));
+    auto challenge_frame = receive_control(client);
+    EXPECT_TRUE(challenge_frame);
+    if (!challenge_frame) {
+      return Result<RelayWssLoginResult>::failure(*challenge_frame.error_if());
+    }
+    auto challenge = parse_enrollment_challenge(challenge_frame.value_if()->payload);
+    if (!challenge) {
+      return Result<RelayWssLoginResult>::failure(*challenge.error_if());
+    }
+    auto login = make_login_request(*identity.value_if(), *challenge.value_if(),
+                                    1U, now, endpoint_byte);
+    if (!login) {
+      return Result<RelayWssLoginResult>::failure(*login.error_if());
+    }
+    auto login_bytes = encode_relay_login_request(*login.value_if());
+    if (!login_bytes) {
+      return Result<RelayWssLoginResult>::failure(*login_bytes.error_if());
+    }
+    if (!send_control(client, RelayWssControlType::login_request,
+                      *login_bytes.value_if())) {
+      return Result<RelayWssLoginResult>::failure(
+          Error{ErrorCode::internal, "test", "login_send_failed"});
+    }
+    auto result_frame = receive_control(client);
+    if (!result_frame ||
+        result_frame.value_if()->type != RelayWssControlType::login_result) {
+      return Result<RelayWssLoginResult>::failure(
+          result_frame ? Error{ErrorCode::protocol, "test",
+                               "login_result_not_received"}
+                       : *result_frame.error_if());
+    }
+    return parse_relay_wss_login_result(result_frame.value_if()->payload);
+  };
+
+  auto first_login = login_endpoint(*first.value_if(), 0x71U);
+  auto second_login = login_endpoint(*second.value_if(), 0x72U);
+  ASSERT_TRUE(first_login) << first_login.error_if()->safe_detail();
+  ASSERT_TRUE(second_login) << second_login.error_if()->safe_detail();
+  ASSERT_TRUE(send_control(*first.value_if(), RelayWssControlType::heartbeat));
+  ASSERT_EQ(receive_control(*first.value_if()).value_if()->type,
+            RelayWssControlType::heartbeat_ack);
+  ASSERT_TRUE(send_control(*second.value_if(), RelayWssControlType::heartbeat));
+  ASSERT_EQ(receive_control(*second.value_if()).value_if()->type,
+            RelayWssControlType::heartbeat_ack);
+
+  auto first_record = make_endpoint_record(*identity.value_if(), 0x71U, now);
+  auto second_record = make_endpoint_record(*identity.value_if(), 0x72U, now);
+  ASSERT_TRUE(first_record) << first_record.error_if()->safe_detail();
+  ASSERT_TRUE(second_record) << second_record.error_if()->safe_detail();
+  const auto publish_endpoint = [&](RelayWssClient& client,
+                                    const RelayEndpointRecord& record) {
+    auto record_bytes = encode_relay_endpoint_record(record);
+    EXPECT_TRUE(record_bytes);
+    if (!record_bytes) {
+      return Result<void>::failure(*record_bytes.error_if());
+    }
+    RelayWssEndpointPublish publish;
+    publish.endpoint_record = std::move(*record_bytes.value_if());
+    auto publish_bytes = encode_relay_wss_endpoint_publish(publish);
+    if (!publish_bytes) {
+      return Result<void>::failure(*publish_bytes.error_if());
+    }
+    if (!send_control(client, RelayWssControlType::endpoint_publish,
+                      *publish_bytes.value_if())) {
+      return Result<void>::failure(
+          Error{ErrorCode::internal, "test", "publish_send_failed"});
+    }
+    auto ack = receive_control(client);
+    if (!ack ||
+        ack.value_if()->type != RelayWssControlType::endpoint_publish_ack) {
+      return Result<void>::failure(
+          ack ? Error{ErrorCode::protocol, "test",
+                      "endpoint_publish_ack_not_received"}
+              : *ack.error_if());
+    }
+    return Result<void>::success();
+  };
+  ASSERT_TRUE(publish_endpoint(*first.value_if(), *first_record.value_if()));
+  ASSERT_TRUE(publish_endpoint(*second.value_if(), *second_record.value_if()));
+
+  ASSERT_TRUE(send_control(*first.value_if(),
+                           RelayWssControlType::endpoint_query));
+  auto query_frame = receive_control(*first.value_if());
+  ASSERT_TRUE(query_frame) << query_frame.error_if()->safe_detail();
+  auto all = parse_relay_wss_endpoint_query_result(query_frame.value_if()->payload);
+  ASSERT_TRUE(all) << all.error_if()->safe_detail();
+  ASSERT_EQ(all.value_if()->endpoints.size(), 2U);
+
+  RelayWssEndpointQuery filtered;
+  filtered.device_id = identity.value_if()->device_id();
+  filtered.endpoint_id = second_record.value_if()->endpoint.endpoint_id;
+  auto filtered_bytes = encode_relay_wss_endpoint_query(filtered);
+  ASSERT_TRUE(filtered_bytes) << filtered_bytes.error_if()->safe_detail();
+  ASSERT_TRUE(send_control(*first.value_if(),
+                           RelayWssControlType::endpoint_query,
+                           *filtered_bytes.value_if()));
+  auto filtered_frame = receive_control(*first.value_if());
+  ASSERT_TRUE(filtered_frame) << filtered_frame.error_if()->safe_detail();
+  auto filtered_result =
+      parse_relay_wss_endpoint_query_result(filtered_frame.value_if()->payload);
+  ASSERT_TRUE(filtered_result) << filtered_result.error_if()->safe_detail();
+  ASSERT_EQ(filtered_result.value_if()->endpoints.size(), 1U);
+  EXPECT_EQ(filtered_result.value_if()->endpoints[0U].endpoint_id,
+            second_record.value_if()->endpoint.endpoint_id);
+
+  ASSERT_TRUE(first.value_if()->close(3s));
+  ASSERT_TRUE(second.value_if()->close(3s));
+  ASSERT_TRUE(wait_until(
+      [&] { return server.value_if()->snapshot().leases.current_entries == 0U; },
+      2s));
+  EXPECT_TRUE(server.value_if()->shutdown().stopped);
+}
+
+TEST(M3BRelayWssClientTest, PersistsRealWssEnrollmentAndRetriesIdempotently) {
+  TemporaryDirectory directory{"m3b-wss-control-profile-enrollment"};
+#ifndef _WIN32
+  ASSERT_EQ(::chmod(directory.path().c_str(), S_IRWXU), 0);
+#endif
+  ASSERT_TRUE(write_test_certificate(directory.path()));
+  const std::string token = "TEST-ONLY-real-profile-enrollment-token-0123456789";
+  const auto now = now_milliseconds();
+  {
+    auto database = RelayDatabase::open(directory.path() / "relay.sqlite");
+    ASSERT_TRUE(database) << database.error_if()->safe_detail();
+    ASSERT_TRUE(database.value_if()->create_bootstrap_token(
+        "tenant-a", token, now + 60U * 1000U, 1U));
+  }
+  auto server = RelayServer::create(server_config(directory.path()));
+  ASSERT_TRUE(server) << server.error_if()->safe_detail();
+  ASSERT_TRUE(wait_until(
+      [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
+  const auto port = server.value_if()->snapshot().listen_port;
+  const std::string relay_url =
+      "wss://127.0.0.1:" + std::to_string(port);
+  auto pin = certificate_pin(directory.path() / "test-only-cert.pem");
+  ASSERT_TRUE(pin);
+  const std::vector<std::byte> pin_vector(pin->begin(), pin->end());
+
+  ProfileOpenOptions profile_options;
+  profile_options.secret_backend.prefer_os_backend = false;
+  auto profile =
+      ProfileStore::create(directory.path() / "profile.sqlite", profile_options);
+  ASSERT_TRUE(profile) << profile.error_if()->safe_detail();
+  auto verifier = create_password_verifier("correct horse battery staple", {});
+  ASSERT_TRUE(verifier) << verifier.error_if()->safe_detail();
+  LocalProfileInitialization initialization;
+  initialization.application_id = "com.example.relay-client";
+  initialization.password_verifier = std::move(*verifier.value_if());
+  initialization.password_generation = 1U;
+  initialization.pairing_policy = PairingPolicy{};
+  initialization.lan = LanConfiguration{};
+  ASSERT_TRUE(profile.value_if()->initialize_local(initialization));
+
+  RelayEnrollmentClientConfig enrollment;
+  enrollment.profile = profile.value_if();
+  enrollment.application_id = "com.example.relay-client";
+  enrollment.relay_url = relay_url;
+  enrollment.tenant = "tenant-a";
+  enrollment.relay_pin = pin_vector;
+  enrollment.auto_connect = true;
+  enrollment.wss_transport = RelayEnrollmentWssTransportConfig{
+      .relay_url = relay_url,
+      .relay_pin = pin_vector,
+      .tls_ca_file = std::nullopt,
+      .tls_verify_peer = false,
+      .connect_timeout = 3s,
+      .handshake_timeout = 3s,
+      .close_timeout = 2s,
+      .runtime = RuntimeConfig{}};
+
+  auto first = enroll_relay_profile(enrollment, token, now);
+  ASSERT_TRUE(first) << first.error_if()->safe_detail();
+  EXPECT_EQ(first.value_if()->enrollment_generation, 1U);
+  auto persisted = profile.value_if()->relay_enrollment(relay_url);
+  ASSERT_TRUE(persisted) << persisted.error_if()->safe_detail();
+  ASSERT_TRUE(persisted.value_if()->has_value());
+  EXPECT_TRUE(persisted.value_if()->value().auto_connect);
+
+  auto second = enroll_relay_profile(enrollment, token, now + 1U);
+  ASSERT_TRUE(second) << second.error_if()->safe_detail();
+  EXPECT_EQ(second.value_if()->enrollment_generation, 1U);
+
+  EXPECT_TRUE(server.value_if()->shutdown().stopped);
+}
+
+TEST(M3BRelayWssClientTest, NodeAutoLoginHeartbeatsAndRelayFailureKeepsLanDisabledPath) {
+  TemporaryDirectory directory{"m3b-node-relay-auto-login"};
+#ifndef _WIN32
+  ASSERT_EQ(::chmod(directory.path().c_str(), S_IRWXU), 0);
+#endif
+  ASSERT_TRUE(write_test_certificate(directory.path()));
+
+  ProfileOpenOptions profile_options;
+  profile_options.secret_backend.prefer_os_backend = false;
+  auto profile =
+      ProfileStore::create(directory.path() / "profile.sqlite", profile_options);
+  ASSERT_TRUE(profile) << profile.error_if()->safe_detail();
+  auto verifier = create_password_verifier("correct horse battery staple", {});
+  ASSERT_TRUE(verifier) << verifier.error_if()->safe_detail();
+  LocalProfileInitialization initialization;
+  initialization.application_id = "com.example.relay-node";
+  initialization.password_verifier = std::move(*verifier.value_if());
+  initialization.password_generation = 1U;
+  initialization.pairing_policy = PairingPolicy{};
+  initialization.lan = LanConfiguration{};
+  ASSERT_TRUE(profile.value_if()->initialize_local(initialization));
+  auto identity = profile.value_if()->load_identity();
+  ASSERT_TRUE(identity) << identity.error_if()->safe_detail();
+  auto endpoint = profile.value_if()->endpoint_for("com.example.relay-node");
+  ASSERT_TRUE(endpoint) << endpoint.error_if()->safe_detail();
+
+  const auto now = now_milliseconds();
+  {
+    auto database = RelayDatabase::open(directory.path() / "relay.sqlite");
+    ASSERT_TRUE(database) << database.error_if()->safe_detail();
+    RelayDeviceRecord device;
+    device.device_id = identity.value_if()->device_id();
+    device.public_key = identity.value_if()->public_key();
+    device.tenant = "tenant-a";
+    device.display_name = "device";
+    device.enrollment_generation = 1U;
+    device.status = RelayDeviceStatus::active;
+    ASSERT_TRUE(database.value_if()->enroll_device(device, now));
+  }
+  auto server = RelayServer::create(server_config(directory.path()));
+  ASSERT_TRUE(server) << server.error_if()->safe_detail();
+  ASSERT_TRUE(wait_until(
+      [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
+  const auto port = server.value_if()->snapshot().listen_port;
+  const std::string relay_url = "wss://127.0.0.1:" + std::to_string(port);
+  auto pin = certificate_pin(directory.path() / "test-only-cert.pem");
+  ASSERT_TRUE(pin);
+  const std::vector<std::byte> pin_vector(pin->begin(), pin->end());
+
+  RelayNodeConfig relay_config;
+  relay_config.enabled = true;
+  relay_config.relay_url = relay_url;
+  relay_config.relay_pin = pin_vector;
+  relay_config.tenant = "tenant-a";
+  relay_config.tls_ca_file = std::nullopt;
+  relay_config.tls_verify_peer = false;
+  relay_config.connect_timeout = 2s;
+  relay_config.handshake_timeout = 2s;
+  relay_config.close_timeout = 1s;
+  relay_config.heartbeat_interval = 1000ms;
+  relay_config.lease_duration = 3000ms;
+  relay_config.missed_heartbeat_limit = 3U;
+  relay_config.minimum_backoff = 100ms;
+  relay_config.maximum_backoff = 500ms;
+  relay_config.poll_interval = 25ms;
+  relay_config.receive_capacity = 16U;
+  relay_config.send_capacity = 16U;
+
+  LanConfiguration lan;
+  lan.enabled = false;
+  NodeConfig node_config;
+  node_config.profile = profile.value_if();
+  node_config.application_id = "com.example.relay-node";
+  node_config.lan_override = lan;
+  node_config.relay_override = relay_config;
+  auto node = Node::create(std::move(node_config));
+  ASSERT_TRUE(node) << node.error_if()->safe_detail();
+
+  ASSERT_TRUE(wait_until(
+      [&] {
+        const auto snapshot = node.value_if()->snapshot();
+        return snapshot.relay.state == RelayNodeState::ready;
+      },
+      3s));
+  const auto ready = node.value_if()->snapshot();
+  EXPECT_EQ(ready.relay.tenant, "tenant-a");
+  EXPECT_EQ(ready.relay.enrollment_generation, 1U);
+  EXPECT_EQ(ready.relay.relay_url, relay_url);
+
+  ASSERT_TRUE(wait_until(
+      [&] { return node.value_if()->snapshot().relay.heartbeats_sent >= 1U; },
+      3s));
+  ASSERT_TRUE(wait_until(
+      [&] { return server.value_if()->snapshot().heartbeats >= 1U; }, 2s));
+  EXPECT_GE(server.value_if()->snapshot().leases.current_entries, 1U);
+
+  EXPECT_TRUE(node.value_if()->shutdown().stopped);
+  ASSERT_TRUE(wait_until(
+      [&] { return server.value_if()->snapshot().active_sessions == 0U; }, 2s));
+  EXPECT_TRUE(server.value_if()->shutdown().stopped);
+}
+
+TEST(M3BRelayWssClientTest, NodeAutoLogsInFromPersistedRelayEnrollment) {
+  TemporaryDirectory directory{"m3b-node-relay-profile-auto-login"};
+#ifndef _WIN32
+  ASSERT_EQ(::chmod(directory.path().c_str(), S_IRWXU), 0);
+#endif
+  ASSERT_TRUE(write_test_certificate(directory.path()));
+
+  ProfileOpenOptions profile_options;
+  profile_options.secret_backend.prefer_os_backend = false;
+  auto profile =
+      ProfileStore::create(directory.path() / "profile.sqlite", profile_options);
+  ASSERT_TRUE(profile) << profile.error_if()->safe_detail();
+  auto verifier = create_password_verifier("correct horse battery staple", {});
+  ASSERT_TRUE(verifier) << verifier.error_if()->safe_detail();
+  LocalProfileInitialization initialization;
+  initialization.application_id = "com.example.relay-node-profile";
+  initialization.password_verifier = std::move(*verifier.value_if());
+  initialization.password_generation = 1U;
+  initialization.pairing_policy = PairingPolicy{};
+  initialization.lan = LanConfiguration{};
+  ASSERT_TRUE(profile.value_if()->initialize_local(initialization));
+  auto identity = profile.value_if()->load_identity();
+  ASSERT_TRUE(identity) << identity.error_if()->safe_detail();
+  ASSERT_TRUE(profile.value_if()->endpoint_for("com.example.relay-node-profile"));
+
+  const auto now = now_milliseconds();
+  {
+    auto database = RelayDatabase::open(directory.path() / "relay.sqlite");
+    ASSERT_TRUE(database) << database.error_if()->safe_detail();
+    RelayDeviceRecord device;
+    device.device_id = identity.value_if()->device_id();
+    device.public_key = identity.value_if()->public_key();
+    device.tenant = "tenant-a";
+    device.display_name = "device";
+    device.enrollment_generation = 1U;
+    device.status = RelayDeviceStatus::active;
+    ASSERT_TRUE(database.value_if()->enroll_device(device, now));
+  }
+  auto server = RelayServer::create(server_config(directory.path()));
+  ASSERT_TRUE(server) << server.error_if()->safe_detail();
+  ASSERT_TRUE(wait_until(
+      [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
+  const auto port = server.value_if()->snapshot().listen_port;
+  const std::string relay_url = "wss://127.0.0.1:" + std::to_string(port);
+  auto pin = certificate_pin(directory.path() / "test-only-cert.pem");
+  ASSERT_TRUE(pin);
+  const std::vector<std::byte> pin_vector(pin->begin(), pin->end());
+  RelayEnrollmentRecord enrollment;
+  enrollment.relay_url = relay_url;
+  enrollment.relay_pin = pin_vector;
+  enrollment.tenant = "tenant-a";
+  enrollment.enrollment_generation = 1U;
+  enrollment.auto_connect = true;
+  enrollment.revoked = false;
+  ASSERT_TRUE(profile.value_if()->put_relay_enrollment(enrollment));
+
+  LanConfiguration lan;
+  lan.enabled = false;
+  NodeConfig node_config;
+  node_config.profile = profile.value_if();
+  node_config.application_id = "com.example.relay-node-profile";
+  node_config.lan_override = lan;
+  auto node = Node::create(std::move(node_config));
+  ASSERT_TRUE(node) << node.error_if()->safe_detail();
+  ASSERT_TRUE(wait_until(
+      [&] {
+        const auto snapshot = node.value_if()->snapshot();
+        return snapshot.relay.state == RelayNodeState::ready;
+      },
+      3s));
+  const auto ready = node.value_if()->snapshot();
+  EXPECT_EQ(ready.relay.enrollment_generation, 1U);
+  EXPECT_EQ(ready.relay.relay_url, relay_url);
+  EXPECT_TRUE(node.value_if()->shutdown().stopped);
+  EXPECT_TRUE(server.value_if()->shutdown().stopped);
+}
+
+TEST(M3BRelayWssClientTest, NodeReconnectsWithBoundedBackoffAfterRelayOutage) {
+  TemporaryDirectory directory{"m3b-node-relay-reconnect"};
+#ifndef _WIN32
+  ASSERT_EQ(::chmod(directory.path().c_str(), S_IRWXU), 0);
+#endif
+  ASSERT_TRUE(write_test_certificate(directory.path()));
+
+  ProfileOpenOptions profile_options;
+  profile_options.secret_backend.prefer_os_backend = false;
+  auto profile =
+      ProfileStore::create(directory.path() / "profile.sqlite", profile_options);
+  ASSERT_TRUE(profile) << profile.error_if()->safe_detail();
+  auto verifier = create_password_verifier("correct horse battery staple", {});
+  ASSERT_TRUE(verifier) << verifier.error_if()->safe_detail();
+  LocalProfileInitialization initialization;
+  initialization.application_id = "com.example.relay-reconnect";
+  initialization.password_verifier = std::move(*verifier.value_if());
+  initialization.password_generation = 1U;
+  initialization.pairing_policy = PairingPolicy{};
+  initialization.lan = LanConfiguration{};
+  ASSERT_TRUE(profile.value_if()->initialize_local(initialization));
+  auto identity = profile.value_if()->load_identity();
+  ASSERT_TRUE(identity) << identity.error_if()->safe_detail();
+  ASSERT_TRUE(profile.value_if()->endpoint_for("com.example.relay-reconnect"));
+
+  const auto now = now_milliseconds();
+  {
+    auto database = RelayDatabase::open(directory.path() / "relay.sqlite");
+    ASSERT_TRUE(database) << database.error_if()->safe_detail();
+    RelayDeviceRecord device;
+    device.device_id = identity.value_if()->device_id();
+    device.public_key = identity.value_if()->public_key();
+    device.tenant = "tenant-a";
+    device.display_name = "device";
+    device.enrollment_generation = 1U;
+    device.status = RelayDeviceStatus::active;
+    ASSERT_TRUE(database.value_if()->enroll_device(device, now));
+  }
+
+  boost::asio::io_context io;
+  boost::asio::ip::tcp::acceptor port_probe{
+      io, boost::asio::ip::tcp::endpoint{boost::asio::ip::tcp::v4(), 0U}};
+  const auto port = port_probe.local_endpoint().port();
+  port_probe.close();
+  ASSERT_NE(port, 0U);
+  const std::string relay_url = "wss://127.0.0.1:" + std::to_string(port);
+  auto pin = certificate_pin(directory.path() / "test-only-cert.pem");
+  ASSERT_TRUE(pin);
+  const std::vector<std::byte> pin_vector(pin->begin(), pin->end());
+
+  RelayNodeConfig relay_config;
+  relay_config.enabled = true;
+  relay_config.relay_url = relay_url;
+  relay_config.relay_pin = pin_vector;
+  relay_config.tenant = "tenant-a";
+  relay_config.enrollment_generation = 1U;
+  relay_config.tls_ca_file = std::nullopt;
+  relay_config.tls_verify_peer = false;
+  relay_config.connect_timeout = 300ms;
+  relay_config.handshake_timeout = 300ms;
+  relay_config.close_timeout = 500ms;
+  relay_config.heartbeat_interval = 1000ms;
+  relay_config.lease_duration = 3000ms;
+  relay_config.missed_heartbeat_limit = 3U;
+  relay_config.minimum_backoff = 100ms;
+  relay_config.maximum_backoff = 400ms;
+  relay_config.poll_interval = 25ms;
+  relay_config.receive_capacity = 8U;
+  relay_config.send_capacity = 8U;
+
+  LanConfiguration lan;
+  lan.enabled = false;
+  NodeConfig node_config;
+  node_config.profile = profile.value_if();
+  node_config.application_id = "com.example.relay-reconnect";
+  node_config.lan_override = lan;
+  node_config.relay_override = relay_config;
+  auto node = Node::create(std::move(node_config));
+  ASSERT_TRUE(node) << node.error_if()->safe_detail();
+  ASSERT_TRUE(wait_until(
+      [&] {
+        const auto snapshot = node.value_if()->snapshot();
+        return snapshot.relay.state == RelayNodeState::degraded &&
+               snapshot.relay.reconnect_count > 0U;
+      },
+      2s));
+  const auto degraded = node.value_if()->snapshot().relay;
+  EXPECT_GE(degraded.backoff.count(), 100);
+  EXPECT_LE(degraded.backoff.count(), 400);
+
+  auto config = server_config(directory.path());
+  config.listen_port = port;
+  auto server = RelayServer::create(std::move(config));
+  ASSERT_TRUE(server) << server.error_if()->safe_detail();
+  ASSERT_TRUE(wait_until(
+      [&] { return node.value_if()->snapshot().relay.state == RelayNodeState::ready; },
+      3s));
+  EXPECT_TRUE(node.value_if()->shutdown().stopped);
   EXPECT_TRUE(server.value_if()->shutdown().stopped);
 }
 

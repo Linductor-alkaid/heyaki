@@ -1,5 +1,8 @@
 #pragma once
 
+#include "relay_endpoint.hpp"
+#include "relay_endpoint_directory.hpp"
+#include "relay_lease_table.hpp"
 #include "relay_rate_limiter.hpp"
 
 #include <heyaki/runtime.hpp>
@@ -23,6 +26,11 @@ struct RelayServerConfig {
   std::chrono::milliseconds handshake_timeout{5000};
   std::chrono::milliseconds shutdown_timeout{2000};
   bool install_signal_handlers{true};
+  RelayLeaseConfig lease;
+  RelayEndpointDirectoryConfig endpoint_directory;
+  RelayTenantExposurePolicy endpoint_exposure;
+  std::size_t endpoint_query_max_results{256U};
+  bool close_revoked_sessions{true};
   RelayRateLimitPolicy rate_limits;
   RuntimeConfig runtime;
 };

@@ -40,6 +40,24 @@ foreach(schema_contract IN ITEMS
   endif()
 endforeach()
 
+set(relay_control_schema "${HEYAKI_PROTO_DIR}/heyaki/relay/v1/relay_control.proto")
+if(NOT EXISTS "${relay_control_schema}")
+  message(FATAL_ERROR "Missing versioned relay control schema: ${relay_control_schema}")
+endif()
+file(READ "${relay_control_schema}" relay_control_contents)
+foreach(relay_control_contract IN ITEMS
+    "package heyaki.protocol.relay.v1;"
+    "option optimize_for = LITE_RUNTIME;"
+    "message LoginResult"
+    "message HeartbeatRequest"
+    "message EndpointPublish"
+    "message EndpointQueryResult")
+  string(FIND "${relay_control_contents}" "${relay_control_contract}" contract_position)
+  if(contract_position EQUAL -1)
+    message(FATAL_ERROR "Schema contract '${relay_control_contract}' is missing from ${relay_control_schema}")
+  endif()
+endforeach()
+
 set(lan_schema "${HEYAKI_PROTO_DIR}/heyaki/signaling/v1/lan.proto")
 if(NOT EXISTS "${lan_schema}")
   message(FATAL_ERROR "Missing versioned LAN signaling schema: ${lan_schema}")

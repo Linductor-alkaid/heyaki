@@ -79,6 +79,17 @@ bool valid_health_path(std::string_view value) noexcept {
   });
 }
 
+Result<bool> parse_bool(std::string_view text, const char* detail,
+                        std::int64_t line) {
+  if (text == "true" || text == "1") {
+    return Result<bool>::success(true);
+  }
+  if (text == "false" || text == "0") {
+    return Result<bool>::success(false);
+  }
+  return Result<bool>::failure(config_error(detail, line));
+}
+
 bool valid_listen_address(std::string_view value) noexcept {
   return !value.empty() && value.size() <= 253U && is_printable_ascii(value) &&
          std::none_of(value.begin(), value.end(), [](unsigned char character) {
@@ -96,7 +107,19 @@ Result<void> validate_relay_server_config(const RelayServerConfig& config) {
       config.health_path == relay_wss_control_path || config.max_connections == 0U ||
       config.max_connections > 65536U ||
       config.handshake_timeout.count() < 100 || config.handshake_timeout.count() > 60000 ||
-      config.shutdown_timeout.count() < 100 || config.shutdown_timeout.count() > 60000) {
+      config.shutdown_timeout.count() < 100 || config.shutdown_timeout.count() > 60000 ||
+      config.lease.capacity == 0U || config.lease.capacity > 65536U ||
+      config.lease.per_device_endpoint_capacity == 0U ||
+      config.lease.per_tenant_device_capacity == 0U ||
+      config.lease.default_lease.count() < 1000 ||
+      config.lease.maximum_lease < config.lease.default_lease ||
+      config.lease.maximum_lease > std::chrono::milliseconds{120000} ||
+      config.endpoint_directory.capacity == 0U ||
+      config.endpoint_directory.capacity > 65536U ||
+      config.endpoint_directory.maximum_ttl <= std::chrono::milliseconds{0} ||
+      config.endpoint_directory.maximum_ttl > std::chrono::milliseconds{5 * 60 * 1000} ||
+      config.endpoint_query_max_results == 0U ||
+      config.endpoint_query_max_results > 4096U) {
     return Result<void>::failure(config_error("relay_config_invalid"));
   }
   return Result<void>::success();
@@ -140,6 +163,18 @@ Result<RelayServerConfig> load_relay_config_file(
   std::optional<std::size_t> max_connections;
   std::optional<std::chrono::milliseconds> handshake_timeout;
   std::optional<std::chrono::milliseconds> shutdown_timeout;
+  std::optional<std::chrono::milliseconds> lease_default;
+  std::optional<std::chrono::milliseconds> lease_maximum;
+  std::optional<std::size_t> lease_capacity;
+  std::optional<std::size_t> lease_per_device_capacity;
+  std::optional<std::size_t> lease_per_tenant_capacity;
+  std::optional<std::size_t> endpoint_directory_capacity;
+  std::optional<std::size_t> endpoint_query_max_results;
+  std::optional<bool> close_revoked_sessions;
+  std::optional<bool> expose_application_id;
+  std::optional<bool> expose_record_generation;
+  std::optional<bool> expose_manifest_sha256;
+  std::optional<bool> expose_manifest_generation;
 
   std::size_t offset = 0U;
   std::int64_t line_number = 1;
@@ -257,6 +292,147 @@ Result<RelayServerConfig> load_relay_config_file(
       }
       config.handshake_timeout = std::chrono::milliseconds{*parsed.value_if()};
       handshake_timeout = config.handshake_timeout;
+    } else if (key == "lease_default_milliseconds") {
+      if (lease_default) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_duplicate_key", line_number));
+      }
+      auto parsed = parse_u64(value, "relay_config_lease_default_invalid", line_number);
+      if (!parsed || *parsed.value_if() > 120000U) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_lease_default_invalid", line_number));
+      }
+      config.lease.default_lease = std::chrono::milliseconds{*parsed.value_if()};
+      lease_default = config.lease.default_lease;
+    } else if (key == "lease_maximum_milliseconds") {
+      if (lease_maximum) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_duplicate_key", line_number));
+      }
+      auto parsed = parse_u64(value, "relay_config_lease_maximum_invalid", line_number);
+      if (!parsed || *parsed.value_if() > 120000U) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_lease_maximum_invalid", line_number));
+      }
+      config.lease.maximum_lease = std::chrono::milliseconds{*parsed.value_if()};
+      lease_maximum = config.lease.maximum_lease;
+    } else if (key == "lease_capacity") {
+      if (lease_capacity) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_duplicate_key", line_number));
+      }
+      auto parsed = parse_u64(value, "relay_config_lease_capacity_invalid", line_number);
+      if (!parsed || *parsed.value_if() > 65536U) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_lease_capacity_invalid", line_number));
+      }
+      config.lease.capacity = static_cast<std::size_t>(*parsed.value_if());
+      lease_capacity = config.lease.capacity;
+    } else if (key == "lease_per_device_endpoint_capacity") {
+      if (lease_per_device_capacity) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_duplicate_key", line_number));
+      }
+      auto parsed = parse_u64(value, "relay_config_per_device_capacity_invalid", line_number);
+      if (!parsed || *parsed.value_if() > 65536U) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_per_device_capacity_invalid", line_number));
+      }
+      config.lease.per_device_endpoint_capacity = static_cast<std::size_t>(*parsed.value_if());
+      lease_per_device_capacity = config.lease.per_device_endpoint_capacity;
+    } else if (key == "lease_per_tenant_device_capacity") {
+      if (lease_per_tenant_capacity) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_duplicate_key", line_number));
+      }
+      auto parsed = parse_u64(value, "relay_config_per_tenant_capacity_invalid", line_number);
+      if (!parsed || *parsed.value_if() > 65536U) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_per_tenant_capacity_invalid", line_number));
+      }
+      config.lease.per_tenant_device_capacity = static_cast<std::size_t>(*parsed.value_if());
+      lease_per_tenant_capacity = config.lease.per_tenant_device_capacity;
+    } else if (key == "endpoint_directory_capacity") {
+      if (endpoint_directory_capacity) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_duplicate_key", line_number));
+      }
+      auto parsed = parse_u64(value, "relay_config_endpoint_directory_capacity_invalid",
+                              line_number);
+      if (!parsed || *parsed.value_if() > 65536U) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_endpoint_directory_capacity_invalid", line_number));
+      }
+      config.endpoint_directory.capacity = static_cast<std::size_t>(*parsed.value_if());
+      endpoint_directory_capacity = config.endpoint_directory.capacity;
+    } else if (key == "endpoint_query_max_results") {
+      if (endpoint_query_max_results) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_duplicate_key", line_number));
+      }
+      auto parsed = parse_u64(value, "relay_config_endpoint_query_max_invalid", line_number);
+      if (!parsed || *parsed.value_if() > 4096U) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_endpoint_query_max_invalid", line_number));
+      }
+      config.endpoint_query_max_results = static_cast<std::size_t>(*parsed.value_if());
+      endpoint_query_max_results = config.endpoint_query_max_results;
+    } else if (key == "close_revoked_sessions") {
+      if (close_revoked_sessions) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_duplicate_key", line_number));
+      }
+      auto parsed = parse_bool(value, "relay_config_close_revoked_invalid", line_number);
+      if (!parsed) {
+        return Result<RelayServerConfig>::failure(*parsed.error_if());
+      }
+      config.close_revoked_sessions = *parsed.value_if();
+      close_revoked_sessions = config.close_revoked_sessions;
+    } else if (key == "endpoint_expose_application_id") {
+      if (expose_application_id) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_duplicate_key", line_number));
+      }
+      auto parsed = parse_bool(value, "relay_config_expose_application_invalid", line_number);
+      if (!parsed) {
+        return Result<RelayServerConfig>::failure(*parsed.error_if());
+      }
+      config.endpoint_exposure.expose_application_id = *parsed.value_if();
+      expose_application_id = config.endpoint_exposure.expose_application_id;
+    } else if (key == "endpoint_expose_record_generation") {
+      if (expose_record_generation) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_duplicate_key", line_number));
+      }
+      auto parsed = parse_bool(value, "relay_config_expose_record_generation_invalid", line_number);
+      if (!parsed) {
+        return Result<RelayServerConfig>::failure(*parsed.error_if());
+      }
+      config.endpoint_exposure.expose_record_generation = *parsed.value_if();
+      expose_record_generation = config.endpoint_exposure.expose_record_generation;
+    } else if (key == "endpoint_expose_manifest_sha256") {
+      if (expose_manifest_sha256) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_duplicate_key", line_number));
+      }
+      auto parsed = parse_bool(value, "relay_config_expose_manifest_sha256_invalid", line_number);
+      if (!parsed) {
+        return Result<RelayServerConfig>::failure(*parsed.error_if());
+      }
+      config.endpoint_exposure.expose_manifest_sha256 = *parsed.value_if();
+      expose_manifest_sha256 = config.endpoint_exposure.expose_manifest_sha256;
+    } else if (key == "endpoint_expose_manifest_generation") {
+      if (expose_manifest_generation) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_duplicate_key", line_number));
+      }
+      auto parsed = parse_bool(value, "relay_config_expose_manifest_generation_invalid",
+                               line_number);
+      if (!parsed) {
+        return Result<RelayServerConfig>::failure(*parsed.error_if());
+      }
+      config.endpoint_exposure.expose_manifest_generation = *parsed.value_if();
+      expose_manifest_generation = config.endpoint_exposure.expose_manifest_generation;
     } else if (key == "shutdown_timeout_milliseconds") {
       if (shutdown_timeout) {
         return Result<RelayServerConfig>::failure(
