@@ -205,6 +205,12 @@ target_link_libraries(heyaki_relay
 heyaki_target_use_pinned_boost_beast(heyaki_relay)
 heyaki_configure_target(heyaki_relay)
 heyaki_enable_executor_exception_adapter_source(src/relay/relay_server.cpp)
+if(MSVC)
+  set_source_files_properties(
+    src/relay/relay_database.cpp
+    src/relay/relay_server.cpp
+    PROPERTIES COMPILE_OPTIONS "/bigobj")
+endif()
 
 set(HEYAKI_INSTALL_TARGETS
   heyaki_sodium
