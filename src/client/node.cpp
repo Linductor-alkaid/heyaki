@@ -1223,7 +1223,6 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     }
     relay_client.reset();
     relay_heartbeat_pending = false;
-    boost::system::error_code ignored;
     (void)relay_heartbeat_timer.cancel();
     relay_heartbeat_timer_active = false;
     if (security_error) {
@@ -1344,7 +1343,6 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return;
     }
     relay_phase = RelayLoginPhase::stopped;
-    boost::system::error_code ignored;
     (void)relay_poll_timer.cancel();
     (void)relay_heartbeat_timer.cancel();
     (void)relay_reconnect_timer.cancel();
