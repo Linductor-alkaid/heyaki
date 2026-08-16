@@ -70,19 +70,27 @@ executor dependency itself.
 
 ## GitHub Commit And Push
 
-Only create commits or update GitHub after the user has explicitly authorized
-that action. Keep commits scoped to the requested work and preserve unrelated
-working-tree changes.
+Agents may create scoped commits and push the current working branch to the
+HTTPS `origin` without additional per-action authorization when needed to
+trigger or verify GitHub CI for the user's requested work. This standing
+authorization includes follow-up commits that fix CI failures within the same
+request. Any other GitHub-changing action still requires explicit user
+authorization. Preserve unrelated working-tree changes and never include them
+in these commits.
 
 - Use the HTTPS `origin` remote and prefer a normal non-force
   `git push origin <branch>` when Git transport is available.
-- Obtain GitHub authentication from `~/.config/gh/hosts.yaml` at runtime. The
-  file may contain either the standard `oauth_token:` field or a
-  `GITHUB_TOKEN=` entry. Never print the token, copy it into the repository,
-  put it in a remote URL, expose it in process arguments, or include it in
-  command output or logs.
-- Do not assume that the `gh` CLI is installed. Detect it before use and fall
-  back to authenticated HTTPS without changing the credential file.
+- The `gh` CLI is installed at `/usr/bin/gh` and authenticated through the
+  system keyring. Prefer `gh` for GitHub API and repository operations, and
+  verify the active account with `gh auth status` before making changes.
+- After a CI-validation push, monitor the relevant workflow with `gh`, inspect
+  failures, and report the final result. Do not merge pull requests, create
+  releases or tags, or change repository settings under this standing
+  authorization.
+- Never print authentication tokens, copy them into the repository, put them
+  in remote URLs, expose them in process arguments, or include them in command
+  output or logs. If `gh` is unavailable or no longer authenticated, fall back
+  to authenticated HTTPS without modifying the credential store.
 - If normal Git transport is unavailable but the GitHub API is reachable, the
   Git Database API is an acceptable fallback: verify the current remote ref,
   create blobs, a tree, and a commit based on that exact remote commit, then
