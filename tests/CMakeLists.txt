@@ -309,7 +309,7 @@ heyaki_add_runtime_test(
 
 set(heyaki_public_header_sources)
 foreach(public_header IN ITEMS
-    error identity ids lan_directory lan_protocol limits node operation password profile_store protocol runtime secret_backend
+    error identity ids lan_directory lan_protocol limits node operation password profile_store protocol relay_enrollment_client runtime secret_backend
     security signing time version wire)
   set(header_source
     "${HEYAKI_TEST_GENERATED_DIR}/${public_header}_header_standalone.cpp")
