@@ -516,8 +516,10 @@ ASan/UBSan/TSAN 全部通过。WSS heartbeat 消息尚未接入，完整 M3B 验
   暴露、parser 拒绝。relay 测试现含 35 项。
 
 本机验证：GCC Debug 全量 CTest 25/25，Release relay 35/35，`-Werror`/禁异常构建通过，
-ASan/UBSan 定向 relay 测试通过，TSAN（关闭 ASLR）relay 35/35。WSS endpoint 注册/查询消息
-尚未接入，完整 M3B 验收未完成，因此 `M3B-08` 保持未勾选。
+ASan/UBSan 定向 relay 测试通过，TSAN（关闭 ASLR）relay 35/35。GitHub Actions run
+`31929776482` 结论 success：Linux GCC/Clang Debug/Release、Windows Debug/Release、
+ASan/UBSan/TSAN 全部通过。WSS endpoint 注册/查询消息尚未接入，完整 M3B 验收未完成，
+因此 `M3B-08` 保持未勾选。
 
 ### 6.5 M3B：TURN credential 与部署
 
