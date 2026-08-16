@@ -39,7 +39,7 @@ struct RelayLoginServiceDiagnostics {
 
 class RelayLoginService {
  public:
-  class Impl;
+  struct Impl;
 
   RelayLoginService(RelayLoginService&&) noexcept;
   RelayLoginService& operator=(RelayLoginService&&) noexcept;
