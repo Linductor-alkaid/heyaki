@@ -1,7 +1,7 @@
 # Heyaki 并发与关闭设计
 
-> 状态：M2 冻结版，含 M3A LAN 工作负载增补
-> 日期：2026-08-15
+> 状态：M2 冻结版，含 M3A LAN 与 M3B relay WSS 骨架增补
+> 日期：2026-08-16
 > 适用范围：`heyaki::Node`、LAN discovery/signaling、`PeerSession`、`heyaki-relay`、`heyaki-tui` 与阻塞 I/O 适配器
 
 ## 1. 所有权边界
@@ -26,6 +26,7 @@ Heyaki 只允许一个明确 owner 初始化和关闭每个 executor 实例。�
 | --- | --- | --- | --- |
 | Asio 网络循环 | executor 注册的 `BlockingIoWorker` | 进程 runtime | worker status + Asio work 收敛 |
 | LAN multicast/TLS | 现有 Asio loop 上的 async socket、acceptor 与 timer | Node/route strand | socket/listener result + route operation 终态 |
+| Relay WSS listener/session | 现有 Asio loop 上的 Beast TLS/WebSocket acceptor、read/write 与 handshake timer | RelayServer strand | listener bind result、session close reason 与 shutdown hook 终态 |
 | Node 状态机 | Node 专属 Asio strand | 仅 strand 内修改 | operation 终态 callback/result |
 | PeerSession 状态机 | session 专属 Asio strand | 仅 strand 内修改 | session 终态与 close reason |
 | 普通 handler | 借用的 executor async pool | handler 自有输入 | 保存的 future 或 failure event |
@@ -45,6 +46,7 @@ Heyaki 只允许一个明确 owner 初始化和关闭每个 executor 实例。�
 | TUI 离散事件 | `MpscChannel` | 1024 条 | 普通事件拒绝；控制事件预留容量 | reject、render lag |
 | runtime 关闭 hook | `MpscChannel` | 每 runtime 64 条 | 拒绝新 hook；关闭后拒绝 | 注册错误、阶段结果 |
 | Node/PeerSession 低频状态 | `DoubleBuffer` | 两份快照 | 发布失败显式报告 | sequence、stale、consumer lag |
+| RelayServer 低频状态 | `DoubleBuffer` | 两份快照 | 发布失败显式报告 | sequence、stale、consumer lag |
 | 可覆盖指标/进度 | `LatestMailbox` | 1 个最新值 | overwrite | sequence、overwrite、lag |
 
 所有容量必须可配置并在启动时校验。未知或为零的关键控制容量是配置错误。通信组件的
@@ -58,6 +60,17 @@ LAN discovery 不注册第二个 Blocking I/O worker，也不在普通 executor 
 `receive`/`accept` 循环。UDP socket、TLS acceptor/client、interface refresh、lease 和 handshake
 timer 全部挂在现有 `io_context`；关闭 socket/acceptor 与取消 timer 必须解除 pending Asio wait。
 worker `ready` 不能代替 multicast join、listener bind 或 LAN signaling readiness。
+
+Relay WSS 同样复用该 Asio loop。`heyaki-relay` 在 `main()` 拥有 executor/runtime；acceptor、
+TLS/WebSocket handshake、health reply、每连接 handshake timer 和 SIGINT/SIGTERM signal_set 全部
+绑定 `RelayServer` strand。满连接时在 strand 内关闭新 socket 并计数；服务器 shutdown 注册为
+`stop_producers` hook，先关 listener/signal/timer/session，再设置 shutdown completion，由 runtime
+以阶段预算等待，不创建第二个 worker、裸线程或独立 poll loop。
+
+Relay SQLite 状态（schema 迁移、bootstrap token 创建/消费、device audit）在 `RelayServer`
+strand 上同步执行，配置 WAL、FULL synchronous 和 busy timeout；token 消费使用
+`BEGIN IMMEDIATE` 事务保证并发扣减只有一个胜者。在线 presence 与 pending signaling 不使用
+SQLite，只放入有界 `RelayTtlTable` 内存结构并在 strand 内过期。
 
 ## 4. Operation 与安全上下文
 

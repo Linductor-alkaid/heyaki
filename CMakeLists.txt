@@ -67,6 +67,7 @@ endif()
 
 heyaki_resolve_build_commit(HEYAKI_RESOLVED_BUILD_COMMIT)
 heyaki_add_pinned_boost_asio()
+heyaki_add_pinned_boost_beast()
 heyaki_add_vendored_sodium()
 heyaki_add_vendored_sqlite()
 find_package(OpenSSL 3.0 REQUIRED COMPONENTS SSL Crypto)
@@ -187,6 +188,24 @@ target_compile_features(heyaki_transport_webrtc PUBLIC cxx_std_20)
 target_link_libraries(heyaki_transport_webrtc PRIVATE heyaki::core)
 heyaki_configure_target(heyaki_transport_webrtc)
 
+add_library(heyaki_relay
+  src/relay/relay_config.cpp
+  src/relay/relay_database.cpp
+  src/relay/relay_enrollment.cpp
+  src/relay/relay_enrollment_service.cpp
+  src/relay/relay_server.cpp)
+add_library(heyaki::relay ALIAS heyaki_relay)
+target_compile_features(heyaki_relay PUBLIC cxx_std_20)
+target_include_directories(heyaki_relay
+  PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/relay>"
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(heyaki_relay
+  PUBLIC heyaki::client
+  PRIVATE executor::executor heyaki::sodium heyaki::sqlite OpenSSL::SSL OpenSSL::Crypto)
+heyaki_target_use_pinned_boost_beast(heyaki_relay)
+heyaki_configure_target(heyaki_relay)
+heyaki_enable_executor_exception_adapter_source(src/relay/relay_server.cpp)
+
 set(HEYAKI_INSTALL_TARGETS
   heyaki_sodium
   heyaki_sqlite
@@ -198,7 +217,7 @@ set(HEYAKI_INSTALL_TARGETS
 
 if(HEYAKI_BUILD_APPS)
   add_executable(heyaki-relay apps/relay/main.cpp)
-  target_link_libraries(heyaki-relay PRIVATE heyaki::core)
+  target_link_libraries(heyaki-relay PRIVATE heyaki::relay)
   heyaki_configure_target(heyaki-relay)
 
   add_library(heyaki_tui_setup STATIC apps/tui/local_setup.cpp)

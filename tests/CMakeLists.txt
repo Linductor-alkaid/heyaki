@@ -275,6 +275,27 @@ target_compile_definitions(heyaki_m3a_lan_tests PRIVATE
 heyaki_add_runtime_test(
   heyaki_m3a_lan heyaki_m3a_lan_tests "unit;lan;security")
 
+add_executable(heyaki_m3b_relay_tests
+  unit/m3b_relay_test.cpp
+  unit/m3b_relay_database_test.cpp
+  unit/m3b_relay_enrollment_test.cpp
+  unit/m3b_relay_enrollment_service_test.cpp
+  unit/m3b_relay_ttl_test.cpp)
+target_link_libraries(heyaki_m3b_relay_tests PRIVATE
+  heyaki::relay
+  executor::executor
+  heyaki::sqlite
+  GTest::gtest_main
+  OpenSSL::SSL
+  OpenSSL::Crypto)
+heyaki_target_use_pinned_boost_beast(heyaki_m3b_relay_tests)
+heyaki_configure_target(heyaki_m3b_relay_tests)
+heyaki_enable_executor_exception_adapter_source(unit/m3b_relay_test.cpp)
+target_compile_definitions(heyaki_m3b_relay_tests PRIVATE
+  "HEYAKI_M3B_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}\"")
+heyaki_add_runtime_test(
+  heyaki_m3b_relay heyaki_m3b_relay_tests "unit;relay;network;security")
+
 set(heyaki_public_header_sources)
 foreach(public_header IN ITEMS
     error identity ids lan_directory lan_protocol limits node operation password profile_store protocol runtime secret_backend
@@ -422,6 +443,7 @@ if(HEYAKI_BUILD_APPS)
   heyaki_add_runtime_test(
     heyaki_tui_setup heyaki_tui_setup_tests "unit;tui;profile;security")
 
+  heyaki_add_runtime_test(heyaki_relay_version heyaki-relay "relay" --version)
   heyaki_add_runtime_test(heyaki_tui_version heyaki-tui "tui" --version)
   add_test(NAME heyaki_tui_local_status
     COMMAND heyaki-tui --profile m3a-status --status)

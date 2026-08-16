@@ -397,6 +397,64 @@ signaling operation/callback、通信队列、directory/replay cache 与 executo
 - [ ] `M3B-08` 对 endpoint record/service manifest 验证设备签名、大小和字段上限，只暴露租户策略允许的最小信息。
 - [ ] `M3B-09` 为 enrollment/login/query/heartbeat 设置连接、请求、tenant 和 IP 级速率限制及明确拒绝指标。
 
+### M3B 实施进度（2026-08-16）
+
+M3B 已开始推进。入口冻结了 `heyaki-relay` 的 WSS 依赖门禁：Boost.Beast 1.88.0 及其
+18 个新增模块 closure 已加入 `dependencies.lock`/`licenses.lock` 并完成离线 `--check`；
+依赖政策与供应链审计文档已同步。`M3B-01` 的服务骨架已落地为 `heyaki_relay` target：
+TLS 1.3-only Asio acceptor、Beast WebSocket 握手、`/health` 路径、每连接握手 deadline、
+有界连接容量与满容量拒绝、配置加载/严格校验、SIGINT/SIGTERM 请求停止，以及由
+executor-managed Runtime 承载的固定关闭 hook。新增 5 项 GCC 本地单元/集成测试，覆盖
+配置文件解析/非法值、WSS health 端到端、握手 deadline、容量上限与有预算关闭。
+
+本轮本机验证：GCC Debug 全量 CTest 25/25 通过（新增 `heyaki_m3b_relay` 与
+`heyaki_relay_version`），GCC `-Werror`/禁异常构建通过，ASan/UBSan 定向 relay 测试各 1/1 通过；
+SIGINT 驱动的 app 启动/监听/优雅退出已手工验证。Windows、完整 sanitizer 矩阵、长期压力
+和 relay 协议栈尚未验证，因此 `M3B-01` 保持未勾选，M3B 继续为活动里程碑。
+
+### M3B 实施进度（2026-08-16，第2轮）
+
+第二轮完成 M3B-02/M3B-03 的服务端数据基座：
+
+- 新增 `relay_database.hpp/.cpp`：relay SQLite schema v2（v1 建 `devices`、
+  `bootstrap_tokens`、`device_audit` 与 `schema_migrations`，v2 增加 tenant/status、tenant/expiry、
+  device/time 索引），独立 application_id，quick_check、迁移历史校验、v1→v2 事务迁移和
+  `schema_too_new`/application_id 错误分类。
+- bootstrap token 只保存 SHA-256 哈希；token 限制为 16..256 字节可打印非空白文本，
+  tenant 严格 UTF-8；创建校验过期与 1..1000000 次使用上限。消费在 `BEGIN IMMEDIATE`
+  事务中完成哈希查找、tenant/过期/剩余次数校验、原子扣减和审计写入，失败回滚且不产生审计。
+- 新增有界 `RelayTtlTable<Key, Value>`（容量、TTL、upsert/refresh、lazy expiry、显式 expire、
+  snapshot 与 diagnostics），作为后续在线 presence 和 pending signaling 的唯一内存形态。
+- `RelayServerConfig` 增加 `database_file`（配置键 `database_file`，CLI `--database`）；
+  `RelayServer` 启动时打开/迁移数据库并把 schema/计数发布到快照。
+
+验证：relay 测试可执行文件现含 15 项测试（新增 token 哈希边界、建库/重开、v1 迁移、
+错误头、过期/耗尽/tenant 拒绝、重复消费、raw token 不落盘、双连接并发消费唯一胜者、
+TTL 表容量/刷新/过期/擦除），GCC Debug 全量 CTest 25/25，`-Werror`/禁异常构建通过，
+ASan/UBSan 定向 relay 测试各 1/1。因 Windows、完整 M3B 验收和 enrollment 协议流尚未完成，
+`M3B-02`/`M3B-03` 继续保持未勾选。
+
+### M3B 实施进度（2026-08-16，第3轮）
+
+第三轮推进 M3B-04，并落地 M3B-05 的设备表操作：
+
+- 新增 `relay_enrollment.hpp/.cpp`：`EnrollmentChallenge`/`EnrollmentRequest` 的
+  Protobuf 1.1 编码/严格解析、随机 challenge 创建、`heyaki.enrollment.v1` canonical
+  signing，以及验证链（公钥派生 `DeviceId`、challenge nonce/过期、请求过期、1.1 capability
+  negotiation、Ed25519 签名）。解析器拒绝截断、重复字段、未知字段和非规范 varint。
+- 新增 `relay_enrollment_service.hpp/.cpp`：有界 challenge 表（复用 `RelayTtlTable`）、
+  单次 challenge 消费、签名验证后竞争消费 bootstrap token、写入/审计 `devices`，
+  并返回 enrollment generation 与 token 剩余次数；错误分为 validation/token/database 指标。
+- `RelayDatabase` 增加 `enroll_device`（幂等同 generation 重试、拒绝旧 generation/identity
+  冲突）、`device` 查询、`revoke_device`（generation 必须更新且审计）。
+- 测试新增 challenge round-trip/边界、签名请求 round-trip、身份/challenge/过期/签名篡改、
+  未知 required capability、parser 拒绝、设备 enrollment/重试/吊销/重登记，以及 service 的
+  token 多设备流程与容量拒绝。relay 测试可执行文件现含 23 项测试。
+
+本机验证：GCC Debug 全量 CTest 25/25，`-Werror`/禁异常构建通过，ASan/UBSan 定向 relay
+测试各 1/1。WSS 控制消息尚未接入这些 service，Windows 与完整 M3B 验收未完成，因此
+`M3B-04`/`M3B-05` 保持未勾选。
+
 ### 6.5 M3B：TURN credential 与部署
 
 - [ ] `M3B-10` 固定 coturn 配置与容器/包版本，启用 TURN REST API 风格 HMAC 临时 credential。

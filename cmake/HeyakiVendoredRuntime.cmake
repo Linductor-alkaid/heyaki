@@ -65,8 +65,24 @@ function(heyaki_add_pinned_boost_asio)
   find_package(Threads REQUIRED)
 endfunction()
 
-function(heyaki_target_use_pinned_boost_asio target_name)
-  target_include_directories(${target_name} SYSTEM PRIVATE ${HEYAKI_BOOST_ASIO_INCLUDE_DIRS})
+function(heyaki_add_pinned_boost_beast)
+  set(boost_modules beast bind container_hash core describe endian intrusive io move mp11
+                    optional preprocessor smart_ptr static_assert static_string type_index
+                    type_traits utility)
+  set(boost_include_dirs)
+  foreach(boost_module IN LISTS boost_modules)
+    set(boost_root "${CMAKE_CURRENT_SOURCE_DIR}/third_party/boost-${boost_module}")
+    if(NOT EXISTS "${boost_root}/include/boost")
+      message(FATAL_ERROR
+        "Pinned Boost.${boost_module} checkout is missing. Run "
+        "`scripts/fetch_third_party.sh boost-${boost_module}`.")
+    endif()
+    list(APPEND boost_include_dirs "${boost_root}/include")
+  endforeach()
+  set(HEYAKI_BOOST_BEAST_INCLUDE_DIRS "${boost_include_dirs}" PARENT_SCOPE)
+endfunction()
+
+function(heyaki_apply_pinned_boost_definitions target_name)
   target_compile_definitions(${target_name} PRIVATE
     BOOST_ERROR_CODE_HEADER_ONLY
     BOOST_SYSTEM_NO_DEPRECATED
@@ -74,6 +90,18 @@ function(heyaki_target_use_pinned_boost_asio target_name)
     BOOST_ASIO_DISABLE_BOOST_ALIGN
     "$<$<PLATFORM_ID:Windows>:_WIN32_WINNT=0x0A00>")
   target_link_libraries(${target_name} PRIVATE Threads::Threads)
+endfunction()
+
+function(heyaki_target_use_pinned_boost_asio target_name)
+  target_include_directories(${target_name} SYSTEM PRIVATE ${HEYAKI_BOOST_ASIO_INCLUDE_DIRS})
+  heyaki_apply_pinned_boost_definitions(${target_name})
+endfunction()
+
+function(heyaki_target_use_pinned_boost_beast target_name)
+  target_include_directories(${target_name} SYSTEM PRIVATE
+    ${HEYAKI_BOOST_BEAST_INCLUDE_DIRS}
+    ${HEYAKI_BOOST_ASIO_INCLUDE_DIRS})
+  heyaki_apply_pinned_boost_definitions(${target_name})
 endfunction()
 
 function(heyaki_add_vendored_sodium)

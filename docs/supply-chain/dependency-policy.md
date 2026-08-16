@@ -28,7 +28,7 @@ strategy is fixed now, while exact package artifacts freeze before first use:
 
 | Component | Strategy | Current M0 evidence | Freeze gate |
 | --- | --- | --- | --- |
-| Boost | Pin the exact modular Asio/System header closure used by M2; freeze Asio SSL integration before M3A and add Beast plus its reviewed closure before M3B WSS work. | Boost 1.88.0 Asio/System/Config/Assert/ThrowException/Predef/WinAPI commits are source-locked. | Asio complete for M2; SSL at M3A entry; Beast at M3B entry |
+| Boost | Pin the exact modular Asio/System header closure used by M2; freeze Asio SSL integration before M3A and add Beast plus its reviewed closure before M3B WSS work. | Boost 1.88.0 Asio/System/Config/Assert/ThrowException/Predef/WinAPI commits are source-locked; Beast 1.88.0 and the 18 additional reviewed module commits were frozen at M3B entry. | Asio complete for M2; SSL at M3A entry; Beast frozen at M3B entry |
 | TLS backend | Use the OpenSSL 3.x ABI line for Asio LAN TLS, Boost.Beast, and libdatachannel on Linux/Windows; CMake rejects other major lines, while release provenance records the exact headers/runtime package version and digest. | M3A development baseline links OpenSSL 3.0.13 on Linux; the host CLI may differ and is not treated as link evidence. | OpenSSL 3.x line frozen at M3A entry; exact package artifacts remain a release-provenance gate |
 | coturn | Run an external image/package referenced by immutable version and digest; keep its config and image provenance in the deployment tree. | Not deployed in M0. | M3B entry |
 
@@ -44,7 +44,7 @@ license file exists, and emits an SPDX 2.3 tag-value document plus a Markdown li
 Generation fails for a missing, duplicate, extra, or malformed package/license record. CTest also
 checks all expected packages and parent/submodule relationships.
 
-The inventory covers 17 direct pins and the 5 recursive libdatachannel submodules. Abseil is pinned
+The inventory covers 35 direct pins and the 5 recursive libdatachannel submodules. The Boost.Beast WSS closure was added and frozen at M3B entry as Beast 1.88.0 plus its reviewed Asio/System/Config/Assert/ThrowException/Predef/WinAPI/Bind/ContainerHash/Core/Describe/Endian/Intrusive/IO/Move/Mp11/Optional/Preprocessor/SmartPtr/StaticAssert/StaticString/TypeIndex/TypeTraits/Utility module closure. Abseil is pinned
 as the build/runtime dependency required by the pinned Protobuf 31.1 Lite toolchain. The
 [M0 linkage and license audit](m0-linkage-license-audit.md) confirms that current installed Heyaki
 artifacts do not yet link or redistribute pinned third-party code. Before any milestone first links a

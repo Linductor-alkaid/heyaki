@@ -8,6 +8,24 @@ boost-assert|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
 boost-throw_exception|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
 boost-predef|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
 boost-winapi|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
+boost-beast|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
+boost-bind|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
+boost-container_hash|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
+boost-core|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
+boost-describe|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
+boost-endian|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
+boost-intrusive|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
+boost-io|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
+boost-move|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
+boost-mp11|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
+boost-optional|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
+boost-preprocessor|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
+boost-smart_ptr|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
+boost-static_assert|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
+boost-static_string|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
+boost-type_index|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
+boost-type_traits|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
+boost-utility|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
 libdatachannel|MPL-2.0|third_party/libdatachannel/LICENSE
 libsodium|ISC AND BSD-2-Clause|docs/supply-chain/m1-libsodium-sha256-notices.md
 protobuf|BSD-3-Clause|third_party/protobuf/LICENSE
