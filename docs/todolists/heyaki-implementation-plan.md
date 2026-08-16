@@ -475,8 +475,10 @@ TSAN 竞争。WSS 控制消息尚未接入这些 service，完整 M3B 验收未�
   已吊销设备/错误签名，以及 parser 拒绝重复、未知、截断字段。relay 测试现含 27 项。
 
 本机验证：GCC Debug 全量 CTest 25/25，Release relay 27/27，`-Werror`/禁异常构建通过，
-ASan/UBSan 定向 relay 测试通过，TSAN（关闭 ASLR）relay 27/27。WSS 控制消息尚未接入，
-完整 M3B 验收未完成，因此 `M3B-06` 保持未勾选。
+ASan/UBSan 定向 relay 测试通过，TSAN（关闭 ASLR）relay 27/27。GitHub Actions run
+`31927188575` 结论 success：Linux GCC/Clang Debug/Release、Windows Debug/Release、
+ASan/UBSan/TSAN 全部通过。WSS 控制消息尚未接入，完整 M3B 验收未完成，因此
+`M3B-06` 保持未勾选。
 
 ### 6.5 M3B：TURN credential 与部署
 
