@@ -233,12 +233,9 @@ std::shared_future<Result<void>> RelayWssClient::Impl::begin_connect() {
   }
   if (!connect_pending && current.state != RelayWssState::ready) {
     connect_pending = true;
-    auto weak = std::weak_ptr<RelayWssClient::Impl>{shared_from_this()};
     try {
-      boost::asio::post(strand, [weak] {
-        if (auto self = weak.lock()) {
-          self->start_connect();
-        }
+      boost::asio::post(strand, [self = shared_from_this()] {
+        self->start_connect();
       });
     } catch (...) {
       connect_pending = false;
@@ -269,21 +266,17 @@ void RelayWssClient::Impl::start_connect() {
   publish();
 
   timer.expires_after(config.connect_timeout + config.handshake_timeout);
-  timer.async_wait([weak = weak_from_this()](boost::system::error_code error) {
+  timer.async_wait([self = shared_from_this()](boost::system::error_code error) {
     if (!error) {
-      if (auto self = weak.lock()) {
-        self->fail(wss_error(ErrorCode::timeout, "wss_connect_timeout"));
-      }
+      self->fail(wss_error(ErrorCode::timeout, "wss_connect_timeout"));
     }
   });
 
   resolver.async_resolve(
       parsed.value_if()->host, parsed.value_if()->port,
-      [weak = weak_from_this()](boost::system::error_code error,
-                                tcp::resolver::results_type results) {
-        if (auto self = weak.lock()) {
-          self->on_resolve(error, std::move(results));
-        }
+      [self = shared_from_this()](boost::system::error_code error,
+                                  tcp::resolver::results_type results) {
+        self->on_resolve(error, std::move(results));
       });
 }
 
@@ -298,11 +291,9 @@ void RelayWssClient::Impl::on_resolve(boost::system::error_code error,
   }
   boost::asio::async_connect(
       boost::beast::get_lowest_layer(websocket).socket(), results,
-      [weak = weak_from_this()](boost::system::error_code connect_error,
-                                const tcp::endpoint& endpoint) {
-        if (auto self = weak.lock()) {
-          self->on_tcp(connect_error, endpoint);
-        }
+      [self = shared_from_this()](boost::system::error_code connect_error,
+                                  const tcp::endpoint& endpoint) {
+        self->on_tcp(connect_error, endpoint);
       });
 }
 
@@ -317,10 +308,8 @@ void RelayWssClient::Impl::on_tcp(boost::system::error_code error,
   }
   websocket.next_layer().async_handshake(
       boost::asio::ssl::stream_base::client,
-      [weak = weak_from_this()](boost::system::error_code handshake_error) {
-        if (auto self = weak.lock()) {
-          self->on_tls(handshake_error);
-        }
+      [self = shared_from_this()](boost::system::error_code handshake_error) {
+        self->on_tls(handshake_error);
       });
 }
 
@@ -353,10 +342,8 @@ void RelayWssClient::Impl::on_tls(boost::system::error_code error) {
   }
   websocket.async_handshake(
       parsed.value_if()->host, parsed.value_if()->path,
-      [weak = weak_from_this()](boost::system::error_code handshake_error) {
-        if (auto self = weak.lock()) {
-          self->on_handshake(handshake_error);
-        }
+      [self = shared_from_this()](boost::system::error_code handshake_error) {
+        self->on_handshake(handshake_error);
       });
 }
 
@@ -385,11 +372,9 @@ void RelayWssClient::Impl::start_read() {
   }
   websocket.async_read(
       read_buffer,
-      [weak = weak_from_this()](boost::system::error_code error,
-                                std::size_t bytes_transferred) {
-        if (auto self = weak.lock()) {
-          self->on_read(error, bytes_transferred);
-        }
+      [self = shared_from_this()](boost::system::error_code error,
+                                  std::size_t bytes_transferred) {
+        self->on_read(error, bytes_transferred);
       });
 }
 
@@ -451,11 +436,9 @@ void RelayWssClient::Impl::write_next() {
   write_in_flight = true;
   websocket.async_write(
       boost::asio::buffer(write_queue.front().data(), write_queue.front().size()),
-      [weak = weak_from_this()](boost::system::error_code error,
-                                std::size_t bytes_transferred) {
-        if (auto self = weak.lock()) {
-          self->on_write(error, bytes_transferred);
-        }
+      [self = shared_from_this()](boost::system::error_code error,
+                                  std::size_t bytes_transferred) {
+        self->on_write(error, bytes_transferred);
       });
 }
 
@@ -490,12 +473,9 @@ std::shared_future<Result<void>> RelayWssClient::Impl::begin_close() {
   if (!close_pending && current.state != RelayWssState::disconnected &&
       current.state != RelayWssState::failed) {
     close_pending = true;
-    auto weak = std::weak_ptr<RelayWssClient::Impl>{shared_from_this()};
     try {
-      boost::asio::post(strand, [weak] {
-        if (auto self = weak.lock()) {
-          self->do_close();
-        }
+      boost::asio::post(strand, [self = shared_from_this()] {
+        self->do_close();
       });
     } catch (...) {
       close_pending = false;
@@ -522,10 +502,8 @@ void RelayWssClient::Impl::do_close() {
   publish();
   websocket.async_close(
       boost::beast::websocket::close_code::normal,
-      [weak = weak_from_this()](boost::system::error_code error) {
-        if (auto self = weak.lock()) {
-          self->on_close(error);
-        }
+      [self = shared_from_this()](boost::system::error_code error) {
+        self->on_close(error);
       });
 }
 
@@ -742,12 +720,9 @@ Result<void> RelayWssClient::send(std::span<const std::byte> payload) {
     return Result<void>::failure(wss_error(ErrorCode::resource_exhausted,
                                            "wss_send_queue_full"));
   }
-  auto weak = std::weak_ptr<RelayWssClient::Impl>{impl_};
   try {
-    boost::asio::post(impl_->strand, [weak] {
-      if (auto self = weak.lock()) {
-        self->drain_send();
-      }
+    boost::asio::post(impl_->strand, [self = impl_] {
+      self->drain_send();
     });
   } catch (...) {
     return Result<void>::failure(wss_error(ErrorCode::internal, "wss_send_post_failed"));
