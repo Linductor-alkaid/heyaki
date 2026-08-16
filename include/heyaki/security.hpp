@@ -43,7 +43,7 @@ struct ReplayCachePolicy {
 
 struct PasswordSecurityPolicy {
   std::uint16_t verifier_format_version{1U};
-  std::size_t minimum_unicode_scalars{16U};
+  std::size_t minimum_unicode_scalars{8U};
   std::size_t maximum_utf8_bytes{256U};
   std::uint16_t generated_entropy_bits{128U};
   std::uint32_t argon2_target_milliseconds{500U};

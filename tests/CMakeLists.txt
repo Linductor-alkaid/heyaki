@@ -412,6 +412,16 @@ heyaki_add_runtime_test(
   heyaki_performance_smoke heyaki_performance_smoke "performance")
 
 if(HEYAKI_BUILD_APPS)
+  add_executable(heyaki_tui_setup_tests unit/tui_setup_test.cpp)
+  target_link_libraries(heyaki_tui_setup_tests PRIVATE
+    heyaki_tui_setup
+    GTest::gtest_main)
+  target_compile_definitions(heyaki_tui_setup_tests PRIVATE
+    "HEYAKI_TUI_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}/tui-setup\"")
+  heyaki_configure_target(heyaki_tui_setup_tests)
+  heyaki_add_runtime_test(
+    heyaki_tui_setup heyaki_tui_setup_tests "unit;tui;profile;security")
+
   heyaki_add_runtime_test(heyaki_tui_version heyaki-tui "tui" --version)
   add_test(NAME heyaki_tui_local_status
     COMMAND heyaki-tui --profile m3a-status --status)

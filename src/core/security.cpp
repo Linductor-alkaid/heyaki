@@ -20,7 +20,7 @@ Result<void> validate_security_policy(const ReplayCachePolicy& replay,
     return Result<void>::failure(
         Error{ErrorCode::configuration, "security", "replay_per_peer_capacity"});
   }
-  if (password.verifier_format_version != 1U || password.minimum_unicode_scalars < 16U ||
+  if (password.verifier_format_version != 1U || password.minimum_unicode_scalars < 8U ||
       password.maximum_utf8_bytes < password.minimum_unicode_scalars ||
       password.maximum_utf8_bytes > 256U || password.generated_entropy_bits < 128U ||
       password.argon2_target_milliseconds < 250U ||

@@ -5,6 +5,8 @@
 
 #include <executor/comm.hpp>
 
+#include "local_setup.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -188,41 +190,6 @@ std::string_view message_kind_name(heyaki::LanSignalingMessageKind kind) noexcep
 void print_error(const heyaki::Error& error) {
   std::cout << heyaki::error_code_name(error.code()) << ' ' << error.component() << ' '
             << error.safe_detail();
-}
-
-heyaki::Result<void> initialize_local_profile(heyaki::ProfileStore& profile) {
-  auto password = read_secret("password: ");
-  if (!password) {
-    return heyaki::Result<void>::failure(*password.error_if());
-  }
-  auto confirmation = read_secret("confirm: ");
-  if (!confirmation) {
-    wipe_string(*password.value_if());
-    return heyaki::Result<void>::failure(*confirmation.error_if());
-  }
-  if (*password.value_if() != *confirmation.value_if()) {
-    wipe_string(*password.value_if());
-    wipe_string(*confirmation.value_if());
-    return heyaki::Result<void>::failure(
-        heyaki::Error{heyaki::ErrorCode::authentication, "tui",
-                      "password_confirmation_mismatch"});
-  }
-  auto verifier = heyaki::create_password_verifier(
-      *password.value_if(), heyaki::PasswordHashParameters{});
-  wipe_string(*password.value_if());
-  wipe_string(*confirmation.value_if());
-  if (!verifier) {
-    return heyaki::Result<void>::failure(*verifier.error_if());
-  }
-  heyaki::LocalProfileInitialization initialization{
-      .application_id = std::string{application_id},
-      .password_verifier = std::move(*verifier.value_if()),
-      .password_generation = 1U,
-      .pairing_policy = heyaki::PairingPolicy{},
-      .lan = heyaki::LanConfiguration{}};
-  auto initialized = profile.initialize_local(initialization);
-  return initialized ? heyaki::Result<void>::success()
-                     : heyaki::Result<void>::failure(*initialized.error_if());
 }
 
 heyaki::RequestId make_request_id() {
@@ -519,16 +486,75 @@ void run_command(std::string line, heyaki::Node& node, UiState& state,
                                       "command_unknown"};
 }
 
+void render_incomplete(std::string_view profile_name) {
+  render_uninitialized(profile_name);
+  std::cout << "SETUP   incomplete\n";
+}
+
+enum class IncompleteProfileAction : std::uint8_t {
+  resume,
+  reset,
+  quit,
+};
+
+IncompleteProfileAction prompt_incomplete_profile_action() {
+  while (true) {
+    std::cout << "\ncommand [resume|reset|quit]> " << std::flush;
+    std::string command;
+    if (!std::getline(std::cin, command) || command == "quit") {
+      return IncompleteProfileAction::quit;
+    }
+    if (command == "resume") {
+      return IncompleteProfileAction::resume;
+    }
+    if (command != "reset") {
+      continue;
+    }
+    std::cout << "confirm reset [yes|no]> " << std::flush;
+    std::string confirmation;
+    if (!std::getline(std::cin, confirmation)) {
+      return IncompleteProfileAction::quit;
+    }
+    if (confirmation == "yes") {
+      return IncompleteProfileAction::reset;
+    }
+  }
+}
+
+heyaki::Result<heyaki::LocalProfileInitialization> read_local_initialization(
+    std::string_view profile_name) {
+  return heyaki::tui::read_local_profile_initialization(
+      application_id, read_secret, [profile_name](const heyaki::Error& error) {
+        render_uninitialized(profile_name, error);
+      });
+}
+
 int run_tui(const Options& options) {
   auto opened = heyaki::ProfileStore::open_default(options.profile_name);
   std::optional<heyaki::ProfileStore> profile;
+  bool needs_initialization = false;
   if (opened) {
     profile.emplace(std::move(*opened.value_if()));
-  }
-
-  if (!profile) {
-    if (options.status_only) {
+  } else {
+    bool profile_exists = true;
+    if (opened.error_if()->code() == heyaki::ErrorCode::not_registered) {
+      auto profiles = heyaki::ProfileStore::enumerate_default();
+      if (!profiles) {
+        render_uninitialized(options.profile_name, *profiles.error_if());
+        return options.status_only ? 0 : 1;
+      }
+      profile_exists = std::any_of(
+          profiles.value_if()->begin(), profiles.value_if()->end(),
+          [&](const heyaki::ProfileInfo& info) {
+            return info.name == options.profile_name;
+          });
+    }
+    if (profile_exists) {
       render_uninitialized(options.profile_name, *opened.error_if());
+      return options.status_only ? 0 : 1;
+    }
+    if (options.status_only) {
+      render_uninitialized(options.profile_name);
       return 0;
     }
     render_uninitialized(options.profile_name);
@@ -537,43 +563,79 @@ int run_tui(const Options& options) {
     if (!std::getline(std::cin, command) || command != "init") {
       return 0;
     }
-    auto created = heyaki::ProfileStore::create_default(options.profile_name);
-    if (!created) {
-      render_uninitialized(options.profile_name, *created.error_if());
-      return 1;
-    }
-    profile.emplace(std::move(*created.value_if()));
+    needs_initialization = true;
   }
 
-  auto readiness = profile->local_readiness(application_id);
-  if (!readiness) {
-    render_uninitialized(options.profile_name, *readiness.error_if());
-    return 1;
-  }
-  if (!options.status_only && !readiness.value_if()->endpoint_ready &&
-      readiness.value_if()->identity_ready &&
-      readiness.value_if()->password_verifier_ready &&
-      readiness.value_if()->pairing_policy_ready &&
-      readiness.value_if()->lan_configuration_ready) {
-    auto endpoint = profile->endpoint_for(application_id);
-    if (!endpoint) {
-      render_uninitialized(options.profile_name, *endpoint.error_if());
-      return 1;
-    }
-    readiness = profile->local_readiness(application_id);
+  if (profile) {
+    auto readiness = profile->local_readiness(application_id);
     if (!readiness) {
       render_uninitialized(options.profile_name, *readiness.error_if());
       return 1;
     }
-  }
-  if (!readiness.value_if()->ready()) {
-    if (options.status_only) {
-      render_uninitialized(options.profile_name);
-      return 0;
+    if (!options.status_only && !readiness.value_if()->endpoint_ready &&
+        readiness.value_if()->identity_ready &&
+        readiness.value_if()->password_verifier_ready &&
+        readiness.value_if()->pairing_policy_ready &&
+        readiness.value_if()->lan_configuration_ready) {
+      auto endpoint = profile->endpoint_for(application_id);
+      if (!endpoint) {
+        render_uninitialized(options.profile_name, *endpoint.error_if());
+        return 1;
+      }
+      readiness = profile->local_readiness(application_id);
+      if (!readiness) {
+        render_uninitialized(options.profile_name, *readiness.error_if());
+        return 1;
+      }
     }
-    auto initialized = initialize_local_profile(*profile);
+    if (!readiness.value_if()->ready()) {
+      render_incomplete(options.profile_name);
+      if (options.status_only) {
+        return 0;
+      }
+      const auto action = prompt_incomplete_profile_action();
+      if (action == IncompleteProfileAction::quit) {
+        return 0;
+      }
+      if (action == IncompleteProfileAction::reset) {
+        const auto database_path = profile->path();
+        profile.reset();
+        auto deleted = heyaki::ProfileStore::delete_local(database_path);
+        if (!deleted) {
+          render_uninitialized(options.profile_name, *deleted.error_if());
+          return 1;
+        }
+      }
+      needs_initialization = true;
+    }
+  }
+
+  if (needs_initialization) {
+    auto initialization = read_local_initialization(options.profile_name);
+    if (!initialization) {
+      render_uninitialized(options.profile_name, *initialization.error_if());
+      return initialization.error_if()->code() == heyaki::ErrorCode::cancelled ? 0 : 1;
+    }
+    if (!profile) {
+      auto created = heyaki::ProfileStore::create_default(options.profile_name);
+      if (!created) {
+        render_uninitialized(options.profile_name, *created.error_if());
+        return 1;
+      }
+      profile.emplace(std::move(*created.value_if()));
+    }
+    auto initialized = profile->initialize_local(*initialization.value_if());
     if (!initialized) {
       render_uninitialized(options.profile_name, *initialized.error_if());
+      return 1;
+    }
+    auto readiness = profile->local_readiness(application_id);
+    if (!readiness || !readiness.value_if()->ready()) {
+      const auto error = readiness
+                             ? heyaki::Error{heyaki::ErrorCode::internal, "tui",
+                                             "local_initialization_incomplete"}
+                             : *readiness.error_if();
+      render_uninitialized(options.profile_name, error);
       return 1;
     }
   }

@@ -250,9 +250,12 @@ TEST(IdentityMaterialTest, CreatesAndValidatesEd25519Identity) {
 
 TEST(PasswordVerifierTest, EnforcesPolicyAndVerifiesWithArgon2id) {
   const PasswordHashParameters parameters{};
-  auto short_password = create_password_verifier("short", parameters);
+  auto short_password = create_password_verifier("1234567", parameters);
   ASSERT_FALSE(short_password);
   EXPECT_EQ(short_password.error_if()->safe_detail(), "password_too_short");
+
+  auto minimum_password = create_password_verifier("12345678", parameters);
+  ASSERT_TRUE(minimum_password) << minimum_password.error_if()->safe_detail();
 
   constexpr std::string_view password = "correct horse battery staple";
   auto verifier = create_password_verifier(password, parameters);

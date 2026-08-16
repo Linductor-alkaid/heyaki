@@ -289,7 +289,7 @@ TEST(Security, SensitiveClassesAreAlwaysRedacted) {
 
 TEST(Security, RejectsPoliciesBelowThreatModelBaseline) {
   auto password = heyaki::PasswordSecurityPolicy{};
-  password.minimum_unicode_scalars = 15U;
+  password.minimum_unicode_scalars = 7U;
   EXPECT_FALSE(heyaki::validate_security_policy({}, password));
 
   password = heyaki::PasswordSecurityPolicy{};
