@@ -46,16 +46,6 @@ std::uint64_t now_milliseconds() {
                                         .count());
 }
 
-RelayEndpointKey make_key(std::uint8_t device_byte, std::uint8_t endpoint_byte) {
-  DeviceId::Storage device{};
-  EndpointId::Storage endpoint{};
-  device[0] = static_cast<std::byte>(device_byte);
-  device[1] = static_cast<std::byte>(0x6bU);
-  endpoint[0] = static_cast<std::byte>(endpoint_byte);
-  return RelayEndpointKey{.device_id = DeviceId{device},
-                          .endpoint_id = EndpointId{endpoint}};
-}
-
 RelayManifestSha256 make_hash(std::uint8_t seed) {
   RelayManifestSha256 hash{};
   hash[0] = static_cast<std::byte>(seed);
