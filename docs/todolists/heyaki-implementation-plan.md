@@ -608,7 +608,9 @@ ASan/UBSan/TSAN 全部通过。尚未在真实 coturn 实例上做 allocation �
 
 本机验证：GCC Debug 全量 CTest 27/27（2 项环境 skip），Release relay 48/48，
 `-Werror`/禁异常构建通过，ASan/UBSan 定向 relay 测试通过，TSAN（关闭 ASLR）relay 48/48。
-enrollment/login 协议尚未通过该 client 跑端到端，因此 `M3B-14` 保持未勾选。
+GitHub Actions run `31937069733` 结论 success：Linux GCC/Clang Debug/Release、
+Windows Debug/Release、ASan/UBSan/TSAN 全部通过。enrollment/login 协议尚未通过该 client
+跑端到端，因此 `M3B-14` 保持未勾选。
 
 ### 6.6 M3B：客户端 enrollment 与 TUI
 
