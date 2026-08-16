@@ -480,6 +480,24 @@ ASan/UBSan 定向 relay 测试通过，TSAN（关闭 ASLR）relay 27/27。GitHub
 ASan/UBSan/TSAN 全部通过。WSS 控制消息尚未接入，完整 M3B 验收未完成，因此
 `M3B-06` 保持未勾选。
 
+### M3B 实施进度（2026-08-16，第5轮）
+
+第五轮推进 M3B-07 在线租约表：
+
+- 新增 `relay_lease_table.hpp/.cpp`：以完整 `(DeviceId, EndpointId)` 为 key 的有界内存
+  租约表；heartbeat 支持插入/刷新、generation 单调递增、默认 45 秒 lease、最大 lease 上限
+  与 tenant 绑定；同一 `DeviceId` 可挂多个 `EndpointId`，同一 tenant 可查询全部在线 endpoint。
+- 硬上限与拒绝分类：总容量、每设备 endpoint 容量、每租户设备容量；tenant 冲突、非法 key/
+  tenant、超长 lease 均返回稳定错误。过期、remove、remove_device 会同步清理设备/租户索引。
+- 在线查询接口：`online`、`online_device`、`online_tenant`，均按当前 steady clock 过滤过期项；
+  diagnostics 覆盖 accepted/refreshed/expired/removed/各类 capacity rejection 与峰值。
+- 测试新增 4 项：插入/刷新与多 endpoint/tenant 查询、过期与索引清理、三类容量拒绝、
+  tenant 冲突与非法配置。relay 测试现含 31 项。
+
+本机验证：GCC Debug 全量 CTest 25/25，Release relay 31/31，`-Werror`/禁异常构建通过，
+ASan/UBSan 定向 relay 测试通过，TSAN（关闭 ASLR）relay 31/31。WSS heartbeat 消息尚未接入，
+完整 M3B 验收未完成，因此 `M3B-07` 保持未勾选。
+
 ### 6.5 M3B：TURN credential 与部署
 
 - [ ] `M3B-10` 固定 coturn 配置与容器/包版本，启用 TURN REST API 风格 HMAC 临时 credential。

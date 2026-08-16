@@ -195,6 +195,7 @@ add_library(heyaki_relay
   src/relay/relay_enrollment_service.cpp
   src/relay/relay_login.cpp
   src/relay/relay_login_service.cpp
+  src/relay/relay_lease_table.cpp
   src/relay/relay_server.cpp)
 add_library(heyaki::relay ALIAS heyaki_relay)
 target_compile_features(heyaki_relay PUBLIC cxx_std_20)
