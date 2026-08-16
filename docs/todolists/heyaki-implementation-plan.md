@@ -1,6 +1,6 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：M3B-01～20 实现项与 M3B 测试退出条件全部完成；等待本轮 CI 全绿后关闭里程碑
+> - 状态：M3B-01～20 实现项与 M3B 测试退出条件全部完成，M3B 里程碑关闭
 > - 日期：2026-08-16
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)、[局域网无服务器连接设计](../design/lan-serverless-connectivity.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
