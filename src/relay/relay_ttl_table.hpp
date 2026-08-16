@@ -38,7 +38,7 @@ struct RelayTtlDiagnostics {
 template <typename Key, typename Value>
 class RelayTtlTable {
  public:
-  class Impl;
+  struct Impl;
 
   RelayTtlTable(RelayTtlTable&&) noexcept;
   RelayTtlTable& operator=(RelayTtlTable&&) noexcept;
