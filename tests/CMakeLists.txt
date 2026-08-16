@@ -518,6 +518,15 @@ set_tests_properties(heyaki_coturn_topology_check PROPERTIES
   TIMEOUT 60)
 
 add_test(
+  NAME heyaki_coturn_allocation_probe
+  COMMAND "${HEYAKI_BASH_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../deploy/coturn/run_allocation_probe.sh")
+set_tests_properties(heyaki_coturn_allocation_probe PROPERTIES
+  LABELS "relay;network;security"
+  SKIP_RETURN_CODE 77
+  TIMEOUT 90)
+
+add_test(
   NAME heyaki_dependency_lock_crlf
   COMMAND "${CMAKE_COMMAND}"
     "-DHEYAKI_FETCH_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/../scripts/fetch_third_party.sh"

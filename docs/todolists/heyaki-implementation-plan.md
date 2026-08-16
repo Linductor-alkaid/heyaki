@@ -1,6 +1,6 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：M3A-01～18 实现验收完成；M3B-01～09、14～20 已实现并完成本机/定向 sanitizer 验收，真实 coturn allocation 与隔离拓扑（M3B-10～13）及对应退出条件待具备 root/coturn 的专用环境
+> - 状态：M3A-01～18 实现验收完成；M3B-01～12、14～20 已实现并完成验收；剩余 M3B-13 双隔离 client namespace 拓扑与依赖真实 coturn/TUI 多进程的退出条件待具备 root/coturn 的专用环境
 > - 日期：2026-08-16
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)、[局域网无服务器连接设计](../design/lan-serverless-connectivity.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
@@ -588,9 +588,9 @@ ASan/UBSan/TSAN 全部通过。尚未在真实 coturn 实例上做 allocation �
 
 ### 6.5 M3B：TURN credential 与部署
 
-- [ ] `M3B-10` 固定 coturn 配置与容器/包版本，启用 TURN REST API 风格 HMAC 临时 credential。
-- [ ] `M3B-11` credential 用户名绑定到期时间、设备和租户；密钥支持轮换，日志不得记录完整 credential。
-- [ ] `M3B-12` 配置 allocation、带宽、并发、relay 端口范围、禁止内网管理 peer 地址、TLS certificate 和 advertised address。
+- [x] `M3B-10` 固定 coturn 配置与容器/包版本，启用 TURN REST API 风格 HMAC 临时 credential。
+- [x] `M3B-11` credential 用户名绑定到期时间、设备和租户；密钥支持轮换，日志不得记录完整 credential。
+- [x] `M3B-12` 配置 allocation、带宽、并发、relay 端口范围、禁止内网管理 peer 地址、TLS certificate 和 advertised address。
 - [ ] `M3B-13` 建立本地一键测试拓扑：relay + coturn + 两个隔离 client namespace，不把 coturn 嵌入 relay 进程。
 
 ### M3B 实施进度（2026-08-16，第10轮）
@@ -708,9 +708,29 @@ Linux GCC/Clang Debug/Release、Windows Debug/Release、ASan/UBSan/TSAN 全部�
 本轮完成后 `M3B-05`～`M3B-09` 与 `M3B-15`～`M3B-20` 满足条目并勾选；真实 coturn allocation
 和隔离拓扑仍受当前环境无 root/coturn 限制，`M3B-10`～`M3B-13` 与对应退出条件保持未勾选。
 
+### M3B 实施进度（2026-08-16，第14轮）
+
+第十四轮用 pinned coturn 4.10.0 镜像完成真实 TURN REST allocation 验收：
+
+- 修复 `deploy/coturn/turnserver.conf` 与 pinned `coturn/coturn:4.10.0-debian@sha256:f4c2...`
+  的兼容性：删除 4.10.0 已不支持的 `no-loopback-peers`，保留显式
+  `denied-peer-ip=127.0.0.0-127.255.255.255` 与 coturn 默认 loopback peer 拒绝语义。
+- 新增 `deploy/coturn/run_allocation_probe.sh`：无需 root，使用与部署相同的
+  `turnserver.conf` 模板生成临时证书/配置，启动真实 coturn，按
+  `<expiry>:<tenant>:<DeviceId>` username 完成 TURN REST allocation 并确认 relayed data
+  admission；同时扫描 coturn 日志确认不出现 `static-auth-secret`。
+- 在本机从 Docker Registry 校验 pinned digest 并解包 `coturn/coturn:4.10.0-debian`
+  amd64 rootfs，以镜像自带动态加载器直接运行 4.10.0 `turnserver`/`turnutils_uclient`，
+  `ALLOCATION_OK version=4.10.0`。CTest `heyaki_coturn_allocation_probe` 在提供
+  `HEYAKI_COTURN_ROOT` 时通过，环境无 coturn 时按 77 skip；deployment contract
+  同步拒绝 `no-loopback-peers` 并检查新 probe。
+- 本轮完成后 `M3B-10`～`M3B-12` 满足条目并勾选。`M3B-13` 仍要求 CAP_NET_ADMIN 创建
+  两个隔离 client namespace + host bridge；当前环境 `sudo` 不可用、`unshare`/`bwrap`
+  的 user namespace 与 setcap 均被拒，因此保持未勾选。
+
 ### M3B 测试与退出条件
 
-- [ ] 覆盖 token 过期/重复消费、伪造 DeviceId、错误签名、吊销 generation、重复 endpoint、租约到期和 relay 重启。
+- [x] 覆盖 token 过期/重复消费、伪造 DeviceId、错误签名、吊销 generation、重复 endpoint、租约到期和 relay 重启。
 - [ ] 抓取 relay DB、日志和 WSS 流量，确认不存在授权密码明文、Argon2id verifier 或私钥。
 - [ ] TUI 可在既有本地 profile 上完成 enrollment；重启 TUI 与独立库 demo 后均无人工输入自动登录。
 - [ ] TUI 与库 demo 使用同一 `DeviceId`、不同 `EndpointId` 同时在线，LAN/relay directory 合并后不混淆 endpoint。

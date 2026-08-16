@@ -114,6 +114,33 @@ jobs:
           HEYAKI_M3A_STRESS_EPOCHS: "2"
         run: ctest --test-dir build -C ${{ matrix.build_type }} --output-on-failure --no-tests=error
 
+  coturn-topology:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch pinned dependencies
+        run: scripts/fetch_third_party.sh --all
+      - name: Configure relay
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DHEYAKI_BUILD_APPS=ON
+          -DHEYAKI_WARNINGS_AS_ERRORS=ON
+      - name: Build relay
+        run: cmake --build build --target heyaki-relay --parallel 2
+      - name: Install coturn fallback package
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y coturn
+          sudo systemctl stop coturn || true
+          sudo pkill -TERM turnserver || true
+          sleep 1
+          sudo pkill -KILL turnserver || true
+      - name: Run isolated two-client coturn topology
+        run: >-
+          sudo deploy/coturn/run_topology.sh
+          --relay-bin "$PWD/build/heyaki-relay"
+
   sanitizer:
     runs-on: ubuntu-24.04
     strategy:

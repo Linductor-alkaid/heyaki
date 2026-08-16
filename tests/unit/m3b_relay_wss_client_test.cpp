@@ -1338,5 +1338,109 @@ TEST(M3BRelayWssClientTest, NodeReconnectsWithBoundedBackoffAfterRelayOutage) {
   EXPECT_TRUE(server.value_if()->shutdown().stopped);
 }
 
+TEST(M3BRelayWssClientTest, NodeReconnectsAfterRelayRestart) {
+  TemporaryDirectory directory{"m3b-node-relay-restart"};
+#ifndef _WIN32
+  ASSERT_EQ(::chmod(directory.path().c_str(), S_IRWXU), 0);
+#endif
+  ASSERT_TRUE(write_test_certificate(directory.path()));
+
+  ProfileOpenOptions profile_options;
+  profile_options.secret_backend.prefer_os_backend = false;
+  auto profile =
+      ProfileStore::create(directory.path() / "profile.sqlite", profile_options);
+  ASSERT_TRUE(profile) << profile.error_if()->safe_detail();
+  auto verifier = create_password_verifier("correct horse battery staple", {});
+  ASSERT_TRUE(verifier) << verifier.error_if()->safe_detail();
+  LocalProfileInitialization initialization;
+  initialization.application_id = "com.example.relay-restart";
+  initialization.password_verifier = std::move(*verifier.value_if());
+  initialization.password_generation = 1U;
+  initialization.pairing_policy = PairingPolicy{};
+  initialization.lan = LanConfiguration{};
+  ASSERT_TRUE(profile.value_if()->initialize_local(initialization));
+  auto identity = profile.value_if()->load_identity();
+  ASSERT_TRUE(identity) << identity.error_if()->safe_detail();
+  ASSERT_TRUE(profile.value_if()->endpoint_for("com.example.relay-restart"));
+
+  const auto now = now_milliseconds();
+  {
+    auto database = RelayDatabase::open(directory.path() / "relay.sqlite");
+    ASSERT_TRUE(database) << database.error_if()->safe_detail();
+    RelayDeviceRecord device;
+    device.device_id = identity.value_if()->device_id();
+    device.public_key = identity.value_if()->public_key();
+    device.tenant = "tenant-a";
+    device.display_name = "device";
+    device.enrollment_generation = 1U;
+    device.status = RelayDeviceStatus::active;
+    ASSERT_TRUE(database.value_if()->enroll_device(device, now));
+  }
+
+  auto first_server = RelayServer::create(server_config(directory.path()));
+  ASSERT_TRUE(first_server) << first_server.error_if()->safe_detail();
+  ASSERT_TRUE(wait_until(
+      [&] { return first_server.value_if()->snapshot().listen_port != 0U; }, 2s));
+  const auto port = first_server.value_if()->snapshot().listen_port;
+  const std::string relay_url = "wss://127.0.0.1:" + std::to_string(port);
+  auto pin = certificate_pin(directory.path() / "test-only-cert.pem");
+  ASSERT_TRUE(pin);
+  const std::vector<std::byte> pin_vector(pin->begin(), pin->end());
+
+  RelayNodeConfig relay_config;
+  relay_config.enabled = true;
+  relay_config.relay_url = relay_url;
+  relay_config.relay_pin = pin_vector;
+  relay_config.tenant = "tenant-a";
+  relay_config.enrollment_generation = 1U;
+  relay_config.tls_ca_file = std::nullopt;
+  relay_config.tls_verify_peer = false;
+  relay_config.connect_timeout = 300ms;
+  relay_config.handshake_timeout = 300ms;
+  relay_config.close_timeout = 500ms;
+  relay_config.heartbeat_interval = 1000ms;
+  relay_config.lease_duration = 3000ms;
+  relay_config.missed_heartbeat_limit = 3U;
+  relay_config.minimum_backoff = 100ms;
+  relay_config.maximum_backoff = 400ms;
+  relay_config.poll_interval = 25ms;
+  relay_config.receive_capacity = 8U;
+  relay_config.send_capacity = 8U;
+
+  LanConfiguration lan;
+  lan.enabled = false;
+  NodeConfig node_config;
+  node_config.profile = profile.value_if();
+  node_config.application_id = "com.example.relay-restart";
+  node_config.lan_override = lan;
+  node_config.relay_override = relay_config;
+  auto node = Node::create(std::move(node_config));
+  ASSERT_TRUE(node) << node.error_if()->safe_detail();
+  ASSERT_TRUE(wait_until(
+      [&] { return node.value_if()->snapshot().relay.state == RelayNodeState::ready; },
+      3s));
+  ASSERT_GE(first_server.value_if()->snapshot().logins_completed, 1U);
+  ASSERT_TRUE(first_server.value_if()->shutdown().stopped);
+
+  ASSERT_TRUE(wait_until(
+      [&] {
+        const auto snapshot = node.value_if()->snapshot();
+        return snapshot.relay.state == RelayNodeState::degraded &&
+               snapshot.relay.reconnect_count > 0U;
+      },
+      3s));
+
+  auto restarted_config = server_config(directory.path());
+  restarted_config.listen_port = port;
+  auto restarted_server = RelayServer::create(std::move(restarted_config));
+  ASSERT_TRUE(restarted_server) << restarted_server.error_if()->safe_detail();
+  ASSERT_TRUE(wait_until(
+      [&] { return node.value_if()->snapshot().relay.state == RelayNodeState::ready; },
+      5s));
+  ASSERT_GE(restarted_server.value_if()->snapshot().logins_completed, 1U);
+  EXPECT_TRUE(node.value_if()->shutdown().stopped);
+  EXPECT_TRUE(restarted_server.value_if()->shutdown().stopped);
+}
+
 }  // namespace
 }  // namespace heyaki

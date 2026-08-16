@@ -33,7 +33,9 @@ Heyaki uses coturn TURN REST API credentials:
 - Per-session bandwidth: 2 Mbit/s each direction; server capacity: 16 Mbit/s each direction.
 - Maximum allocation lifetime: 3600 seconds.
 - Private/link-local/loopback peer ranges are denied to prevent relay-to-management-network
-  pivoting.
+  pivoting. coturn denies loopback peers by default and the config keeps the explicit
+  `denied-peer-ip=127.0.0.0-127.255.255.255` range; the legacy `no-loopback-peers`
+  option is not used because the pinned 4.10.0 image does not support it.
 - `external-ip` advertises the configured public address for the configured local address.
   Local test topologies set both to the host bridge address.
 
@@ -43,6 +45,13 @@ Heyaki uses coturn TURN REST API credentials:
 blocks inter-client forwarding, starts coturn and `heyaki-relay` on the host, verifies STUN
 reachability from both namespaces and WSS reachability to the relay, then tears everything
 down. coturn remains a separate process/container and is never embedded in `heyaki-relay`.
+
+`run_allocation_probe.sh` validates the TURN REST API credential contract against a real
+coturn process without root privileges: it generates a temporary certificate, starts the
+same checked-in resource-policy template on ports above 1024, obtains a TURN allocation
+for `username = <expiry>:<tenant>:<DeviceId>`, verifies relayed data admission, and checks
+that coturn logs do not contain `static-auth-secret`. Set `HEYAKI_COTURN_ROOT` to an
+extracted `coturn/coturn:4.10.0-debian` rootfs to probe the pinned image binary directly.
 
 ## Run
 
