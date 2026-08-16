@@ -157,6 +157,7 @@ add_library(heyaki_client
   src/client/lan_directory.cpp
   src/client/module.cpp
   src/client/node.cpp
+  src/client/relay_enrollment_client.cpp
   src/client/relay_wss_client.cpp
   src/client/runtime.cpp)
 add_library(heyaki::client ALIAS heyaki_client)

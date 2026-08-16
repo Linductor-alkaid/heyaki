@@ -103,6 +103,16 @@ enum class TrustGrantDirection : std::uint8_t {
   received = 2,
 };
 
+struct RelayEnrollmentRecord {
+  std::string relay_url;
+  std::optional<std::vector<std::byte>> relay_pin;
+  std::string tenant;
+  std::uint64_t enrollment_generation{};
+  bool auto_connect{true};
+  bool revoked{false};
+  std::uint64_t updated_unix_milliseconds{};
+};
+
 struct TrustGrantRecord {
   GrantId grant_id;
   TrustGrantDirection direction{TrustGrantDirection::issued};
@@ -183,6 +193,11 @@ class ProfileStore {
   [[nodiscard]] Result<std::vector<DeviceId>> trusted_devices(
       std::uint64_t now_unix_milliseconds) const;
 
+  [[nodiscard]] Result<void> put_relay_enrollment(
+      const RelayEnrollmentRecord& enrollment);
+  [[nodiscard]] Result<std::optional<RelayEnrollmentRecord>> relay_enrollment(
+      std::string_view relay_url) const;
+  [[nodiscard]] Result<std::vector<RelayEnrollmentRecord>> relay_enrollments() const;
   [[nodiscard]] Result<void> mark_relay_revoked(std::string_view relay_url,
                                                 std::uint64_t enrollment_generation);
   [[nodiscard]] Result<void> export_to(const std::filesystem::path& destination) const;

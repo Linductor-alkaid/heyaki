@@ -202,7 +202,9 @@ target_compile_definitions(heyaki_unit_tests PRIVATE
 heyaki_configure_target(heyaki_unit_tests)
 heyaki_add_runtime_test(heyaki_unit heyaki_unit_tests "unit;protocol;security")
 
-add_executable(heyaki_m2_profile_tests unit/m2_profile_test.cpp)
+add_executable(heyaki_m2_profile_tests
+  unit/m2_profile_test.cpp
+  unit/m3b_relay_profile_test.cpp)
 target_link_libraries(heyaki_m2_profile_tests PRIVATE
   heyaki::profile
   heyaki::sqlite
@@ -280,6 +282,7 @@ add_executable(heyaki_m3b_relay_tests
   unit/m3b_relay_database_test.cpp
   unit/m3b_relay_wss_client_test.cpp
   unit/m3b_relay_endpoint_test.cpp
+  unit/m3b_relay_enrollment_client_test.cpp
   unit/m3b_relay_enrollment_test.cpp
   unit/m3b_relay_enrollment_service_test.cpp
   unit/m3b_relay_lease_test.cpp

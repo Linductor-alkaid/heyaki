@@ -303,6 +303,27 @@ bool valid_application_id(std::string_view value) noexcept {
   return true;
 }
 
+bool valid_relay_enrollment_url(std::string_view value) noexcept {
+  if (value.empty() || value.size() > 2048U ||
+      (!value.starts_with("wss://") && !value.starts_with("https://"))) {
+    return false;
+  }
+  return std::all_of(value.begin(), value.end(), [](char raw) {
+    const auto character = static_cast<unsigned char>(raw);
+    return character >= 0x21U && character <= 0x7eU;
+  });
+}
+
+bool valid_relay_tenant(std::string_view value) noexcept {
+  if (value.empty() || value.size() > 128U) {
+    return false;
+  }
+  return std::all_of(value.begin(), value.end(), [](char raw) {
+    const auto character = static_cast<unsigned char>(raw);
+    return character >= 0x21U && character <= 0x7eU;
+  });
+}
+
 bool valid_scope(std::string_view value) noexcept {
   if (value.empty() || value.size() > 256U) {
     return false;
@@ -2328,6 +2349,158 @@ Result<std::vector<DeviceId>> ProfileStore::trusted_devices(
     output.push_back(*device.value_if());
   }
   return Result<std::vector<DeviceId>>::success(std::move(output));
+}
+
+Result<void> ProfileStore::put_relay_enrollment(
+    const RelayEnrollmentRecord& enrollment) {
+  if (!valid_relay_enrollment_url(enrollment.relay_url) ||
+      !valid_relay_tenant(enrollment.tenant) || enrollment.enrollment_generation == 0U ||
+      (enrollment.relay_pin &&
+       enrollment.relay_pin->size() != 32U)) {
+    return Result<void>::failure(
+        Error{ErrorCode::configuration, "profile", "invalid_relay_enrollment"});
+  }
+  auto statement = prepare(
+      impl_->database,
+      "INSERT INTO relay_enrollments("
+      "relay_url, relay_pin, tenant, enrollment_generation, auto_connect, revoked, "
+      "updated_unix_milliseconds) VALUES(?, ?, ?, ?, ?, ?, ?) "
+      "ON CONFLICT(relay_url) DO UPDATE SET relay_pin=excluded.relay_pin, "
+      "tenant=excluded.tenant, enrollment_generation=excluded.enrollment_generation, "
+      "auto_connect=excluded.auto_connect, revoked=excluded.revoked, "
+      "updated_unix_milliseconds=excluded.updated_unix_milliseconds");
+  if (!statement) {
+    return Result<void>::failure(*statement.error_if());
+  }
+  sqlite3_bind_text(statement.value_if()->get(), 1, enrollment.relay_url.data(),
+                    static_cast<int>(enrollment.relay_url.size()), SQLITE_TRANSIENT);
+  if (enrollment.relay_pin) {
+    sqlite3_bind_blob(statement.value_if()->get(), 2, enrollment.relay_pin->data(),
+                      static_cast<int>(enrollment.relay_pin->size()), SQLITE_TRANSIENT);
+  } else {
+    sqlite3_bind_null(statement.value_if()->get(), 2);
+  }
+  sqlite3_bind_text(statement.value_if()->get(), 3, enrollment.tenant.data(),
+                    static_cast<int>(enrollment.tenant.size()), SQLITE_TRANSIENT);
+  sqlite3_bind_int64(statement.value_if()->get(), 4,
+                     static_cast<sqlite3_int64>(enrollment.enrollment_generation));
+  sqlite3_bind_int(statement.value_if()->get(), 5, enrollment.auto_connect ? 1 : 0);
+  sqlite3_bind_int(statement.value_if()->get(), 6, enrollment.revoked ? 1 : 0);
+  sqlite3_bind_int64(statement.value_if()->get(), 7,
+                     static_cast<sqlite3_int64>(current_unix_milliseconds()));
+  return step_done(*statement.value_if());
+}
+
+Result<std::optional<RelayEnrollmentRecord>> ProfileStore::relay_enrollment(
+    std::string_view relay_url) const {
+  if (!valid_relay_enrollment_url(relay_url)) {
+    return Result<std::optional<RelayEnrollmentRecord>>::failure(
+        Error{ErrorCode::configuration, "profile", "invalid_relay_enrollment_url"});
+  }
+  auto statement = prepare(
+      impl_->database,
+      "SELECT relay_url, relay_pin, tenant, enrollment_generation, auto_connect, revoked, "
+      "updated_unix_milliseconds FROM relay_enrollments WHERE relay_url = ?");
+  if (!statement) {
+    return Result<std::optional<RelayEnrollmentRecord>>::failure(*statement.error_if());
+  }
+  sqlite3_bind_text(statement.value_if()->get(), 1, relay_url.data(),
+                    static_cast<int>(relay_url.size()), SQLITE_TRANSIENT);
+  const int step = sqlite3_step(statement.value_if()->get());
+  if (step == SQLITE_DONE) {
+    return Result<std::optional<RelayEnrollmentRecord>>::success(std::nullopt);
+  }
+  if (step != SQLITE_ROW) {
+    return Result<std::optional<RelayEnrollmentRecord>>::failure(
+        sqlite_error(impl_->database, "relay_enrollment_query_failed", step));
+  }
+  RelayEnrollmentRecord record;
+  const auto* url = reinterpret_cast<const char*>(sqlite3_column_text(statement.value_if()->get(), 0));
+  const int url_size = sqlite3_column_bytes(statement.value_if()->get(), 0);
+  if (url == nullptr || url_size <= 0) {
+    return Result<std::optional<RelayEnrollmentRecord>>::failure(
+        Error{ErrorCode::profile_corrupt, "profile", "relay_enrollment_url_invalid"});
+  }
+  record.relay_url.assign(url, static_cast<std::size_t>(url_size));
+  const auto* pin = static_cast<const std::byte*>(
+      sqlite3_column_blob(statement.value_if()->get(), 1));
+  const int pin_size = sqlite3_column_bytes(statement.value_if()->get(), 1);
+  if (pin != nullptr) {
+    if (pin_size != static_cast<int>(32U)) {
+      return Result<std::optional<RelayEnrollmentRecord>>::failure(
+          Error{ErrorCode::profile_corrupt, "profile", "relay_enrollment_pin_invalid"});
+    }
+    record.relay_pin = std::vector<std::byte>(pin, pin + pin_size);
+  }
+  const auto* tenant = reinterpret_cast<const char*>(
+      sqlite3_column_text(statement.value_if()->get(), 2));
+  const int tenant_size = sqlite3_column_bytes(statement.value_if()->get(), 2);
+  if (tenant == nullptr || tenant_size <= 0) {
+    return Result<std::optional<RelayEnrollmentRecord>>::failure(
+        Error{ErrorCode::profile_corrupt, "profile", "relay_enrollment_tenant_invalid"});
+  }
+  record.tenant.assign(tenant, static_cast<std::size_t>(tenant_size));
+  record.enrollment_generation = static_cast<std::uint64_t>(
+      sqlite3_column_int64(statement.value_if()->get(), 3));
+  record.auto_connect = sqlite3_column_int(statement.value_if()->get(), 4) != 0;
+  record.revoked = sqlite3_column_int(statement.value_if()->get(), 5) != 0;
+  record.updated_unix_milliseconds = static_cast<std::uint64_t>(
+      sqlite3_column_int64(statement.value_if()->get(), 6));
+  return Result<std::optional<RelayEnrollmentRecord>>::success(std::move(record));
+}
+
+Result<std::vector<RelayEnrollmentRecord>> ProfileStore::relay_enrollments() const {
+  auto statement = prepare(
+      impl_->database,
+      "SELECT relay_url, relay_pin, tenant, enrollment_generation, auto_connect, revoked, "
+      "updated_unix_milliseconds FROM relay_enrollments ORDER BY relay_url");
+  if (!statement) {
+    return Result<std::vector<RelayEnrollmentRecord>>::failure(*statement.error_if());
+  }
+  std::vector<RelayEnrollmentRecord> output;
+  int step = sqlite3_step(statement.value_if()->get());
+  while (step == SQLITE_ROW) {
+    RelayEnrollmentRecord record;
+    const auto* url = reinterpret_cast<const char*>(
+        sqlite3_column_text(statement.value_if()->get(), 0));
+    const int url_size = sqlite3_column_bytes(statement.value_if()->get(), 0);
+    if (url == nullptr || url_size <= 0) {
+      return Result<std::vector<RelayEnrollmentRecord>>::failure(
+          Error{ErrorCode::profile_corrupt, "profile", "relay_enrollment_url_invalid"});
+    }
+    record.relay_url.assign(url, static_cast<std::size_t>(url_size));
+    const auto* pin = static_cast<const std::byte*>(
+        sqlite3_column_blob(statement.value_if()->get(), 1));
+    const int pin_size = sqlite3_column_bytes(statement.value_if()->get(), 1);
+    if (pin != nullptr) {
+      if (pin_size != static_cast<int>(32U)) {
+        return Result<std::vector<RelayEnrollmentRecord>>::failure(
+            Error{ErrorCode::profile_corrupt, "profile", "relay_enrollment_pin_invalid"});
+      }
+      record.relay_pin = std::vector<std::byte>(pin, pin + pin_size);
+    }
+    const auto* tenant = reinterpret_cast<const char*>(
+        sqlite3_column_text(statement.value_if()->get(), 2));
+    const int tenant_size = sqlite3_column_bytes(statement.value_if()->get(), 2);
+    if (tenant == nullptr || tenant_size <= 0) {
+      return Result<std::vector<RelayEnrollmentRecord>>::failure(
+          Error{ErrorCode::profile_corrupt, "profile", "relay_enrollment_tenant_invalid"});
+    }
+    record.tenant.assign(tenant, static_cast<std::size_t>(tenant_size));
+    record.enrollment_generation = static_cast<std::uint64_t>(
+        sqlite3_column_int64(statement.value_if()->get(), 3));
+    record.auto_connect = sqlite3_column_int(statement.value_if()->get(), 4) != 0;
+    record.revoked = sqlite3_column_int(statement.value_if()->get(), 5) != 0;
+    record.updated_unix_milliseconds = static_cast<std::uint64_t>(
+        sqlite3_column_int64(statement.value_if()->get(), 6));
+    output.push_back(std::move(record));
+    step = sqlite3_step(statement.value_if()->get());
+  }
+  if (step != SQLITE_DONE) {
+    return Result<std::vector<RelayEnrollmentRecord>>::failure(
+        sqlite_error(impl_->database, "relay_enrollments_query_failed", step));
+  }
+  return Result<std::vector<RelayEnrollmentRecord>>::success(std::move(output));
 }
 
 Result<void> ProfileStore::mark_relay_revoked(std::string_view relay_url,

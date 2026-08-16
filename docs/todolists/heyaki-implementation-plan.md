@@ -612,6 +612,26 @@ GitHub Actions run `31937069733` 结论 success：Linux GCC/Clang Debug/Release�
 Windows Debug/Release、ASan/UBSan/TSAN 全部通过。enrollment/login 协议尚未通过该 client
 跑端到端，因此 `M3B-14` 保持未勾选。
 
+### M3B 实施进度（2026-08-16，第11轮）
+
+第十一轮推进 M3B-15/M3B-16 的客户端 enrollment 持久化语义：
+
+- `ProfileStore` 新增 `put_relay_enrollment`、`relay_enrollment`、
+  `relay_enrollments`：原子 upsert/查询 relay URL、pin、tenant、generation、
+  auto_connect、revoked；校验 URL scheme、32 字节 pin、非空 tenant 与 generation。
+- 新增公共 `relay_enrollment_client.hpp/.cpp`：`enroll_relay_profile` 只使用已有本地
+  identity/endpoint，不隐式创建 profile；通过可注入 exchange 完成 challenge/request 流程，
+  成功后才写 ProfileStore；exchange 失败不落盘；结果不匹配或持久化失败时调用 rollback，
+  rollback 失败返回 `outcome_unknown`。
+- 测试新增 profile 3 项（写入/查询/重开、吊销 generation、非法记录）与 client 4 项
+  （成功持久化、exchange 失败不持久化、mismatch rollback、未初始化 profile 不隐式创建）。
+  relay 测试现含 52 项，profile 测试增加 3 项。
+
+本机验证：GCC Debug 全量 CTest 27/27（2 项环境 skip），Release relay 52/52，
+`-Werror`/禁异常构建通过，ASan/UBSan/TSAN 均覆盖 relay 与新增 profile 测试。
+真实 WSS exchange 尚未接入（exchange 为可注入 transport），因此
+`M3B-15`/`M3B-16` 保持未勾选。
+
 ### 6.6 M3B：客户端 enrollment 与 TUI
 
 - [ ] `M3B-14` 实现设备端 WSS client、证书/主机名校验、可选 relay pin 和安全错误分类。
