@@ -568,6 +568,23 @@ ASan/UBSan 定向 relay 测试通过，TSAN（关闭 ASLR）relay 44/44。GitHub
 ASan/UBSan/TSAN 全部通过。尚未在真实 coturn 实例上做 allocation 端到端验证，因此
 `M3B-10`/`M3B-11` 保持未勾选。
 
+### M3B 实施进度（2026-08-16，第9轮）
+
+第九轮推进 M3B-12/M3B-13 coturn 资源策略与本地拓扑：
+
+- `turnserver.conf` 增加 `external-ip`、每会话 2 Mbit/s、服务器 16 Mbit/s 容量、
+  3600 秒最大 allocation lifetime；已有 total/user quota、49160-49200 端口范围、
+  私网/链路本地/环回 peer 拒绝与 TLS 证书配置。
+- README 记录资源策略、TURN credential 契约和 `run_topology.sh` 使用方法。
+- 新增 `deploy/coturn/run_topology.sh`：两个隔离 client namespace、两个 host bridge、
+  iptables 阻断 client 间转发、host coturn 与 `heyaki-relay` 分别启动、从两个 namespace
+  验证 STUN 与 relay WSS TCP 可达性、检查隔离后自动清理。coturn 保持独立进程，不嵌入 relay。
+- 新增 CTest `heyaki_coturn_topology_check`：环境缺少 root/namespace/coturn 时按 77 skip；
+  具备环境时验证脚本与二进制可用性。部署 contract 同步检查新配置项和拓扑脚本关键行为。
+- 全量 CTest 现为 27 项；本机网络 harness 与 coturn topology 按环境限制 skip，其余全通过。
+  尚未在具备 CAP_NET_ADMIN 且安装 coturn 的专用环境执行完整拓扑，因此
+  `M3B-12`/`M3B-13` 保持未勾选。
+
 ### 6.5 M3B：TURN credential 与部署
 
 - [ ] `M3B-10` 固定 coturn 配置与容器/包版本，启用 TURN REST API 风格 HMAC 临时 credential。

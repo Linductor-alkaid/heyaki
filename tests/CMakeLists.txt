@@ -499,6 +499,17 @@ set_tests_properties(heyaki_coturn_deployment_contract PROPERTIES
   LABELS "relay;network;security")
 
 add_test(
+  NAME heyaki_coturn_topology_check
+  COMMAND "${HEYAKI_BASH_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../deploy/coturn/run_topology.sh"
+    --relay-bin "$<TARGET_FILE:heyaki-relay>"
+    --check-only)
+set_tests_properties(heyaki_coturn_topology_check PROPERTIES
+  LABELS "relay;network"
+  SKIP_RETURN_CODE 77
+  TIMEOUT 60)
+
+add_test(
   NAME heyaki_dependency_lock_crlf
   COMMAND "${CMAKE_COMMAND}"
     "-DHEYAKI_FETCH_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/../scripts/fetch_third_party.sh"

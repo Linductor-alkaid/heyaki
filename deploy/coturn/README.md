@@ -25,6 +25,25 @@ Heyaki uses coturn TURN REST API credentials:
 - `static-auth-secret` is never committed to the repository or written to relay logs.
   It is supplied through the deployment environment as `HEYAKI_TURN_SECRET`.
 
+## Resource policy
+
+- Client listeners: UDP/TCP 3478 and TLS 5349.
+- Allocation ports: 49160-49200.
+- Total allocation quota: 100; per-user quota: 12.
+- Per-session bandwidth: 2 Mbit/s each direction; server capacity: 16 Mbit/s each direction.
+- Maximum allocation lifetime: 3600 seconds.
+- Private/link-local/loopback peer ranges are denied to prevent relay-to-management-network
+  pivoting.
+- `external-ip` advertises the configured public address for the configured local address.
+  Local test topologies set both to the host bridge address.
+
+## Local test topology
+
+`run_topology.sh` creates two isolated network namespaces connected to two host bridges,
+blocks inter-client forwarding, starts coturn and `heyaki-relay` on the host, verifies STUN
+reachability from both namespaces and WSS reachability to the relay, then tears everything
+down. coturn remains a separate process/container and is never embedded in `heyaki-relay`.
+
 ## Run
 
 ```sh
