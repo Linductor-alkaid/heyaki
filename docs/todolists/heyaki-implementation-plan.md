@@ -452,7 +452,10 @@ ASan/UBSan 定向 relay 测试各 1/1。因 Windows、完整 M3B 验收和 enrol
   token 多设备流程与容量拒绝。relay 测试可执行文件现含 23 项测试。
 
 本机验证：GCC Debug 全量 CTest 25/25，`-Werror`/禁异常构建通过，ASan/UBSan 定向 relay
-测试各 1/1。WSS 控制消息尚未接入这些 service，Windows 与完整 M3B 验收未完成，因此
+测试各 1/1。GitHub Actions run `31925713758` 结论 success：Linux GCC/Clang Debug/Release、
+Windows Debug/Release、ASan/UBSan/TSAN 全部通过。CI 整改包含空 optional 读取修复、
+relay SQLite 改用 DELETE journal、MSVC `/bigobj`，以及把既有 Node begin 调度到 strand 消除
+TSAN 竞争。WSS 控制消息尚未接入这些 service，完整 M3B 验收未完成，因此
 `M3B-04`/`M3B-05` 保持未勾选。
 
 ### 6.5 M3B：TURN credential 与部署
