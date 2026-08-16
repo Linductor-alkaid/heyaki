@@ -278,6 +278,7 @@ heyaki_add_runtime_test(
 add_executable(heyaki_m3b_relay_tests
   unit/m3b_relay_test.cpp
   unit/m3b_relay_database_test.cpp
+  unit/m3b_relay_endpoint_test.cpp
   unit/m3b_relay_enrollment_test.cpp
   unit/m3b_relay_enrollment_service_test.cpp
   unit/m3b_relay_lease_test.cpp

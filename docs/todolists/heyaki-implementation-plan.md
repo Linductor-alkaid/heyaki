@@ -500,6 +500,25 @@ ASan/UBSan 定向 relay 测试通过，TSAN（关闭 ASLR）relay 31/31。GitHub
 ASan/UBSan/TSAN 全部通过。WSS heartbeat 消息尚未接入，完整 M3B 验收未完成，因此
 `M3B-07` 保持未勾选。
 
+### M3B 实施进度（2026-08-16，第6轮）
+
+第六轮推进 M3B-08 endpoint record 与 service manifest：
+
+- 新增 `relay_endpoint.hpp/.cpp`：`RelayEndpointRecord`/`RelayServiceManifest` 的
+  Protobuf 编码与严格解析、`heyaki.endpoint-record.v1`/`heyaki.service-manifest.v1`
+  canonical signing，以及基于数据库设备公钥/状态的验签（吊销设备拒绝）。
+- 大小与字段上限：单消息 16 KiB、application_id 1..255 字节严格 UTF-8、generation/hash/expiry
+  非零、endpoint 非零；parser 拒绝重复、未知、截断、超长和非规范 varint。
+- manifest 可与 endpoint record 绑定校验（同 endpoint 且 manifest hash 一致）。
+- 新增 `RelayTenantExposurePolicy`/`RelayEndpointPublication`：只输出租户策略允许的字段；
+  默认最小策略仅暴露完整 endpoint 与 expiry，不暴露 application_id、generation、manifest hash。
+- 测试新增 4 项：record round-trip/吊销/签名、manifest round-trip/绑定/签名、租户最小/全量
+  暴露、parser 拒绝。relay 测试现含 35 项。
+
+本机验证：GCC Debug 全量 CTest 25/25，Release relay 35/35，`-Werror`/禁异常构建通过，
+ASan/UBSan 定向 relay 测试通过，TSAN（关闭 ASLR）relay 35/35。WSS endpoint 注册/查询消息
+尚未接入，完整 M3B 验收未完成，因此 `M3B-08` 保持未勾选。
+
 ### 6.5 M3B：TURN credential 与部署
 
 - [ ] `M3B-10` 固定 coturn 配置与容器/包版本，启用 TURN REST API 风格 HMAC 临时 credential。

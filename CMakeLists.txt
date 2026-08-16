@@ -191,6 +191,7 @@ heyaki_configure_target(heyaki_transport_webrtc)
 add_library(heyaki_relay
   src/relay/relay_config.cpp
   src/relay/relay_database.cpp
+  src/relay/relay_endpoint.cpp
   src/relay/relay_enrollment.cpp
   src/relay/relay_enrollment_service.cpp
   src/relay/relay_login.cpp
