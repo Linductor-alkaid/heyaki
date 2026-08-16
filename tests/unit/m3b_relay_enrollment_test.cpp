@@ -296,7 +296,7 @@ TEST(M3BRelayEnrollmentTest, DeviceEnrollmentRetryRevocationAndReenrollment) {
 
   auto loaded = database.value_if()->device(record.device_id);
   ASSERT_TRUE(loaded) << loaded.error_if()->safe_detail();
-  ASSERT_TRUE(loaded.value_if());
+  ASSERT_TRUE(loaded.value_if()->has_value());
   EXPECT_EQ((*loaded.value_if())->status, RelayDeviceStatus::active);
   EXPECT_EQ((*loaded.value_if())->enrollment_generation, 1U);
 
@@ -314,7 +314,7 @@ TEST(M3BRelayEnrollmentTest, DeviceEnrollmentRetryRevocationAndReenrollment) {
   ASSERT_TRUE(revoked) << revoked.error_if()->safe_detail();
   auto loaded_revoked = database.value_if()->device(record.device_id);
   ASSERT_TRUE(loaded_revoked) << loaded_revoked.error_if()->safe_detail();
-  ASSERT_TRUE(loaded_revoked.value_if());
+  ASSERT_TRUE(loaded_revoked.value_if()->has_value());
   EXPECT_EQ((*loaded_revoked.value_if())->status, RelayDeviceStatus::revoked);
   EXPECT_EQ((*loaded_revoked.value_if())->enrollment_generation, 2U);
   EXPECT_EQ(database.value_if()->snapshot().device_audit_count, 2U);

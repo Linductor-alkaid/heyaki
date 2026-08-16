@@ -68,7 +68,7 @@ TLS/WebSocket handshake、health reply、每连接 handshake timer 和 SIGINT/SI
 以阶段预算等待，不创建第二个 worker、裸线程或独立 poll loop。
 
 Relay SQLite 状态（schema 迁移、bootstrap token 创建/消费、device audit）在 `RelayServer`
-strand 上同步执行，配置 WAL、FULL synchronous 和 busy timeout；token 消费使用
+strand 上同步执行，配置 DELETE journal、FULL synchronous 和 busy timeout；token 消费使用
 `BEGIN IMMEDIATE` 事务保证并发扣减只有一个胜者。在线 presence 与 pending signaling 不使用
 SQLite，只放入有界 `RelayTtlTable` 内存结构并在 strand 内过期。
 

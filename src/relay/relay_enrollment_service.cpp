@@ -129,7 +129,8 @@ Result<RelayEnrollmentCompletion> RelayEnrollmentService::complete(
     ++impl_->stats.database_rejected;
     return Result<RelayEnrollmentCompletion>::failure(*existing.error_if());
   }
-  if (existing.value_if() && (*existing.value_if())->status == RelayDeviceStatus::active &&
+  if (existing.value_if()->has_value() &&
+      (*existing.value_if())->status == RelayDeviceStatus::active &&
       (*existing.value_if())->public_key == request.identity_public_key &&
       (*existing.value_if())->tenant == request.tenant) {
     ++impl_->stats.challenges_completed;
@@ -149,7 +150,9 @@ Result<RelayEnrollmentCompletion> RelayEnrollmentService::complete(
   }
 
   const std::uint64_t generation =
-      existing.value_if() ? (*existing.value_if())->enrollment_generation + 1U : 1U;
+      existing.value_if()->has_value()
+          ? (*existing.value_if())->enrollment_generation + 1U
+          : 1U;
   RelayDeviceRecord record;
   record.device_id = request.device_id;
   record.public_key = request.identity_public_key;

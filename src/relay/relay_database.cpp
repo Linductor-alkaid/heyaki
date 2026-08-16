@@ -527,7 +527,7 @@ Result<RelayDatabase> RelayDatabase::open(const std::filesystem::path& database_
   auto validated = validate_or_migrate(database, options.create_if_missing);
   if (validated) {
     validated = execute(database,
-                        "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; "
+                        "PRAGMA foreign_keys=ON; PRAGMA journal_mode=DELETE; "
                         "PRAGMA synchronous=FULL;");
   }
   if (!validated) {
