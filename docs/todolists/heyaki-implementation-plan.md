@@ -765,11 +765,11 @@ Linux GCC/Clang Debug/Release、Windows Debug/Release、ASan/UBSan/TSAN 全部�
 
 ### 7.1 信令与 Transport SPI
 
-- [ ] `M4-01` 实现内部 `TransportSession`/`TransportChannel` SPI、`ChannelOptions`、close reason，以及分离 `signaling_path`/`data_path` 的 `PathInfo`，不暴露为稳定第三方插件 ABI。
+- [x] `M4-01` 实现内部 `TransportSession`/`TransportChannel` SPI、`ChannelOptions`、close reason，以及分离 `signaling_path`/`data_path` 的 `PathInfo`，不暴露为稳定第三方插件 ABI。
 - [ ] `M4-02` 实现 `SignalingCoordinator` 对 `LanSignalingRoute`/`RelaySignalingRoute` 的统一 connect/accept/deny/trickle 状态机；所有 pending 项都有 request ID、TTL、大小、来源和速率上限。
-- [ ] `M4-03` 实现 offer、answer、ICE ufrag、fingerprint、双方 ID、endpoint、nonce 和 expiry 的规范化签名与验签。
+- [x] `M4-03` 实现 offer、answer、ICE ufrag、fingerprint、双方 ID、endpoint、nonce 和 expiry 的规范化签名与验签。
 - [ ] `M4-04` 建立 replay cache，拒绝重复 request ID、nonce、过期对象和 session epoch 迟到信令。
-- [ ] `M4-05` 未通过签名、公钥派生 ID 和 endpoint 验证时，不把 SDP/candidate 交给 transport。
+- [x] `M4-05` 未通过签名、公钥派生 ID 和 endpoint 验证时，不把 SDP/candidate 交给 transport。
 
 ### 7.2 WebRTC/ICE/TURN
 
@@ -836,9 +836,12 @@ libdatachannel：
   映射（M4-11）将在后续轮次另读 communication/blocking-io 卡片。
 
 本机验证：GCC 13.3 Debug（`-Werror`）全量 CTest 30/30 通过（2 项 coturn 环境性
-skip）；禁异常构建 M4 18/18；UBSan 全量 30/30；ASan 定向 M4 通过。Windows 与远端
-sanitizer/CI 尚未执行，`M4-01`～`M4-05` 保持未勾选，待 CI 与后续轮次补齐 relay
-route、session epoch 迟到信令与真实 transport 后再逐项勾选。
+skip）；Release 全量 30/30；禁异常构建 M4 18/18；UBSan 全量 30/30；ASan 定向 M4
+通过。GitHub Actions run `32011493922`（提交 `48efcc5`）结论 success，10 个 job 全部
+通过：Linux GCC/Clang Debug/Release、Windows Debug/Release、ASan、UBSan、TSAN 与
+coturn-topology。据此 `M4-01`/`M4-03`/`M4-05` 满足条目并勾选；`M4-02` 待
+RelaySignalingRoute 接入 relay 控制面转发、`M4-04` 待 session epoch 迟到信令拒绝，
+两者与 libdatachannel transport（M4-06 起）在后续轮次推进。
 
 ---
 
