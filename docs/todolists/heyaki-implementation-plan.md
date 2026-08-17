@@ -1,7 +1,8 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：M3B-01～20 实现项与 M3B 测试退出条件全部完成，M3B 里程碑关闭
-> - 日期：2026-08-16
+> - 状态：M3B 已关闭；M4 活动中（第一轮：Transport SPI、签名信令协议、replay cache、
+>   SignalingCoordinator 与假 transport 已落地，libdatachannel/网络矩阵未开始）
+> - 日期：2026-08-17
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)、[局域网无服务器连接设计](../design/lan-serverless-connectivity.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
 
@@ -797,6 +798,47 @@ Linux GCC/Clang Debug/Release、Windows Debug/Release、ASan/UBSan/TSAN 全部�
 - [ ] 可打洞环境建连 P95 小于 3 秒；直连失败 TURN fallback P95 小于 5 秒。
 - [ ] 100% 失败/取消/关闭路径最终进入终态，executor worker、Asio work、DataChannel 和 replay cache 无泄漏。
 - [ ] TUI 可以从 LAN/relay 合并列表选择正确 endpoint 建立认证后的最小会话，并准确显示 signaling/data path。
+
+### M4 实施进度（2026-08-17，第1轮）
+
+第一轮按计划第 14 节顺序先交付 Transport SPI、假 transport 与统一信令状态机，不接
+libdatachannel：
+
+- 新增公共 `signaling_protocol.hpp/.cpp`：`SignalBinding`/`SignedOffer`/`SignedAnswer`/
+  `SignedCandidate` 结构、M1 冻结的 `heyaki.offer.v1`/`heyaki.answer.v1`/
+  `heyaki.candidate.v1` canonical 字节、Ed25519 签名/验签（含公钥派生 DeviceId、
+  5 分钟有效期 + 30 秒负偏移窗口）、严格 Protobuf 编解码（拒绝截断/重复/未知字段/
+  非规范 varint/错误宽度/offer 携带 responder nonce）以及 SDP ICE ufrag 提取。
+  canonical offer/answer 字节与 transcript SHA-256 逐字节对齐 M1 golden vectors，
+  RFC 8032 测试向量签名通过验签路径复验。
+- 新增公共 `signaling_replay_cache.hpp/.cpp`：按签名域、signer、request/session ID、
+  nonce 二元组与 candidate sequence 组成 replay key；固定 10 分钟 TTL、总量与每 peer
+  容量（沿用 M1 冻结的 ReplayCachePolicy 下限 64/16）、饱和显式拒绝并计数，不做
+  静默驱逐。
+- 新增内部 Transport SPI `src/transport/transport_session.hpp`（不安装、不进公共 ABI）：
+  `TransportSession`/`TransportChannel`、`ChannelOptions`（可靠性/顺序/优先级/字节
+  预算）、`CloseReason`、`TransportState`，以及分离 `signaling_path`（lan/relay）与
+  `data_path`（direct_host/direct_srflx/turn_udp/turn_tcp/turn_tls）的 `PathInfo`。
+- 新增 `src/client/signaling_coordinator.hpp/.cpp`：对 `SignalingRoute` 抽象的统一
+  connect/accept/deny/trickle 状态机（requesting/accepted/responding/offered/answered/
+  candidates/closed），pending 表具备 request ID、TTL、来源路由、payload 大小、
+  每 peer 速率与 inbound/outbound 容量上限；签名对象只有在通过结构校验、绑定匹配、
+  对端身份查找、验签、expiry 窗口与 replay 准入后才经 delegate 交付（M4-05 门禁），
+  candidate 另外校验 owner 角色、owner ufrag/fingerprint 与 transcript 一致性、
+  sequence 单调以及"字节完全一致的重复才幂等"。
+- 测试：新增 `heyaki_m4_signaling_tests` 18 项（golden canonical/transcript/签名、
+  codec 拒绝矩阵、expiry 窗口、replay cache、完整协商+trickle、篡改/重放/绑定破坏/
+  未知身份/容量/TTL/速率、假 transport 有界发送与关闭）；`m4_support.hpp` 提供
+  FakeSignalingRoute 与 LoopbackTransportPair 假 transport。三个签名对象 parser 加入
+  parser fuzz harness 与 fuzz smoke corpus 种子。
+- 本轮为纯同步状态机与协议代码，未新增线程、Asio 工作或 executor 通道；已按
+  EXEC-09 重读 executor-integration skill 确认路由决策，libdatachannel callback
+  映射（M4-11）将在后续轮次另读 communication/blocking-io 卡片。
+
+本机验证：GCC 13.3 Debug（`-Werror`）全量 CTest 30/30 通过（2 项 coturn 环境性
+skip）；禁异常构建 M4 18/18；UBSan 全量 30/30；ASan 定向 M4 通过。Windows 与远端
+sanitizer/CI 尚未执行，`M4-01`～`M4-05` 保持未勾选，待 CI 与后续轮次补齐 relay
+route、session epoch 迟到信令与真实 transport 后再逐项勾选。
 
 ---
 

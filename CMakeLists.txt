@@ -120,6 +120,8 @@ add_library(heyaki_core
   src/core/operation.cpp
   src/core/protocol.cpp
   src/core/security.cpp
+  src/core/signaling_protocol.cpp
+  src/core/signaling_replay_cache.cpp
   src/core/signing.cpp
   src/core/version.cpp
   src/core/wire.cpp)
@@ -161,12 +163,15 @@ add_library(heyaki_client
   src/client/relay_wss_client.cpp
   src/client/relay_wss_control.cpp
   src/client/runtime.cpp
+  src/client/signaling_coordinator.cpp
   src/relay/relay_endpoint.cpp
   src/relay/relay_enrollment.cpp
   src/relay/relay_login.cpp)
 add_library(heyaki::client ALIAS heyaki_client)
 set_target_properties(heyaki_client PROPERTIES EXPORT_NAME client OUTPUT_NAME heyaki_client)
 target_compile_features(heyaki_client PUBLIC cxx_std_20)
+target_include_directories(heyaki_client PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/transport")
 target_link_libraries(heyaki_client
   PUBLIC heyaki::profile
   PRIVATE executor::executor heyaki::sodium OpenSSL::SSL OpenSSL::Crypto)
@@ -192,6 +197,8 @@ set_target_properties(heyaki_transport_webrtc PROPERTIES
   EXPORT_NAME transport_webrtc
   OUTPUT_NAME heyaki_transport_webrtc)
 target_compile_features(heyaki_transport_webrtc PUBLIC cxx_std_20)
+target_include_directories(heyaki_transport_webrtc PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/transport")
 target_link_libraries(heyaki_transport_webrtc PRIVATE heyaki::core)
 heyaki_configure_target(heyaki_transport_webrtc)
 

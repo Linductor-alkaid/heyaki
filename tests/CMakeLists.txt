@@ -277,6 +277,19 @@ target_compile_definitions(heyaki_m3a_lan_tests PRIVATE
 heyaki_add_runtime_test(
   heyaki_m3a_lan heyaki_m3a_lan_tests "unit;lan;security")
 
+add_executable(heyaki_m4_signaling_tests unit/m4_signaling_test.cpp)
+target_link_libraries(heyaki_m4_signaling_tests PRIVATE
+  heyaki::client
+  GTest::gtest_main)
+target_include_directories(heyaki_m4_signaling_tests PRIVATE
+  "${HEYAKI_TEST_GENERATED_DIR}"
+  "${CMAKE_CURRENT_SOURCE_DIR}/unit"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/client"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+heyaki_configure_target(heyaki_m4_signaling_tests)
+heyaki_add_runtime_test(
+  heyaki_m4_signaling heyaki_m4_signaling_tests "unit;signaling;security")
+
 add_executable(heyaki_m3b_relay_tests
   unit/m3b_relay_test.cpp
   unit/m3b_relay_database_test.cpp
@@ -312,7 +325,7 @@ heyaki_add_runtime_test(
 set(heyaki_public_header_sources)
 foreach(public_header IN ITEMS
     error identity ids lan_directory lan_protocol limits node operation password profile_store protocol relay_enrollment_client relay_wss_control runtime secret_backend
-    security signing time version wire)
+    security signaling_protocol signaling_replay_cache signing time version wire)
   set(header_source
     "${HEYAKI_TEST_GENERATED_DIR}/${public_header}_header_standalone.cpp")
   file(GENERATE OUTPUT "${header_source}"

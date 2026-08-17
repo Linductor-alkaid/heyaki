@@ -3,6 +3,7 @@
 #include <heyaki/operation.hpp>
 #include <heyaki/lan_protocol.hpp>
 #include <heyaki/protocol.hpp>
+#include <heyaki/signaling_protocol.hpp>
 #include <heyaki/wire.hpp>
 
 #include "heyaki/common/v1/common.pb.h"
@@ -365,6 +366,45 @@ void lan_presence_parser(std::span<const std::byte> input) {
   const auto encoded = encode_lan_presence(*parsed.value_if());
   if (!encoded || encoded.value_if()->size() != input.size() ||
       !std::equal(encoded.value_if()->begin(), encoded.value_if()->end(), input.begin())) {
+    std::abort();
+  }
+}
+
+void signed_offer_parser(std::span<const std::byte> input) {
+  const auto parsed = parse_signed_offer(input);
+  if (!parsed) {
+    return;
+  }
+  const auto encoded = encode_signed_offer(*parsed.value_if());
+  if (!encoded || encoded.value_if()->size() != input.size() ||
+      !std::equal(encoded.value_if()->begin(), encoded.value_if()->end(),
+                  input.begin())) {
+    std::abort();
+  }
+}
+
+void signed_answer_parser(std::span<const std::byte> input) {
+  const auto parsed = parse_signed_answer(input);
+  if (!parsed) {
+    return;
+  }
+  const auto encoded = encode_signed_answer(*parsed.value_if());
+  if (!encoded || encoded.value_if()->size() != input.size() ||
+      !std::equal(encoded.value_if()->begin(), encoded.value_if()->end(),
+                  input.begin())) {
+    std::abort();
+  }
+}
+
+void signed_candidate_parser(std::span<const std::byte> input) {
+  const auto parsed = parse_signed_candidate(input);
+  if (!parsed) {
+    return;
+  }
+  const auto encoded = encode_signed_candidate(*parsed.value_if());
+  if (!encoded || encoded.value_if()->size() != input.size() ||
+      !std::equal(encoded.value_if()->begin(), encoded.value_if()->end(),
+                  input.begin())) {
     std::abort();
   }
 }

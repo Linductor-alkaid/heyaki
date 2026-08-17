@@ -3,6 +3,7 @@
 
 #include <heyaki/lan_protocol.hpp>
 #include <heyaki/protocol.hpp>
+#include <heyaki/signaling_protocol.hpp>
 #include <heyaki/wire.hpp>
 
 #include <algorithm>
@@ -194,6 +195,59 @@ int main(int argc, char** argv) {
     heyaki::fuzz::lan_signaling_frame_parser(seed);
     if (!write_seed(corpus_root / "lan-signaling-frame-parser", name, seed)) {
       std::cerr << "cannot write LAN signaling seed " << name << '\n';
+      return 1;
+    }
+  }
+
+  const auto signaling_identity = heyaki::create_identity();
+  if (!signaling_identity) {
+    std::cerr << "cannot create signed signaling seed identity\n";
+    return 1;
+  }
+  heyaki::EndpointId::Storage initiator_endpoint{};
+  initiator_endpoint[0] = std::byte{0x11U};
+  heyaki::DeviceId::Storage responder_device{};
+  responder_device[0] = std::byte{0x22U};
+  heyaki::EndpointId::Storage responder_endpoint{};
+  responder_endpoint[0] = std::byte{0x33U};
+  heyaki::RequestId::Storage seed_request{};
+  seed_request[0] = std::byte{0x44U};
+  heyaki::SessionId::Storage seed_session{};
+  seed_session[0] = std::byte{0x55U};
+  heyaki::SignedOffer seed_offer;
+  seed_offer.binding.initiator.device_id = signaling_identity.value_if()->device_id();
+  seed_offer.binding.initiator.endpoint_id = heyaki::EndpointId{initiator_endpoint};
+  seed_offer.binding.responder.device_id = heyaki::DeviceId{responder_device};
+  seed_offer.binding.responder.endpoint_id = heyaki::EndpointId{responder_endpoint};
+  seed_offer.binding.request_id = heyaki::RequestId{seed_request};
+  seed_offer.binding.session_id = heyaki::SessionId{seed_session};
+  seed_offer.binding.initiator_nonce = heyaki::SignalingNonce{};
+  seed_offer.binding.initiator_nonce[0] = std::byte{0x66U};
+  seed_offer.binding.expires_unix_milliseconds = 1'700'000'000'000ULL;
+  seed_offer.sdp = {std::byte{'v'}, std::byte{'='}, std::byte{'0'}};
+  seed_offer.dtls_fingerprint = heyaki::DtlsFingerprint{};
+  seed_offer.dtls_fingerprint[0] = std::byte{0x77U};
+  if (!heyaki::sign_signed_offer(seed_offer, *signaling_identity.value_if())) {
+    std::cerr << "cannot sign signed offer seed\n";
+    return 1;
+  }
+  const auto encoded_seed_offer = heyaki::encode_signed_offer(seed_offer);
+  if (!encoded_seed_offer) {
+    std::cerr << "cannot encode signed offer seed\n";
+    return 1;
+  }
+  auto truncated_offer = *encoded_seed_offer.value_if();
+  truncated_offer.pop_back();
+  const std::vector<std::pair<std::string_view, std::vector<std::byte>>> offer_seeds{
+      std::pair{std::string_view{"signed-offer"}, *encoded_seed_offer.value_if()},
+      std::pair{std::string_view{"truncated-offer"}, truncated_offer},
+  };
+  for (const auto& [name, seed] : offer_seeds) {
+    heyaki::fuzz::signed_offer_parser(seed);
+    heyaki::fuzz::signed_answer_parser(seed);
+    heyaki::fuzz::signed_candidate_parser(seed);
+    if (!write_seed(corpus_root / "signed-signaling-parser", name, seed)) {
+      std::cerr << "cannot write signed signaling seed " << name << '\n';
       return 1;
     }
   }
