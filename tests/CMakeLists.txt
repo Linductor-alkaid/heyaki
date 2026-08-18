@@ -305,6 +305,11 @@ heyaki_enable_executor_exception_adapter_source(unit/m4_webrtc_transport_test.cp
 heyaki_add_runtime_test(
   heyaki_m4_webrtc_transport heyaki_m4_webrtc_transport_tests
   "unit;transport;network;concurrency")
+if(WIN32)
+  set_tests_properties(heyaki_m4_webrtc_transport PROPERTIES
+    ENVIRONMENT_MODIFICATION
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:datachannel>")
+endif()
 
 add_executable(heyaki_m4_relay_route_tests unit/m4_relay_signaling_test.cpp)
 target_link_libraries(heyaki_m4_relay_route_tests PRIVATE
@@ -390,6 +395,11 @@ target_link_libraries(heyaki_module_linkage PRIVATE
   heyaki::transport_webrtc)
 heyaki_configure_target(heyaki_module_linkage)
 heyaki_add_runtime_test(heyaki_module_linkage heyaki_module_linkage "integration")
+if(WIN32)
+  set_tests_properties(heyaki_module_linkage PROPERTIES
+    ENVIRONMENT_MODIFICATION
+      "PATH=path_list_prepend:$<TARGET_FILE_DIR:datachannel>")
+endif()
 
 add_library(heyaki_fuzz_harness OBJECT fuzz/protocol_fuzz.cpp)
 target_link_libraries(heyaki_fuzz_harness PRIVATE heyaki::core heyaki_protocol_lite)

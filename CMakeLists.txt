@@ -86,14 +86,22 @@ set(EXECUTOR_ENABLE_TSAN OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/executor)
 
 # Heyaki owns the libdatachannel lifecycle through WebRtcTransportSession. Keep the
-# pinned dependency on its minimal static DataChannel profile; media and the standalone
-# websocket API are not part of the v1 data plane.
+# pinned dependency on its minimal DataChannel profile; media and the standalone
+# websocket API are not part of the v1 data plane. The pinned release's MSVC install
+# rule requests a linker PDB for its primary target, so that target must be shared on
+# Windows. Its dependency libraries and every Heyaki target remain static.
 set(NO_MEDIA ON CACHE BOOL "" FORCE)
 set(NO_WEBSOCKET ON CACHE BOOL "" FORCE)
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+if(WIN32)
+  set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
+else()
+  set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+endif()
+set(BUILD_SHARED_DEPS_LIBS OFF CACHE BOOL "" FORCE)
 set(NO_EXAMPLES ON CACHE BOOL "" FORCE)
 set(NO_TESTS ON CACHE BOOL "" FORCE)
 add_subdirectory(third_party/libdatachannel)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 
 if(NOT HEYAKI_SANITIZER STREQUAL "none" AND
    CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
