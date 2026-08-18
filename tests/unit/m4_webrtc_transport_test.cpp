@@ -343,6 +343,7 @@ TEST(M4WebRtcTransport, PropagatesHighAndLowWaterBackpressure) {
 
   std::atomic<TransportChannel*> channel{nullptr};
   std::atomic<heyaki::ErrorCode> blocked_code{heyaki::ErrorCode::internal};
+  std::atomic<bool> paused_observed{false};
   auto open_dispatched = runtime_dispatcher(*context.value_if())(
       "m4.backpressure.open", [&] {
         left->async_open_channel(
@@ -360,6 +361,8 @@ TEST(M4WebRtcTransport, PropagatesHighAndLowWaterBackpressure) {
                 if (!sent) {
                   blocked_code.store(sent.error_if()->code(),
                                      std::memory_order_release);
+                  paused_observed.store(!current->writable(),
+                                        std::memory_order_release);
                   (void)send_paused.advance_to(1U);
                   return;
                 }
@@ -371,8 +374,8 @@ TEST(M4WebRtcTransport, PropagatesHighAndLowWaterBackpressure) {
 
   ASSERT_TRUE(send_paused.wait_for(1U, 10s));
   ASSERT_EQ(blocked_code.load(std::memory_order_acquire), heyaki::ErrorCode::would_block);
+  EXPECT_TRUE(paused_observed.load(std::memory_order_acquire));
   ASSERT_NE(channel.load(std::memory_order_acquire), nullptr);
-  EXPECT_FALSE(channel.load(std::memory_order_acquire)->writable());
   ASSERT_TRUE(send_resumed.wait_for(1U, 10s));
   EXPECT_TRUE(channel.load(std::memory_order_acquire)->writable());
 
