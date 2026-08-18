@@ -204,6 +204,14 @@ heyaki_configure_target(heyaki_client)
 heyaki_enable_executor_exception_adapter_source(src/client/node.cpp)
 heyaki_enable_executor_exception_adapter_source(src/client/relay_wss_client.cpp)
 heyaki_enable_executor_exception_adapter_source(src/client/runtime.cpp)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  # GCC 13 Release optimization reports executor::comm::BoundedQueue's
+  # std::optional<Item> storage as uninitialized when Item contains this
+  # translation unit's variant with a vector. Retain the diagnostic without
+  # treating this pinned dependency false positive as a Heyaki build failure.
+  set_property(SOURCE src/client/node.cpp APPEND PROPERTY COMPILE_OPTIONS
+    "$<$<CONFIG:Release>:-Wno-error=uninitialized>")
+endif()
 
 add_library(heyaki_services src/services/module.cpp)
 add_library(heyaki::services ALIAS heyaki_services)
