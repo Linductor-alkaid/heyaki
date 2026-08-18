@@ -223,9 +223,15 @@ target_include_directories(heyaki_transport_webrtc PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src/transport")
 target_include_directories(heyaki_transport_webrtc SYSTEM PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libdatachannel/include")
-target_link_libraries(heyaki_transport_webrtc
-  PRIVATE executor::executor heyaki::core
-    $<IF:$<PLATFORM_ID:Windows>,LibDataChannel::LibDataChannelStatic,LibDataChannel::LibDataChannel>)
+target_link_libraries(heyaki_transport_webrtc PRIVATE executor::executor heyaki::core)
+if(WIN32)
+  target_link_libraries(heyaki_transport_webrtc PRIVATE
+    $<BUILD_INTERFACE:LibDataChannel::LibDataChannelStatic>
+    $<INSTALL_INTERFACE:LibDataChannel::LibDataChannel>)
+else()
+  target_link_libraries(heyaki_transport_webrtc PRIVATE
+    LibDataChannel::LibDataChannel)
+endif()
 heyaki_configure_target(heyaki_transport_webrtc)
 heyaki_enable_executor_exception_adapter_source(
   src/transport/webrtc/webrtc_transport_session.cpp)
