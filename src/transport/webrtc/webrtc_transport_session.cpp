@@ -565,6 +565,32 @@ class WebRtcTransportSession::Impl
     completion(Result<TransportChannel*>::failure(transport_error(code, detail)));
   }
 
+  void open_channel(ChannelKind kind, ChannelOptions options,
+                    OpenCompletion completion) {
+    if (channels_.contains(kind) || channels_.size() >= config_.channel_capacity ||
+        options.send_queue_bytes == 0U || options.max_message_bytes == 0U ||
+        options.max_message_bytes > config_.maximum_message_bytes) {
+      ++channels_rejected_;
+      completion(Result<TransportChannel*>::failure(
+          transport_error(ErrorCode::resource_exhausted,
+                          "channel_admission_rejected")));
+      return;
+    }
+    try {
+      rtc::DataChannelInit init;
+      init.reliability.unordered = options.ordering == Ordering::unordered;
+      if (options.reliability == Reliability::unreliable) {
+        init.reliability.maxRetransmits = 0U;
+      }
+      pending_opens_.emplace(kind, std::move(completion));
+      auto rtc_channel = peer_->createDataChannel(label_for(kind), std::move(init));
+      (void)attach_channel(kind, std::move(options), std::move(rtc_channel));
+    } catch (...) {
+      ++channels_rejected_;
+      fail_pending_open(kind, ErrorCode::transport, "channel_create_failed");
+    }
+  }
+
   WebRtcTransportConfig config_;
   RuntimeDispatcher dispatcher_;
   WebRtcSignalingHandler signaling_;
@@ -706,27 +732,24 @@ WebRtcTransportDiagnostics WebRtcTransportSession::diagnostics() const noexcept 
 void WebRtcTransportSession::async_open_channel(ChannelKind kind, ChannelOptions options,
                                                 OpenCompletion completion) {
   if (!impl_ || !completion) return;
-  if (impl_->channels_.contains(kind) ||
-      impl_->channels_.size() >= impl_->config_.channel_capacity ||
-      options.send_queue_bytes == 0U || options.max_message_bytes == 0U ||
-      options.max_message_bytes > impl_->config_.maximum_message_bytes) {
-    ++impl_->channels_rejected_;
-    completion(Result<TransportChannel*>::failure(
-        transport_error(ErrorCode::resource_exhausted, "channel_admission_rejected")));
-    return;
-  }
-  try {
-    rtc::DataChannelInit init;
-    init.reliability.unordered = options.ordering == Ordering::unordered;
-    if (options.reliability == Reliability::unreliable) {
-      init.reliability.maxRetransmits = 0U;
-    }
-    impl_->pending_opens_.emplace(kind, std::move(completion));
-    auto rtc_channel = impl_->peer_->createDataChannel(label_for(kind), std::move(init));
-    (void)impl_->attach_channel(kind, std::move(options), std::move(rtc_channel));
-  } catch (...) {
-    ++impl_->channels_rejected_;
-    impl_->fail_pending_open(kind, ErrorCode::transport, "channel_create_failed");
+  auto weak = std::weak_ptr<Impl>{impl_};
+  auto rejected_completion = completion;
+  auto dispatched = impl_->dispatcher_(
+      "webrtc-open-channel",
+      [weak, kind, options = std::move(options),
+       completion = std::move(completion)]() mutable {
+        if (auto self = weak.lock()) {
+          self->open_channel(kind, std::move(options), std::move(completion));
+        } else {
+          completion(Result<TransportChannel*>::failure(
+              transport_error(ErrorCode::cancelled, "transport_closed")));
+        }
+        return Result<void>::success();
+      });
+  if (!dispatched) {
+    rejected_completion(Result<TransportChannel*>::failure(
+        transport_error(ErrorCode::resource_exhausted,
+                        "channel_dispatch_rejected")));
   }
 }
 

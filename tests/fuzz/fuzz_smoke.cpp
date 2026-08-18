@@ -3,6 +3,7 @@
 
 #include <heyaki/lan_protocol.hpp>
 #include <heyaki/protocol.hpp>
+#include <heyaki/session_protocol.hpp>
 #include <heyaki/signaling_protocol.hpp>
 #include <heyaki/wire.hpp>
 
@@ -246,6 +247,7 @@ int main(int argc, char** argv) {
     heyaki::fuzz::signed_offer_parser(seed);
     heyaki::fuzz::signed_answer_parser(seed);
     heyaki::fuzz::signed_candidate_parser(seed);
+    heyaki::fuzz::signed_session_hello_parser(seed);
     if (!write_seed(corpus_root / "signed-signaling-parser", name, seed)) {
       std::cerr << "cannot write signed signaling seed " << name << '\n';
       return 1;

@@ -900,7 +900,8 @@ ASan、UBSan、TSAN 与 coturn-topology。协调器接入 Node LAN TLS 路径与
 - 发送路径按 `bufferedAmount`、channel byte budget、消息数和 high-water 显式返回
   `would_block`，low-water callback 恢复保守消息预算；M4-12 保持未勾选，等待专门的
   高低水位压力与 API 反压传播测试。
-- CMake 采用 pinned `0.23.2` 的静态 DataChannel-only profile，并把官方
+- CMake 采用 pinned `0.23.2` 的 DataChannel-only profile（Linux 静态；Windows 因
+  upstream MSVC install PDB 规则使用主 DLL，内部依赖和 Heyaki target 仍静态），并把官方
   LibDataChannel config、headers、libjuice/usrsctp 闭包纳入安装；安装后 consumer 已
   验证。LAN directory 现保留已验证 presence 公钥，供下一轮 Node 内 coordinator 做
   peer identity lookup；公钥仍来自既有 DeviceId 派生与 presence 签名门禁。
@@ -913,6 +914,30 @@ ASan、UBSan、TSAN 与 coturn-topology。协调器接入 Node LAN TLS 路径与
 allocation probe 因本机未提供 coturn 按既有规则 skip；新 WebRTC e2e 与安装后 consumer
 定向复跑均通过。据此 `M4-06`/`M4-08`/`M4-09`/`M4-11` 满足条目并勾选；Node 双路由、
 session epoch、`SESSION_HELLO` 与剩余网络矩阵继续推进。
+
+### M4 实施进度（2026-08-18，第4轮）
+
+第四轮先补齐 `SESSION_HELLO` 协议核心与 session epoch admission，不提前宣称已完成
+真实会话集成：
+
+- 新增公共 `session_protocol.hpp/.cpp`：实现冻结 `SessionHello` schema 的严格有界
+  Protobuf codec、`heyaki.session-hello.v1` 14 字段 canonical bytes、Ed25519 签名/验签、
+  公钥派生 sender DeviceId、expiry 窗口，以及 session capability 协商。
+- 新增 `SessionHelloAdmission`：只在 sender/peer endpoint、session ID、双方 nonce 与
+  signaling transcript 全部匹配后准入；低 epoch 作为迟到 hello 忽略，高 epoch 返回
+  `higher_epoch_requires_new_transport`，相同编码重复幂等，改变字节的同 epoch 重复按
+  authentication failure 拒绝。状态只在全部验证和能力协商成功后提交。
+- 新增 `heyaki_m4_session_hello_tests`，覆盖 generated Lite protobuf 互操作、签名/transcript
+  篡改、首次准入/字节相同重复/冲突重复、低/高 epoch；严格 parser 同时加入既有 protocol
+  parser fuzz target 和 fuzz smoke，公共头独立编译与依赖泄漏检查通过。
+- 修复第3轮暴露的 Windows CMake 4 配置失败：pinned libdatachannel 对静态主 target 请求
+  linker PDB，Windows 改用其可安装 DLL target，并给真实链接 WebRTC 的测试显式配置 DLL
+  搜索路径；GitHub Actions run `32147196987` 的 Windows Debug/Release 已越过 Configure。
+
+本机验证：GCC 13.3 Debug `-Werror` 的 core、session hello test、fuzz smoke、public-header
+standalone/boundary 均通过；真实 WebRTC e2e 与 installed consumer 在前一 scoped CI 修复
+提交上复跑通过。`M4-04` 与 `M4-13` 仍保留未勾选，等待下一轮把 admission 绑定到已验证
+fingerprint 的真实 control DataChannel 和 Node/PeerSession 生命周期后再满足条目。
 
 ---
 

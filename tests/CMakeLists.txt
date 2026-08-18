@@ -291,6 +291,16 @@ heyaki_configure_target(heyaki_m4_signaling_tests)
 heyaki_add_runtime_test(
   heyaki_m4_signaling heyaki_m4_signaling_tests "unit;signaling;security")
 
+add_executable(heyaki_m4_session_hello_tests unit/m4_session_hello_test.cpp)
+target_link_libraries(heyaki_m4_session_hello_tests PRIVATE
+  heyaki::core
+  heyaki_protocol_lite
+  GTest::gtest_main)
+heyaki_configure_target(heyaki_m4_session_hello_tests)
+heyaki_add_runtime_test(
+  heyaki_m4_session_hello heyaki_m4_session_hello_tests
+  "unit;session;security;protocol")
+
 add_executable(heyaki_m4_webrtc_transport_tests unit/m4_webrtc_transport_test.cpp)
 target_link_libraries(heyaki_m4_webrtc_transport_tests PRIVATE
   heyaki::client
@@ -365,7 +375,7 @@ heyaki_add_runtime_test(
 set(heyaki_public_header_sources)
 foreach(public_header IN ITEMS
     error identity ids lan_directory lan_protocol limits node operation password profile_store protocol relay_enrollment_client relay_wss_control runtime secret_backend
-    security signaling_protocol signaling_replay_cache signing time version wire)
+    security session_protocol signaling_protocol signaling_replay_cache signing time version wire)
   set(header_source
     "${HEYAKI_TEST_GENERATED_DIR}/${public_header}_header_standalone.cpp")
   file(GENERATE OUTPUT "${header_source}"

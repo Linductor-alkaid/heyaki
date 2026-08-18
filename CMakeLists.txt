@@ -138,6 +138,7 @@ add_library(heyaki_core
   src/core/operation.cpp
   src/core/protocol.cpp
   src/core/security.cpp
+  src/core/session_protocol.cpp
   src/core/signaling_protocol.cpp
   src/core/signaling_replay_cache.cpp
   src/core/signing.cpp
@@ -222,7 +223,8 @@ target_include_directories(heyaki_transport_webrtc PRIVATE
 target_include_directories(heyaki_transport_webrtc SYSTEM PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libdatachannel/include")
 target_link_libraries(heyaki_transport_webrtc
-  PRIVATE executor::executor heyaki::core LibDataChannel::LibDataChannel)
+  PRIVATE executor::executor heyaki::core
+    $<IF:$<PLATFORM_ID:Windows>,LibDataChannel::LibDataChannelStatic,LibDataChannel::LibDataChannel>)
 heyaki_configure_target(heyaki_transport_webrtc)
 heyaki_enable_executor_exception_adapter_source(
   src/transport/webrtc/webrtc_transport_session.cpp)

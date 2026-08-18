@@ -12,5 +12,6 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
   heyaki::fuzz::signed_offer_parser(input);
   heyaki::fuzz::signed_answer_parser(input);
   heyaki::fuzz::signed_candidate_parser(input);
+  heyaki::fuzz::signed_session_hello_parser(input);
   return 0;
 }

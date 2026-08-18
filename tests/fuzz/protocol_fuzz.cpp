@@ -3,6 +3,7 @@
 #include <heyaki/operation.hpp>
 #include <heyaki/lan_protocol.hpp>
 #include <heyaki/protocol.hpp>
+#include <heyaki/session_protocol.hpp>
 #include <heyaki/signaling_protocol.hpp>
 #include <heyaki/wire.hpp>
 
@@ -402,6 +403,19 @@ void signed_candidate_parser(std::span<const std::byte> input) {
     return;
   }
   const auto encoded = encode_signed_candidate(*parsed.value_if());
+  if (!encoded || encoded.value_if()->size() != input.size() ||
+      !std::equal(encoded.value_if()->begin(), encoded.value_if()->end(),
+                  input.begin())) {
+    std::abort();
+  }
+}
+
+void signed_session_hello_parser(std::span<const std::byte> input) {
+  const auto parsed = parse_signed_session_hello(input);
+  if (!parsed) {
+    return;
+  }
+  const auto encoded = encode_signed_session_hello(*parsed.value_if());
   if (!encoded || encoded.value_if()->size() != input.size() ||
       !std::equal(encoded.value_if()->begin(), encoded.value_if()->end(),
                   input.begin())) {
