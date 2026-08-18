@@ -82,13 +82,20 @@ login_challenge(empty)
 heartbeat(HeartbeatRequest) -> heartbeat_ack(HeartbeatAck)
 endpoint_publish(EndpointPublish) -> endpoint_publish_ack(EndpointPublishAck)
 endpoint_query(EndpointQuery) -> endpoint_query_result(EndpointQueryResult)
+signaling_send(SignalingSend) -> signaling_deliver(SignalingDeliver) on the target session
 ```
 
 Enrollment and login challenges are accepted only by the WSS session that requested them. A logged-in
 session is bound to its authenticated `(DeviceId, EndpointId)` and tenant; heartbeat extends the
 bounded in-memory lease, endpoint publish stores only validated signed records in a bounded TTL
 directory, and endpoint query returns only online endpoints in the caller tenant under the configured
-tenant exposure policy. Revoked devices are rejected at login; by default a revoked device also loses
+tenant exposure policy. `signaling_send` forwards one bounded peer-signaling envelope to another
+logged-in endpoint of the same tenant: kind is a `LanSignalingMessageKind` value, connect control
+kinds carry an empty payload and signed kinds carry exactly one encoded signed object of at most
+64 KiB. The relay resolves the target through the live lease table and its session index, applies
+per-connection signaling rate limits, and answers `control_error` with `endpoint_offline` for
+targets without a live session, `permission` for cross-tenant targets, and `protocol` for unknown
+kinds, zero request IDs, or payload/kind mismatches. The relay never decodes the payload. Revoked devices are rejected at login; by default a revoked device also loses
 its existing control session on the next authenticated message.
 
 The nested payloads are the normative Protobuf messages in

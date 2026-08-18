@@ -1,4 +1,5 @@
 #include <heyaki/relay_wss_control.hpp>
+#include <heyaki/signaling_protocol.hpp>
 
 #include <algorithm>
 #include <array>
@@ -21,7 +22,7 @@ Error control_error(const char* detail) {
 
 bool valid_control_type(std::uint8_t value) noexcept {
   return value >= static_cast<std::uint8_t>(RelayWssControlType::enrollment_challenge) &&
-         value <= static_cast<std::uint8_t>(RelayWssControlType::endpoint_query_result);
+         value <= static_cast<std::uint8_t>(RelayWssControlType::signaling_deliver);
 }
 
 bool valid_error_code(std::uint16_t value) noexcept {
@@ -858,6 +859,192 @@ Result<RelayWssEndpointQueryResult> parse_relay_wss_endpoint_query_result(
     result.endpoints.push_back(std::move(*publication.value_if()));
   }
   return Result<RelayWssEndpointQueryResult>::success(std::move(result));
+}
+
+
+namespace {
+
+template <typename Target>
+Result<Target> parse_signaling_target(std::span<const std::byte> payload) {
+  ProtoReader reader(payload);
+  std::optional<DeviceId> device_id;
+  std::optional<EndpointId> endpoint_id;
+  std::optional<std::uint8_t> kind;
+  std::optional<RequestId> request_id;
+  std::vector<std::byte> message_payload;
+  bool payload_seen = false;
+  while (!reader.done()) {
+    auto field = reader.next();
+    if (!field) {
+      return Result<Target>::failure(*field.error_if());
+    }
+    switch (field.value_if()->number) {
+      case 1U: {
+        DeviceId::Storage value{};
+        if (field.value_if()->wire_type != 2U || device_id ||
+            field.value_if()->bytes.size() != value.size()) {
+          return Result<Target>::failure(control_error("signaling_device_id_invalid"));
+        }
+        std::copy(field.value_if()->bytes.begin(), field.value_if()->bytes.end(),
+                  value.begin());
+        device_id = DeviceId{value};
+        break;
+      }
+      case 2U: {
+        EndpointId::Storage value{};
+        if (field.value_if()->wire_type != 2U || endpoint_id ||
+            field.value_if()->bytes.size() != value.size()) {
+          return Result<Target>::failure(control_error("signaling_endpoint_id_invalid"));
+        }
+        std::copy(field.value_if()->bytes.begin(), field.value_if()->bytes.end(),
+                  value.begin());
+        endpoint_id = EndpointId{value};
+        break;
+      }
+      case 3U: {
+        if (field.value_if()->wire_type != 0U || kind ||
+            field.value_if()->integer > 255U || field.value_if()->integer == 0U) {
+          return Result<Target>::failure(control_error("signaling_kind_invalid"));
+        }
+        kind = static_cast<std::uint8_t>(field.value_if()->integer);
+        break;
+      }
+      case 4U: {
+        RequestId::Storage value{};
+        if (field.value_if()->wire_type != 2U || request_id ||
+            field.value_if()->bytes.size() != value.size()) {
+          return Result<Target>::failure(control_error("signaling_request_id_invalid"));
+        }
+        std::copy(field.value_if()->bytes.begin(), field.value_if()->bytes.end(),
+                  value.begin());
+        request_id = RequestId{value};
+        break;
+      }
+      case 5U: {
+        if (field.value_if()->wire_type != 2U || payload_seen ||
+            field.value_if()->bytes.size() > max_signaling_object_bytes) {
+          return Result<Target>::failure(control_error("signaling_payload_invalid"));
+        }
+        message_payload = std::vector<std::byte>{field.value_if()->bytes.begin(),
+                                                 field.value_if()->bytes.end()};
+        payload_seen = true;
+        break;
+      }
+      default:
+        return Result<Target>::failure(control_error("signaling_field_unknown"));
+    }
+  }
+  if (!device_id || !endpoint_id || !kind || !request_id) {
+    return Result<Target>::failure(control_error("signaling_field_missing"));
+  }
+  if (device_id->is_zero() || endpoint_id->is_zero() || request_id->is_zero()) {
+    return Result<Target>::failure(control_error("signaling_identity_zero"));
+  }
+  Target target;
+  target.device_id = *device_id;
+  target.endpoint_id = *endpoint_id;
+  target.kind = *kind;
+  target.request_id = *request_id;
+  target.payload = std::move(message_payload);
+  return Result<Target>::success(std::move(target));
+}
+
+void append_signaling_common(std::vector<std::byte>& output, const DeviceId& device_id,
+                             const EndpointId& endpoint_id, std::uint8_t kind,
+                             const RequestId& request_id,
+                             std::span<const std::byte> payload) {
+  append_bytes(output, 1U, device_id.bytes());
+  append_bytes(output, 2U, endpoint_id.bytes());
+  append_uint(output, 3U, kind);
+  append_bytes(output, 4U, request_id.bytes());
+  // proto3 omits absent bytes fields; an empty payload is encoded as absence.
+  if (!payload.empty()) {
+    append_bytes(output, 5U, payload);
+  }
+}
+
+}  // namespace
+
+Result<std::vector<std::byte>> encode_relay_wss_signaling_send(
+    const RelayWssSignalingSend& send) {
+  if (send.target_device_id.is_zero() || send.target_endpoint_id.is_zero() ||
+      send.request_id.is_zero() || send.kind == 0U ||
+      send.payload.size() > max_signaling_object_bytes) {
+    return Result<std::vector<std::byte>>::failure(
+        control_error("signaling_send_invalid"));
+  }
+  std::vector<std::byte> output;
+  append_signaling_common(output, send.target_device_id, send.target_endpoint_id,
+                          send.kind, send.request_id, send.payload);
+  return Result<std::vector<std::byte>>::success(std::move(output));
+}
+
+struct ParsedSignalingSend {
+  DeviceId device_id;
+  EndpointId endpoint_id;
+  std::uint8_t kind{};
+  RequestId request_id;
+  std::vector<std::byte> payload;
+};
+
+Result<RelayWssSignalingSend> parse_relay_wss_signaling_send(
+    std::span<const std::byte> payload) {
+  if (payload.size() > max_relay_wss_control_frame_bytes - relay_wss_control_header_bytes) {
+    return Result<RelayWssSignalingSend>::failure(
+        control_error("signaling_send_size_invalid"));
+  }
+  auto parsed = parse_signaling_target<ParsedSignalingSend>(payload);
+  if (!parsed) {
+    return Result<RelayWssSignalingSend>::failure(*parsed.error_if());
+  }
+  RelayWssSignalingSend send;
+  send.target_device_id = parsed.value_if()->device_id;
+  send.target_endpoint_id = parsed.value_if()->endpoint_id;
+  send.kind = parsed.value_if()->kind;
+  send.request_id = parsed.value_if()->request_id;
+  send.payload = std::move(parsed.value_if()->payload);
+  return Result<RelayWssSignalingSend>::success(std::move(send));
+}
+
+Result<std::vector<std::byte>> encode_relay_wss_signaling_deliver(
+    const RelayWssSignalingDeliver& deliver) {
+  if (deliver.source_device_id.is_zero() || deliver.source_endpoint_id.is_zero() ||
+      deliver.request_id.is_zero() || deliver.kind == 0U ||
+      deliver.payload.size() > max_signaling_object_bytes) {
+    return Result<std::vector<std::byte>>::failure(
+        control_error("signaling_deliver_invalid"));
+  }
+  std::vector<std::byte> output;
+  append_signaling_common(output, deliver.source_device_id, deliver.source_endpoint_id,
+                          deliver.kind, deliver.request_id, deliver.payload);
+  return Result<std::vector<std::byte>>::success(std::move(output));
+}
+
+struct ParsedSignalingDeliver {
+  DeviceId device_id;
+  EndpointId endpoint_id;
+  std::uint8_t kind{};
+  RequestId request_id;
+  std::vector<std::byte> payload;
+};
+
+Result<RelayWssSignalingDeliver> parse_relay_wss_signaling_deliver(
+    std::span<const std::byte> payload) {
+  if (payload.size() > max_relay_wss_control_frame_bytes - relay_wss_control_header_bytes) {
+    return Result<RelayWssSignalingDeliver>::failure(
+        control_error("signaling_deliver_size_invalid"));
+  }
+  auto parsed = parse_signaling_target<ParsedSignalingDeliver>(payload);
+  if (!parsed) {
+    return Result<RelayWssSignalingDeliver>::failure(*parsed.error_if());
+  }
+  RelayWssSignalingDeliver deliver;
+  deliver.source_device_id = parsed.value_if()->device_id;
+  deliver.source_endpoint_id = parsed.value_if()->endpoint_id;
+  deliver.kind = parsed.value_if()->kind;
+  deliver.request_id = parsed.value_if()->request_id;
+  deliver.payload = std::move(parsed.value_if()->payload);
+  return Result<RelayWssSignalingDeliver>::success(std::move(deliver));
 }
 
 }  // namespace heyaki

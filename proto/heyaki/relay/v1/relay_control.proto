@@ -50,3 +50,21 @@ message EndpointPublication {
 message EndpointQueryResult {
   repeated EndpointPublication endpoints = 1;
 }
+
+// Peer signaling forwarding between logged-in endpoints of the same tenant. The relay
+// never parses the payload; devices run the signed-object verification chain.
+message SignalingSend {
+  bytes target_device_id = 1;   // Exactly 32 bytes.
+  bytes target_endpoint_id = 2; // Exactly 16 bytes.
+  uint32 kind = 3;              // LanSignalingMessageKind value 1..6.
+  bytes request_id = 4;         // Exactly 16 bytes, non-zero.
+  bytes payload = 5;            // Empty for connect control kinds, <= 64 KiB otherwise.
+}
+
+message SignalingDeliver {
+  bytes source_device_id = 1;   // Exactly 32 bytes.
+  bytes source_endpoint_id = 2; // Exactly 16 bytes.
+  uint32 kind = 3;              // LanSignalingMessageKind value 1..6.
+  bytes request_id = 4;         // Exactly 16 bytes, non-zero.
+  bytes payload = 5;            // The forwarded payload, unmodified.
+}

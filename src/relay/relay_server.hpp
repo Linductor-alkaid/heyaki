@@ -48,6 +48,8 @@ struct RelayServerSnapshot {
   std::uint64_t heartbeats{};
   std::uint64_t endpoint_publications{};
   std::uint64_t endpoint_queries{};
+  std::uint64_t signaling_forwarded{};
+  std::uint64_t signaling_rejected{};
   RelayDatabaseSnapshot database;
   RelayRateLimitDiagnostics rate_limits;
   RelayLeaseDiagnostics leases;

@@ -843,6 +843,41 @@ coturn-topology。据此 `M4-01`/`M4-03`/`M4-05` 满足条目并勾选；`M4-02`
 RelaySignalingRoute 接入 relay 控制面转发、`M4-04` 待 session epoch 迟到信令拒绝，
 两者与 libdatachannel transport（M4-06 起）在后续轮次推进。
 
+### M4 实施进度（2026-08-18，第2轮）
+
+第二轮按计划顺序补齐 relay 侧统一信令路由，不接 libdatachannel：
+
+- relay WSS 控制面新增 `signaling_send`(16)/`signaling_deliver`(17) 消息：严格
+  Protobuf codec（与生成的 Lite 消息逐字节一致，proto3 空 payload 字段省略；
+  拒绝截断/重复/未知字段/零 ID/零 kind/超限 payload）、normative
+  `relay_control.proto` schema、schema 契约检查与 wire 文档同步。
+- `RelayServer` 信令转发：登录端点 -> 会话索引（weak_ptr，会话清理按 owner 相等
+  防误删）、kind 1..6 与 connect 控制/signed payload 策略校验、每会话每秒
+  signaling 速率上限（新配置 `signaling_rate_per_second`，1..1024）、目标离线返回
+  `endpoint_offline`、跨租户返回 `permission`、限速返回 `resource_exhausted`——
+  三类运营错误经新的非断连 `send_signaling_error` 应答，协议误用（解析失败/未知
+  kind/payload 策略）仍按既有惯例关闭会话；relay 全程不解码 payload，验签只在
+  设备端。快照新增 `signaling_forwarded`/`signaling_rejected` 计数。
+- 服务器会话 I/O 由"请求->响应、写完成才重挂读"重写为"读常挂 + 串行写队列"：
+  服务器主动推送（转发 deliver）可与在途回复共存，消除 beast 单读/单写断言，
+  既有 enrollment/login/heartbeat/endpoint 流为顺序消费不受影响。
+- 新增客户端 `RelaySignalingRoute`：以可注入 WSS sender 实现统一
+  `SignalingRoute`，`decode_delivery` 将 deliver 还原为协调器 envelope（peer 为
+  已认证来源端点）。
+- 测试：新增 `heyaki_m4_relay_route_tests` 6 项——codec 往返/拒绝与 Lite 字节
+  一致、真实 TLS/WSS 双端登录转发 e2e、离线目标 `endpoint_offline`、未知
+  kind/payload 策略断连拒绝（每例新连接）、跨租户拒绝与每秒限速（含窗口计数语
+  义）、以及两台 SignalingCoordinator 经真实 relay 完成 connect/accept/offer/
+  answer/candidate 全握手并进入 candidates 相位（M4-02 双路由统一的核心证明）。
+- 测试基础设施修复：`heyaki_m3b_relay_onboarding_harness` 与
+  `heyaki_coturn_topology_check` 依赖 app 二进制，现只在 `HEYAKI_BUILD_APPS` 下
+  注册，apps-off 的 sanitizer 树不再以空路径失败。
+
+本机验证：GCC Debug/Release 全量 CTest 31/31；禁异常 M4 relay route 6/6；UBSan
+全量 25/25（apps-off 树）；ASan M4 relay route 6/6 与既有 relay 72/72；TSan（关闭
+ASLR）M4 relay route 6/6。Windows 与远端 CI 待推送验证；协调器接入 Node LAN TLS
+路径与 M4-02 最终勾选留待后续轮次。
+
 ---
 
 ## 8. M5：会话授权、调度与 ByteStream

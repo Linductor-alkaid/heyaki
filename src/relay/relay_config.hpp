@@ -30,6 +30,7 @@ struct RelayServerConfig {
   RelayEndpointDirectoryConfig endpoint_directory;
   RelayTenantExposurePolicy endpoint_exposure;
   std::size_t endpoint_query_max_results{256U};
+  std::size_t signaling_rate_per_second{32U};
   bool close_revoked_sessions{true};
   RelayRateLimitPolicy rate_limits;
   RuntimeConfig runtime;

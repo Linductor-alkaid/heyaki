@@ -34,6 +34,8 @@ enum class RelayWssControlType : std::uint8_t {
   endpoint_publish_ack = 13U,
   endpoint_query = 14U,
   endpoint_query_result = 15U,
+  signaling_send = 16U,
+  signaling_deliver = 17U,
 };
 
 struct RelayWssControlFrame {
@@ -91,6 +93,24 @@ struct RelayWssEndpointQueryResult {
   std::vector<RelayWssEndpointPublication> endpoints;
 };
 
+// Peer signaling forwarding. The relay treats the payload as opaque bounded bytes: the
+// signed-object verification chain runs on the devices, never on the relay.
+struct RelayWssSignalingSend {
+  DeviceId target_device_id;
+  EndpointId target_endpoint_id;
+  std::uint8_t kind{};  // LanSignalingMessageKind value.
+  RequestId request_id;
+  std::vector<std::byte> payload;
+};
+
+struct RelayWssSignalingDeliver {
+  DeviceId source_device_id;
+  EndpointId source_endpoint_id;
+  std::uint8_t kind{};  // LanSignalingMessageKind value.
+  RequestId request_id;
+  std::vector<std::byte> payload;
+};
+
 struct RelayWssControlError {
   ErrorCode code{ErrorCode::internal};
   std::string safe_detail;
@@ -137,6 +157,14 @@ struct RelayWssControlError {
 [[nodiscard]] Result<std::vector<std::byte>> encode_relay_wss_endpoint_query_result(
     const RelayWssEndpointQueryResult& result);
 [[nodiscard]] Result<RelayWssEndpointQueryResult> parse_relay_wss_endpoint_query_result(
+    std::span<const std::byte> payload);
+[[nodiscard]] Result<std::vector<std::byte>> encode_relay_wss_signaling_send(
+    const RelayWssSignalingSend& send);
+[[nodiscard]] Result<RelayWssSignalingSend> parse_relay_wss_signaling_send(
+    std::span<const std::byte> payload);
+[[nodiscard]] Result<std::vector<std::byte>> encode_relay_wss_signaling_deliver(
+    const RelayWssSignalingDeliver& deliver);
+[[nodiscard]] Result<RelayWssSignalingDeliver> parse_relay_wss_signaling_deliver(
     std::span<const std::byte> payload);
 
 }  // namespace heyaki

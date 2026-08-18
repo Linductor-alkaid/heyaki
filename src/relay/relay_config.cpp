@@ -119,7 +119,9 @@ Result<void> validate_relay_server_config(const RelayServerConfig& config) {
       config.endpoint_directory.maximum_ttl <= std::chrono::milliseconds{0} ||
       config.endpoint_directory.maximum_ttl > std::chrono::milliseconds{5 * 60 * 1000} ||
       config.endpoint_query_max_results == 0U ||
-      config.endpoint_query_max_results > 4096U) {
+      config.endpoint_query_max_results > 4096U ||
+      config.signaling_rate_per_second == 0U ||
+      config.signaling_rate_per_second > 1024U) {
     return Result<void>::failure(config_error("relay_config_invalid"));
   }
   return Result<void>::success();
@@ -170,6 +172,7 @@ Result<RelayServerConfig> load_relay_config_file(
   std::optional<std::size_t> lease_per_tenant_capacity;
   std::optional<std::size_t> endpoint_directory_capacity;
   std::optional<std::size_t> endpoint_query_max_results;
+  std::optional<std::size_t> signaling_rate_per_second;
   std::optional<bool> close_revoked_sessions;
   std::optional<bool> expose_application_id;
   std::optional<bool> expose_record_generation;
@@ -377,6 +380,19 @@ Result<RelayServerConfig> load_relay_config_file(
       }
       config.endpoint_query_max_results = static_cast<std::size_t>(*parsed.value_if());
       endpoint_query_max_results = config.endpoint_query_max_results;
+    } else if (key == "signaling_rate_per_second") {
+      if (signaling_rate_per_second) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_duplicate_key", line_number));
+      }
+      auto parsed =
+          parse_u64(value, "relay_config_signaling_rate_invalid", line_number);
+      if (!parsed || *parsed.value_if() == 0U || *parsed.value_if() > 1024U) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_signaling_rate_invalid", line_number));
+      }
+      config.signaling_rate_per_second = static_cast<std::size_t>(*parsed.value_if());
+      signaling_rate_per_second = config.signaling_rate_per_second;
     } else if (key == "close_revoked_sessions") {
       if (close_revoked_sessions) {
         return Result<RelayServerConfig>::failure(

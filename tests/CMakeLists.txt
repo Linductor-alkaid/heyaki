@@ -290,6 +290,25 @@ heyaki_configure_target(heyaki_m4_signaling_tests)
 heyaki_add_runtime_test(
   heyaki_m4_signaling heyaki_m4_signaling_tests "unit;signaling;security")
 
+add_executable(heyaki_m4_relay_route_tests unit/m4_relay_signaling_test.cpp)
+target_link_libraries(heyaki_m4_relay_route_tests PRIVATE
+  heyaki::relay
+  heyaki_protocol_lite
+  executor::executor
+  heyaki::sqlite
+  GTest::gtest_main
+  OpenSSL::SSL
+  OpenSSL::Crypto)
+heyaki_target_use_pinned_boost_beast(heyaki_m4_relay_route_tests)
+target_include_directories(heyaki_m4_relay_route_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/client"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+heyaki_configure_target(heyaki_m4_relay_route_tests)
+target_compile_definitions(heyaki_m4_relay_route_tests PRIVATE
+  "HEYAKI_M4_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}\"")
+heyaki_add_runtime_test(
+  heyaki_m4_relay_route heyaki_m4_relay_route_tests "unit;relay;signaling;security")
+
 add_executable(heyaki_m3b_relay_tests
   unit/m3b_relay_test.cpp
   unit/m3b_relay_database_test.cpp
@@ -496,18 +515,20 @@ set_tests_properties(heyaki_network_harness PROPERTIES
   SKIP_RETURN_CODE 77
   TIMEOUT 180)
 
-add_test(
-  NAME heyaki_m3b_relay_onboarding_harness
-  COMMAND "${HEYAKI_BASH_EXECUTABLE}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/network/run_m3b_relay_onboarding_harness.sh"
-    --relay-bin "$<TARGET_FILE:heyaki-relay>"
-    --tui-bin "$<TARGET_FILE:heyaki-tui>"
-    --demo-bin "$<TARGET_FILE:heyaki-m3b-relay-demo>"
-    --work-dir "${HEYAKI_TEST_STATE_DIR}/m3b-onboarding")
-set_tests_properties(heyaki_m3b_relay_onboarding_harness PROPERTIES
-  LABELS "network;relay;tui;security"
-  SKIP_RETURN_CODE 77
-  TIMEOUT 120)
+if(HEYAKI_BUILD_APPS)
+  add_test(
+    NAME heyaki_m3b_relay_onboarding_harness
+    COMMAND "${HEYAKI_BASH_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/network/run_m3b_relay_onboarding_harness.sh"
+      --relay-bin "$<TARGET_FILE:heyaki-relay>"
+      --tui-bin "$<TARGET_FILE:heyaki-tui>"
+      --demo-bin "$<TARGET_FILE:heyaki-m3b-relay-demo>"
+      --work-dir "${HEYAKI_TEST_STATE_DIR}/m3b-onboarding")
+  set_tests_properties(heyaki_m3b_relay_onboarding_harness PROPERTIES
+    LABELS "network;relay;tui;security"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 120)
+endif()
 
 if(WIN32)
   find_program(HEYAKI_POWERSHELL_EXECUTABLE NAMES pwsh powershell REQUIRED)
@@ -532,16 +553,18 @@ add_test(
 set_tests_properties(heyaki_coturn_deployment_contract PROPERTIES
   LABELS "relay;network;security")
 
-add_test(
-  NAME heyaki_coturn_topology_check
-  COMMAND "${HEYAKI_BASH_EXECUTABLE}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../deploy/coturn/run_topology.sh"
-    --relay-bin "$<TARGET_FILE:heyaki-relay>"
-    --check-only)
-set_tests_properties(heyaki_coturn_topology_check PROPERTIES
-  LABELS "relay;network"
-  SKIP_RETURN_CODE 77
-  TIMEOUT 60)
+if(HEYAKI_BUILD_APPS)
+  add_test(
+    NAME heyaki_coturn_topology_check
+    COMMAND "${HEYAKI_BASH_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/../deploy/coturn/run_topology.sh"
+      --relay-bin "$<TARGET_FILE:heyaki-relay>"
+      --check-only)
+  set_tests_properties(heyaki_coturn_topology_check PROPERTIES
+    LABELS "relay;network"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 60)
+endif()
 
 add_test(
   NAME heyaki_coturn_allocation_probe

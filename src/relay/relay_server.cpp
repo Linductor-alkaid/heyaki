@@ -7,7 +7,9 @@
 #include "relay_lease_table.hpp"
 #include "relay_login_service.hpp"
 
+#include <heyaki/lan_protocol.hpp>
 #include <heyaki/relay_wss_control.hpp>
+#include <heyaki/signaling_protocol.hpp>
 
 #include <executor/comm.hpp>
 
@@ -33,9 +35,11 @@
 #include <array>
 #include <chrono>
 #include <cstddef>
+#include <deque>
 #include <cstdint>
 #include <future>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -134,6 +138,8 @@ struct RelayServer::Impl : std::enable_shared_from_this<RelayServer::Impl> {
                                 std::span<const std::byte> payload);
   void session_handle_endpoint_publish(const std::shared_ptr<RelaySession>& session,
                                        std::span<const std::byte> payload);
+  void session_handle_signaling_send(const std::shared_ptr<RelaySession>& session,
+                                     std::span<const std::byte> payload);
   void session_handle_endpoint_query(const std::shared_ptr<RelaySession>& session,
                                      std::span<const std::byte> payload);
   Result<RuntimeShutdownCompletion> begin_shutdown();
@@ -159,6 +165,7 @@ struct RelayServer::Impl : std::enable_shared_from_this<RelayServer::Impl> {
   RelayId relay_id{};
   executor::comm::DoubleBuffer<RelayServerSnapshot> snapshots;
   std::set<std::shared_ptr<RelaySession>> sessions;
+  std::map<RelayLeaseKey, std::weak_ptr<RelaySession>> online_endpoints;
   std::promise<Result<void>> shutdown_promise;
   std::shared_future<Result<void>> shutdown_completion;
   bool shutdown_posted{false};
@@ -313,6 +320,9 @@ class RelaySession : public std::enable_shared_from_this<RelaySession> {
           std::span<const std::byte>{reinterpret_cast<const std::byte*>(bytes.data()),
                                      bytes.size()},
           binary);
+      if (!finished.load()) {
+        read_control();
+      }
     } else {
       close_socket();
     }
@@ -320,14 +330,30 @@ class RelaySession : public std::enable_shared_from_this<RelaySession> {
 
   void send_control(RelayWssControlType type, std::span<const std::byte> payload,
                     bool close_after_write = false, bool protocol_error = false) {
+    if (finished.load()) {
+      return;
+    }
     auto encoded = encode_relay_wss_control_frame(type, payload);
     if (!encoded) {
       fail(false);
       return;
     }
-    response_bytes = std::move(*encoded.value_if());
-    close_after_control_write = close_after_write;
-    control_protocol_error = protocol_error;
+    pending_control_writes.push_back(PendingControlWrite{std::move(*encoded.value_if()),
+                                                         close_after_write,
+                                                         protocol_error});
+    pump_control_writes();
+  }
+
+  void pump_control_writes() {
+    if (control_write_in_flight || pending_control_writes.empty()) {
+      return;
+    }
+    auto entry = std::move(pending_control_writes.front());
+    pending_control_writes.pop_front();
+    control_write_in_flight = true;
+    control_write_closes = entry.close_after_write;
+    control_write_protocol_error = entry.protocol_error;
+    response_bytes = std::move(entry.bytes);
     websocket.binary(true);
     websocket.async_write(
         boost::asio::buffer(response_bytes),
@@ -347,19 +373,31 @@ class RelaySession : public std::enable_shared_from_this<RelaySession> {
                  protocol_error);
   }
 
+  // Operational signaling failures answer without terminating the control session;
+  // protocol misuse still closes through send_error.
+  void send_signaling_error(const Error& error) {
+    auto payload = encode_relay_wss_control_error(error.code(), error.safe_detail());
+    if (!payload) {
+      fail(false);
+      return;
+    }
+    send_control(RelayWssControlType::control_error, *payload.value_if(), false, false);
+  }
+
   void on_control_written(boost::system::error_code error) {
+    control_write_in_flight = false;
     response_bytes.clear();
     if (error) {
       fail(false);
       return;
     }
-    if (!close_after_control_write) {
-      read_control();
+    if (!control_write_closes) {
+      pump_control_writes();
       return;
     }
     websocket.async_close(
-        control_protocol_error ? boost::beast::websocket::close_code::policy_error
-                               : boost::beast::websocket::close_code::normal,
+        control_write_protocol_error ? boost::beast::websocket::close_code::policy_error
+                                     : boost::beast::websocket::close_code::normal,
         [self = shared_from_this()](boost::system::error_code close_error) {
           self->on_control_closed(close_error);
         });
@@ -372,7 +410,7 @@ class RelaySession : public std::enable_shared_from_this<RelaySession> {
     close_socket();
     if (auto owner = server.lock()) {
       owner->on_session_finished(shared_from_this(), false, false,
-                                 control_protocol_error);
+                                 control_write_protocol_error);
     }
     (void)error;
   }
@@ -447,10 +485,23 @@ class RelaySession : public std::enable_shared_from_this<RelaySession> {
   std::optional<EndpointId> logged_in_endpoint_id;
   std::string logged_in_tenant;
   std::uint64_t logged_in_generation{};
-  bool close_after_control_write{false};
-  bool control_protocol_error{false};
+  std::chrono::steady_clock::time_point signaling_window_start{};
+  std::size_t signaling_window_count{};
   bool handshake_complete{false};
   std::atomic<bool> finished{false};
+
+  // Serialized control writes: server-initiated pushes (forwarded signaling) may arrive
+  // while a response write is in flight, so writes queue instead of assuming one
+  // request-response pair at a time.
+  struct PendingControlWrite {
+    std::vector<std::byte> bytes;
+    bool close_after_write{false};
+    bool protocol_error{false};
+  };
+  std::deque<PendingControlWrite> pending_control_writes;
+  bool control_write_in_flight{false};
+  bool control_write_closes{false};
+  bool control_write_protocol_error{false};
 };
 
 Result<void> RelayServer::Impl::initialize() {
@@ -956,6 +1007,9 @@ void RelayServer::Impl::session_handle_control(
     session->logged_in_generation =
         authenticated.value_if()->enrollment_generation;
     ++current.logins_completed;
+    online_endpoints[RelayLeaseKey{.device_id = *session->logged_in_device_id,
+                                   .endpoint_id = *session->logged_in_endpoint_id}] =
+        session;
     current.database = database->snapshot();
     current.login = login_service->diagnostics();
     publish();
@@ -980,7 +1034,8 @@ void RelayServer::Impl::session_handle_control(
   if (session->control_state == RelaySession::ControlState::logged_in) {
     if (type != RelayWssControlType::heartbeat &&
         type != RelayWssControlType::endpoint_publish &&
-        type != RelayWssControlType::endpoint_query) {
+        type != RelayWssControlType::endpoint_query &&
+        type != RelayWssControlType::signaling_send) {
       ++current.control_rejected;
       publish();
       session->send_error(
@@ -1043,6 +1098,12 @@ void RelayServer::Impl::session_cleanup(
       session->control_state == RelaySession::ControlState::logged_in) {
     const RelayLeaseKey key{.device_id = *session->logged_in_device_id,
                             .endpoint_id = *session->logged_in_endpoint_id};
+    if (auto registered = online_endpoints.find(key);
+        registered != online_endpoints.end() &&
+        !registered->second.owner_before(session) &&
+        !session.owner_before(registered->second)) {
+      online_endpoints.erase(registered);
+    }
     if (lease_table) {
       (void)lease_table->remove(key);
       current.leases = lease_table->diagnostics();
@@ -1057,6 +1118,106 @@ void RelayServer::Impl::session_cleanup(
   }
 }
 
+
+void RelayServer::Impl::session_handle_signaling_send(
+    const std::shared_ptr<RelaySession>& session, std::span<const std::byte> payload) {
+  auto parsed = parse_relay_wss_signaling_send(payload);
+  if (!parsed) {
+    ++current.control_rejected;
+    ++current.signaling_rejected;
+    publish();
+    session->send_error(*parsed.error_if(), true);
+    return;
+  }
+  const auto& send = *parsed.value_if();
+  const auto kind = static_cast<LanSignalingMessageKind>(send.kind);
+  const bool control_kind = kind == LanSignalingMessageKind::connect_request ||
+                            kind == LanSignalingMessageKind::connect_accept ||
+                            kind == LanSignalingMessageKind::connect_deny;
+  const bool signed_kind = kind == LanSignalingMessageKind::signed_offer ||
+                           kind == LanSignalingMessageKind::signed_answer ||
+                           kind == LanSignalingMessageKind::signed_candidate;
+  if (!control_kind && !signed_kind) {
+    ++current.control_rejected;
+    ++current.signaling_rejected;
+    publish();
+    session->send_error(
+        relay_error(ErrorCode::protocol, "signaling_kind_unknown"), false);
+    return;
+  }
+  if ((control_kind && !send.payload.empty()) ||
+      (!control_kind && send.payload.empty())) {
+    ++current.control_rejected;
+    ++current.signaling_rejected;
+    publish();
+    session->send_error(
+        relay_error(ErrorCode::protocol, "signaling_payload_policy_invalid"), false);
+    return;
+  }
+  if (!session->logged_in_device_id || !session->logged_in_endpoint_id) {
+    session->send_error(
+        relay_error(ErrorCode::authentication, "relay_session_not_logged_in"), false);
+    return;
+  }
+
+  const auto now = std::chrono::steady_clock::now();
+  if (now - session->signaling_window_start >= std::chrono::seconds{1}) {
+    session->signaling_window_start = now;
+    session->signaling_window_count = 0U;
+  }
+  ++session->signaling_window_count;
+  if (session->signaling_window_count > config.signaling_rate_per_second) {
+    ++current.signaling_rejected;
+    publish();
+    session->send_signaling_error(
+        relay_error(ErrorCode::resource_exhausted, "signaling_rate_exceeded"));
+    return;
+  }
+
+  const RelayLeaseKey target_key{.device_id = send.target_device_id,
+                                 .endpoint_id = send.target_endpoint_id};
+  std::shared_ptr<RelaySession> target;
+  if (auto registered = online_endpoints.find(target_key);
+      registered != online_endpoints.end()) {
+    target = registered->second.lock();
+    if (!target) {
+      online_endpoints.erase(registered);
+    }
+  }
+  if (!target || target->finished.load() ||
+      target->control_state != RelaySession::ControlState::logged_in) {
+    ++current.signaling_rejected;
+    publish();
+    session->send_signaling_error(
+        relay_error(ErrorCode::endpoint_offline, "signaling_target_offline"));
+    return;
+  }
+  if (target->logged_in_tenant != session->logged_in_tenant) {
+    ++current.signaling_rejected;
+    publish();
+    session->send_signaling_error(
+        relay_error(ErrorCode::permission, "signaling_tenant_mismatch"));
+    return;
+  }
+
+  RelayWssSignalingDeliver deliver;
+  deliver.source_device_id = *session->logged_in_device_id;
+  deliver.source_endpoint_id = *session->logged_in_endpoint_id;
+  deliver.kind = send.kind;
+  deliver.request_id = send.request_id;
+  deliver.payload = send.payload;
+  auto encoded = encode_relay_wss_signaling_deliver(deliver);
+  if (!encoded) {
+    ++current.signaling_rejected;
+    publish();
+    session->send_error(*encoded.error_if(), false);
+    return;
+  }
+  ++current.signaling_forwarded;
+  publish();
+  target->send_control(RelayWssControlType::signaling_deliver, *encoded.value_if());
+}
+
 void RelayServer::Impl::session_handle_logged_in(
     const std::shared_ptr<RelaySession>& session, RelayWssControlType type,
     std::span<const std::byte> payload) {
@@ -1069,6 +1230,9 @@ void RelayServer::Impl::session_handle_logged_in(
       return;
     case RelayWssControlType::endpoint_query:
       session_handle_endpoint_query(session, payload);
+      return;
+    case RelayWssControlType::signaling_send:
+      session_handle_signaling_send(session, payload);
       return;
     default:
       session->send_error(

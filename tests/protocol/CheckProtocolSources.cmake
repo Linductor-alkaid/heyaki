@@ -51,7 +51,9 @@ foreach(relay_control_contract IN ITEMS
     "message LoginResult"
     "message HeartbeatRequest"
     "message EndpointPublish"
-    "message EndpointQueryResult")
+    "message EndpointQueryResult"
+    "message SignalingSend"
+    "message SignalingDeliver")
   string(FIND "${relay_control_contents}" "${relay_control_contract}" contract_position)
   if(contract_position EQUAL -1)
     message(FATAL_ERROR "Schema contract '${relay_control_contract}' is missing from ${relay_control_schema}")
