@@ -295,10 +295,12 @@ if(HEYAKI_BUILD_APPS)
   target_link_libraries(heyaki-relay PRIVATE heyaki::relay)
   heyaki_configure_target(heyaki-relay)
 
-  add_library(heyaki_tui_setup STATIC apps/tui/local_setup.cpp)
+  add_library(heyaki_tui_setup STATIC
+    apps/tui/device_view.cpp
+    apps/tui/local_setup.cpp)
   target_include_directories(heyaki_tui_setup PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/apps/tui")
-  target_link_libraries(heyaki_tui_setup PUBLIC heyaki::profile)
+  target_link_libraries(heyaki_tui_setup PUBLIC heyaki::client heyaki::profile)
   heyaki_configure_target(heyaki_tui_setup)
 
   add_executable(heyaki-tui apps/tui/main.cpp)

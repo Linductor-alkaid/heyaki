@@ -1565,6 +1565,12 @@ TEST(M3BRelayWssClientTest, NodesAssembleAuthenticatedSessionOverRelayOnlyRoute)
   const auto right = second.value_if()->peer_sessions().front();
   EXPECT_EQ(left.signaling_route, SignalingRouteKind::relay);
   EXPECT_EQ(right.signaling_route, SignalingRouteKind::relay);
+  EXPECT_EQ(left.connection_stage, NodeConnectionStage::authenticated);
+  EXPECT_EQ(right.connection_stage, NodeConnectionStage::authenticated);
+  EXPECT_EQ(left.data_path, NodeDataPathKind::direct_host);
+  EXPECT_EQ(right.data_path, NodeDataPathKind::direct_host);
+  EXPECT_FALSE(left.selected_candidate.empty());
+  EXPECT_FALSE(right.selected_candidate.empty());
   EXPECT_EQ(left.session_id, right.session_id);
   EXPECT_EQ(left.request_id, right.request_id);
   EXPECT_TRUE(first.value_if()->shutdown().stopped);

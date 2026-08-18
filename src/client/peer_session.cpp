@@ -160,18 +160,27 @@ Result<void> PeerSession::start() {
       [weak](const transport::TransportSessionSnapshot& snapshot) {
         auto self = weak.lock();
         if (!self) return;
+        bool timeline_changed = false;
         if (snapshot.state == transport::TransportState::gathering && self->config_.timeline &&
             self->config_.timeline->stage() == ConnectionStage::signaling) {
           auto recorded =
               self->record(ConnectionStage::gathering, "transport", "ice_gathering");
-          if (!recorded) self->fail(*recorded.error_if());
+          if (!recorded) {
+            self->fail(*recorded.error_if());
+            return;
+          }
+          timeline_changed = true;
         } else if (snapshot.state == transport::TransportState::checking &&
                    self->config_.timeline &&
                    (self->config_.timeline->stage() == ConnectionStage::signaling ||
                     self->config_.timeline->stage() == ConnectionStage::gathering)) {
           auto recorded =
               self->record(ConnectionStage::checking, "transport", "ice_checking");
-          if (!recorded) self->fail(*recorded.error_if());
+          if (!recorded) {
+            self->fail(*recorded.error_if());
+            return;
+          }
+          timeline_changed = true;
         } else if (snapshot.state == transport::TransportState::connected &&
                    self->config_.timeline &&
                    (self->config_.timeline->stage() == ConnectionStage::signaling ||
@@ -179,14 +188,20 @@ Result<void> PeerSession::start() {
                     self->config_.timeline->stage() == ConnectionStage::checking)) {
           auto recorded = self->record(ConnectionStage::transport_connected, "transport",
                                        "data_channel_transport_ready");
-          if (!recorded) self->fail(*recorded.error_if());
+          if (!recorded) {
+            self->fail(*recorded.error_if());
+            return;
+          }
+          timeline_changed = true;
         } else if (snapshot.state == transport::TransportState::closed) {
           self->diagnostics_.state = PeerSessionState::closed;
           auto recorded =
               self->record(ConnectionStage::closed, "transport", "transport_closed");
           if (!recorded) self->diagnostics_.last_error = *recorded.error_if();
           self->notify();
+          return;
         }
+        if (timeline_changed) self->notify();
       });
   if (!config_.initiator) return Result<void>::success();
   transport::ChannelOptions options;

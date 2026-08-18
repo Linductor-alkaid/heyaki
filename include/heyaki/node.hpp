@@ -68,12 +68,38 @@ enum class NodePeerSessionState : std::uint8_t {
   closed,
 };
 
+enum class NodeConnectionStage : std::uint8_t {
+  idle,
+  resolving_endpoint,
+  signaling,
+  gathering,
+  checking,
+  transport_connected,
+  authenticating,
+  authenticated,
+  closed,
+};
+
+enum class NodeDataPathKind : std::uint8_t {
+  unknown,
+  direct_host,
+  direct_srflx,
+  turn_udp,
+  turn_tcp,
+  turn_tls,
+};
+
 struct NodePeerSessionSnapshot {
   DeviceEndpointKey peer;
   RequestId request_id;
   SessionId session_id;
   SignalingRouteKind signaling_route{SignalingRouteKind::lan};
   NodePeerSessionState state{NodePeerSessionState::signaling};
+  NodeConnectionStage connection_stage{NodeConnectionStage::idle};
+  NodeDataPathKind data_path{NodeDataPathKind::unknown};
+  std::string selected_candidate;
+  std::chrono::milliseconds rtt{};
+  std::size_t buffered_amount{};
   bool initiator{false};
   std::optional<Error> error;
 };
@@ -238,6 +264,12 @@ class Node {
 [[nodiscard]] std::string_view relay_node_state_name(RelayNodeState state) noexcept;
 [[nodiscard]] std::string_view node_peer_session_state_name(
     NodePeerSessionState state) noexcept;
+[[nodiscard]] std::string_view signaling_route_kind_name(
+    SignalingRouteKind kind) noexcept;
+[[nodiscard]] std::string_view node_connection_stage_name(
+    NodeConnectionStage stage) noexcept;
+[[nodiscard]] std::string_view node_data_path_kind_name(
+    NodeDataPathKind kind) noexcept;
 [[nodiscard]] bool is_lan_offer_owner(DeviceEndpointKey local,
                                       DeviceEndpointKey peer) noexcept;
 [[nodiscard]] Result<SignalingRouteKind> select_signaling_route(

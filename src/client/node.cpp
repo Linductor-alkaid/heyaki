@@ -102,6 +102,48 @@ Error node_error(ErrorCode code, const char* detail,
   return {code, "node", detail, underlying};
 }
 
+NodeConnectionStage public_connection_stage(ConnectionStage stage) noexcept {
+  switch (stage) {
+    case ConnectionStage::idle:
+      return NodeConnectionStage::idle;
+    case ConnectionStage::resolving_endpoint:
+      return NodeConnectionStage::resolving_endpoint;
+    case ConnectionStage::signaling:
+      return NodeConnectionStage::signaling;
+    case ConnectionStage::gathering:
+      return NodeConnectionStage::gathering;
+    case ConnectionStage::checking:
+      return NodeConnectionStage::checking;
+    case ConnectionStage::transport_connected:
+      return NodeConnectionStage::transport_connected;
+    case ConnectionStage::authenticating:
+      return NodeConnectionStage::authenticating;
+    case ConnectionStage::authenticated:
+      return NodeConnectionStage::authenticated;
+    case ConnectionStage::closed:
+      return NodeConnectionStage::closed;
+  }
+  return NodeConnectionStage::closed;
+}
+
+NodeDataPathKind public_data_path(transport::DataPathKind path) noexcept {
+  switch (path) {
+    case transport::DataPathKind::unknown:
+      return NodeDataPathKind::unknown;
+    case transport::DataPathKind::direct_host:
+      return NodeDataPathKind::direct_host;
+    case transport::DataPathKind::direct_srflx:
+      return NodeDataPathKind::direct_srflx;
+    case transport::DataPathKind::turn_udp:
+      return NodeDataPathKind::turn_udp;
+    case transport::DataPathKind::turn_tcp:
+      return NodeDataPathKind::turn_tcp;
+    case transport::DataPathKind::turn_tls:
+      return NodeDataPathKind::turn_tls;
+  }
+  return NodeDataPathKind::unknown;
+}
+
 Error discovery_error(ErrorCode code, const char* detail,
                       const boost::system::error_code& error = {}) {
   return {code, "lan_discovery", detail,
@@ -2247,12 +2289,29 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
                          : iterator->relay->identity_public_key;
   }
 
+  NodePeerSessionSnapshot peer_session_snapshot(const PeerAttempt& attempt) const {
+    auto snapshot = attempt.snapshot;
+    if (attempt.timeline) {
+      snapshot.connection_stage =
+          public_connection_stage(attempt.timeline->stage());
+    }
+    if (attempt.transport) {
+      const auto transport = attempt.transport->snapshot();
+      snapshot.data_path = public_data_path(transport.path.data_path);
+      snapshot.selected_candidate = transport.path.selected_candidate;
+      snapshot.rtt = transport.path.rtt;
+      snapshot.buffered_amount = transport.buffered_amount;
+      if (!snapshot.error && transport.error) snapshot.error = transport.error;
+    }
+    return snapshot;
+  }
+
   void publish_peer_sessions() {
     std::vector<NodePeerSessionSnapshot> published;
     published.reserve(peer_attempts.size() + finished_peer_sessions.size());
     for (const auto& [request_id, attempt] : peer_attempts) {
       (void)request_id;
-      published.push_back(attempt.snapshot);
+      published.push_back(peer_session_snapshot(attempt));
     }
     published.insert(published.end(), finished_peer_sessions.begin(),
                      finished_peer_sessions.end());
@@ -2710,7 +2769,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       iterator->second.transport->close(transport::CloseReason::protocol_error);
     }
     const auto peer = iterator->second.snapshot.peer;
-    auto completed = iterator->second.snapshot;
+    auto completed = peer_session_snapshot(iterator->second);
     peer_attempt_by_endpoint.erase(peer);
     peer_attempts.erase(iterator);
     finished_peer_sessions.push_back(std::move(completed));
@@ -4009,6 +4068,58 @@ std::string_view node_peer_session_state_name(NodePeerSessionState state) noexce
       return "closed";
   }
   return "closed";
+}
+
+std::string_view signaling_route_kind_name(SignalingRouteKind kind) noexcept {
+  switch (kind) {
+    case SignalingRouteKind::lan:
+      return "lan";
+    case SignalingRouteKind::relay:
+      return "relay";
+  }
+  return "unknown";
+}
+
+std::string_view node_connection_stage_name(NodeConnectionStage stage) noexcept {
+  switch (stage) {
+    case NodeConnectionStage::idle:
+      return "idle";
+    case NodeConnectionStage::resolving_endpoint:
+      return "resolving_endpoint";
+    case NodeConnectionStage::signaling:
+      return "signaling";
+    case NodeConnectionStage::gathering:
+      return "gathering";
+    case NodeConnectionStage::checking:
+      return "checking";
+    case NodeConnectionStage::transport_connected:
+      return "transport_connected";
+    case NodeConnectionStage::authenticating:
+      return "authenticating";
+    case NodeConnectionStage::authenticated:
+      return "authenticated";
+    case NodeConnectionStage::closed:
+      return "closed";
+  }
+  return "closed";
+}
+
+std::string_view node_data_path_kind_name(NodeDataPathKind kind) noexcept {
+  switch (kind) {
+    case NodeDataPathKind::unknown:
+      return "unknown";
+    case NodeDataPathKind::direct_host:
+      return "direct_host";
+    case NodeDataPathKind::direct_srflx:
+      return "direct_srflx";
+    case NodeDataPathKind::turn_udp:
+      return "turn_udp";
+    case NodeDataPathKind::turn_tcp:
+      return "turn_tcp";
+    case NodeDataPathKind::turn_tls:
+      return "turn_tls";
+  }
+  return "unknown";
 }
 
 bool is_lan_offer_owner(DeviceEndpointKey local, DeviceEndpointKey peer) noexcept {

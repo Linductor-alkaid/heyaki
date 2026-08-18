@@ -1437,8 +1437,21 @@ TEST_F(M3aNodeTest, NodeAutomaticallyAssemblesAuthenticatedWebRtcPeerSession) {
   EXPECT_NE(first_sessions.front().initiator, second_sessions.front().initiator);
   EXPECT_FALSE(first_sessions.front().error);
   EXPECT_FALSE(second_sessions.front().error);
+  EXPECT_EQ(first_sessions.front().signaling_route, SignalingRouteKind::lan);
+  EXPECT_EQ(first_sessions.front().connection_stage,
+            NodeConnectionStage::authenticated);
+  EXPECT_EQ(second_sessions.front().connection_stage,
+            NodeConnectionStage::authenticated);
+  EXPECT_EQ(first_sessions.front().data_path, NodeDataPathKind::direct_host);
+  EXPECT_EQ(second_sessions.front().data_path, NodeDataPathKind::direct_host);
+  EXPECT_FALSE(first_sessions.front().selected_candidate.empty());
+  EXPECT_FALSE(second_sessions.front().selected_candidate.empty());
   EXPECT_EQ(node_peer_session_state_name(first_sessions.front().state),
             "authenticated");
+  EXPECT_EQ(node_connection_stage_name(first_sessions.front().connection_stage),
+            "authenticated");
+  EXPECT_EQ(node_data_path_kind_name(first_sessions.front().data_path),
+            "direct_host");
 
   EXPECT_TRUE(first.value_if()->shutdown().stopped);
   EXPECT_TRUE(second.value_if()->shutdown().stopped);

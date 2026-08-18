@@ -6,6 +6,7 @@
 
 #include <executor/comm.hpp>
 
+#include "device_view.hpp"
 #include "local_setup.hpp"
 
 #include <algorithm>
@@ -182,23 +183,6 @@ std::string_view connectivity_mode_name(heyaki::ConnectivityMode mode) noexcept 
   return "unknown";
 }
 
-std::string_view signaling_state_name(
-    heyaki::LanSignalingConnectionState state) noexcept {
-  switch (state) {
-    case heyaki::LanSignalingConnectionState::connecting:
-      return "connecting";
-    case heyaki::LanSignalingConnectionState::provisional_tls:
-      return "provisional-tls";
-    case heyaki::LanSignalingConnectionState::authenticated:
-      return "authenticated";
-    case heyaki::LanSignalingConnectionState::closed:
-      return "closed";
-    case heyaki::LanSignalingConnectionState::failed:
-      return "failed";
-  }
-  return "failed";
-}
-
 std::string_view message_kind_name(heyaki::LanSignalingMessageKind kind) noexcept {
   switch (kind) {
     case heyaki::LanSignalingMessageKind::connect_request:
@@ -308,7 +292,7 @@ void render_node(std::string_view profile_name, const heyaki::Node& node,
   drain_ui_events(bridge, state, event_capacity);
   const auto snapshot = node.snapshot();
   const auto endpoints = node.endpoints();
-  const auto connections = node.signaling_connections();
+  const auto sessions = node.peer_sessions();
   std::cout << "HEYAKI  profile=" << profile_name << "\n\n";
   std::cout << "LOCAL   ready  device=" << heyaki::to_string(snapshot.device_id)
             << "\n        endpoint=" << heyaki::to_string(snapshot.endpoint_id) << '\n';
@@ -348,36 +332,7 @@ void render_node(std::string_view profile_name, const heyaki::Node& node,
     std::cout << '\n';
   }
 
-  std::cout << "\nENDPOINTS\n";
-  if (endpoints.empty()) {
-    std::cout << "  none\n";
-  }
-  for (std::size_t index = 0U; index < endpoints.size(); ++index) {
-    const auto& endpoint = endpoints[index];
-    std::cout << "  [" << index + 1U << "] "
-              << (endpoint.trusted ? "trusted" : "pairing-restricted")
-              << "\n      device=" << heyaki::to_string(endpoint.key.device_id)
-              << "\n      endpoint=" << heyaki::to_string(endpoint.key.endpoint_id)
-              << "\n      discovery=";
-    if (endpoint.lan && endpoint.relay) {
-      std::cout << "lan+relay";
-    } else if (endpoint.lan) {
-      std::cout << "lan";
-    } else {
-      std::cout << "relay";
-    }
-    const auto connection = std::find_if(
-        connections.begin(), connections.end(), [&](const auto& value) {
-          return value.peer == endpoint.key;
-        });
-    std::cout << "  signaling=";
-    if (connection == connections.end()) {
-      std::cout << "none";
-    } else {
-      std::cout << "lan/" << signaling_state_name(connection->state);
-    }
-    std::cout << "  data=none\n";
-  }
+  heyaki::tui::render_device_view(std::cout, endpoints, sessions);
 
   std::cout << "\nPAIRING\n";
   std::size_t request_index = 0U;

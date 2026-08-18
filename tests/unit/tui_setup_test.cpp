@@ -1,3 +1,4 @@
+#include "device_view.hpp"
 #include "local_setup.hpp"
 
 #include <heyaki/password.hpp>
@@ -7,6 +8,7 @@
 
 #include <deque>
 #include <filesystem>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -133,6 +135,59 @@ TEST_F(TuiSetupTest, ReopensAndCompletesAnIncompleteProfile) {
   auto readiness = reopened.value_if()->local_readiness(application_id);
   ASSERT_TRUE(readiness) << readiness.error_if()->safe_detail();
   EXPECT_TRUE(readiness.value_if()->ready());
+}
+
+TEST(TuiDeviceViewTest, RendersEndpointSourcesAndSessionDiagnostics) {
+  DeviceId::Storage device_bytes{};
+  device_bytes.fill(std::byte{0x11U});
+  EndpointId::Storage endpoint_bytes{};
+  endpoint_bytes.fill(std::byte{0x22U});
+  RequestId::Storage request_bytes{};
+  request_bytes.fill(std::byte{0x33U});
+  SessionId::Storage session_bytes{};
+  session_bytes.fill(std::byte{0x44U});
+  OperationId::Storage operation_bytes{};
+  operation_bytes.fill(std::byte{0x55U});
+  const DeviceEndpointKey peer{DeviceId{device_bytes}, EndpointId{endpoint_bytes}};
+
+  EndpointDirectoryEntrySnapshot endpoint;
+  endpoint.key = peer;
+  endpoint.trusted = true;
+  endpoint.lan = LanEndpointSnapshot{};
+  endpoint.relay = RelayEndpointSnapshot{};
+
+  NodePeerSessionSnapshot session;
+  session.peer = peer;
+  session.request_id = RequestId{request_bytes};
+  session.session_id = SessionId{session_bytes};
+  session.signaling_route = SignalingRouteKind::relay;
+  session.state = NodePeerSessionState::transport_connecting;
+  session.connection_stage = NodeConnectionStage::checking;
+  session.data_path = NodeDataPathKind::turn_udp;
+  session.selected_candidate = "candidate:relay 1 udp 2122260223 192.0.2.10 3478 typ relay";
+  session.rtt = std::chrono::milliseconds{37};
+  session.buffered_amount = 4096U;
+  session.error = Error{ErrorCode::nat_traversal,
+                        "webrtc_transport",
+                        "ice_failed",
+                        701,
+                        peer.device_id,
+                        OperationId{operation_bytes}};
+
+  std::ostringstream output;
+  render_device_view(output, {endpoint}, {session});
+  const auto rendered = output.str();
+  EXPECT_NE(rendered.find("discovery=lan+relay"), std::string::npos);
+  EXPECT_NE(rendered.find("transport_connecting  stage=checking"), std::string::npos);
+  EXPECT_NE(rendered.find("signaling=relay  data=turn_udp  rtt=37ms  buffered=4096"),
+            std::string::npos);
+  EXPECT_NE(rendered.find("candidate=candidate:relay 1 udp"), std::string::npos);
+  EXPECT_NE(rendered.find("failure=nat_traversal webrtc_transport ice_failed"),
+            std::string::npos);
+  EXPECT_NE(rendered.find("underlying=701"), std::string::npos);
+  EXPECT_NE(rendered.find("peer=" + to_string(peer.device_id)), std::string::npos);
+  EXPECT_NE(rendered.find("operation=" + to_string(OperationId{operation_bytes})),
+            std::string::npos);
 }
 
 }  // namespace

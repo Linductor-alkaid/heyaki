@@ -786,7 +786,7 @@ Linux GCC/Clang Debug/Release、Windows Debug/Release、ASan/UBSan/TSAN 全部�
 - [x] `M4-13` 实现 `SESSION_HELLO`，在 fingerprint 已验证的 DataChannel 上绑定签名 signaling transcript、session ID/epoch、endpoint、能力摘要和签名。
 - [x] `M4-14` 实现最小状态机 `Idle -> ResolvingEndpoint -> Signaling -> Gathering -> Checking -> TransportConnected -> Authenticating -> Closed`，每次转换记录 source/reason/timestamp。
 - [x] `M4-15` 在授权功能尚未实现时，成功认证的测试设备只开放内部 control ping，不开放通用业务通道。
-- [ ] `M4-16` TUI 设备/诊断视图展示 LAN/relay endpoint 来源、建连阶段、signaling/data path、candidate、RTT 和结构化失败。
+- [x] `M4-16` TUI 设备/诊断视图展示 LAN/relay endpoint 来源、建连阶段、signaling/data path、candidate、RTT 和结构化失败。
 - [ ] `M4-17` 增加测试专用策略强制 `lan_only`、`relay_only`、direct、TURN/UDP、TURN/TCP/TLS 或禁止某类 candidate，避免公网偶测。
 
 ### M4 测试与 Connectivity MVP 退出条件
@@ -1072,6 +1072,23 @@ relay 72/72、真实 Node relay-only session 通过；`git diff --check` 通过�
 
 据此完成 `M4-12`。`M4-07` 仍受 pinned libjuice 不支持 TURN/TCP/TLS 的已记录能力边界阻塞；
 `M4-10`、`M4-16`、`M4-17` 与 Connectivity MVP 网络矩阵继续推进，M4 goal 保持 active。
+
+### M4 实施进度（2026-08-19，第12轮）
+
+- 公共 `NodePeerSessionSnapshot` 新增 transport-neutral 的建连阶段、data path、selected
+  candidate、RTT 与 buffered amount；Node 在 owning strand 上合并 attempt timeline 与
+  WebRTC `DoubleBuffer` 诊断快照，再通过既有 peer-session `DoubleBuffer` 向 UI 发布，不新增
+  跨执行上下文共享状态。失败历史保存实际失败阶段，同时以 closed session state 表达终态。
+- TUI 将 endpoint 与 session 分区展示：endpoint 标明 LAN、relay 或合并来源；session 独立显示
+  signaling route 和 data path，以及 candidate、RTT、buffered bytes。结构化失败完整显示稳定
+  error code、component、safe detail，并在存在时显示 underlying code、peer ID 与 operation ID。
+- 新增纯渲染回归覆盖合并来源、checking 阶段、relay signaling + TURN/UDP data path 和完整错误
+  字段；真实 LAN Node 会话验证 LAN signaling + direct-host data path，真实 relay-only Node
+  会话验证 relay signaling + direct-host data path，从而固定 signaling/data path 不混为一谈。
+
+据此完成 `M4-16`。Connectivity MVP 的 TUI 选择并建连门禁仍未勾选，因为当前验收证明诊断
+呈现和 Node 自动会话，但尚未覆盖 TUI 交互选择 endpoint 的完整路径。`M4-07`、`M4-10`、
+`M4-17` 与 Connectivity MVP 网络矩阵继续推进，M4 goal 保持 active。
 
 ---
 
