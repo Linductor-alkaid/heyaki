@@ -768,7 +768,7 @@ Linux GCC/Clang Debug/Release、Windows Debug/Release、ASan/UBSan/TSAN 全部�
 - [x] `M4-01` 实现内部 `TransportSession`/`TransportChannel` SPI、`ChannelOptions`、close reason，以及分离 `signaling_path`/`data_path` 的 `PathInfo`，不暴露为稳定第三方插件 ABI。
 - [x] `M4-02` 实现 `SignalingCoordinator` 对 `LanSignalingRoute`/`RelaySignalingRoute` 的统一 connect/accept/deny/trickle 状态机；所有 pending 项都有 request ID、TTL、大小、来源和速率上限。
 - [x] `M4-03` 实现 offer、answer、ICE ufrag、fingerprint、双方 ID、endpoint、nonce 和 expiry 的规范化签名与验签。
-- [ ] `M4-04` 建立 replay cache，拒绝重复 request ID、nonce、过期对象和 session epoch 迟到信令。
+- [x] `M4-04` 建立 replay cache，拒绝重复 request ID、nonce、过期对象和 session epoch 迟到信令。
 - [x] `M4-05` 未通过签名、公钥派生 ID 和 endpoint 验证时，不把 SDP/candidate 交给 transport。
 
 ### 7.2 WebRTC/ICE/TURN
@@ -1041,6 +1041,22 @@ coturn 按既有规则 skip；禁异常 `-Werror`、ASan、UBSan 与关闭 ASLR 
 relay 72/72、真实 Node relay-only session 通过；`git diff --check` 通过。据此完成 `M4-02`。
 `M4-04`、`M4-07`、`M4-10`、`M4-12`、`M4-16`、`M4-17` 以及 Connectivity MVP 的网络矩阵
 退出条件仍保持未勾选，M4 goal 继续 active。
+
+### M4 实施进度（2026-08-19，第10轮）
+
+- `connect_request` 的 sender/request ID 现在进入与签名对象共用的有界 replay cache；attempt
+  结束不会提前重开 10 分钟 replay 窗口，重复请求、每 peer/全局容量耗尽均 fail closed 并进入
+  coordinator/replay diagnostics。offer、answer、candidate 继续按签名域、signer、request/session
+  ID、双方 nonce 与 candidate sequence 去重，过期对象在验签阶段拒绝。
+- 新增 session transition 回归：完成 offer/answer/trickle 后令双方 attempt 过期、为同一 peer
+  建立新 attempt，再注入旧 offer、answer 与 candidate；三者均因旧 request/session binding 在
+  coordinator 层拒绝，transport delegate 零调用。
+- epoch 门禁保持分层且不破坏 v1 wire/golden vector：每次新物理 transport 使用新的随机
+  request/session ID 隔离迟到信令；已验证 DataChannel 上的签名 `SESSION_HELLO` 再绑定
+  `session_epoch`，低 epoch 返回 `late_epoch` 且不认证，高 epoch 明确要求建立新 transport。
+
+据此完成 `M4-04`。`M4-07`、`M4-10`、`M4-12`、`M4-16`、`M4-17` 与 Connectivity MVP
+网络矩阵退出条件继续保持未勾选，M4 goal 继续 active。
 
 ---
 

@@ -50,6 +50,13 @@ class SignalingReplayCache {
 
   [[nodiscard]] static Result<SignalingReplayCache> create(ReplayCachePolicy policy);
 
+  // Connect requests are not signed objects, but their sender identity is already bound by
+  // the authenticated signaling route. Retain the sender/request tuple across attempt
+  // teardown so an old request cannot be admitted again during the replay window.
+  [[nodiscard]] Result<SignalingReplayDecision> admit_connect_request(
+      const DeviceId& sender, const RequestId& request_id,
+      std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
+
   [[nodiscard]] Result<SignalingReplayDecision> admit(
       SigningDomain domain, const DeviceId& signer, const RequestId& request_id,
       const SessionId& session_id, const SignalingNonce& initiator_nonce,

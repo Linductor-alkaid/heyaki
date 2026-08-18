@@ -512,6 +512,22 @@ class SignalingCoordinator::Impl {
       return Result<void>::failure(
           coordinator_error(ErrorCode::protocol, "connect_request_payload_invalid"));
     }
+    auto replay = replay_.admit_connect_request(message.peer.device_id,
+                                                message.request_id, now);
+    if (!replay) {
+      return Result<void>::failure(*replay.error_if());
+    }
+    if (*replay.value_if() == SignalingReplayDecision::duplicate) {
+      ++diagnostics_.duplicate_request_rejected;
+      ++diagnostics_.replay_rejected;
+      return Result<void>::failure(
+          coordinator_error(ErrorCode::protocol, "connect_request_replayed"));
+    }
+    if (*replay.value_if() == SignalingReplayDecision::capacity_rejected) {
+      ++diagnostics_.replay_rejected;
+      return Result<void>::failure(
+          coordinator_error(ErrorCode::resource_exhausted, "replay_cache_saturated"));
+    }
     if (find(message.request_id) != nullptr) {
       ++diagnostics_.duplicate_request_rejected;
       return Result<void>::failure(

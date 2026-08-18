@@ -367,6 +367,33 @@ TEST(M4ReplayCache, AdmitsDuplicatesCapacityAndTtl) {
             heyaki::SignalingReplayDecision::admitted);
 }
 
+TEST(M4ReplayCache, RetainsConnectRequestAcrossAttemptLifetime) {
+  heyaki::ReplayCachePolicy policy;
+  policy.ttl_milliseconds = 600'000U;
+  policy.capacity = 64U;
+  policy.per_peer_capacity = 16U;
+  auto cache = heyaki::SignalingReplayCache::create(policy);
+  ASSERT_TRUE(cache.has_value());
+  const auto sender = id_from_hex<heyaki::DeviceId>(
+      "aafe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9");
+  const auto request =
+      id_from_hex<heyaki::RequestId>("102132435465768798a9bacbdcedfe0f");
+  const auto t0 = std::chrono::steady_clock::time_point{} + std::chrono::seconds{5};
+
+  EXPECT_EQ(*cache.value_if()->admit_connect_request(sender, request, t0).value_if(),
+            heyaki::SignalingReplayDecision::admitted);
+  EXPECT_EQ(*cache.value_if()
+                 ->admit_connect_request(sender, request,
+                                         t0 + std::chrono::seconds{30})
+                 .value_if(),
+            heyaki::SignalingReplayDecision::duplicate);
+  EXPECT_EQ(*cache.value_if()
+                 ->admit_connect_request(sender, request,
+                                         t0 + std::chrono::milliseconds{600001})
+                 .value_if(),
+            heyaki::SignalingReplayDecision::admitted);
+}
+
 struct PeerHarness {
   std::optional<heyaki::IdentityKeyPair> identity;
   heyaki::DeviceEndpointKey self;
@@ -433,14 +460,15 @@ struct ManualFlow {
   }
 
   // Runs connect_request -> (accepted) -> connect_accept manually and returns the request.
-  heyaki::RequestId connect_accepted() {
+  heyaki::RequestId connect_accepted(
+      std::chrono::steady_clock::time_point now = kSteadyNow) {
     auto accepted = false;
     b.delegate->on_inbound_connect = [&](const heyaki::SignalingAttemptSnapshot&) {
       accepted = true;
       return true;
     };
     const auto request = a.coordinator->begin_attempt(
-        b.self, heyaki::SignalingRouteKind::lan, kSteadyNow);
+        b.self, heyaki::SignalingRouteKind::lan, now);
     EXPECT_TRUE(request.has_value());
     const auto connect =
         route_a.last_of(heyaki::LanSignalingMessageKind::connect_request);
@@ -449,7 +477,7 @@ struct ManualFlow {
     inbound_connect.peer = a.self;
     EXPECT_TRUE(b.coordinator
                     ->handle_message(inbound_connect, heyaki::SignalingRouteKind::lan,
-                                     kSteadyNow, kNowUnix)
+                                     now, kNowUnix)
                     .has_value());
     EXPECT_TRUE(accepted);
     heyaki::SignalingEnvelope accept;
@@ -457,7 +485,7 @@ struct ManualFlow {
     accept.kind = heyaki::LanSignalingMessageKind::connect_accept;
     accept.request_id = connect->request_id;
     EXPECT_TRUE(a.coordinator
-                    ->handle_message(accept, heyaki::SignalingRouteKind::lan, kSteadyNow,
+                    ->handle_message(accept, heyaki::SignalingRouteKind::lan, now,
                                      kNowUnix)
                     .has_value());
     return *request.value_if();
@@ -806,6 +834,94 @@ TEST(M4Coordinator, ConnectDenyClosesOutboundAttempt) {
   EXPECT_FALSE(offer_after_deny.has_value());
 }
 
+TEST(M4Coordinator, RejectsLateObjectsAfterAttemptEpochTransition) {
+  ManualFlow flow;
+  ASSERT_TRUE(flow.init());
+
+  const auto first_request = flow.connect_accepted();
+  (void)flow.exchange_offer_answer(first_request, test_fingerprint(0x10U),
+                                   test_fingerprint(0x70U));
+
+  ASSERT_TRUE(flow.a.coordinator
+                  ->send_local_candidate(first_request, bytes_from_hex("01000000"),
+                                         kSteadyNow, kNowUnix)
+                  .has_value());
+  auto old_candidate_from_a =
+      flow.route_a.last_of(heyaki::LanSignalingMessageKind::signed_candidate);
+  ASSERT_TRUE(old_candidate_from_a.has_value());
+  auto inbound_old_candidate_from_a = *old_candidate_from_a;
+  inbound_old_candidate_from_a.peer = flow.a.self;
+  ASSERT_TRUE(flow.b.coordinator
+                  ->handle_message(inbound_old_candidate_from_a,
+                                   heyaki::SignalingRouteKind::lan, kSteadyNow, kNowUnix)
+                  .has_value());
+
+  ASSERT_TRUE(flow.b.coordinator
+                  ->send_local_candidate(first_request, bytes_from_hex("02000000"),
+                                         kSteadyNow, kNowUnix)
+                  .has_value());
+  auto old_candidate_from_b =
+      flow.route_b.last_of(heyaki::LanSignalingMessageKind::signed_candidate);
+  ASSERT_TRUE(old_candidate_from_b.has_value());
+  auto inbound_old_candidate_from_b = *old_candidate_from_b;
+  inbound_old_candidate_from_b.peer = flow.b.self;
+  ASSERT_TRUE(flow.a.coordinator
+                  ->handle_message(inbound_old_candidate_from_b,
+                                   heyaki::SignalingRouteKind::lan, kSteadyNow, kNowUnix)
+                  .has_value());
+
+  const auto old_offer =
+      flow.route_a.last_of(heyaki::LanSignalingMessageKind::signed_offer);
+  const auto old_answer =
+      flow.route_b.last_of(heyaki::LanSignalingMessageKind::signed_answer);
+  ASSERT_TRUE(old_offer.has_value());
+  ASSERT_TRUE(old_answer.has_value());
+  auto late_offer = *old_offer;
+  late_offer.peer = flow.a.self;
+  auto late_answer = *old_answer;
+  late_answer.peer = flow.b.self;
+
+  int verified_offers = 0;
+  int verified_answers = 0;
+  int verified_candidates = 0;
+  flow.b.delegate->on_verified_offer =
+      [&](const heyaki::SignalingAttemptSnapshot&, const heyaki::SignedOffer&) {
+        ++verified_offers;
+      };
+  flow.a.delegate->on_verified_answer =
+      [&](const heyaki::SignalingAttemptSnapshot&, const heyaki::SignedAnswer&,
+          const heyaki::SignalingTranscriptSha256&) { ++verified_answers; };
+  flow.b.delegate->on_verified_candidate =
+      [&](const heyaki::SignalingAttemptSnapshot&, const heyaki::SignedCandidate&) {
+        ++verified_candidates;
+      };
+
+  const auto expired_at = kSteadyNow + std::chrono::milliseconds{15001};
+  flow.a.coordinator->expire(expired_at);
+  flow.b.coordinator->expire(expired_at);
+  const auto second_request = flow.connect_accepted(expired_at);
+  EXPECT_NE(second_request, first_request);
+
+  const auto rejected_offer = flow.b.coordinator->handle_message(
+      late_offer, heyaki::SignalingRouteKind::lan, expired_at, kNowUnix);
+  ASSERT_FALSE(rejected_offer.has_value());
+  EXPECT_EQ(rejected_offer.error_if()->safe_detail(), "signed_offer_unmatched");
+
+  const auto rejected_answer = flow.a.coordinator->handle_message(
+      late_answer, heyaki::SignalingRouteKind::lan, expired_at, kNowUnix);
+  ASSERT_FALSE(rejected_answer.has_value());
+  EXPECT_EQ(rejected_answer.error_if()->safe_detail(), "signed_answer_unmatched");
+
+  const auto rejected_candidate = flow.b.coordinator->handle_message(
+      inbound_old_candidate_from_a, heyaki::SignalingRouteKind::lan, expired_at, kNowUnix);
+  ASSERT_FALSE(rejected_candidate.has_value());
+  EXPECT_EQ(rejected_candidate.error_if()->safe_detail(), "signed_candidate_unmatched");
+
+  EXPECT_EQ(verified_offers, 0);
+  EXPECT_EQ(verified_answers, 0);
+  EXPECT_EQ(verified_candidates, 0);
+}
+
 TEST(M4Coordinator, BoundsTtlAndRateLimits) {
   PeerHarness a;
   auto config = default_config();
@@ -884,6 +1000,13 @@ TEST(M4Coordinator, BoundsTtlAndRateLimits) {
   EXPECT_EQ(expired_errors, 3);
   EXPECT_TRUE(a.coordinator->attempts().empty());
   EXPECT_EQ(a.coordinator->diagnostics().attempts_expired, 3U);
+  // Attempt teardown does not reopen the replay window for an old request ID.
+  inbound.request_id = id_from_hex<heyaki::RequestId>("00000000000000000000000000000001");
+  const auto retired_request = a.coordinator->handle_message(
+      inbound, heyaki::SignalingRouteKind::lan,
+      kSteadyNow + std::chrono::milliseconds{1001}, kNowUnix);
+  ASSERT_FALSE(retired_request.has_value());
+  EXPECT_EQ(retired_request.error_if()->safe_detail(), "connect_request_replayed");
   // After expiry, the same peer can start a fresh attempt.
   EXPECT_TRUE(a.coordinator
                   ->begin_attempt(b.self, heyaki::SignalingRouteKind::lan,

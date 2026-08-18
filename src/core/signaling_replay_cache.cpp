@@ -11,6 +11,8 @@
 namespace heyaki {
 namespace {
 
+constexpr std::uint8_t connect_request_replay_domain = 0xffU;
+
 Error replay_error(const char* detail) {
   return Error{ErrorCode::resource_exhausted, "signaling_replay", detail};
 }
@@ -165,6 +167,20 @@ Result<SignalingReplayDecision> SignalingReplayCache::admit(
   if (sequence.has_value()) {
     key.sequence = *sequence;
   }
+  return impl_->admit(key, now);
+}
+
+Result<SignalingReplayDecision> SignalingReplayCache::admit_connect_request(
+    const DeviceId& sender, const RequestId& request_id,
+    std::chrono::steady_clock::time_point now) {
+  if (sender.is_zero() || request_id.is_zero()) {
+    return Result<SignalingReplayDecision>::failure(
+        replay_error("connect_request_replay_key_zero"));
+  }
+  ReplayKey key;
+  key.domain = connect_request_replay_domain;
+  key.signer = sender;
+  key.request_id = request_id;
   return impl_->admit(key, now);
 }
 
