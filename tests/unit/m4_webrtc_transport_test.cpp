@@ -277,6 +277,7 @@ TEST(M4WebRtcTransport, PropagatesHighAndLowWaterBackpressure) {
   executor::comm::PhaseGate send_paused("m4-backpressure-paused");
   executor::comm::PhaseGate send_resumed("m4-backpressure-resumed");
   executor::comm::PhaseGate retry_sent("m4-backpressure-retry");
+  executor::comm::PhaseGate sessions_closed("m4-backpressure-closed");
 
   std::shared_ptr<WebRtcTransportSession> left;
   std::shared_ptr<WebRtcTransportSession> right;
@@ -342,24 +343,31 @@ TEST(M4WebRtcTransport, PropagatesHighAndLowWaterBackpressure) {
 
   std::atomic<TransportChannel*> channel{nullptr};
   std::atomic<heyaki::ErrorCode> blocked_code{heyaki::ErrorCode::internal};
-  left->async_open_channel(
-      ChannelKind::file, options,
-      [&](heyaki::Result<TransportChannel*> opened) {
-        ASSERT_TRUE(opened) << opened.error_if()->safe_detail();
-        auto* current = *opened.value_if();
-        channel.store(current, std::memory_order_release);
-        current->set_writable_handler([&] { (void)send_resumed.advance_to(1U); });
-        const auto payload =
-            std::vector<std::byte>(256U * 1024U, std::byte{0x5aU});
-        for (std::size_t attempt = 0U; attempt < 64U; ++attempt) {
-          auto sent = current->send(payload);
-          if (!sent) {
-            blocked_code.store(sent.error_if()->code(), std::memory_order_release);
-            (void)send_paused.advance_to(1U);
-            return;
-          }
-        }
+  auto open_dispatched = runtime_dispatcher(*context.value_if())(
+      "m4.backpressure.open", [&] {
+        left->async_open_channel(
+            ChannelKind::file, options,
+            [&](heyaki::Result<TransportChannel*> opened) {
+              ASSERT_TRUE(opened) << opened.error_if()->safe_detail();
+              auto* current = *opened.value_if();
+              channel.store(current, std::memory_order_release);
+              current->set_writable_handler(
+                  [&] { (void)send_resumed.advance_to(1U); });
+              const auto payload =
+                  std::vector<std::byte>(256U * 1024U, std::byte{0x5aU});
+              for (std::size_t attempt = 0U; attempt < 64U; ++attempt) {
+                auto sent = current->send(payload);
+                if (!sent) {
+                  blocked_code.store(sent.error_if()->code(),
+                                     std::memory_order_release);
+                  (void)send_paused.advance_to(1U);
+                  return;
+                }
+              }
+            });
+        return heyaki::Result<void>::success();
       });
+  ASSERT_TRUE(open_dispatched) << open_dispatched.error_if()->safe_detail();
 
   ASSERT_TRUE(send_paused.wait_for(1U, 10s));
   ASSERT_EQ(blocked_code.load(std::memory_order_acquire), heyaki::ErrorCode::would_block);
@@ -382,8 +390,15 @@ TEST(M4WebRtcTransport, PropagatesHighAndLowWaterBackpressure) {
   EXPECT_GE(left->diagnostics().backpressure_pauses, 1U);
   EXPECT_GE(left->diagnostics().writable_resumes, 1U);
 
-  left->close(heyaki::transport::CloseReason::local_shutdown);
-  right->close(heyaki::transport::CloseReason::local_shutdown);
+  auto close_dispatched = runtime_dispatcher(*context.value_if())(
+      "m4.backpressure.close", [&] {
+        left->close(heyaki::transport::CloseReason::local_shutdown);
+        right->close(heyaki::transport::CloseReason::local_shutdown);
+        (void)sessions_closed.advance_to(1U);
+        return heyaki::Result<void>::success();
+      });
+  ASSERT_TRUE(close_dispatched) << close_dispatched.error_if()->safe_detail();
+  ASSERT_TRUE(sessions_closed.wait_for(1U, 5s));
   const auto shutdown = runtime.value_if()->shutdown();
   EXPECT_EQ(shutdown.final_phase, heyaki::RuntimePhase::stopped);
 }
