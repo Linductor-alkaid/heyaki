@@ -875,8 +875,10 @@ RelaySignalingRoute 接入 relay 控制面转发、`M4-04` 待 session epoch 迟
 
 本机验证：GCC Debug/Release 全量 CTest 31/31；禁异常 M4 relay route 6/6；UBSan
 全量 25/25（apps-off 树）；ASan M4 relay route 6/6 与既有 relay 72/72；TSan（关闭
-ASLR）M4 relay route 6/6。Windows 与远端 CI 待推送验证；协调器接入 Node LAN TLS
-路径与 M4-02 最终勾选留待后续轮次。
+ASLR）M4 relay route 6/6。GitHub Actions run `32092070331`（提交 `a83dc40`）结论
+success，10 个 job 全部通过：Linux GCC/Clang Debug/Release、Windows Debug/Release、
+ASan、UBSan、TSAN 与 coturn-topology。协调器接入 Node LAN TLS 路径与 `M4-02` 最终
+勾选留待后续轮次。
 
 ---
 
