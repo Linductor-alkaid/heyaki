@@ -530,10 +530,18 @@ TEST(M4Coordinator, VerifiedHandshakeAndTrickleFlow) {
   };
 
   const auto request = flow.connect_accepted();
+  auto premature_binding = flow.a.coordinator->verified_session_binding(request, 3U);
+  ASSERT_FALSE(premature_binding);
+  EXPECT_EQ(premature_binding.error_if()->safe_detail(), "session_binding_not_ready");
   const auto transcript =
       flow.exchange_offer_answer(request, test_fingerprint(0x10U), test_fingerprint(0x70U));
   EXPECT_TRUE(transport_opened_on_b);
   EXPECT_NE(transcript, heyaki::SignalingTranscriptSha256{});
+  auto binding = flow.a.coordinator->verified_session_binding(request, 3U);
+  ASSERT_TRUE(binding);
+  EXPECT_EQ(binding.value_if()->expectation.session_epoch, 3U);
+  EXPECT_EQ(binding.value_if()->expectation.signaling_transcript_sha256, transcript);
+  EXPECT_EQ(binding.value_if()->peer_fingerprint, test_fingerprint(0x70U));
 
   EXPECT_TRUE(flow.a.coordinator
                   ->send_local_candidate(request, bytes_from_hex("01000000"), kSteadyNow,

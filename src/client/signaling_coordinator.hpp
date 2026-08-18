@@ -10,6 +10,7 @@
 #include <heyaki/node.hpp>
 #include <heyaki/signaling_protocol.hpp>
 #include <heyaki/signaling_replay_cache.hpp>
+#include <heyaki/session_protocol.hpp>
 
 #include <chrono>
 #include <cstddef>
@@ -63,6 +64,12 @@ struct SignalingAttemptSnapshot {
   std::chrono::milliseconds ttl{};
   std::uint32_t sent_candidates{};
   std::uint32_t received_candidates{};
+};
+
+struct VerifiedSessionBinding {
+  SessionHelloExpectation expectation;
+  DtlsFingerprint peer_fingerprint{};
+  std::string peer_ufrag;
 };
 
 struct SignalingCoordinatorConfig {
@@ -186,6 +193,8 @@ class SignalingCoordinator {
   void expire(std::chrono::steady_clock::time_point now);
 
   [[nodiscard]] std::vector<SignalingAttemptSnapshot> attempts() const;
+  [[nodiscard]] Result<VerifiedSessionBinding> verified_session_binding(
+      RequestId request_id, std::uint64_t session_epoch = 1U) const;
   [[nodiscard]] SignalingCoordinatorDiagnostics diagnostics() const noexcept;
 
  private:

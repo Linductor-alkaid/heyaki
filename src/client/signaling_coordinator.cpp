@@ -392,6 +392,28 @@ class SignalingCoordinator::Impl {
     return snapshots;
   }
 
+  Result<VerifiedSessionBinding> verified_session_binding(RequestId request_id,
+                                                          std::uint64_t epoch) const {
+    const auto* attempt = find(request_id);
+    if (attempt == nullptr || !attempt->canonical_offer || !attempt->canonical_answer ||
+        !attempt->transcript || !attempt->responder_nonce || attempt->session_id.is_zero()) {
+      return Result<VerifiedSessionBinding>::failure(
+          coordinator_error(ErrorCode::signaling, "session_binding_not_ready"));
+    }
+    const auto initiator = attempt->inbound ? attempt->peer : config_.local;
+    const auto responder = attempt->inbound ? config_.local : attempt->peer;
+    return Result<VerifiedSessionBinding>::success({
+        .expectation = {.sender = initiator,
+                        .peer = responder,
+                        .session_id = attempt->session_id,
+                        .session_epoch = epoch,
+                        .initiator_nonce = attempt->initiator_nonce,
+                        .responder_nonce = *attempt->responder_nonce,
+                        .signaling_transcript_sha256 = *attempt->transcript},
+        .peer_fingerprint = attempt->peer_fingerprint,
+        .peer_ufrag = attempt->peer_ufrag});
+  }
+
   SignalingCoordinatorDiagnostics diagnostics() const noexcept { return diagnostics_; }
 
   Result<void> check_create() {
@@ -425,6 +447,11 @@ class SignalingCoordinator::Impl {
 
  private:
   Attempt* find(const RequestId& request_id) {
+    const auto it = attempts_.find(request_id);
+    return it == attempts_.end() ? nullptr : &it->second;
+  }
+
+  const Attempt* find(const RequestId& request_id) const {
     const auto it = attempts_.find(request_id);
     return it == attempts_.end() ? nullptr : &it->second;
   }
@@ -974,6 +1001,11 @@ std::vector<SignalingAttemptSnapshot> SignalingCoordinator::attempts() const {
 
 SignalingCoordinatorDiagnostics SignalingCoordinator::diagnostics() const noexcept {
   return impl_->diagnostics();
+}
+
+Result<VerifiedSessionBinding> SignalingCoordinator::verified_session_binding(
+    RequestId request_id, std::uint64_t session_epoch) const {
+  return impl_->verified_session_binding(request_id, session_epoch);
 }
 
 SignalingCoordinator::SignalingCoordinator(std::unique_ptr<Impl> impl) noexcept
