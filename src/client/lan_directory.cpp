@@ -57,6 +57,7 @@ class EndpointDirectory::Impl {
   };
 
   struct RelayHint {
+    IdentityPublicKey identity_public_key{};
     std::string relay_url;
     SteadyTime expires_at;
     SteadyTime observed_at;
@@ -297,6 +298,14 @@ Result<DirectoryObservation> EndpointDirectory::observe_lan(
   }
 
   auto entry_iterator = impl_->entries.find(key);
+  if (entry_iterator != impl_->entries.end() && entry_iterator->second.relay &&
+      entry_iterator->second.relay->identity_public_key !=
+          presence.identity_public_key) {
+    ++impl_->metrics.conflict_rejected;
+    impl_->record(ErrorCode::authentication, "endpoint_identity_conflict", now);
+    return Result<DirectoryObservation>::failure(
+        directory_error(ErrorCode::authentication, "endpoint_identity_conflict"));
+  }
   const bool new_entry = entry_iterator == impl_->entries.end();
   const bool new_lan_hint = new_entry || !entry_iterator->second.lan;
   if (new_lan_hint &&
@@ -366,9 +375,10 @@ Result<DirectoryObservation> EndpointDirectory::observe_lan(
       key});
 }
 
-Result<void> EndpointDirectory::upsert_relay(DeviceEndpointKey key, std::string relay_url,
-                                             bool trusted, std::chrono::milliseconds lease,
-                                             SteadyTime now) {
+Result<void> EndpointDirectory::upsert_relay(DeviceEndpointKey key,
+                                             IdentityPublicKey identity_public_key,
+                                             std::string relay_url, bool trusted,
+                                             std::chrono::milliseconds lease, SteadyTime now) {
   if (key.device_id.is_zero() || key.endpoint_id.is_zero() ||
       !valid_directory_text(relay_url, 2048U) || lease.count() <= 0 ||
       lease > std::chrono::hours{24}) {
@@ -386,9 +396,17 @@ Result<void> EndpointDirectory::upsert_relay(DeviceEndpointKey key, std::string 
     iterator = impl_->entries.emplace(key, Impl::Entry{}).first;
   }
   auto& entry = iterator->second;
+  if ((entry.lan && entry.lan->identity_public_key != identity_public_key) ||
+      (entry.relay && entry.relay->identity_public_key != identity_public_key)) {
+    ++impl_->metrics.conflict_rejected;
+    impl_->record(ErrorCode::authentication, "endpoint_identity_conflict", now);
+    return Result<void>::failure(
+        directory_error(ErrorCode::authentication, "endpoint_identity_conflict"));
+  }
   entry.trusted = entry.trusted || trusted;
   entry.relay = Impl::RelayHint{
-      .relay_url = std::move(relay_url), .expires_at = now + lease, .observed_at = now};
+      .identity_public_key = identity_public_key, .relay_url = std::move(relay_url),
+      .expires_at = now + lease, .observed_at = now};
   entry.last_update = now;
   impl_->metrics.current_entries = impl_->entries.size();
   impl_->metrics.peak_entries = std::max(impl_->metrics.peak_entries, impl_->entries.size());
@@ -452,6 +470,7 @@ std::vector<EndpointDirectoryEntrySnapshot> EndpointDirectory::snapshot(SteadyTi
     }
     if (entry.relay && entry.relay->expires_at > now) {
       snapshot.relay = RelayEndpointSnapshot{
+          .identity_public_key = entry.relay->identity_public_key,
           .relay_url = entry.relay->relay_url,
           .ttl = remaining_ttl(entry.relay->expires_at, now)};
     }

@@ -149,6 +149,7 @@ Result<void> RelayEndpointDirectory::publish(
       record.endpoint,
       RelayEndpointDirectoryEntry{
           .record = record,
+          .identity_public_key = device.public_key,
           .manifest = manifest,
           .tenant = std::string{tenant},
           .wall_clock_expires_unix_milliseconds = record.expires_unix_milliseconds},

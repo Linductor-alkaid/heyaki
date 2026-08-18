@@ -766,7 +766,7 @@ Linux GCC/Clang Debug/Release、Windows Debug/Release、ASan/UBSan/TSAN 全部�
 ### 7.1 信令与 Transport SPI
 
 - [x] `M4-01` 实现内部 `TransportSession`/`TransportChannel` SPI、`ChannelOptions`、close reason，以及分离 `signaling_path`/`data_path` 的 `PathInfo`，不暴露为稳定第三方插件 ABI。
-- [ ] `M4-02` 实现 `SignalingCoordinator` 对 `LanSignalingRoute`/`RelaySignalingRoute` 的统一 connect/accept/deny/trickle 状态机；所有 pending 项都有 request ID、TTL、大小、来源和速率上限。
+- [x] `M4-02` 实现 `SignalingCoordinator` 对 `LanSignalingRoute`/`RelaySignalingRoute` 的统一 connect/accept/deny/trickle 状态机；所有 pending 项都有 request ID、TTL、大小、来源和速率上限。
 - [x] `M4-03` 实现 offer、answer、ICE ufrag、fingerprint、双方 ID、endpoint、nonce 和 expiry 的规范化签名与验签。
 - [ ] `M4-04` 建立 replay cache，拒绝重复 request ID、nonce、过期对象和 session epoch 迟到信令。
 - [x] `M4-05` 未通过签名、公钥派生 ID 和 endpoint 验证时，不把 SDP/candidate 交给 transport。
@@ -1016,8 +1016,31 @@ ASLR 后 PeerSession 3/3、真实 WebRTC 连续 10 轮 2/2 通过，无数据竞
 本机验证：GCC 13.3 Debug `-Werror` 全量 CTest 28/28 通过，coturn allocation 因本机未安装
 coturn 按既有规则 skip；禁异常 `-Werror`、ASan、UBSan 与关闭 ASLR 的 TSAN 定向各 5/5
 通过，均覆盖完整 LAN Node 闭环、signaling、PeerSession、真实 WebRTC 与 fuzz smoke。
-据此完成 `M4-13`。`M4-02` 仍待 Node relay route 自动装配，`M4-04` 仍待所有 session epoch
-迟到信令门禁，`M4-16` 与 Connectivity MVP 三设备/网络矩阵退出条件也继续保持未勾选。
+据此完成 `M4-13`。`M4-02` 在下一轮闭合；`M4-04` 仍待所有 session epoch 迟到信令门禁，
+`M4-16` 与 Connectivity MVP 三设备/网络矩阵退出条件也继续保持未勾选。
+
+### M4 实施进度（2026-08-19，第9轮）
+
+- Node relay 登录完成首个 heartbeat 并取得 lease 后，自动生成并签名 endpoint record，按
+  `endpoint_publish_ack -> endpoint_query_result` 的有界顺序刷新同租户目录；登录 ready 不再被
+  误当作 lease 或协议 ready。查询结果携带原始签名 record 与公钥，Node 本地校验
+  `derive_device_id`、endpoint tuple、expiry 和签名后才写入 relay directory，relay 不能单独
+  冒充 peer。
+- `EndpointDirectory` 的 LAN/relay hints 保存并比较已验证公钥；同一 endpoint 出现身份冲突时
+  拒绝更新并记录结构化诊断。relay directory 在发布时缓存已验证公钥，查询只读取有界内存目录，
+  不新增同步数据库读取。
+- Node 自动挂载 `LanSignalingRoute` 与 `RelaySignalingRoute`，新增 transport-neutral
+  `Node::connect()`，按 `lan_only`/`relay_only`/automatic 选择路径；relay `signaling_deliver`
+  直接进入 coordinator，断线会以明确错误终止 relay route 上的 active attempts。所有 Node
+  timers、WSS queues 和 runtime dispatch 继续由 executor 管理。
+- 新增 endpoint proof 编解码/验签、跨 LAN/relay 身份冲突测试，以及两个真实 relay-only Node
+  通过 RelayServer 自动发现、coordinator、WebRTC host candidate 和 mutual `SESSION_HELLO`
+  后达到相同 request/session ID 的 authenticated 验收。
+
+本机验证：GCC Debug `-Werror` 定向 M3A/M3B/M4 与 onboarding harness 6/6 通过，其中 M3B
+relay 72/72、真实 Node relay-only session 通过；`git diff --check` 通过。据此完成 `M4-02`。
+`M4-04`、`M4-07`、`M4-10`、`M4-12`、`M4-16`、`M4-17` 以及 Connectivity MVP 的网络矩阵
+退出条件仍保持未勾选，M4 goal 继续 active。
 
 ---
 

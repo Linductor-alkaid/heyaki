@@ -1444,6 +1444,12 @@ void RelayServer::Impl::session_handle_endpoint_query(
         ? now_wall + static_cast<std::uint64_t>(lease_remaining.count())
         : now_wall;
     wire_publication.lease_expires_unix_milliseconds = lease_expiry;
+    auto record_bytes = encode_relay_endpoint_record(entry->record);
+    if (!record_bytes) {
+      continue;
+    }
+    wire_publication.endpoint_record = std::move(*record_bytes.value_if());
+    wire_publication.identity_public_key = entry->identity_public_key;
     result.endpoints.push_back(std::move(wire_publication));
   }
   auto encoded = encode_relay_wss_endpoint_query_result(result);

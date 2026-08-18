@@ -223,6 +223,7 @@ class Node {
   [[nodiscard]] std::vector<LanSignalingConnectionSnapshot> signaling_connections() const;
   [[nodiscard]] std::vector<NodePeerSessionSnapshot> peer_sessions() const;
   [[nodiscard]] Result<void> refresh_interfaces();
+  [[nodiscard]] Result<void> connect(DeviceEndpointKey peer);
   [[nodiscard]] Result<void> connect_lan(DeviceEndpointKey peer);
   [[nodiscard]] Result<void> send_lan_signaling(LanSignalingMessage message);
   [[nodiscard]] Result<void> close_lan(DeviceEndpointKey peer);

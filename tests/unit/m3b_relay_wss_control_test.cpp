@@ -254,6 +254,9 @@ TEST(M3BRelayWssControlTest, LoginHeartbeatAndEndpointPayloadsRoundTrip) {
   (*publication.manifest_sha256)[0U] = std::byte{0x5aU};
   publication.expires_unix_milliseconds = 6U;
   publication.lease_expires_unix_milliseconds = 7U;
+  publication.endpoint_record = std::vector<std::byte>(record.begin(), record.end());
+  publication.identity_public_key = IdentityPublicKey{};
+  (*publication.identity_public_key)[0U] = std::byte{0x6bU};
   RelayWssEndpointQueryResult result;
   result.endpoints.push_back(publication);
   auto result_bytes = encode_relay_wss_endpoint_query_result(result);
@@ -266,6 +269,10 @@ TEST(M3BRelayWssControlTest, LoginHeartbeatAndEndpointPayloadsRoundTrip) {
             publication.application_id);
   EXPECT_EQ(result_round_trip.value_if()->endpoints[0U].record_generation, 4U);
   EXPECT_EQ(result_round_trip.value_if()->endpoints[0U].lease_expires_unix_milliseconds, 7U);
+  EXPECT_EQ(result_round_trip.value_if()->endpoints[0U].endpoint_record,
+            publication.endpoint_record);
+  EXPECT_EQ(result_round_trip.value_if()->endpoints[0U].identity_public_key,
+            publication.identity_public_key);
 }
 
 TEST(M3BRelayWssControlTest, RejectsMalformedLoginHeartbeatAndEndpointPayloads) {

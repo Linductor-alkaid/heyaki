@@ -397,18 +397,24 @@ void append_control_publication(std::vector<std::byte>& output, std::uint32_t fi
   if (publication.lease_expires_unix_milliseconds) {
     append_uint(nested, 8U, *publication.lease_expires_unix_milliseconds);
   }
+  if (publication.endpoint_record) {
+    append_bytes(nested, 9U, *publication.endpoint_record);
+  }
+  if (publication.identity_public_key) {
+    append_bytes(nested, 10U, *publication.identity_public_key);
+  }
   append_bytes(output, field, nested);
 }
 
 Result<RelayWssEndpointPublication> parse_control_publication(
     std::span<const std::byte> payload) {
-  if (payload.empty() || payload.size() > 4096U) {
+  if (payload.empty() || payload.size() > max_relay_wss_endpoint_record_bytes + 4096U) {
     return Result<RelayWssEndpointPublication>::failure(
         control_error("endpoint_publication_size_invalid"));
   }
   ProtoReader reader(payload);
   RelayWssEndpointPublication output;
-  std::array<bool, 8U> seen{};
+  std::array<bool, 10U> seen{};
   while (!reader.done()) {
     auto field = reader.next();
     if (!field) {
@@ -469,6 +475,26 @@ Result<RelayWssEndpointPublication> parse_control_publication(
       std::array<std::byte, relay_wss_manifest_sha256_bytes> hash{};
       std::copy_n(field.value_if()->bytes.begin(), hash.size(), hash.begin());
       output.manifest_sha256 = hash;
+    } else if (field.value_if()->number == 9U) {
+      if (field.value_if()->wire_type != 2U || field.value_if()->bytes.empty() ||
+          field.value_if()->bytes.size() > max_relay_wss_endpoint_record_bytes) {
+        return Result<RelayWssEndpointPublication>::failure(
+            control_error("endpoint_publication_record_invalid"));
+      }
+      output.endpoint_record.emplace(field.value_if()->bytes.begin(),
+                                     field.value_if()->bytes.end());
+    } else if (field.value_if()->number == 10U) {
+      if (field.value_if()->wire_type != 2U) {
+        return Result<RelayWssEndpointPublication>::failure(
+            control_error("endpoint_publication_identity_invalid"));
+      }
+      IdentityPublicKey key{};
+      auto copied = copy_control_bytes(field.value_if()->bytes, key,
+                                       "endpoint_publication_identity_invalid");
+      if (!copied) {
+        return Result<RelayWssEndpointPublication>::failure(*copied.error_if());
+      }
+      output.identity_public_key = key;
     } else {
       if (field.value_if()->wire_type != 0U || field.value_if()->integer == 0U) {
         return Result<RelayWssEndpointPublication>::failure(
@@ -826,7 +852,12 @@ Result<std::vector<std::byte>> encode_relay_wss_endpoint_query_result(
         (endpoint.expires_unix_milliseconds &&
          *endpoint.expires_unix_milliseconds == 0U) ||
         (endpoint.lease_expires_unix_milliseconds &&
-         *endpoint.lease_expires_unix_milliseconds == 0U)) {
+         *endpoint.lease_expires_unix_milliseconds == 0U) ||
+        (endpoint.endpoint_record &&
+         (endpoint.endpoint_record->empty() ||
+          endpoint.endpoint_record->size() > max_relay_wss_endpoint_record_bytes)) ||
+        (endpoint.endpoint_record.has_value() !=
+         endpoint.identity_public_key.has_value())) {
       return Result<std::vector<std::byte>>::failure(
           control_error("endpoint_query_result_invalid"));
     }

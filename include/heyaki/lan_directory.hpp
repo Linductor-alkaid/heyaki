@@ -46,6 +46,7 @@ struct LanEndpointSnapshot {
 };
 
 struct RelayEndpointSnapshot {
+  IdentityPublicKey identity_public_key{};
   std::string relay_url;
   std::chrono::milliseconds ttl{};
 };
@@ -97,7 +98,8 @@ class EndpointDirectory {
       std::string_view interface_name, bool trusted,
       std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
   [[nodiscard]] Result<void> upsert_relay(
-      DeviceEndpointKey key, std::string relay_url, bool trusted,
+      DeviceEndpointKey key, IdentityPublicKey identity_public_key,
+      std::string relay_url, bool trusted,
       std::chrono::milliseconds lease,
       std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
   [[nodiscard]] Result<void> set_trusted(DeviceEndpointKey key, bool trusted);

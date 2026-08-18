@@ -45,6 +45,8 @@ message EndpointPublication {
   optional bytes manifest_sha256 = 6; // Exactly 32 bytes when present.
   optional uint64 expires_unix_milliseconds = 7;
   optional uint64 lease_expires_unix_milliseconds = 8;
+  optional bytes endpoint_record = 9;      // Device-signed canonical record.
+  optional bytes identity_public_key = 10; // Exactly 32 bytes when present.
 }
 
 message EndpointQueryResult {

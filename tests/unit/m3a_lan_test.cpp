@@ -514,7 +514,8 @@ TEST(EndpointDirectoryTest, LanExpiryDoesNotDeleteRelayPresence) {
       presence, "192.0.2.5", "eth0", true, now));
   const DeviceEndpointKey key{presence.device_id, presence.endpoint_id};
   ASSERT_TRUE(directory.value_if()->upsert_relay(
-      key, "wss://relay.example.invalid", true, std::chrono::seconds{30}, now));
+      key, presence.identity_public_key, "wss://relay.example.invalid", true,
+      std::chrono::seconds{30}, now));
 
   directory.value_if()->expire(now + std::chrono::seconds{2});
   auto after_lan_expiry = directory.value_if()->snapshot(now + std::chrono::seconds{2});
@@ -525,6 +526,22 @@ TEST(EndpointDirectoryTest, LanExpiryDoesNotDeleteRelayPresence) {
 
   directory.value_if()->expire(now + std::chrono::seconds{31});
   EXPECT_TRUE(directory.value_if()->snapshot(now + std::chrono::seconds{31}).empty());
+}
+
+TEST(EndpointDirectoryTest, RejectsIdentityConflictAcrossLanAndRelayHints) {
+  auto directory = EndpointDirectory::create(LanConfiguration{});
+  auto identity = create_identity();
+  auto other = create_identity();
+  ASSERT_TRUE(directory && identity && other);
+  const auto now = std::chrono::steady_clock::now();
+  auto presence = signed_presence(*identity.value_if(), 6U, 6U, 1U);
+  const DeviceEndpointKey key{presence.device_id, presence.endpoint_id};
+  ASSERT_TRUE(directory.value_if()->upsert_relay(
+      key, other.value_if()->public_key(), "wss://relay.example.invalid", false,
+      std::chrono::seconds{30}, now));
+  EXPECT_FALSE(directory.value_if()->observe_lan(
+      presence, "192.0.2.6", "eth0", false, now));
+  EXPECT_EQ(directory.value_if()->diagnostics().conflict_rejected, 1U);
 }
 
 TEST(EndpointDirectoryTest, RateAndPerSourceLimitsAreExplicit) {

@@ -20,6 +20,7 @@ struct RelayEndpointDirectoryConfig {
 
 struct RelayEndpointDirectoryEntry {
   RelayEndpointRecord record;
+  IdentityPublicKey identity_public_key{};
   std::optional<RelayServiceManifest> manifest;
   std::string tenant;
   std::uint64_t wall_clock_expires_unix_milliseconds{};

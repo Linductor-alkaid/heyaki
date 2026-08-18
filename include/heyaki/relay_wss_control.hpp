@@ -1,6 +1,7 @@
 #pragma once
 
 #include <heyaki/error.hpp>
+#include <heyaki/identity.hpp>
 #include <heyaki/ids.hpp>
 
 #include <array>
@@ -87,6 +88,8 @@ struct RelayWssEndpointPublication {
   std::optional<std::array<std::byte, 32U>> manifest_sha256;
   std::optional<std::uint64_t> expires_unix_milliseconds;
   std::optional<std::uint64_t> lease_expires_unix_milliseconds;
+  std::optional<std::vector<std::byte>> endpoint_record;
+  std::optional<IdentityPublicKey> identity_public_key;
 };
 
 struct RelayWssEndpointQueryResult {

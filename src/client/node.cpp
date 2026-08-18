@@ -3,8 +3,10 @@
 #include "runtime_access.hpp"
 #include "connection_attempt.hpp"
 #include "peer_session.hpp"
+#include "relay_signaling_route.hpp"
 #include "relay_wss_client.hpp"
 #include "signaling_coordinator.hpp"
+#include "../relay/relay_endpoint.hpp"
 #include "../relay/relay_login.hpp"
 #include "../transport/webrtc/webrtc_transport_session.hpp"
 
@@ -475,6 +477,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
 
   struct ConnectCommand {
     DeviceEndpointKey peer;
+    SignalingRouteKind route{SignalingRouteKind::lan};
   };
 
   struct SendCommand {
@@ -862,9 +865,6 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     signaling_snapshots.publish({});
     peer_session_snapshots.publish({});
 
-    auto sessions_initialized = initialize_session_coordinator();
-    if (!sessions_initialized) return sessions_initialized;
-
     const auto relay_initialized = initialize_relay();
     if (!relay_initialized) {
       update_snapshot([&](NodeSnapshot& snapshot) {
@@ -876,6 +876,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         return relay_initialized;
       }
     }
+
+    auto sessions_initialized = initialize_session_coordinator();
+    if (!sessions_initialized) return sessions_initialized;
 
     if (!initial.lan_enabled) {
       return register_shutdown_hooks();
@@ -938,7 +941,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
 
   void begin() {
     begin_relay();
+    schedule_expiry();
     if (!snapshots.load().value.lan_enabled) {
+      publish_resource_snapshot();
       return;
     }
     start_accept();
@@ -947,7 +952,6 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     }
     arm_multicast_readiness_timeout();
     announce_now();
-    schedule_expiry();
     schedule_interface_refresh();
     publish_resource_snapshot();
   }
@@ -1229,7 +1233,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         snapshot.relay.lease_generation = relay_lease_generation;
         snapshot.relay.last_error.reset();
       });
-      arm_relay_heartbeat();
+      relay_heartbeat_tick();
       return;
     }
     if (relay_phase == RelayLoginPhase::ready &&
@@ -1248,6 +1252,56 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       update_snapshot([&](NodeSnapshot& snapshot) {
         snapshot.relay.lease_generation = relay_lease_generation;
       });
+      auto refreshed = publish_and_query_relay_endpoints();
+      if (!refreshed) {
+        relay_failed(*refreshed.error_if(), false);
+      }
+      return;
+    }
+    if (relay_phase == RelayLoginPhase::ready &&
+        type == RelayWssControlType::endpoint_publish_ack) {
+      auto ack = parse_relay_wss_endpoint_publish_ack(frame.value_if()->payload);
+      if (!ack || ack.value_if()->record_generation != relay_record_generation) {
+        relay_failed(ack ? node_error(ErrorCode::protocol,
+                                      "relay_publish_generation_mismatch")
+                         : *ack.error_if(), true);
+      } else {
+        auto query = encode_relay_wss_endpoint_query(RelayWssEndpointQuery{});
+        if (!query) {
+          relay_failed(*query.error_if(), true);
+          return;
+        }
+        auto sent = send_relay_control(RelayWssControlType::endpoint_query,
+                                       *query.value_if());
+        if (!sent) relay_failed(*sent.error_if(), false);
+      }
+      return;
+    }
+    if (relay_phase == RelayLoginPhase::ready &&
+        type == RelayWssControlType::endpoint_query_result) {
+      auto result = parse_relay_wss_endpoint_query_result(frame.value_if()->payload);
+      if (!result) {
+        relay_failed(*result.error_if(), true);
+        return;
+      }
+      auto admitted = admit_relay_endpoints(*result.value_if());
+      if (!admitted) {
+        record_signaling_error(*admitted.error_if());
+      }
+      return;
+    }
+    if (relay_phase == RelayLoginPhase::ready &&
+        type == RelayWssControlType::signaling_deliver) {
+      auto envelope = RelaySignalingRoute::decode_delivery(frame.value_if()->payload);
+      if (!envelope || !coordinator) {
+        record_signaling_error(envelope
+            ? node_error(ErrorCode::cancelled, "relay_coordinator_unavailable")
+            : *envelope.error_if());
+        return;
+      }
+      auto handled = coordinator->handle_message(*envelope.value_if(),
+                                                 SignalingRouteKind::relay);
+      if (!handled) record_signaling_error(*handled.error_if());
       return;
     }
     if (relay_phase == RelayLoginPhase::ready) {
@@ -1261,6 +1315,15 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return;
     }
     relay_client.reset();
+    std::vector<RequestId> relay_attempts;
+    for (const auto& [request_id, attempt] : peer_attempts) {
+      if (attempt.snapshot.signaling_route == SignalingRouteKind::relay) {
+        relay_attempts.push_back(request_id);
+      }
+    }
+    for (const auto request_id : relay_attempts) {
+      fail_peer_attempt(request_id, error);
+    }
     relay_heartbeat_pending = false;
     (void)relay_heartbeat_timer.cancel();
     relay_heartbeat_timer_active = false;
@@ -1408,6 +1471,80 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return Result<void>::failure(*frame.error_if());
     }
     return relay_client->send(*frame.value_if());
+  }
+
+  Result<void> publish_and_query_relay_endpoints() {
+    RelayEndpointRecord record;
+    record.endpoint = RelayEndpointKey{identity.device_id(), endpoint_id};
+    record.application_id = application_id;
+    record.record_generation = ++relay_record_generation;
+    if (crypto_hash_sha256(reinterpret_cast<unsigned char*>(record.manifest_sha256.data()),
+                           reinterpret_cast<const unsigned char*>(application_id.data()),
+                           application_id.size()) != 0) {
+      return Result<void>::failure(
+          node_error(ErrorCode::internal, "relay_manifest_hash_failed"));
+    }
+    record.expires_unix_milliseconds = unix_milliseconds_now() + 60'000U;
+    auto signed_record = sign_relay_endpoint_record(record, identity);
+    if (!signed_record) return signed_record;
+    auto record_bytes = encode_relay_endpoint_record(record);
+    if (!record_bytes) return Result<void>::failure(*record_bytes.error_if());
+    RelayWssEndpointPublish publish;
+    publish.endpoint_record = std::move(*record_bytes.value_if());
+    auto publish_bytes = encode_relay_wss_endpoint_publish(publish);
+    if (!publish_bytes) return Result<void>::failure(*publish_bytes.error_if());
+    return send_relay_control(RelayWssControlType::endpoint_publish,
+                              *publish_bytes.value_if());
+  }
+
+  Result<void> admit_relay_endpoints(const RelayWssEndpointQueryResult& result) {
+    const auto now_wall = unix_milliseconds_now();
+    const auto now_steady = std::chrono::steady_clock::now();
+    for (const auto& publication : result.endpoints) {
+      if (publication.device_id == identity.device_id() &&
+          publication.endpoint_id == endpoint_id) {
+        continue;
+      }
+      if (!publication.endpoint_record || !publication.identity_public_key ||
+          !publication.lease_expires_unix_milliseconds) {
+        return Result<void>::failure(
+            node_error(ErrorCode::authentication, "relay_endpoint_proof_missing"));
+      }
+      auto derived = derive_device_id(*publication.identity_public_key);
+      if (!derived || *derived.value_if() != publication.device_id) {
+        return Result<void>::failure(
+            node_error(ErrorCode::authentication, "relay_endpoint_identity_mismatch"));
+      }
+      auto record = parse_relay_endpoint_record(*publication.endpoint_record);
+      if (!record || record.value_if()->endpoint.device_id != publication.device_id ||
+          record.value_if()->endpoint.endpoint_id != publication.endpoint_id) {
+        return Result<void>::failure(record
+            ? node_error(ErrorCode::authentication, "relay_endpoint_record_mismatch")
+            : *record.error_if());
+      }
+      RelayDeviceRecord device{.device_id = publication.device_id,
+                               .public_key = *publication.identity_public_key,
+                               .tenant = relay.tenant,
+                               .display_name = {},
+                               .enrollment_generation = 1U,
+                               .status = RelayDeviceStatus::active,
+                               .created_unix_milliseconds = 0U,
+                               .updated_unix_milliseconds = 0U};
+      auto verified = validate_relay_endpoint_record(*record.value_if(), device, now_wall);
+      if (!verified) return verified;
+      const auto expires = std::min(record.value_if()->expires_unix_milliseconds,
+                                    *publication.lease_expires_unix_milliseconds);
+      if (expires <= now_wall) continue;
+      const auto lease = std::chrono::milliseconds{static_cast<std::int64_t>(
+          std::min<std::uint64_t>(expires - now_wall, 24U * 60U * 60U * 1000U))};
+      const DeviceEndpointKey key{publication.device_id, publication.endpoint_id};
+      auto stored = directory.upsert_relay(
+          key, *publication.identity_public_key, relay.relay_url,
+          trusted_devices.contains(publication.device_id), lease, now_steady);
+      if (!stored) return stored;
+    }
+    publish_directory();
+    return Result<void>::success();
   }
 
   Result<void> initialize_tls() {
@@ -2101,11 +2238,13 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     const auto entries = directory.snapshot();
     const auto iterator = std::find_if(entries.begin(), entries.end(),
                                        [&](const auto& entry) {
-                                         return entry.key == peer && entry.lan.has_value();
+                                         return entry.key == peer &&
+                                                (entry.lan.has_value() ||
+                                                 entry.relay.has_value());
                                        });
-    return iterator == entries.end()
-               ? std::nullopt
-               : std::optional<IdentityPublicKey>{iterator->lan->identity_public_key};
+    if (iterator == entries.end()) return std::nullopt;
+    return iterator->lan ? iterator->lan->identity_public_key
+                         : iterator->relay->identity_public_key;
   }
 
   void publish_peer_sessions() {
@@ -2121,8 +2260,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   }
 
   Result<void> initialize_session_coordinator() {
-    if (signaling_validator || signaling_handler || !lan.enabled ||
-        lan.connectivity_mode == ConnectivityMode::relay_only) {
+    if (signaling_validator || signaling_handler ||
+        (!lan.enabled && !relay.enabled)) {
       return Result<void>::success();
     }
     coordinator_delegate = std::make_shared<SignalingDelegate>();
@@ -2206,8 +2345,21 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     auto created = SignalingCoordinator::create(config, coordinator_delegate);
     if (!created) return Result<void>::failure(*created.error_if());
     coordinator.emplace(std::move(*created.value_if()));
-    lan_coordinator_route = std::make_unique<LanCoordinatorRoute>(*this);
-    coordinator->attach_route(lan_coordinator_route.get());
+    if (lan.enabled && lan.connectivity_mode != ConnectivityMode::relay_only) {
+      lan_coordinator_route = std::make_unique<LanCoordinatorRoute>(*this);
+      coordinator->attach_route(lan_coordinator_route.get());
+    }
+    if (relay.enabled && lan.connectivity_mode != ConnectivityMode::lan_only) {
+      relay_coordinator_route = std::make_unique<RelaySignalingRoute>(
+          local_key(), [this](std::span<const std::byte> frame) {
+            if (relay_phase != RelayLoginPhase::ready || !relay_client) {
+              return Result<void>::failure(
+                  node_error(ErrorCode::relay_unavailable, "relay_route_not_ready"));
+            }
+            return relay_client->send(frame);
+          });
+      coordinator->attach_route(relay_coordinator_route.get());
+    }
     return Result<void>::success();
   }
 
@@ -2239,7 +2391,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     return true;
   }
 
-  Result<void> begin_peer_attempt(DeviceEndpointKey peer) {
+  Result<void> begin_peer_attempt(
+      DeviceEndpointKey peer,
+      std::optional<SignalingRouteKind> required_route = std::nullopt) {
     if (!coordinator || peers_closed || producers_stopped) {
       return Result<void>::failure(
           node_error(ErrorCode::cancelled, "peer_session_admission_closed"));
@@ -2254,12 +2408,31 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return Result<void>::failure(
           node_error(ErrorCode::authentication, "peer_identity_unavailable"));
     }
-    auto request = coordinator->begin_attempt(peer, SignalingRouteKind::lan);
+    const auto entries = directory.snapshot();
+    const auto endpoint = std::find_if(entries.begin(), entries.end(),
+                                       [&](const auto& entry) { return entry.key == peer; });
+    const bool lan_available = endpoint != entries.end() && endpoint->lan.has_value() &&
+                               lan_coordinator_route != nullptr;
+    const bool relay_available = endpoint != entries.end() && endpoint->relay.has_value() &&
+                                 relay_coordinator_route != nullptr &&
+                                 relay_phase == RelayLoginPhase::ready;
+    auto selected = required_route
+        ? Result<SignalingRouteKind>::success(*required_route)
+        : select_signaling_route(lan.connectivity_mode, lan_available, relay_available);
+    if (!selected) return Result<void>::failure(*selected.error_if());
+    if ((*selected.value_if() == SignalingRouteKind::lan && !lan_available) ||
+        (*selected.value_if() == SignalingRouteKind::relay && !relay_available)) {
+      return Result<void>::failure(node_error(
+          *selected.value_if() == SignalingRouteKind::relay
+              ? ErrorCode::relay_unavailable : ErrorCode::endpoint_offline,
+          "selected_signaling_route_unavailable"));
+    }
+    auto request = coordinator->begin_attempt(peer, *selected.value_if());
     if (!request) return Result<void>::failure(*request.error_if());
     PeerAttempt attempt;
     attempt.snapshot.peer = peer;
     attempt.snapshot.request_id = *request.value_if();
-    attempt.snapshot.signaling_route = SignalingRouteKind::lan;
+    attempt.snapshot.signaling_route = *selected.value_if();
     attempt.snapshot.state = NodePeerSessionState::signaling;
     attempt.snapshot.initiator = true;
     attempt.peer_public_key = *public_key;
@@ -2322,7 +2495,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     }
     transport::webrtc::WebRtcTransportConfig config;
     config.offerer = offerer;
-    config.signaling_path = transport::SignalingPathKind::lan;
+    config.signaling_path = snapshot.route == SignalingRouteKind::relay
+                                ? transport::SignalingPathKind::relay
+                                : transport::SignalingPathKind::lan;
     config.ice_servers.clear();
     config.candidates.allow_server_reflexive = false;
     config.candidates.allow_turn_udp = false;
@@ -2623,7 +2798,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     update_snapshot([&](NodeSnapshot& snapshot) { snapshot.last_error = error; });
   }
 
-  void start_outbound_connection(DeviceEndpointKey peer, bool automatic = false) {
+  void start_outbound_connection(DeviceEndpointKey peer, bool automatic = false,
+                                 SignalingRouteKind route = SignalingRouteKind::lan) {
     if (producers_stopped || peers_closed) {
       record_signaling_error(
           tls_error(ErrorCode::cancelled, "signaling_admission_closed"));
@@ -2632,6 +2808,11 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     if (peer == local_key() || peer.device_id.is_zero() || peer.endpoint_id.is_zero()) {
       record_signaling_error(
           tls_error(ErrorCode::configuration, "signaling_peer_invalid"));
+      return;
+    }
+    if (route == SignalingRouteKind::relay) {
+      auto begun = begin_peer_attempt(peer, route);
+      if (!begun) record_signaling_error(*begun.error_if());
       return;
     }
     const bool already_connecting = std::any_of(
@@ -3139,7 +3320,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
           [this](auto&& value) {
             using Command = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<Command, ConnectCommand>) {
-              start_outbound_connection(value.peer);
+              start_outbound_connection(value.peer, false, value.route);
             } else if constexpr (std::is_same_v<Command, SendCommand>) {
               (void)queue_outbound_message(std::move(value.message));
             } else {
@@ -3483,6 +3664,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   RelayLoginPhase relay_phase{RelayLoginPhase::disabled};
   SteadyTime relay_lease_deadline{};
   std::uint64_t relay_lease_generation{};
+  std::uint64_t relay_record_generation{};
   std::uint64_t relay_heartbeats_sent{};
   std::uint64_t relay_heartbeats_missed{};
   bool relay_heartbeat_pending{false};
@@ -3505,6 +3687,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   std::shared_ptr<SignalingDelegate> coordinator_delegate;
   std::optional<SignalingCoordinator> coordinator;
   std::unique_ptr<LanCoordinatorRoute> lan_coordinator_route;
+  std::unique_ptr<RelaySignalingRoute> relay_coordinator_route;
   std::map<RequestId, PeerAttempt> peer_attempts;
   std::map<DeviceEndpointKey, RequestId> peer_attempt_by_endpoint;
   std::deque<NodePeerSessionSnapshot> finished_peer_sessions;
@@ -3692,7 +3875,33 @@ Result<void> Node::connect_lan(DeviceEndpointKey peer) {
     return Result<void>::failure(
         tls_error(ErrorCode::endpoint_offline, "lan_endpoint_unavailable"));
   }
-  return impl_->submit_signaling_command(Impl::ConnectCommand{peer});
+  return impl_->submit_signaling_command(
+      Impl::ConnectCommand{peer, SignalingRouteKind::lan});
+}
+
+Result<void> Node::connect(DeviceEndpointKey peer) {
+  if (!impl_) {
+    return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  if (peer.device_id.is_zero() || peer.endpoint_id.is_zero() ||
+      peer == impl_->local_key()) {
+    return Result<void>::failure(
+        node_error(ErrorCode::configuration, "signaling_peer_invalid"));
+  }
+  const auto entries = impl_->endpoint_snapshots.load().value;
+  const auto endpoint = std::find_if(entries.begin(), entries.end(),
+                                     [&](const auto& entry) {
+                                       return entry.key == peer;
+                                     });
+  const bool lan_available = endpoint != entries.end() && endpoint->lan.has_value();
+  const auto state = impl_->snapshots.load().value;
+  const bool relay_available = endpoint != entries.end() && endpoint->relay.has_value() &&
+                               state.relay.state == RelayNodeState::ready;
+  auto route = select_signaling_route(state.connectivity_mode, lan_available,
+                                      relay_available);
+  if (!route) return Result<void>::failure(*route.error_if());
+  return impl_->submit_signaling_command(
+      Impl::ConnectCommand{peer, *route.value_if()});
 }
 
 Result<void> Node::send_lan_signaling(LanSignalingMessage message) {
