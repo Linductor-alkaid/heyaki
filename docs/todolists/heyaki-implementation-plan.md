@@ -1,8 +1,8 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：M3B 已关闭；M4 活动中（第一轮：Transport SPI、签名信令协议、replay cache、
->   SignalingCoordinator 与假 transport 已落地，libdatachannel/网络矩阵未开始）
-> - 日期：2026-08-17
+> - 状态：M3B 已关闭；M4 活动中（已推进至第七轮：真实 WebRTC、签名会话与连接
+>   timeline 已落地；Node 自动装配、策略/背压、诊断 UI 与网络矩阵继续实施）
+> - 日期：2026-08-19
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)、[局域网无服务器连接设计](../design/lan-serverless-connectivity.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
 
@@ -784,7 +784,7 @@ Linux GCC/Clang Debug/Release、Windows Debug/Release、ASan/UBSan/TSAN 全部�
 ### 7.3 最小身份会话与诊断 UI
 
 - [ ] `M4-13` 实现 `SESSION_HELLO`，在 fingerprint 已验证的 DataChannel 上绑定签名 signaling transcript、session ID/epoch、endpoint、能力摘要和签名。
-- [ ] `M4-14` 实现最小状态机 `Idle -> ResolvingEndpoint -> Signaling -> Gathering -> Checking -> TransportConnected -> Authenticating -> Closed`，每次转换记录 source/reason/timestamp。
+- [x] `M4-14` 实现最小状态机 `Idle -> ResolvingEndpoint -> Signaling -> Gathering -> Checking -> TransportConnected -> Authenticating -> Closed`，每次转换记录 source/reason/timestamp。
 - [x] `M4-15` 在授权功能尚未实现时，成功认证的测试设备只开放内部 control ping，不开放通用业务通道。
 - [ ] `M4-16` TUI 设备/诊断视图展示 LAN/relay endpoint 来源、建连阶段、signaling/data path、candidate、RTT 和结构化失败。
 - [ ] `M4-17` 增加测试专用策略强制 `lan_only`、`relay_only`、direct、TURN/UDP、TURN/TCP/TLS 或禁止某类 candidate，避免公网偶测。
@@ -965,6 +965,31 @@ fingerprint 的真实 control DataChannel 和 Node/PeerSession 生命周期后�
 
 `M4-13` 仍保持未勾选：当前 coordinator binding 与真实 WebRTC 分别已有集成测试，但 Node 尚未
 在同一 connect attempt 中自动把前者装配给后者；完成该组合路径后再满足条目。
+
+### M4 实施进度（2026-08-19，第7轮）
+
+- 新增内部 `ConnectionAttemptTimeline`：以有界 history 实现 `Idle`、endpoint 解析、
+  signaling、ICE gathering/checking、transport connected、authenticating、authenticated 与
+  `Closed` 的严格合法转换；每项保存 steady timestamp、非空且定长上限的 source/reason。
+  非法回退、metadata 越界与 history 满载分别返回结构化 protocol/configuration/
+  `resource_exhausted` 错误，不覆盖旧记录。
+- `PeerSession` 接收同一 attempt timeline，并把 WebRTC transport state callback、control
+  channel 打开或接收、mutual `SESSION_HELLO` 验证、协议失败与显式关闭记录到连续 history；
+  libdatachannel 可能合并中间 callback 时允许从 signaling/gathering/checking 直接记录实际
+  transport connected 事件，不伪造未观察到的 ICE 阶段。
+- loopback 与真实 host-candidate WebRTC 测试检查完整 `from/to/source/reason/timestamp` 链、
+  authenticated 状态及显式 `Closed` 终态；新增专用 connection-attempt state-machine fuzz
+  harness/corpus，持续验证容量、失败不提交、链连续与 closed 不可回退不变式。真实 WebRTC
+  测试的 ping 与关闭操作通过同一 executor `RuntimeContext` 提交，避免跨 owner context 访问
+  `PeerSession` 状态。
+
+据此完成 `M4-14`。该 timeline 当前由 connect-attempt 调用方持有并传入 `PeerSession`；Node
+尚未自动组装 coordinator binding、WebRTC transport 与该 timeline，TUI 也未消费其诊断，
+因此 `M4-13`、`M4-16` 及 Connectivity MVP 对应退出条件继续保持未勾选。
+
+本机验证：GCC Debug 的全部 M4、public-header boundary、fuzz smoke 与 installed consumer
+定向 9/9 通过；禁异常、ASan、UBSan 的 PeerSession/WebRTC/fuzz 各 3/3 通过；TSAN 在关闭
+ASLR 后 PeerSession 3/3、真实 WebRTC 连续 10 轮 2/2 通过，无数据竞争报告。
 
 ---
 

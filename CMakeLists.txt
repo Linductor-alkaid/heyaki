@@ -175,6 +175,7 @@ endif()
 heyaki_configure_target(heyaki_profile)
 
 add_library(heyaki_client
+  src/client/connection_attempt.cpp
   src/client/peer_session.cpp
   src/client/lan_directory.cpp
   src/client/module.cpp

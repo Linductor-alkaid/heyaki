@@ -433,6 +433,7 @@ heyaki_configure_target(heyaki_fuzz_harness)
 
 add_executable(heyaki_fuzz_smoke
   fuzz/fuzz_smoke.cpp
+  fuzz/connection_state_fuzz.cpp
   fuzz/lan_state_fuzz.cpp
   $<TARGET_OBJECTS:heyaki_fuzz_harness>)
 target_link_libraries(heyaki_fuzz_smoke PRIVATE
@@ -440,6 +441,7 @@ target_link_libraries(heyaki_fuzz_smoke PRIVATE
   heyaki_protocol_lite)
 target_include_directories(heyaki_fuzz_smoke PRIVATE
   "${HEYAKI_TEST_GENERATED_DIR}"
+  "${PROJECT_SOURCE_DIR}/src"
   "${CMAKE_CURRENT_SOURCE_DIR}/fuzz")
 heyaki_configure_target(heyaki_fuzz_smoke)
 heyaki_add_runtime_test(
@@ -495,6 +497,17 @@ if(HEYAKI_BUILD_FUZZERS)
   target_compile_options(heyaki_lan_state_fuzzer PRIVATE -fsanitize=fuzzer)
   target_link_options(heyaki_lan_state_fuzzer PRIVATE -fsanitize=fuzzer)
   heyaki_configure_target(heyaki_lan_state_fuzzer)
+
+  add_executable(heyaki_connection_state_fuzzer
+    fuzz/connection_state_fuzzer_entry.cpp
+    fuzz/connection_state_fuzz.cpp)
+  target_link_libraries(heyaki_connection_state_fuzzer PRIVATE heyaki::client)
+  target_include_directories(heyaki_connection_state_fuzzer PRIVATE
+    "${PROJECT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/fuzz")
+  target_compile_options(heyaki_connection_state_fuzzer PRIVATE -fsanitize=fuzzer)
+  target_link_options(heyaki_connection_state_fuzzer PRIVATE -fsanitize=fuzzer)
+  heyaki_configure_target(heyaki_connection_state_fuzzer)
 endif()
 
 add_test(

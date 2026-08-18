@@ -49,6 +49,39 @@ heyaki::ProtocolHello session_protocol() {
           .required = {static_cast<std::uint64_t>(heyaki::Capability::session)}};
 }
 
+void expect_connected_timeline(const heyaki::ConnectionAttemptTimeline& timeline) {
+  const auto& transitions = timeline.transitions();
+  ASSERT_GE(transitions.size(), 5U);
+  EXPECT_EQ(transitions.front().from, heyaki::ConnectionStage::idle);
+  EXPECT_EQ(transitions.front().to, heyaki::ConnectionStage::resolving_endpoint);
+  EXPECT_EQ(transitions.front().source, "node");
+  EXPECT_EQ(transitions[1].from, heyaki::ConnectionStage::resolving_endpoint);
+  EXPECT_EQ(transitions[1].to, heyaki::ConnectionStage::signaling);
+  EXPECT_EQ(transitions[1].source, "signaling");
+  EXPECT_EQ(transitions[transitions.size() - 2U].to,
+            heyaki::ConnectionStage::authenticating);
+  EXPECT_EQ(transitions[transitions.size() - 2U].source, "peer_session");
+  EXPECT_EQ(transitions.back().from, heyaki::ConnectionStage::authenticating);
+  EXPECT_EQ(transitions.back().to, heyaki::ConnectionStage::authenticated);
+  EXPECT_EQ(transitions.back().source, "peer_session");
+  EXPECT_EQ(transitions.back().reason, "session_hello_verified");
+
+  bool saw_transport_connected = false;
+  for (std::size_t index = 0U; index < transitions.size(); ++index) {
+    const auto& transition = transitions[index];
+    EXPECT_FALSE(transition.source.empty());
+    EXPECT_FALSE(transition.reason.empty());
+    if (transition.to == heyaki::ConnectionStage::transport_connected) {
+      saw_transport_connected = true;
+    }
+    if (index != 0U) {
+      EXPECT_EQ(transitions[index - 1U].to, transition.from);
+      EXPECT_LE(transitions[index - 1U].timestamp, transition.timestamp);
+    }
+  }
+  EXPECT_TRUE(saw_transport_connected);
+}
+
 heyaki::transport::webrtc::RuntimeDispatcher runtime_dispatcher(
     const heyaki::RuntimeContext& context) {
   return [context](std::string_view name,
@@ -90,6 +123,7 @@ TEST(M4WebRtcTransport, HostCandidateDataChannelUsesExecutorDispatcher) {
   executor::comm::PhaseGate left_authenticated("m4-left-authenticated");
   executor::comm::PhaseGate right_authenticated("m4-right-authenticated");
   executor::comm::PhaseGate pong_received("m4-pong-received");
+  executor::comm::PhaseGate sessions_closed("m4-sessions-closed");
 
   std::shared_ptr<WebRtcTransportSession> left;
   std::shared_ptr<WebRtcTransportSession> right;
@@ -153,6 +187,16 @@ TEST(M4WebRtcTransport, HostCandidateDataChannelUsesExecutorDispatcher) {
       {left_endpoint, right_endpoint, session_id, 1U, initiator_nonce, responder_nonce,
        transcript},
       {}, "peer-ufrag", false};
+  auto left_timeline = std::make_shared<heyaki::ConnectionAttemptTimeline>();
+  auto right_timeline = std::make_shared<heyaki::ConnectionAttemptTimeline>();
+  ASSERT_TRUE(left_timeline->transition(heyaki::ConnectionStage::resolving_endpoint,
+                                        "node", "endpoint_selected"));
+  ASSERT_TRUE(left_timeline->transition(heyaki::ConnectionStage::signaling,
+                                        "signaling", "signed_answer_verified"));
+  ASSERT_TRUE(right_timeline->transition(heyaki::ConnectionStage::resolving_endpoint,
+                                         "node", "endpoint_selected"));
+  ASSERT_TRUE(right_timeline->transition(heyaki::ConnectionStage::signaling,
+                                         "signaling", "signed_offer_verified"));
   auto left_peer = heyaki::PeerSession::create_verified(
       {left, left_binding, left_identity.value_if(), right_identity.value_if()->public_key(),
        session_protocol(), 1'060'000U, 1'000'000U,
@@ -161,7 +205,8 @@ TEST(M4WebRtcTransport, HostCandidateDataChannelUsesExecutorDispatcher) {
            (void)left_authenticated.advance_to(1U);
          }
          if (value.pongs_received != 0U) (void)pong_received.advance_to(1U);
-       }});
+       },
+       left_timeline, {}});
   auto right_peer = heyaki::PeerSession::create_verified(
       {right, right_binding, right_identity.value_if(), left_identity.value_if()->public_key(),
        session_protocol(), 1'060'000U, 1'000'000U,
@@ -169,17 +214,26 @@ TEST(M4WebRtcTransport, HostCandidateDataChannelUsesExecutorDispatcher) {
          if (value.state == heyaki::PeerSessionState::authenticated) {
            (void)right_authenticated.advance_to(1U);
          }
-       }});
+       },
+       right_timeline, {}});
   ASSERT_TRUE(left_peer);
   ASSERT_TRUE(right_peer);
-  ASSERT_TRUE((*right_peer.value_if())->start());
-  ASSERT_TRUE((*left_peer.value_if())->start());
+  auto left_session = *left_peer.value_if();
+  auto right_session = *right_peer.value_if();
+  ASSERT_TRUE(right_session->start());
+  ASSERT_TRUE(left_session->start());
   const auto started = left->start();
   ASSERT_TRUE(started) << started.error_if()->safe_detail();
   ASSERT_TRUE(left_authenticated.wait_for(1U, 10s));
   ASSERT_TRUE(right_authenticated.wait_for(1U, 10s));
-  ASSERT_TRUE((*left_peer.value_if())->send_ping(42U));
+  auto ping_dispatched = runtime_dispatcher(*context.value_if())(
+      "m4.peer.send-ping", [left_session] { return left_session->send_ping(42U); });
+  ASSERT_TRUE(ping_dispatched) << ping_dispatched.error_if()->safe_detail();
   ASSERT_TRUE(pong_received.wait_for(1U, 5s));
+  EXPECT_EQ(left_timeline->stage(), heyaki::ConnectionStage::authenticated);
+  EXPECT_EQ(right_timeline->stage(), heyaki::ConnectionStage::authenticated);
+  expect_connected_timeline(*left_timeline);
+  expect_connected_timeline(*right_timeline);
 
   EXPECT_EQ(left->snapshot().path.data_path, DataPathKind::direct_host);
   EXPECT_EQ(right->snapshot().path.data_path, DataPathKind::direct_host);
@@ -187,8 +241,19 @@ TEST(M4WebRtcTransport, HostCandidateDataChannelUsesExecutorDispatcher) {
   EXPECT_EQ(left->diagnostics().callbacks_rejected, 0U);
   EXPECT_EQ(right->diagnostics().callbacks_rejected, 0U);
 
-  left->close(heyaki::transport::CloseReason::local_shutdown);
-  right->close(heyaki::transport::CloseReason::local_shutdown);
+  auto close_dispatched = runtime_dispatcher(*context.value_if())(
+      "m4.peer.close", [left_session, right_session, &sessions_closed] {
+        left_session->close(heyaki::transport::CloseReason::local_shutdown);
+        right_session->close(heyaki::transport::CloseReason::local_shutdown);
+        (void)sessions_closed.advance_to(1U);
+        return heyaki::Result<void>::success();
+      });
+  ASSERT_TRUE(close_dispatched) << close_dispatched.error_if()->safe_detail();
+  ASSERT_TRUE(sessions_closed.wait_for(1U, 5s));
+  EXPECT_EQ(left_timeline->stage(), heyaki::ConnectionStage::closed);
+  EXPECT_EQ(right_timeline->stage(), heyaki::ConnectionStage::closed);
+  EXPECT_EQ(left_timeline->transitions().back().reason, "local_shutdown");
+  EXPECT_EQ(right_timeline->transitions().back().reason, "local_shutdown");
   EXPECT_EQ(left->snapshot().state, TransportState::closed);
   EXPECT_EQ(right->snapshot().state, TransportState::closed);
   const auto shutdown = runtime.value_if()->shutdown();

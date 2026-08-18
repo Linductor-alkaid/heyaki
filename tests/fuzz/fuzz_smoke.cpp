@@ -345,6 +345,29 @@ int main(int argc, char** argv) {
     }
   }
 
+  const std::vector<std::vector<std::byte>> connection_state_seeds{
+      {std::byte{10U}, std::byte{1U}, std::byte{4U}, std::byte{8U}, std::byte{1U},
+       std::byte{2U}, std::byte{9U}, std::byte{15U}, std::byte{1U}, std::byte{5U},
+       std::byte{9U}, std::byte{12U}, std::byte{1U}, std::byte{3U}, std::byte{9U},
+       std::byte{12U}, std::byte{1U}, std::byte{4U}, std::byte{12U}, std::byte{18U},
+       std::byte{1U}, std::byte{5U}, std::byte{12U}, std::byte{14U}, std::byte{1U},
+       std::byte{6U}, std::byte{12U}, std::byte{11U}, std::byte{1U}, std::byte{7U},
+       std::byte{12U}, std::byte{9U}, std::byte{1U}, std::byte{8U}, std::byte{12U},
+       std::byte{7U}},
+      {std::byte{2U}, std::byte{1U}, std::byte{65U}, std::byte{2U}, std::byte{0U},
+       std::byte{0U}, std::byte{1U}, std::byte{129U}, std::byte{0U}, std::byte{8U},
+       std::byte{1U}, std::byte{1U}, std::byte{0U}},
+  };
+  for (std::size_t index = 0U; index < connection_state_seeds.size(); ++index) {
+    heyaki::fuzz::connection_attempt_state_machine(connection_state_seeds[index]);
+    const auto name = "connection-state-" + std::to_string(index);
+    if (!write_seed(corpus_root / "connection-attempt-state", name,
+                    connection_state_seeds[index])) {
+      std::cerr << "cannot write connection state seed " << name << '\n';
+      return 1;
+    }
+  }
+
   const std::vector<std::vector<std::byte>> lan_state_seeds{
       {std::byte{1U}, std::byte{1U}, std::byte{1U}, std::byte{1U},
        std::byte{1U}, std::byte{0U}, std::byte{1U}, std::byte{1U},

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "connection_attempt.hpp"
 #include "signaling_coordinator.hpp"
 #include "../transport/transport_session.hpp"
 
@@ -33,6 +34,8 @@ struct PeerSessionConfig {
   std::uint64_t now_unix_milliseconds{};
   bool initiator{false};
   std::function<void(const PeerSessionDiagnostics&)> observer;
+  std::shared_ptr<ConnectionAttemptTimeline> timeline;
+  std::function<std::chrono::steady_clock::time_point()> clock;
 };
 
 struct VerifiedPeerSessionConfig {
@@ -44,6 +47,8 @@ struct VerifiedPeerSessionConfig {
   std::uint64_t expires_unix_milliseconds{};
   std::uint64_t now_unix_milliseconds{};
   std::function<void(const PeerSessionDiagnostics&)> observer;
+  std::shared_ptr<ConnectionAttemptTimeline> timeline;
+  std::function<std::chrono::steady_clock::time_point()> clock;
 };
 
 struct PeerSessionDiagnostics {
@@ -82,6 +87,8 @@ class PeerSession final : public std::enable_shared_from_this<PeerSession> {
   [[nodiscard]] Result<void> send_hello(transport::TransportChannel& channel);
   void fail(Error error);
   void notify() const;
+  [[nodiscard]] Result<void> record(ConnectionStage stage, std::string_view source,
+                                    std::string_view reason);
 
   PeerSessionConfig config_;
   std::unique_ptr<SessionHelloAdmission> admission_;
