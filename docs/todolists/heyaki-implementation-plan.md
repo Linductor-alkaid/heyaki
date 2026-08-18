@@ -785,7 +785,7 @@ Linux GCC/Clang Debug/Release、Windows Debug/Release、ASan/UBSan/TSAN 全部�
 
 - [ ] `M4-13` 实现 `SESSION_HELLO`，在 fingerprint 已验证的 DataChannel 上绑定签名 signaling transcript、session ID/epoch、endpoint、能力摘要和签名。
 - [ ] `M4-14` 实现最小状态机 `Idle -> ResolvingEndpoint -> Signaling -> Gathering -> Checking -> TransportConnected -> Authenticating -> Closed`，每次转换记录 source/reason/timestamp。
-- [ ] `M4-15` 在授权功能尚未实现时，成功认证的测试设备只开放内部 control ping，不开放通用业务通道。
+- [x] `M4-15` 在授权功能尚未实现时，成功认证的测试设备只开放内部 control ping，不开放通用业务通道。
 - [ ] `M4-16` TUI 设备/诊断视图展示 LAN/relay endpoint 来源、建连阶段、signaling/data path、candidate、RTT 和结构化失败。
 - [ ] `M4-17` 增加测试专用策略强制 `lan_only`、`relay_only`、direct、TURN/UDP、TURN/TCP/TLS 或禁止某类 candidate，避免公网偶测。
 
@@ -938,6 +938,19 @@ session epoch、`SESSION_HELLO` 与剩余网络矩阵继续推进。
 standalone/boundary 均通过；真实 WebRTC e2e 与 installed consumer 在前一 scoped CI 修复
 提交上复跑通过。`M4-04` 与 `M4-13` 仍保留未勾选，等待下一轮把 admission 绑定到已验证
 fingerprint 的真实 control DataChannel 和 Node/PeerSession 生命周期后再满足条目。
+
+### M4 实施进度（2026-08-18，第5轮）
+
+新增内部 `PeerSession` 会话层：它接收已验证的 session binding，拥有 control channel
+生命周期，在 transport connected 后发送带 wire frame 的签名 `SESSION_HELLO`；响应方只在
+收到并成功 admission 后回发 hello。冲突签名、epoch、transcript、endpoint 或 capability
+会关闭 transport。认证前不开放业务通道，认证后仅允许受限 control `PING/PONG`，并拒绝
+重复 pending ping。loopback 测试覆盖双方 mutual hello、认证状态和 control ping/pong，
+据此完成 `M4-15`。
+
+该轮仍不勾选 `M4-13`：真实 WebRTC 测试尚未把 DTLS fingerprint 已验证的 signaling binding
+传入 `PeerSession`，Node 的 LAN/relay coordinator 也尚未自动创建该层；下一轮继续补齐这两个
+集成门禁。
 
 ---
 

@@ -301,6 +301,19 @@ heyaki_add_runtime_test(
   heyaki_m4_session_hello heyaki_m4_session_hello_tests
   "unit;session;security;protocol")
 
+add_executable(heyaki_m4_peer_session_tests unit/m4_peer_session_test.cpp)
+target_link_libraries(heyaki_m4_peer_session_tests PRIVATE
+  heyaki::client
+  heyaki::core
+  GTest::gtest_main)
+target_include_directories(heyaki_m4_peer_session_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/client")
+heyaki_configure_target(heyaki_m4_peer_session_tests)
+heyaki_add_runtime_test(
+  heyaki_m4_peer_session heyaki_m4_peer_session_tests
+  "unit;session;security;protocol")
+
 add_executable(heyaki_m4_webrtc_transport_tests unit/m4_webrtc_transport_test.cpp)
 target_link_libraries(heyaki_m4_webrtc_transport_tests PRIVATE
   heyaki::client
