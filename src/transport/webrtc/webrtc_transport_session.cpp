@@ -11,6 +11,7 @@
 #include <rtc/peerconnection.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <limits>
 #include <map>
@@ -186,6 +187,8 @@ class WebRtcTransportSession::Impl
       try {
         const auto* bytes = reinterpret_cast<const rtc::byte*>(payload.data());
         (void)channel_->send(bytes, payload.size());
+        owner->buffered_amounts_[static_cast<std::size_t>(kind_)].store(
+            channel_->bufferedAmount(), std::memory_order_release);
       } catch (...) {
         return Result<void>::failure(transport_error(ErrorCode::transport,
                                                      "channel_send_failed"));
@@ -196,7 +199,12 @@ class WebRtcTransportSession::Impl
 
     std::size_t buffered_amount() const noexcept override {
       try {
-        return channel_->bufferedAmount();
+        const auto buffered = channel_->bufferedAmount();
+        if (auto owner = owner_.lock()) {
+          owner->buffered_amounts_[static_cast<std::size_t>(kind_)].store(
+              buffered, std::memory_order_release);
+        }
+        return buffered;
       } catch (...) {
         return 0U;
       }
@@ -204,6 +212,10 @@ class WebRtcTransportSession::Impl
 
     void close(CloseReason /*reason*/) override {
       if (!closed_.exchange(true, std::memory_order_acq_rel)) {
+        if (auto owner = owner_.lock()) {
+          owner->buffered_amounts_[static_cast<std::size_t>(kind_)].store(
+              0U, std::memory_order_release);
+        }
         channel_->resetCallbacks();
         channel_->close();
       }
@@ -211,6 +223,10 @@ class WebRtcTransportSession::Impl
 
     void buffered_low() noexcept {
       queued_messages_.store(0U, std::memory_order_release);
+      if (auto owner = owner_.lock()) {
+        owner->buffered_amounts_[static_cast<std::size_t>(kind_)].store(
+            0U, std::memory_order_release);
+      }
     }
 
     std::shared_ptr<rtc::DataChannel> rtc_channel() const { return channel_; }
@@ -535,16 +551,22 @@ class WebRtcTransportSession::Impl
     path_.rtt = peer_->rtt().value_or(std::chrono::milliseconds{});
   }
 
-  TransportSessionSnapshot snapshot() const noexcept { return snapshots_.load().value; }
+  TransportSessionSnapshot snapshot() const noexcept {
+    auto value = snapshots_.load().value;
+    value.buffered_amount = 0U;
+    for (const auto& buffered : buffered_amounts_) {
+      value.buffered_amount += buffered.load(std::memory_order_acquire);
+    }
+    return value;
+  }
 
   void update_snapshot(TransportState state, std::optional<Error> error = std::nullopt) {
     TransportSessionSnapshot next;
     next.state = state;
     next.path = path_;
     next.error = std::move(error);
-    for (const auto& [kind, channel] : channels_) {
-      (void)kind;
-      next.buffered_amount += channel->buffered_amount();
+    for (const auto& buffered : buffered_amounts_) {
+      next.buffered_amount += buffered.load(std::memory_order_acquire);
     }
     snapshots_.publish(next);
     if (state_handler_) state_handler_(next);
@@ -614,6 +636,7 @@ class WebRtcTransportSession::Impl
   std::atomic<std::uint64_t> channels_opened_{0U};
   std::atomic<std::uint64_t> channels_rejected_{0U};
   std::atomic<std::uint64_t> ice_restarts_{0U};
+  std::array<std::atomic<std::size_t>, 7U> buffered_amounts_{};
 };
 
 Result<std::shared_ptr<WebRtcTransportSession>> WebRtcTransportSession::create(
@@ -732,25 +755,7 @@ WebRtcTransportDiagnostics WebRtcTransportSession::diagnostics() const noexcept 
 void WebRtcTransportSession::async_open_channel(ChannelKind kind, ChannelOptions options,
                                                 OpenCompletion completion) {
   if (!impl_ || !completion) return;
-  auto weak = std::weak_ptr<Impl>{impl_};
-  auto rejected_completion = completion;
-  auto dispatched = impl_->dispatcher_(
-      "webrtc-open-channel",
-      [weak, kind, options = std::move(options),
-       completion = std::move(completion)]() mutable {
-        if (auto self = weak.lock()) {
-          self->open_channel(kind, std::move(options), std::move(completion));
-        } else {
-          completion(Result<TransportChannel*>::failure(
-              transport_error(ErrorCode::cancelled, "transport_closed")));
-        }
-        return Result<void>::success();
-      });
-  if (!dispatched) {
-    rejected_completion(Result<TransportChannel*>::failure(
-        transport_error(ErrorCode::resource_exhausted,
-                        "channel_dispatch_rejected")));
-  }
+  impl_->open_channel(kind, std::move(options), std::move(completion));
 }
 
 void WebRtcTransportSession::set_message_handler(MessageHandler handler) {
