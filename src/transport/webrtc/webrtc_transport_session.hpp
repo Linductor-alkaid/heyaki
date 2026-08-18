@@ -65,6 +65,8 @@ struct WebRtcTransportDiagnostics {
   std::uint64_t callback_dispatch_rejected{};
   std::uint64_t messages_rejected{};
   std::uint64_t sends_would_block{};
+  std::uint64_t backpressure_pauses{};
+  std::uint64_t writable_resumes{};
   std::uint64_t channels_opened{};
   std::uint64_t channels_rejected{};
   std::uint64_t ice_restarts{};

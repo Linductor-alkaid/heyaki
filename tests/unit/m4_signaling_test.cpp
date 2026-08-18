@@ -1065,6 +1065,9 @@ TEST(M4TransportSpi, LoopbackChannelBoundedSendAndClose) {
         left_channel = *result.value_if();
       });
   ASSERT_NE(left_channel, nullptr);
+  int writable_events = 0;
+  left_channel->set_writable_handler([&] { ++writable_events; });
+  EXPECT_TRUE(left_channel->writable());
   pair.right().async_open_channel(
       heyaki::transport::ChannelKind::control, options,
       [](heyaki::Result<heyaki::transport::TransportChannel*>) {});
@@ -1077,6 +1080,7 @@ TEST(M4TransportSpi, LoopbackChannelBoundedSendAndClose) {
   const auto blocked = left_channel->send(message);
   ASSERT_FALSE(blocked.has_value());
   EXPECT_EQ(blocked.error_if()->code(), heyaki::ErrorCode::would_block);
+  EXPECT_FALSE(left_channel->writable());
   // Messages above max_message_bytes are rejected outright.
   const auto too_large = left_channel->send(std::vector<std::byte>(33U, std::byte{'y'}));
   ASSERT_FALSE(too_large.has_value());
@@ -1087,6 +1091,8 @@ TEST(M4TransportSpi, LoopbackChannelBoundedSendAndClose) {
   EXPECT_EQ(received, (std::vector<std::string>{std::string(16U, 'x'),
                                                 std::string(16U, 'x')}));
   EXPECT_EQ(left_channel->buffered_amount(), 0U);
+  EXPECT_TRUE(left_channel->writable());
+  EXPECT_EQ(writable_events, 1);
 
   heyaki::transport::PathInfo path;
   path.signaling_path = heyaki::transport::SignalingPathKind::lan;
@@ -1101,6 +1107,7 @@ TEST(M4TransportSpi, LoopbackChannelBoundedSendAndClose) {
   EXPECT_EQ(pair.left().last_close_reason(),
             heyaki::transport::CloseReason::local_shutdown);
   EXPECT_EQ(pair.left().snapshot().state, heyaki::transport::TransportState::closed);
+  EXPECT_FALSE(left_channel->writable());
   const auto after_close = left_channel->send(message);
   ASSERT_FALSE(after_close.has_value());
   EXPECT_EQ(after_close.error_if()->code(), heyaki::ErrorCode::transport);

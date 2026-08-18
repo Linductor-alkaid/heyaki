@@ -7,8 +7,9 @@
 
 #include <gtest/gtest.h>
 
-#include <chrono>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <memory>
 #include <span>
 #include <string>
@@ -260,6 +261,129 @@ TEST(M4WebRtcTransport, HostCandidateDataChannelUsesExecutorDispatcher) {
   EXPECT_EQ(right_timeline->transitions().back().reason, "local_shutdown");
   EXPECT_EQ(left->snapshot().state, TransportState::closed);
   EXPECT_EQ(right->snapshot().state, TransportState::closed);
+  const auto shutdown = runtime.value_if()->shutdown();
+  EXPECT_EQ(shutdown.final_phase, heyaki::RuntimePhase::stopped);
+}
+
+TEST(M4WebRtcTransport, PropagatesHighAndLowWaterBackpressure) {
+  auto runtime = heyaki::Runtime::create_owned();
+  ASSERT_TRUE(runtime) << runtime.error_if()->safe_detail();
+  auto context = runtime.value_if()->create_context(
+      heyaki::RuntimeContextKind::peer_session, "m4-webrtc-backpressure");
+  ASSERT_TRUE(context) << context.error_if()->safe_detail();
+
+  executor::comm::PhaseGate left_connected("m4-backpressure-left-connected");
+  executor::comm::PhaseGate right_connected("m4-backpressure-right-connected");
+  executor::comm::PhaseGate send_paused("m4-backpressure-paused");
+  executor::comm::PhaseGate send_resumed("m4-backpressure-resumed");
+  executor::comm::PhaseGate retry_sent("m4-backpressure-retry");
+
+  std::shared_ptr<WebRtcTransportSession> left;
+  std::shared_ptr<WebRtcTransportSession> right;
+  WebRtcTransportConfig left_config;
+  left_config.offerer = true;
+  left_config.ice_servers.clear();
+  left_config.candidates.allow_server_reflexive = false;
+  left_config.candidates.allow_turn_udp = false;
+  left_config.maximum_message_bytes = 1024U * 1024U;
+  left_config.buffered_amount_high_water = 256U * 1024U;
+  left_config.buffered_amount_low_water = 64U * 1024U;
+  WebRtcTransportConfig right_config = left_config;
+  right_config.offerer = false;
+
+  heyaki::transport::webrtc::WebRtcSignalingHandler left_signaling;
+  left_signaling.on_local_description =
+      [&](std::vector<std::byte> sdp, std::string type,
+          heyaki::DtlsFingerprint) {
+        ASSERT_TRUE(right);
+        EXPECT_TRUE(right->set_remote_description(sdp, type).has_value());
+      };
+  left_signaling.on_local_candidate = [&](std::vector<std::byte> candidate) {
+    ASSERT_TRUE(right);
+    EXPECT_TRUE(right->add_remote_candidate(candidate).has_value());
+  };
+  heyaki::transport::webrtc::WebRtcSignalingHandler right_signaling;
+  right_signaling.on_local_description =
+      [&](std::vector<std::byte> sdp, std::string type,
+          heyaki::DtlsFingerprint) {
+        ASSERT_TRUE(left);
+        EXPECT_TRUE(left->set_remote_description(sdp, type).has_value());
+      };
+  right_signaling.on_local_candidate = [&](std::vector<std::byte> candidate) {
+    ASSERT_TRUE(left);
+    EXPECT_TRUE(left->add_remote_candidate(candidate).has_value());
+  };
+
+  auto created_left = WebRtcTransportSession::create(
+      left_config, runtime_dispatcher(*context.value_if()), std::move(left_signaling));
+  ASSERT_TRUE(created_left) << created_left.error_if()->safe_detail();
+  left = *created_left.value_if();
+  auto created_right = WebRtcTransportSession::create(
+      right_config, runtime_dispatcher(*context.value_if()), std::move(right_signaling));
+  ASSERT_TRUE(created_right) << created_right.error_if()->safe_detail();
+  right = *created_right.value_if();
+
+  left->set_state_handler([&](const heyaki::transport::TransportSessionSnapshot& snapshot) {
+    if (snapshot.state == TransportState::connected) (void)left_connected.advance_to(1U);
+  });
+  right->set_state_handler([&](const heyaki::transport::TransportSessionSnapshot& snapshot) {
+    if (snapshot.state == TransportState::connected) (void)right_connected.advance_to(1U);
+  });
+  right->set_message_handler(
+      [](TransportChannel&, std::vector<std::byte>) {});
+  ChannelOptions options;
+  options.send_queue_bytes = 256U * 1024U;
+  options.max_message_bytes = 256U * 1024U;
+  ASSERT_TRUE(left->prepare_channel(ChannelKind::file, options));
+  const auto started = left->start();
+  ASSERT_TRUE(started) << started.error_if()->safe_detail();
+  ASSERT_TRUE(left_connected.wait_for(1U, 10s));
+  ASSERT_TRUE(right_connected.wait_for(1U, 10s));
+
+  std::atomic<TransportChannel*> channel{nullptr};
+  std::atomic<heyaki::ErrorCode> blocked_code{heyaki::ErrorCode::internal};
+  left->async_open_channel(
+      ChannelKind::file, options,
+      [&](heyaki::Result<TransportChannel*> opened) {
+        ASSERT_TRUE(opened) << opened.error_if()->safe_detail();
+        auto* current = *opened.value_if();
+        channel.store(current, std::memory_order_release);
+        current->set_writable_handler([&] { (void)send_resumed.advance_to(1U); });
+        const auto payload =
+            std::vector<std::byte>(256U * 1024U, std::byte{0x5aU});
+        for (std::size_t attempt = 0U; attempt < 64U; ++attempt) {
+          auto sent = current->send(payload);
+          if (!sent) {
+            blocked_code.store(sent.error_if()->code(), std::memory_order_release);
+            (void)send_paused.advance_to(1U);
+            return;
+          }
+        }
+      });
+
+  ASSERT_TRUE(send_paused.wait_for(1U, 10s));
+  ASSERT_EQ(blocked_code.load(std::memory_order_acquire), heyaki::ErrorCode::would_block);
+  ASSERT_NE(channel.load(std::memory_order_acquire), nullptr);
+  EXPECT_FALSE(channel.load(std::memory_order_acquire)->writable());
+  ASSERT_TRUE(send_resumed.wait_for(1U, 10s));
+  EXPECT_TRUE(channel.load(std::memory_order_acquire)->writable());
+
+  auto retried = runtime_dispatcher(*context.value_if())(
+      "m4.backpressure.retry", [&] {
+        const auto payload = std::vector<std::byte>(512U, std::byte{0x6bU});
+        auto sent = channel.load(std::memory_order_acquire)->send(payload);
+        if (!sent) return sent;
+        (void)retry_sent.advance_to(1U);
+        return heyaki::Result<void>::success();
+      });
+  ASSERT_TRUE(retried) << retried.error_if()->safe_detail();
+  ASSERT_TRUE(retry_sent.wait_for(1U, 5s));
+  EXPECT_GE(left->diagnostics().sends_would_block, 1U);
+  EXPECT_GE(left->diagnostics().backpressure_pauses, 1U);
+  EXPECT_GE(left->diagnostics().writable_resumes, 1U);
+
+  left->close(heyaki::transport::CloseReason::local_shutdown);
+  right->close(heyaki::transport::CloseReason::local_shutdown);
   const auto shutdown = runtime.value_if()->shutdown();
   EXPECT_EQ(shutdown.final_phase, heyaki::RuntimePhase::stopped);
 }

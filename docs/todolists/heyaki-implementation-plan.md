@@ -779,7 +779,7 @@ Linux GCC/Clang Debug/Release、Windows Debug/Release、ASan/UBSan/TSAN 全部�
 - [x] `M4-09` 实现 `path_info()`、signaling route、selected candidate/data path、RTT、buffered amount、ICE state 和 restart 事件观测。
 - [ ] `M4-10` 实现网络接口变化的 presence 刷新与 ICE restart；association 或 signaling route 丢失则建立新物理 session，不伪装为无损迁移。
 - [x] `M4-11` 映射 libdatachannel callback 到 executor-managed 有界通道；满载、关闭和投递失败都有错误/统计。
-- [ ] `M4-12` 基于 `bufferedAmount` high/low water callback 暂停/恢复发送，验证底层背压能传回 API。
+- [x] `M4-12` 基于 `bufferedAmount` high/low water callback 暂停/恢复发送，验证底层背压能传回 API。
 
 ### 7.3 最小身份会话与诊断 UI
 
@@ -1057,6 +1057,21 @@ relay 72/72、真实 Node relay-only session 通过；`git diff --check` 通过�
 
 据此完成 `M4-04`。`M4-07`、`M4-10`、`M4-12`、`M4-16`、`M4-17` 与 Connectivity MVP
 网络矩阵退出条件继续保持未勾选，M4 goal 继续 active。
+
+### M4 实施进度（2026-08-19，第11轮）
+
+- 内部 `TransportChannel` SPI 新增 `writable()` 与 writable handler。WebRTC channel 达到
+  `bufferedAmount` high-water 后进入明确 paused 状态，paused 期间发送稳定返回
+  `would_block`；libdatachannel 的 low-water callback 仍先进入 executor-managed 有界事件
+  channel，再在 owning runtime context 清除暂停并通知上层，不引入轮询、私有线程或额外队列。
+- `WebRtcTransportDiagnostics` 新增 backpressure pause/writable resume 计数；channel 关闭会
+  清理 callbacks 且不会发出伪恢复通知。loopback Transport SPI fake 实现相同暂停/恢复契约，
+  单元测试固定 `would_block -> non-writable -> peer drain -> one writable notification` 顺序。
+- 新增真实 DataChannel 压力测试：256 KiB SCTP 分片触发实际 buffered backlog，验证 high-water
+  拒绝、low-water executor callback、恢复可写和重试成功；定向连续运行 5 次通过。
+
+据此完成 `M4-12`。`M4-07` 仍受 pinned libjuice 不支持 TURN/TCP/TLS 的已记录能力边界阻塞；
+`M4-10`、`M4-16`、`M4-17` 与 Connectivity MVP 网络矩阵继续推进，M4 goal 保持 active。
 
 ---
 

@@ -119,12 +119,18 @@ struct TransportSessionSnapshot {
 // without limit.
 class TransportChannel {
  public:
+  using WritableHandler = std::function<void()>;
+
   virtual ~TransportChannel() = default;
 
   [[nodiscard]] virtual ChannelKind kind() const noexcept = 0;
   [[nodiscard]] virtual const ChannelOptions& options() const noexcept = 0;
   [[nodiscard]] virtual Result<void> send(std::span<const std::byte> payload) = 0;
   [[nodiscard]] virtual std::size_t buffered_amount() const noexcept = 0;
+  [[nodiscard]] virtual bool writable() const noexcept = 0;
+  // Called once when a channel that returned would_block crosses back below its
+  // low-water mark. Implementations dispatch the callback on their owning runtime context.
+  virtual void set_writable_handler(WritableHandler handler) = 0;
   virtual void close(CloseReason reason) = 0;
 };
 

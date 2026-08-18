@@ -84,11 +84,13 @@ class LoopbackChannel : public transport::TransportChannel {
       return Result<void>::failure(Error{ErrorCode::protocol, "loopback",
                                          "message_too_large"});
     }
-    if (pending_bytes_ + payload.size() > options_.send_queue_bytes) {
+    if (paused_ || pending_bytes_ + payload.size() > options_.send_queue_bytes) {
+      paused_ = true;
       return Result<void>::failure(Error{ErrorCode::would_block, "loopback",
                                          "send_queue_full"});
     }
     pending_bytes_ += payload.size();
+    if (pending_bytes_ >= options_.send_queue_bytes) paused_ = true;
     peer_inbound_->push_back(
         PendingMessage{kind_, std::vector<std::byte>{payload.begin(), payload.end()},
                        this});
@@ -97,6 +99,14 @@ class LoopbackChannel : public transport::TransportChannel {
 
   [[nodiscard]] std::size_t buffered_amount() const noexcept override {
     return pending_bytes_;
+  }
+
+  [[nodiscard]] bool writable() const noexcept override {
+    return !closed_ && !paused_;
+  }
+
+  void set_writable_handler(WritableHandler handler) override {
+    writable_handler_ = std::move(handler);
   }
 
   void close(transport::CloseReason reason) override {
@@ -113,6 +123,10 @@ class LoopbackChannel : public transport::TransportChannel {
 
   void note_delivered(std::size_t bytes) {
     pending_bytes_ -= std::min(pending_bytes_, bytes);
+    if (paused_ && pending_bytes_ <= options_.send_queue_bytes / 2U) {
+      paused_ = false;
+      if (writable_handler_) writable_handler_();
+    }
   }
   void attach_peer_inbound(std::deque<PendingMessage>* inbound) { peer_inbound_ = inbound; }
 
@@ -121,8 +135,10 @@ class LoopbackChannel : public transport::TransportChannel {
   transport::ChannelOptions options_;
   std::deque<PendingMessage>* peer_inbound_{nullptr};
   std::size_t pending_bytes_{};
+  bool paused_{false};
   bool closed_{false};
   std::optional<transport::CloseReason> close_reason_;
+  WritableHandler writable_handler_;
 };
 
 class LoopbackTransportPair;

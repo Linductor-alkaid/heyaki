@@ -205,15 +205,26 @@ class WebRtcTransportSession::Impl
         return Result<void>::failure(transport_error(ErrorCode::protocol,
                                                      "message_size_invalid"));
       }
+      if (paused_.load(std::memory_order_acquire)) {
+        ++owner->sends_would_block_;
+        return Result<void>::failure(transport_error(ErrorCode::would_block,
+                                                     "channel_paused"));
+      }
       const auto buffered = channel_->bufferedAmount();
       if (buffered == 0U) {
         queued_messages_.store(0U, std::memory_order_release);
       }
       const auto byte_limit =
           std::min(options_.send_queue_bytes, owner->config_.buffered_amount_high_water);
+      const auto low_water = std::min(owner->config_.buffered_amount_low_water,
+                                      options_.send_queue_bytes / 2U);
       const auto queued_messages = queued_messages_.load(std::memory_order_relaxed);
       if (buffered > byte_limit || payload.size() > byte_limit - buffered ||
           queued_messages >= owner->config_.channel_message_capacity) {
+        if (buffered > low_water &&
+            !paused_.exchange(true, std::memory_order_acq_rel)) {
+          ++owner->backpressure_pauses_;
+        }
         ++owner->sends_would_block_;
         return Result<void>::failure(transport_error(ErrorCode::would_block,
                                                      "channel_high_water"));
@@ -221,8 +232,13 @@ class WebRtcTransportSession::Impl
       try {
         const auto* bytes = reinterpret_cast<const rtc::byte*>(payload.data());
         (void)channel_->send(bytes, payload.size());
+        const auto after_send = channel_->bufferedAmount();
         owner->buffered_amounts_[static_cast<std::size_t>(kind_)].store(
-            channel_->bufferedAmount(), std::memory_order_release);
+            after_send, std::memory_order_release);
+        if (after_send >= byte_limit &&
+            !paused_.exchange(true, std::memory_order_acq_rel)) {
+          ++owner->backpressure_pauses_;
+        }
       } catch (...) {
         return Result<void>::failure(transport_error(ErrorCode::transport,
                                                      "channel_send_failed"));
@@ -244,6 +260,15 @@ class WebRtcTransportSession::Impl
       }
     }
 
+    bool writable() const noexcept override {
+      return !closed_.load(std::memory_order_acquire) &&
+             !paused_.load(std::memory_order_acquire);
+    }
+
+    void set_writable_handler(WritableHandler handler) override {
+      writable_handler_ = std::move(handler);
+    }
+
     void close(CloseReason /*reason*/) override {
       if (!closed_.exchange(true, std::memory_order_acq_rel)) {
         if (auto owner = owner_.lock()) {
@@ -255,11 +280,22 @@ class WebRtcTransportSession::Impl
       }
     }
 
-    void buffered_low() noexcept {
+    void buffered_low() {
       queued_messages_.store(0U, std::memory_order_release);
       if (auto owner = owner_.lock()) {
+        std::size_t buffered = 0U;
+        try {
+          buffered = channel_->bufferedAmount();
+        } catch (...) {
+          // A closing channel is treated as drained; closed_ suppresses writable delivery.
+        }
         owner->buffered_amounts_[static_cast<std::size_t>(kind_)].store(
-            0U, std::memory_order_release);
+            buffered, std::memory_order_release);
+        if (!closed_.load(std::memory_order_acquire) &&
+            paused_.exchange(false, std::memory_order_acq_rel)) {
+          ++owner->writable_resumes_;
+          if (writable_handler_) writable_handler_();
+        }
       }
     }
 
@@ -271,7 +307,9 @@ class WebRtcTransportSession::Impl
     ChannelOptions options_;
     std::shared_ptr<rtc::DataChannel> channel_;
     std::atomic<std::size_t> queued_messages_{0U};
+    std::atomic<bool> paused_{false};
     std::atomic<bool> closed_{false};
+    WritableHandler writable_handler_;
   };
 
   struct LocalDescriptionEvent {
@@ -722,6 +760,8 @@ class WebRtcTransportSession::Impl
   std::atomic<std::uint64_t> callback_dispatch_rejected_{0U};
   std::atomic<std::uint64_t> messages_rejected_{0U};
   std::atomic<std::uint64_t> sends_would_block_{0U};
+  std::atomic<std::uint64_t> backpressure_pauses_{0U};
+  std::atomic<std::uint64_t> writable_resumes_{0U};
   std::atomic<std::uint64_t> channels_opened_{0U};
   std::atomic<std::uint64_t> channels_rejected_{0U};
   std::atomic<std::uint64_t> ice_restarts_{0U};
@@ -846,6 +886,9 @@ WebRtcTransportDiagnostics WebRtcTransportSession::diagnostics() const noexcept 
           impl_->callback_dispatch_rejected_.load(std::memory_order_relaxed),
       .messages_rejected = impl_->messages_rejected_.load(std::memory_order_relaxed),
       .sends_would_block = impl_->sends_would_block_.load(std::memory_order_relaxed),
+      .backpressure_pauses =
+          impl_->backpressure_pauses_.load(std::memory_order_relaxed),
+      .writable_resumes = impl_->writable_resumes_.load(std::memory_order_relaxed),
       .channels_opened = impl_->channels_opened_.load(std::memory_order_relaxed),
       .channels_rejected = impl_->channels_rejected_.load(std::memory_order_relaxed),
       .ice_restarts = impl_->ice_restarts_.load(std::memory_order_relaxed),
