@@ -47,29 +47,24 @@ TEST(M4PeerSession, AuthenticatesControlHelloAndAllowsOnlyControlPing) {
   const auto responder_nonce = filled_array<heyaki::signaling_nonce_bytes>(0x30U);
   const auto transcript =
       filled_array<heyaki::signaling_transcript_sha256_bytes>(0x50U);
-  heyaki::SignedSessionHello left_hello{left, right, session_id, 1U, initiator_nonce,
-                                        responder_nonce, transcript};
-  heyaki::SignedSessionHello right_hello{right, left, session_id, 1U, initiator_nonce,
-                                         responder_nonce, transcript};
-  left_hello.expires_unix_milliseconds = 1'060'000U;
-  right_hello.expires_unix_milliseconds = 1'060'000U;
-  ASSERT_TRUE(heyaki::sign_signed_session_hello(left_hello, *left_identity.value_if()));
-  ASSERT_TRUE(heyaki::sign_signed_session_hello(right_hello, *right_identity.value_if()));
-
   heyaki::test::LoopbackTransportPair pair;
   pair.connect();
   auto left_transport = std::shared_ptr<heyaki::transport::TransportSession>(
       &pair.left(), [](heyaki::transport::TransportSession*) {});
   auto right_transport = std::shared_ptr<heyaki::transport::TransportSession>(
       &pair.right(), [](heyaki::transport::TransportSession*) {});
-  auto left_session = heyaki::PeerSession::create({
-      left_transport, left_hello, {right, left, session_id, 1U, initiator_nonce,
-                                   responder_nonce, transcript},
-      right_identity.value_if()->public_key(), protocol(), 1'000'000U, true});
-  auto right_session = heyaki::PeerSession::create({
-      right_transport, right_hello, {left, right, session_id, 1U, initiator_nonce,
-                                    responder_nonce, transcript},
-      left_identity.value_if()->public_key(), protocol(), 1'000'000U, false});
+  heyaki::VerifiedSessionBinding left_binding{
+      {right, left, session_id, 1U, initiator_nonce, responder_nonce, transcript},
+      {}, "peer-ufrag", true};
+  heyaki::VerifiedSessionBinding right_binding{
+      {left, right, session_id, 1U, initiator_nonce, responder_nonce, transcript},
+      {}, "peer-ufrag", false};
+  auto left_session = heyaki::PeerSession::create_verified(
+      {left_transport, left_binding, left_identity.value_if(),
+       right_identity.value_if()->public_key(), protocol(), 1'060'000U, 1'000'000U, {}});
+  auto right_session = heyaki::PeerSession::create_verified(
+      {right_transport, right_binding, right_identity.value_if(),
+       left_identity.value_if()->public_key(), protocol(), 1'060'000U, 1'000'000U, {}});
   ASSERT_TRUE(left_session);
   ASSERT_TRUE(right_session);
   ASSERT_TRUE((*right_session.value_if())->start());

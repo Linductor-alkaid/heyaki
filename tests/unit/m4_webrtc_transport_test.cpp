@@ -1,4 +1,5 @@
 #include "webrtc_transport_session.hpp"
+#include "client/peer_session.hpp"
 
 #include <heyaki/runtime.hpp>
 
@@ -7,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <array>
 #include <memory>
 #include <span>
 #include <string>
@@ -22,6 +24,30 @@ using heyaki::transport::TransportChannel;
 using heyaki::transport::TransportState;
 using heyaki::transport::webrtc::WebRtcTransportConfig;
 using heyaki::transport::webrtc::WebRtcTransportSession;
+
+template <typename Value>
+Value filled(std::uint8_t seed) {
+  typename Value::Storage bytes{};
+  for (std::size_t index = 0U; index < bytes.size(); ++index) {
+    bytes[index] = static_cast<std::byte>(seed + static_cast<std::uint8_t>(index));
+  }
+  return Value{bytes};
+}
+
+template <std::size_t Size>
+std::array<std::byte, Size> filled_array(std::uint8_t seed) {
+  std::array<std::byte, Size> bytes{};
+  for (std::size_t index = 0U; index < bytes.size(); ++index) {
+    bytes[index] = static_cast<std::byte>(seed + static_cast<std::uint8_t>(index));
+  }
+  return bytes;
+}
+
+heyaki::ProtocolHello session_protocol() {
+  return {.version = heyaki::current_protocol_version,
+          .supported = {heyaki::protocol_1_1_capability_bits},
+          .required = {static_cast<std::uint64_t>(heyaki::Capability::session)}};
+}
 
 heyaki::transport::webrtc::RuntimeDispatcher runtime_dispatcher(
     const heyaki::RuntimeContext& context) {
@@ -61,10 +87,9 @@ TEST(M4WebRtcTransport, HostCandidateDataChannelUsesExecutorDispatcher) {
       heyaki::RuntimeContextKind::peer_session, "m4-webrtc-pair");
   ASSERT_TRUE(context) << context.error_if()->safe_detail();
 
-  executor::comm::PhaseGate left_connected("m4-left-connected");
-  executor::comm::PhaseGate right_connected("m4-right-connected");
-  executor::comm::PhaseGate message_received("m4-message-received");
-  executor::comm::PhaseGate channel_opened("m4-channel-opened");
+  executor::comm::PhaseGate left_authenticated("m4-left-authenticated");
+  executor::comm::PhaseGate right_authenticated("m4-right-authenticated");
+  executor::comm::PhaseGate pong_received("m4-pong-received");
 
   std::shared_ptr<WebRtcTransportSession> left;
   std::shared_ptr<WebRtcTransportSession> right;
@@ -107,47 +132,54 @@ TEST(M4WebRtcTransport, HostCandidateDataChannelUsesExecutorDispatcher) {
   ASSERT_TRUE(created_right) << created_right.error_if()->safe_detail();
   right = *created_right.value_if();
 
-  left->set_state_handler([&](const heyaki::transport::TransportSessionSnapshot& snapshot) {
-    if (snapshot.state == TransportState::connected) {
-      (void)left_connected.advance_to(1U);
-    }
-  });
-  right->set_state_handler([&](const heyaki::transport::TransportSessionSnapshot& snapshot) {
-    if (snapshot.state == TransportState::connected) {
-      (void)right_connected.advance_to(1U);
-    }
-  });
-  right->set_message_handler(
-      [&](TransportChannel& channel, std::vector<std::byte> payload) {
-        EXPECT_EQ(channel.kind(), ChannelKind::control);
-        EXPECT_EQ(std::string(reinterpret_cast<const char*>(payload.data()), payload.size()),
-                  "ping");
-        (void)message_received.advance_to(1U);
-      });
-
-  TransportChannel* control = nullptr;
-  ChannelOptions options;
-  options.send_queue_bytes = 64U * 1024U;
-  options.max_message_bytes = 64U * 1024U;
-  left->async_open_channel(ChannelKind::control, options,
-                           [&](heyaki::Result<TransportChannel*> opened) {
-                             ASSERT_TRUE(opened) << opened.error_if()->safe_detail();
-                             control = *opened.value_if();
-                             (void)channel_opened.advance_to(1U);
-                           });
+  auto left_identity = heyaki::create_identity();
+  auto right_identity = heyaki::create_identity();
+  ASSERT_TRUE(left_identity);
+  ASSERT_TRUE(right_identity);
+  const heyaki::DeviceEndpointKey left_endpoint{
+      left_identity.value_if()->device_id(), filled<heyaki::EndpointId>(0x20U)};
+  const heyaki::DeviceEndpointKey right_endpoint{
+      right_identity.value_if()->device_id(), filled<heyaki::EndpointId>(0x40U)};
+  const auto session_id = filled<heyaki::SessionId>(0x60U);
+  const auto initiator_nonce = filled_array<heyaki::signaling_nonce_bytes>(0x10U);
+  const auto responder_nonce = filled_array<heyaki::signaling_nonce_bytes>(0x30U);
+  const auto transcript =
+      filled_array<heyaki::signaling_transcript_sha256_bytes>(0x50U);
+  heyaki::VerifiedSessionBinding left_binding{
+      {right_endpoint, left_endpoint, session_id, 1U, initiator_nonce, responder_nonce,
+       transcript},
+      {}, "peer-ufrag", true};
+  heyaki::VerifiedSessionBinding right_binding{
+      {left_endpoint, right_endpoint, session_id, 1U, initiator_nonce, responder_nonce,
+       transcript},
+      {}, "peer-ufrag", false};
+  auto left_peer = heyaki::PeerSession::create_verified(
+      {left, left_binding, left_identity.value_if(), right_identity.value_if()->public_key(),
+       session_protocol(), 1'060'000U, 1'000'000U,
+       [&](const heyaki::PeerSessionDiagnostics& value) {
+         if (value.state == heyaki::PeerSessionState::authenticated) {
+           (void)left_authenticated.advance_to(1U);
+         }
+         if (value.pongs_received != 0U) (void)pong_received.advance_to(1U);
+       }});
+  auto right_peer = heyaki::PeerSession::create_verified(
+      {right, right_binding, right_identity.value_if(), left_identity.value_if()->public_key(),
+       session_protocol(), 1'060'000U, 1'000'000U,
+       [&](const heyaki::PeerSessionDiagnostics& value) {
+         if (value.state == heyaki::PeerSessionState::authenticated) {
+           (void)right_authenticated.advance_to(1U);
+         }
+       }});
+  ASSERT_TRUE(left_peer);
+  ASSERT_TRUE(right_peer);
+  ASSERT_TRUE((*right_peer.value_if())->start());
+  ASSERT_TRUE((*left_peer.value_if())->start());
   const auto started = left->start();
   ASSERT_TRUE(started) << started.error_if()->safe_detail();
-  ASSERT_TRUE(left_connected.wait_for(1U, 10s));
-  ASSERT_TRUE(right_connected.wait_for(1U, 10s));
-  ASSERT_TRUE(channel_opened.wait_for(1U, 5s));
-  ASSERT_NE(control, nullptr);
-
-  const std::string ping = "ping";
-  const auto bytes = std::span<const std::byte>{
-      reinterpret_cast<const std::byte*>(ping.data()), ping.size()};
-  const auto sent = control->send(bytes);
-  ASSERT_TRUE(sent) << sent.error_if()->safe_detail();
-  ASSERT_TRUE(message_received.wait_for(1U, 5s));
+  ASSERT_TRUE(left_authenticated.wait_for(1U, 10s));
+  ASSERT_TRUE(right_authenticated.wait_for(1U, 10s));
+  ASSERT_TRUE((*left_peer.value_if())->send_ping(42U));
+  ASSERT_TRUE(pong_received.wait_for(1U, 5s));
 
   EXPECT_EQ(left->snapshot().path.data_path, DataPathKind::direct_host);
   EXPECT_EQ(right->snapshot().path.data_path, DataPathKind::direct_host);

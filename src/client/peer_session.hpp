@@ -1,5 +1,6 @@
 #pragma once
 
+#include "signaling_coordinator.hpp"
 #include "../transport/transport_session.hpp"
 
 #include <heyaki/identity.hpp>
@@ -7,6 +8,7 @@
 #include <heyaki/session_protocol.hpp>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 
@@ -20,6 +22,8 @@ enum class PeerSessionState : std::uint8_t {
   closed,
 };
 
+struct PeerSessionDiagnostics;
+
 struct PeerSessionConfig {
   std::shared_ptr<transport::TransportSession> transport;
   SignedSessionHello local_hello;
@@ -28,6 +32,18 @@ struct PeerSessionConfig {
   ProtocolHello local_protocol;
   std::uint64_t now_unix_milliseconds{};
   bool initiator{false};
+  std::function<void(const PeerSessionDiagnostics&)> observer;
+};
+
+struct VerifiedPeerSessionConfig {
+  std::shared_ptr<transport::TransportSession> transport;
+  VerifiedSessionBinding binding;
+  const IdentityKeyPair* local_identity{nullptr};
+  IdentityPublicKey peer_public_key{};
+  ProtocolHello local_protocol;
+  std::uint64_t expires_unix_milliseconds{};
+  std::uint64_t now_unix_milliseconds{};
+  std::function<void(const PeerSessionDiagnostics&)> observer;
 };
 
 struct PeerSessionDiagnostics {
@@ -46,6 +62,8 @@ class PeerSession final : public std::enable_shared_from_this<PeerSession> {
  public:
   [[nodiscard]] static Result<std::shared_ptr<PeerSession>> create(
       PeerSessionConfig config);
+  [[nodiscard]] static Result<std::shared_ptr<PeerSession>> create_verified(
+      VerifiedPeerSessionConfig config);
   ~PeerSession();
 
   PeerSession(const PeerSession&) = delete;
@@ -63,6 +81,7 @@ class PeerSession final : public std::enable_shared_from_this<PeerSession> {
                       std::vector<std::byte> payload);
   [[nodiscard]] Result<void> send_hello(transport::TransportChannel& channel);
   void fail(Error error);
+  void notify() const;
 
   PeerSessionConfig config_;
   std::unique_ptr<SessionHelloAdmission> admission_;

@@ -77,12 +77,46 @@ Result<std::shared_ptr<PeerSession>> PeerSession::create(PeerSessionConfig confi
       std::shared_ptr<PeerSession>(new PeerSession(std::move(config))));
 }
 
+Result<std::shared_ptr<PeerSession>> PeerSession::create_verified(
+    VerifiedPeerSessionConfig config) {
+  if (config.local_identity == nullptr) {
+    return Result<std::shared_ptr<PeerSession>>::failure(
+        session_error(ErrorCode::configuration, "local_identity_missing"));
+  }
+  SignedSessionHello local;
+  local.sender = config.binding.expectation.peer;
+  local.peer = config.binding.expectation.sender;
+  local.session_id = config.binding.expectation.session_id;
+  local.session_epoch = config.binding.expectation.session_epoch;
+  local.initiator_nonce = config.binding.expectation.initiator_nonce;
+  local.responder_nonce = config.binding.expectation.responder_nonce;
+  local.signaling_transcript_sha256 =
+      config.binding.expectation.signaling_transcript_sha256;
+  local.protocol_version = config.local_protocol.version;
+  local.supported = config.local_protocol.supported;
+  local.required = config.local_protocol.required;
+  local.expires_unix_milliseconds = config.expires_unix_milliseconds;
+  auto signed_hello = sign_signed_session_hello(local, *config.local_identity);
+  if (!signed_hello) {
+    return Result<std::shared_ptr<PeerSession>>::failure(*signed_hello.error_if());
+  }
+  return create({.transport = std::move(config.transport),
+                 .local_hello = std::move(local),
+                 .expectation = config.binding.expectation,
+                 .peer_public_key = config.peer_public_key,
+                 .local_protocol = config.local_protocol,
+                 .now_unix_milliseconds = config.now_unix_milliseconds,
+                 .initiator = config.binding.initiator,
+                 .observer = std::move(config.observer)});
+}
+
 Result<void> PeerSession::start() {
   if (started_ || diagnostics_.state == PeerSessionState::closed) {
     return Result<void>::failure(session_error(ErrorCode::cancelled, "peer_session_closed"));
   }
   started_ = true;
   diagnostics_.state = PeerSessionState::authenticating;
+  notify();
   auto weak = weak_from_this();
   config_.transport->set_message_handler(
       [weak](transport::TransportChannel& channel, std::vector<std::byte> payload) {
@@ -91,6 +125,7 @@ Result<void> PeerSession::start() {
   config_.transport->set_state_handler([weak](const transport::TransportSessionSnapshot& snapshot) {
     if (auto self = weak.lock(); self && snapshot.state == transport::TransportState::closed) {
       self->diagnostics_.state = PeerSessionState::closed;
+      self->notify();
     }
   });
   if (!config_.initiator) return Result<void>::success();
@@ -126,6 +161,7 @@ Result<void> PeerSession::send_hello(transport::TransportChannel& channel) {
   auto sent = channel.send(*encoded.value_if());
   if (!sent) return Result<void>::failure(*sent.error_if());
   ++diagnostics_.hellos_sent;
+  notify();
   return Result<void>::success();
 }
 
@@ -144,6 +180,7 @@ Result<void> PeerSession::send_ping(std::uint64_t ping_id) {
   if (!sent) return Result<void>::failure(*sent.error_if());
   pending_ping_ = ping_id;
   ++diagnostics_.pings_sent;
+  notify();
   return Result<void>::success();
 }
 
@@ -151,6 +188,7 @@ void PeerSession::handle_message(transport::TransportChannel& channel,
                                  std::vector<std::byte> payload) {
   if (channel.kind() != transport::ChannelKind::control) {
     ++diagnostics_.business_frames_rejected;
+    notify();
     channel.close(transport::CloseReason::protocol_error);
     return;
   }
@@ -178,6 +216,7 @@ void PeerSession::handle_message(transport::TransportChannel& channel,
         }
       }
       diagnostics_.state = PeerSessionState::authenticated;
+      notify();
     }
     return;
   }
@@ -194,6 +233,7 @@ void PeerSession::handle_message(transport::TransportChannel& channel,
     }
     ++diagnostics_.pings_received;
     ++diagnostics_.pongs_sent;
+    notify();
     return;
   }
   if (frame.type == static_cast<std::uint8_t>(FrameType::pong) &&
@@ -201,6 +241,7 @@ void PeerSession::handle_message(transport::TransportChannel& channel,
       pending_ping_ == decode_ping_payload(frame.payload)) {
     pending_ping_.reset();
     ++diagnostics_.pongs_received;
+    notify();
     return;
   }
   if (diagnostics_.state != PeerSessionState::authenticated) {
@@ -211,6 +252,7 @@ void PeerSession::handle_message(transport::TransportChannel& channel,
 void PeerSession::fail(Error error) {
   diagnostics_.last_error = error;
   diagnostics_.state = PeerSessionState::closed;
+  notify();
   if (config_.transport) config_.transport->close(transport::CloseReason::protocol_error);
 }
 
@@ -223,7 +265,12 @@ bool PeerSession::authenticated() const noexcept {
 void PeerSession::close(transport::CloseReason reason) {
   if (diagnostics_.state == PeerSessionState::closed) return;
   diagnostics_.state = PeerSessionState::closed;
+  notify();
   if (config_.transport) config_.transport->close(reason);
+}
+
+void PeerSession::notify() const {
+  if (config_.observer) config_.observer(diagnostics_);
 }
 
 }  // namespace heyaki

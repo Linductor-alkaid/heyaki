@@ -70,6 +70,7 @@ struct VerifiedSessionBinding {
   SessionHelloExpectation expectation;
   DtlsFingerprint peer_fingerprint{};
   std::string peer_ufrag;
+  bool initiator{false};
 };
 
 struct SignalingCoordinatorConfig {

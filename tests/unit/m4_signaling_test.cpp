@@ -539,6 +539,9 @@ TEST(M4Coordinator, VerifiedHandshakeAndTrickleFlow) {
   EXPECT_NE(transcript, heyaki::SignalingTranscriptSha256{});
   auto binding = flow.a.coordinator->verified_session_binding(request, 3U);
   ASSERT_TRUE(binding);
+  EXPECT_EQ(binding.value_if()->expectation.sender, flow.b.self);
+  EXPECT_EQ(binding.value_if()->expectation.peer, flow.a.self);
+  EXPECT_TRUE(binding.value_if()->initiator);
   EXPECT_EQ(binding.value_if()->expectation.session_epoch, 3U);
   EXPECT_EQ(binding.value_if()->expectation.signaling_transcript_sha256, transcript);
   EXPECT_EQ(binding.value_if()->peer_fingerprint, test_fingerprint(0x70U));

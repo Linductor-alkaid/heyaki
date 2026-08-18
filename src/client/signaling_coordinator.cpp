@@ -400,18 +400,17 @@ class SignalingCoordinator::Impl {
       return Result<VerifiedSessionBinding>::failure(
           coordinator_error(ErrorCode::signaling, "session_binding_not_ready"));
     }
-    const auto initiator = attempt->inbound ? attempt->peer : config_.local;
-    const auto responder = attempt->inbound ? config_.local : attempt->peer;
     return Result<VerifiedSessionBinding>::success({
-        .expectation = {.sender = initiator,
-                        .peer = responder,
+        .expectation = {.sender = attempt->peer,
+                        .peer = config_.local,
                         .session_id = attempt->session_id,
                         .session_epoch = epoch,
                         .initiator_nonce = attempt->initiator_nonce,
                         .responder_nonce = *attempt->responder_nonce,
                         .signaling_transcript_sha256 = *attempt->transcript},
         .peer_fingerprint = attempt->peer_fingerprint,
-        .peer_ufrag = attempt->peer_ufrag});
+        .peer_ufrag = attempt->peer_ufrag,
+        .initiator = !attempt->inbound});
   }
 
   SignalingCoordinatorDiagnostics diagnostics() const noexcept { return diagnostics_; }

@@ -321,6 +321,7 @@ target_link_libraries(heyaki_m4_webrtc_transport_tests PRIVATE
   executor::executor
   GTest::gtest_main)
 target_include_directories(heyaki_m4_webrtc_transport_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src"
   "${CMAKE_CURRENT_SOURCE_DIR}/../src/transport"
   "${CMAKE_CURRENT_SOURCE_DIR}/../src/transport/webrtc")
 heyaki_configure_target(heyaki_m4_webrtc_transport_tests)

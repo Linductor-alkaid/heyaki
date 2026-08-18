@@ -952,6 +952,20 @@ fingerprint 的真实 control DataChannel 和 Node/PeerSession 生命周期后�
 传入 `PeerSession`，Node 的 LAN/relay coordinator 也尚未自动创建该层；下一轮继续补齐这两个
 集成门禁。
 
+### M4 实施进度（2026-08-18，第6轮）
+
+- `SignalingCoordinator::verified_session_binding()` 现在只在 signed offer/answer 完成验签、
+  nonce、transcript、peer fingerprint 与 ICE ufrag 均已建立后返回；出站与入站 expectation
+  始终按 `sender=peer, peer=local` 定向，过早读取明确失败。
+- `PeerSession::create_verified()` 直接消费该 binding，并用本地长期身份构造和签名反向 hello，
+  调用方不再手工拼接 session transcript。
+- 真实 host-candidate WebRTC e2e 已从裸字符串 DataChannel 测试升级为双方 framed mutual
+  `SESSION_HELLO`、认证状态门禁和受限 control PING/PONG，证明同一会话实现运行在实际
+  DTLS/SCTP DataChannel 上。
+
+`M4-13` 仍保持未勾选：当前 coordinator binding 与真实 WebRTC 分别已有集成测试，但 Node 尚未
+在同一 connect attempt 中自动把前者装配给后者；完成该组合路径后再满足条目。
+
 ---
 
 ## 8. M5：会话授权、调度与 ByteStream
