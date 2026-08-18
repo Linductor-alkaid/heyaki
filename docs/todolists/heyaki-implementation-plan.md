@@ -773,12 +773,12 @@ Linux GCC/Clang Debug/Release、Windows Debug/Release、ASan/UBSan/TSAN 全部�
 
 ### 7.2 WebRTC/ICE/TURN
 
-- [ ] `M4-06` 实现 `WebRtcTransportSession`，包装 libdatachannel PeerConnection、DataChannel callback、错误和关闭状态。
+- [x] `M4-06` 实现 `WebRtcTransportSession`，包装 libdatachannel PeerConnection、DataChannel callback、错误和关闭状态。
 - [ ] `M4-07` 配置 candidate 优先级：IPv6 host、LAN IPv4、srflx UDP、TURN/UDP、已验证的 TURN/TCP/TLS；`lan_only` 不配置 ICE server 且失败时明确终止。
-- [ ] `M4-08` 并行收集/检查 direct 与 relay candidate，relay 可提前分配但低优先级提名，禁止串行等待长直连超时后才开始 TURN。
-- [ ] `M4-09` 实现 `path_info()`、signaling route、selected candidate/data path、RTT、buffered amount、ICE state 和 restart 事件观测。
+- [x] `M4-08` 并行收集/检查 direct 与 relay candidate，relay 可提前分配但低优先级提名，禁止串行等待长直连超时后才开始 TURN。
+- [x] `M4-09` 实现 `path_info()`、signaling route、selected candidate/data path、RTT、buffered amount、ICE state 和 restart 事件观测。
 - [ ] `M4-10` 实现网络接口变化的 presence 刷新与 ICE restart；association 或 signaling route 丢失则建立新物理 session，不伪装为无损迁移。
-- [ ] `M4-11` 映射 libdatachannel callback 到 executor-managed 有界通道；满载、关闭和投递失败都有错误/统计。
+- [x] `M4-11` 映射 libdatachannel callback 到 executor-managed 有界通道；满载、关闭和投递失败都有错误/统计。
 - [ ] `M4-12` 基于 `bufferedAmount` high/low water callback 暂停/恢复发送，验证底层背压能传回 API。
 
 ### 7.3 最小身份会话与诊断 UI
@@ -879,6 +879,40 @@ ASLR）M4 relay route 6/6。GitHub Actions run `32092070331`（提交 `a83dc40`�
 success，10 个 job 全部通过：Linux GCC/Clang Debug/Release、Windows Debug/Release、
 ASan、UBSan、TSAN 与 coturn-topology。协调器接入 Node LAN TLS 路径与 `M4-02` 最终
 勾选留待后续轮次。
+
+### M4 实施进度（2026-08-18，第3轮）
+
+第三轮交付 pinned libdatachannel 的真实 WebRTC transport，不提前开放业务会话：
+
+- 新增内部 `WebRtcTransportSession`/channel 实现，包装 `rtc::PeerConnection`、
+  offer/answer/trickle candidate、DataChannel 创建/接收、ICE/gathering/connection 状态、
+  selected candidate、RTT、buffered amount、错误和幂等关闭；`signaling_path` 与
+  `data_path` 继续独立记录，host/srflx/TURN UDP/TCP/TLS 路径按 selected candidate
+  分类。
+- libdatachannel callback 只向容量可配、`RejectNewest` 的 executor
+  `MpscChannel` 投递事件，再由注入的 Runtime dispatcher 串行排空；队列满、runtime
+  dispatch 拒绝、消息超限、channel 容量拒绝和 `would_block` 均有独立计数。修复真实
+  e2e 暴露的状态竞态后，`async_open_channel` 只在 DataChannel `onOpen` 经 executor
+  投递后完成，open 前 error/close 返回失败。
+- ICE server 在 PeerConnection 创建时同时配置，direct 与 TURN candidate 由 ICE 并行
+  收集/检查；提供 relay-only 及 host/srflx/TURN 类型过滤。pinned 默认 libjuice 不支持
+  TURN/TCP/TLS，因此未通过显式 backend capability 验证时配置会失败，而不会声称支持。
+- 发送路径按 `bufferedAmount`、channel byte budget、消息数和 high-water 显式返回
+  `would_block`，low-water callback 恢复保守消息预算；M4-12 保持未勾选，等待专门的
+  高低水位压力与 API 反压传播测试。
+- CMake 采用 pinned `0.23.2` 的静态 DataChannel-only profile，并把官方
+  LibDataChannel config、headers、libjuice/usrsctp 闭包纳入安装；安装后 consumer 已
+  验证。LAN directory 现保留已验证 presence 公钥，供下一轮 Node 内 coordinator 做
+  peer identity lookup；公钥仍来自既有 DeviceId 派生与 presence 签名门禁。
+- 新增真实双 PeerConnection host-candidate 测试：offer/answer/trickle、DTLS/SCTP、
+  control DataChannel、executor dispatcher、消息收发、direct-host path 与关闭终态均
+  通过；同时覆盖未验证 TURN/TCP 与非法 watermark 配置拒绝。并行 CTest 为共享 M3A
+  profile 的直接测试和 network harness 增加同一 `RESOURCE_LOCK`，消除测试间清理竞态。
+
+本机验证：GCC 13.3 Debug `-Werror` 完整构建通过；全量 CTest 26/26 通过，coturn
+allocation probe 因本机未提供 coturn 按既有规则 skip；新 WebRTC e2e 与安装后 consumer
+定向复跑均通过。据此 `M4-06`/`M4-08`/`M4-09`/`M4-11` 满足条目并勾选；Node 双路由、
+session epoch、`SESSION_HELLO` 与剩余网络矩阵继续推进。
 
 ---
 

@@ -36,6 +36,7 @@ struct DirectoryObservation {
 };
 
 struct LanEndpointSnapshot {
+  IdentityPublicKey identity_public_key{};
   std::string address;
   std::string interface_name;
   std::uint16_t tls_signaling_port{};

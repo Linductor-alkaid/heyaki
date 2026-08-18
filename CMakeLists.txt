@@ -85,6 +85,16 @@ set(EXECUTOR_ENABLE_OPENCL OFF CACHE BOOL "" FORCE)
 set(EXECUTOR_ENABLE_TSAN OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/executor)
 
+# Heyaki owns the libdatachannel lifecycle through WebRtcTransportSession. Keep the
+# pinned dependency on its minimal static DataChannel profile; media and the standalone
+# websocket API are not part of the v1 data plane.
+set(NO_MEDIA ON CACHE BOOL "" FORCE)
+set(NO_WEBSOCKET ON CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(NO_EXAMPLES ON CACHE BOOL "" FORCE)
+set(NO_TESTS ON CACHE BOOL "" FORCE)
+add_subdirectory(third_party/libdatachannel)
+
 if(NOT HEYAKI_SANITIZER STREQUAL "none" AND
    CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
   if(HEYAKI_SANITIZER STREQUAL "address")
@@ -191,7 +201,9 @@ target_compile_features(heyaki_services PUBLIC cxx_std_20)
 target_link_libraries(heyaki_services PUBLIC heyaki::client)
 heyaki_configure_target(heyaki_services)
 
-add_library(heyaki_transport_webrtc src/transport/webrtc/module.cpp)
+add_library(heyaki_transport_webrtc
+  src/transport/webrtc/module.cpp
+  src/transport/webrtc/webrtc_transport_session.cpp)
 add_library(heyaki::transport_webrtc ALIAS heyaki_transport_webrtc)
 set_target_properties(heyaki_transport_webrtc PROPERTIES
   EXPORT_NAME transport_webrtc
@@ -199,8 +211,13 @@ set_target_properties(heyaki_transport_webrtc PROPERTIES
 target_compile_features(heyaki_transport_webrtc PUBLIC cxx_std_20)
 target_include_directories(heyaki_transport_webrtc PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src/transport")
-target_link_libraries(heyaki_transport_webrtc PRIVATE heyaki::core)
+target_include_directories(heyaki_transport_webrtc SYSTEM PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libdatachannel/include")
+target_link_libraries(heyaki_transport_webrtc
+  PRIVATE executor::executor heyaki::core LibDataChannel::LibDataChannel)
 heyaki_configure_target(heyaki_transport_webrtc)
+heyaki_enable_executor_exception_adapter_source(
+  src/transport/webrtc/webrtc_transport_session.cpp)
 
 add_library(heyaki_relay
   src/relay/relay_config.cpp

@@ -46,6 +46,7 @@ class EndpointDirectory::Impl {
       : configuration(std::move(configuration)) {}
 
   struct LanHint {
+    IdentityPublicKey identity_public_key{};
     std::string address;
     std::string interface_name;
     std::uint16_t port{};
@@ -337,7 +338,8 @@ Result<DirectoryObservation> EndpointDirectory::observe_lan(
 
   auto& entry = entry_iterator->second;
   entry.trusted = entry.trusted || trusted;
-  entry.lan = Impl::LanHint{.address = std::string{source_address},
+  entry.lan = Impl::LanHint{.identity_public_key = presence.identity_public_key,
+                            .address = std::string{source_address},
                             .interface_name = std::string{interface_name},
                             .port = presence.tls_signaling_port,
                             .boot_nonce = presence.boot_nonce,
@@ -439,12 +441,14 @@ std::vector<EndpointDirectoryEntrySnapshot> EndpointDirectory::snapshot(SteadyTi
     EndpointDirectoryEntrySnapshot snapshot{
         .key = key, .trusted = entry.trusted, .lan = std::nullopt, .relay = std::nullopt};
     if (entry.lan && entry.lan->expires_at > now) {
-      snapshot.lan = LanEndpointSnapshot{.address = entry.lan->address,
-                                         .interface_name = entry.lan->interface_name,
-                                         .tls_signaling_port = entry.lan->port,
-                                         .boot_nonce = entry.lan->boot_nonce,
-                                         .sequence = entry.lan->sequence,
-                                         .ttl = remaining_ttl(entry.lan->expires_at, now)};
+      snapshot.lan = LanEndpointSnapshot{
+          .identity_public_key = entry.lan->identity_public_key,
+          .address = entry.lan->address,
+          .interface_name = entry.lan->interface_name,
+          .tls_signaling_port = entry.lan->port,
+          .boot_nonce = entry.lan->boot_nonce,
+          .sequence = entry.lan->sequence,
+          .ttl = remaining_ttl(entry.lan->expires_at, now)};
     }
     if (entry.relay && entry.relay->expires_at > now) {
       snapshot.relay = RelayEndpointSnapshot{

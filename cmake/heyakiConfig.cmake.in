@@ -5,6 +5,7 @@ include(CMakeFindDependencyMacro)
 find_dependency(Threads)
 find_dependency(executor CONFIG)
 find_dependency(OpenSSL 3.0 COMPONENTS SSL Crypto)
+find_dependency(LibDataChannel 0.23 CONFIG)
 
 include("${CMAKE_CURRENT_LIST_DIR}/heyakiTargets.cmake")
 check_required_components(heyaki)

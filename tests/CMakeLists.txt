@@ -276,6 +276,7 @@ target_compile_definitions(heyaki_m3a_lan_tests PRIVATE
   "HEYAKI_M3A_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}\"")
 heyaki_add_runtime_test(
   heyaki_m3a_lan heyaki_m3a_lan_tests "unit;lan;security")
+set_tests_properties(heyaki_m3a_lan PROPERTIES RESOURCE_LOCK heyaki_m3a_profile_state)
 
 add_executable(heyaki_m4_signaling_tests unit/m4_signaling_test.cpp)
 target_link_libraries(heyaki_m4_signaling_tests PRIVATE
@@ -289,6 +290,21 @@ target_include_directories(heyaki_m4_signaling_tests PRIVATE
 heyaki_configure_target(heyaki_m4_signaling_tests)
 heyaki_add_runtime_test(
   heyaki_m4_signaling heyaki_m4_signaling_tests "unit;signaling;security")
+
+add_executable(heyaki_m4_webrtc_transport_tests unit/m4_webrtc_transport_test.cpp)
+target_link_libraries(heyaki_m4_webrtc_transport_tests PRIVATE
+  heyaki::client
+  heyaki::transport_webrtc
+  executor::executor
+  GTest::gtest_main)
+target_include_directories(heyaki_m4_webrtc_transport_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/transport"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/transport/webrtc")
+heyaki_configure_target(heyaki_m4_webrtc_transport_tests)
+heyaki_enable_executor_exception_adapter_source(unit/m4_webrtc_transport_test.cpp)
+heyaki_add_runtime_test(
+  heyaki_m4_webrtc_transport heyaki_m4_webrtc_transport_tests
+  "unit;transport;network;concurrency")
 
 add_executable(heyaki_m4_relay_route_tests unit/m4_relay_signaling_test.cpp)
 target_link_libraries(heyaki_m4_relay_route_tests PRIVATE
@@ -512,6 +528,7 @@ add_test(
     "$<TARGET_FILE:heyaki_m3a_lan_tests>")
 set_tests_properties(heyaki_network_harness PROPERTIES
   LABELS "network;lan;security"
+  RESOURCE_LOCK heyaki_m3a_profile_state
   SKIP_RETURN_CODE 77
   TIMEOUT 180)
 
