@@ -237,6 +237,10 @@ heyaki_configure_target(heyaki_transport_webrtc)
 heyaki_enable_executor_exception_adapter_source(
   src/transport/webrtc/webrtc_transport_session.cpp)
 
+# Node owns the v1 connection assembly and instantiates the only shipped data-plane
+# backend through its internal SPI.
+target_link_libraries(heyaki_client PRIVATE heyaki_transport_webrtc)
+
 add_library(heyaki_relay
   src/relay/relay_config.cpp
   src/relay/relay_database.cpp

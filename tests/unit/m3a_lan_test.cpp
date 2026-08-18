@@ -1352,6 +1352,83 @@ TEST_F(M3aNodeTest, AuthenticatesLanTlsAndForwardsBoundedControlMessages) {
   EXPECT_TRUE(second.value_if()->shutdown().stopped);
 }
 
+TEST_F(M3aNodeTest, NodeAutomaticallyAssemblesAuthenticatedWebRtcPeerSession) {
+  LanConfiguration configuration;
+  configuration.connectivity_mode = ConnectivityMode::lan_only;
+  configuration.announcement_interval = std::chrono::milliseconds{100};
+  configuration.announcement_jitter = std::chrono::milliseconds{0};
+  configuration.presence_lease = std::chrono::milliseconds{1000};
+  configuration.interface_refresh_interval = std::chrono::seconds{2};
+  configuration.announcement_rate_per_second = 100U;
+  configuration.per_source_announcement_rate = 100U;
+  auto first_profile = initialized_profile("m4-node-first", "com.example.m4.first",
+                                           configuration);
+  auto second_profile = initialized_profile("m4-node-second", "com.example.m4.second",
+                                            configuration);
+  ASSERT_TRUE(first_profile && second_profile);
+
+  auto first = Node::create(
+      node_config(*first_profile.value_if(), "com.example.m4.first"));
+  auto second = Node::create(
+      node_config(*second_profile.value_if(), "com.example.m4.second"));
+  ASSERT_TRUE(first && second);
+  const auto first_node = first.value_if()->snapshot();
+  const auto second_node = second.value_if()->snapshot();
+  if (first_node.interfaces.empty() || second_node.interfaces.empty()) {
+    (void)first.value_if()->shutdown();
+    (void)second.value_if()->shutdown();
+    if (environment_enabled("HEYAKI_REQUIRE_LAN_INTERFACES")) {
+      FAIL() << "Required LAN interface is unavailable";
+    }
+    GTEST_SKIP() << "No multicast-capable non-loopback interface";
+  }
+
+  ASSERT_TRUE(wait_until(
+      [&] {
+        return first.value_if()->endpoints().size() == 1U &&
+               second.value_if()->endpoints().size() == 1U;
+      },
+      std::chrono::seconds{4}));
+  const auto peer = first.value_if()->endpoints().front().key;
+  ASSERT_TRUE(first.value_if()->connect_lan(peer));
+  const bool authenticated = wait_until(
+      [&] {
+        const auto first_sessions = first.value_if()->peer_sessions();
+        const auto second_sessions = second.value_if()->peer_sessions();
+        return first_sessions.size() == 1U && second_sessions.size() == 1U &&
+               first_sessions.front().state == NodePeerSessionState::authenticated &&
+               second_sessions.front().state == NodePeerSessionState::authenticated;
+      },
+      std::chrono::seconds{10});
+  const auto first_sessions = first.value_if()->peer_sessions();
+  const auto second_sessions = second.value_if()->peer_sessions();
+  ASSERT_TRUE(authenticated)
+      << "first_node_error="
+      << (first.value_if()->snapshot().last_error
+              ? first.value_if()->snapshot().last_error->safe_detail()
+              : "none")
+      << " second_node_error="
+      << (second.value_if()->snapshot().last_error
+              ? second.value_if()->snapshot().last_error->safe_detail()
+              : "none")
+      << " first_sessions=" << first_sessions.size()
+      << " second_sessions=" << second_sessions.size();
+  ASSERT_EQ(first_sessions.size(), 1U);
+  ASSERT_EQ(second_sessions.size(), 1U);
+  EXPECT_EQ(first_sessions.front().session_id, second_sessions.front().session_id);
+  EXPECT_EQ(first_sessions.front().request_id, second_sessions.front().request_id);
+  EXPECT_NE(first_sessions.front().initiator, second_sessions.front().initiator);
+  EXPECT_FALSE(first_sessions.front().error);
+  EXPECT_FALSE(second_sessions.front().error);
+  EXPECT_EQ(node_peer_session_state_name(first_sessions.front().state),
+            "authenticated");
+
+  EXPECT_TRUE(first.value_if()->shutdown().stopped);
+  EXPECT_TRUE(second.value_if()->shutdown().stopped);
+  EXPECT_TRUE(first.value_if()->peer_sessions().empty());
+  EXPECT_TRUE(second.value_if()->peer_sessions().empty());
+}
+
 TEST_F(M3aNodeTest, TrustedAutoConnectUsesOnlyTheTupleOfferOwner) {
   LanConfiguration configuration;
   configuration.connectivity_mode = ConnectivityMode::lan_only;
@@ -1372,10 +1449,15 @@ TEST_F(M3aNodeTest, TrustedAutoConnectUsesOnlyTheTupleOfferOwner) {
   ASSERT_TRUE(trust_peer(*second_profile.value_if(),
                          first_profile.value_if()->device_id(), 2U));
 
+  auto signaling_handler = [](const LanSignalingMessage&) {
+    return Result<void>::success();
+  };
   auto first = Node::create(
-      node_config(*first_profile.value_if(), "com.example.first"));
+      node_config(*first_profile.value_if(), "com.example.first", {},
+                  signaling_handler));
   auto second = Node::create(
-      node_config(*second_profile.value_if(), "com.example.second"));
+      node_config(*second_profile.value_if(), "com.example.second", {},
+                  signaling_handler));
   ASSERT_TRUE(first && second);
   const auto first_snapshot = first.value_if()->snapshot();
   const auto second_snapshot = second.value_if()->snapshot();
@@ -1450,10 +1532,15 @@ TEST_F(M3aNodeTest, RepeatedConnectCloseRemainsBounded) {
   auto second_profile = initialized_profile("stress-second", "com.example.stress.second",
                                             configuration);
   ASSERT_TRUE(first_profile && second_profile);
+  auto signaling_handler = [](const LanSignalingMessage&) {
+    return Result<void>::success();
+  };
   auto first = Node::create(node_config(*first_profile.value_if(),
-                                        "com.example.stress.first"));
+                                        "com.example.stress.first", {},
+                                        signaling_handler));
   auto second = Node::create(node_config(*second_profile.value_if(),
-                                         "com.example.stress.second"));
+                                         "com.example.stress.second", {},
+                                         signaling_handler));
   ASSERT_TRUE(first && second);
   if (joined_interface_count(first.value_if()->snapshot()) == 0U ||
       joined_interface_count(second.value_if()->snapshot()) == 0U) {

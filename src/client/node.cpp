@@ -1,8 +1,12 @@
 #include <heyaki/node.hpp>
 
 #include "runtime_access.hpp"
+#include "connection_attempt.hpp"
+#include "peer_session.hpp"
 #include "relay_wss_client.hpp"
+#include "signaling_coordinator.hpp"
 #include "../relay/relay_login.hpp"
+#include "../transport/webrtc/webrtc_transport_session.hpp"
 
 #include <heyaki/relay_wss_control.hpp>
 
@@ -427,6 +431,35 @@ bool is_relay_security_error(const Error& error) noexcept {
 
 class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
  public:
+  class LanCoordinatorRoute final : public SignalingRoute {
+   public:
+    explicit LanCoordinatorRoute(Impl& owner) : owner_(owner) {}
+
+    [[nodiscard]] SignalingRouteKind kind() const noexcept override {
+      return SignalingRouteKind::lan;
+    }
+
+    [[nodiscard]] Result<void> send(const SignalingEnvelope& message) override {
+      return owner_.send_coordinator_envelope(message);
+    }
+
+   private:
+    Impl& owner_;
+  };
+
+  struct PeerAttempt {
+    NodePeerSessionSnapshot snapshot;
+    IdentityPublicKey peer_public_key{};
+    std::shared_ptr<ConnectionAttemptTimeline> timeline;
+    std::shared_ptr<transport::webrtc::WebRtcTransportSession> transport;
+    std::shared_ptr<PeerSession> session;
+    std::deque<std::vector<std::byte>> pending_local_candidates;
+    std::deque<std::vector<std::byte>> pending_remote_candidates;
+    bool candidate_signing_ready{false};
+    bool remote_description_ready{false};
+    bool retiring{false};
+  };
+
   struct DiscoverySocket : public std::enable_shared_from_this<DiscoverySocket> {
     DiscoverySocket(boost::asio::strand<boost::asio::any_io_executor> executor,
                     InterfaceBinding binding)
@@ -801,6 +834,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
                                                      "heyaki-lan-signaling-results")),
         signaling_snapshots(std::vector<LanSignalingConnectionSnapshot>{},
                             "heyaki-lan-signaling-snapshot"),
+        peer_session_snapshots(std::vector<NodePeerSessionSnapshot>{},
+                               "heyaki-peer-session-snapshot"),
         stopped("heyaki-node-stopped"), trusted_devices(std::move(trusted_devices)),
         signaling_validator(std::move(signaling_validator)),
         signaling_handler(std::move(signaling_handler)),
@@ -825,6 +860,10 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     snapshots.publish(initial);
     endpoint_snapshots.publish({});
     signaling_snapshots.publish({});
+    peer_session_snapshots.publish({});
+
+    auto sessions_initialized = initialize_session_coordinator();
+    if (!sessions_initialized) return sessions_initialized;
 
     const auto relay_initialized = initialize_relay();
     if (!relay_initialized) {
@@ -1815,7 +1854,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     expiry_timer.async_wait([weak](const boost::system::error_code& error) {
       if (!error) {
         if (auto self = weak.lock()) {
-          self->directory.expire();
+          const auto now = std::chrono::steady_clock::now();
+          self->directory.expire(now);
+          if (self->coordinator) self->coordinator->expire(now);
           self->publish_directory();
           self->schedule_expiry();
         }
@@ -2054,6 +2095,455 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
 
   DeviceEndpointKey local_key() const noexcept {
     return DeviceEndpointKey{identity.device_id(), endpoint_id};
+  }
+
+  std::optional<IdentityPublicKey> peer_identity(DeviceEndpointKey peer) const {
+    const auto entries = directory.snapshot();
+    const auto iterator = std::find_if(entries.begin(), entries.end(),
+                                       [&](const auto& entry) {
+                                         return entry.key == peer && entry.lan.has_value();
+                                       });
+    return iterator == entries.end()
+               ? std::nullopt
+               : std::optional<IdentityPublicKey>{iterator->lan->identity_public_key};
+  }
+
+  void publish_peer_sessions() {
+    std::vector<NodePeerSessionSnapshot> published;
+    published.reserve(peer_attempts.size() + finished_peer_sessions.size());
+    for (const auto& [request_id, attempt] : peer_attempts) {
+      (void)request_id;
+      published.push_back(attempt.snapshot);
+    }
+    published.insert(published.end(), finished_peer_sessions.begin(),
+                     finished_peer_sessions.end());
+    peer_session_snapshots.publish(std::move(published));
+  }
+
+  Result<void> initialize_session_coordinator() {
+    if (signaling_validator || signaling_handler || !lan.enabled ||
+        lan.connectivity_mode == ConnectivityMode::relay_only) {
+      return Result<void>::success();
+    }
+    coordinator_delegate = std::make_shared<SignalingDelegate>();
+    coordinator_delegate->peer_identity = [this](const DeviceEndpointKey& peer) {
+      return peer_identity(peer);
+    };
+    coordinator_delegate->on_inbound_connect =
+        [this](const SignalingAttemptSnapshot& snapshot) {
+          return admit_inbound_attempt(snapshot);
+        };
+    coordinator_delegate->on_outbound_accepted =
+        [this](const SignalingAttemptSnapshot& snapshot) {
+          auto started = start_webrtc_transport(snapshot, true, std::nullopt);
+          if (!started) fail_peer_attempt(snapshot.request_id, *started.error_if());
+        };
+    coordinator_delegate->on_verified_offer =
+        [this](const SignalingAttemptSnapshot& snapshot, const SignedOffer& offer) {
+          auto started = start_webrtc_transport(snapshot, false, offer.sdp);
+          if (!started) fail_peer_attempt(snapshot.request_id, *started.error_if());
+        };
+    coordinator_delegate->on_verified_answer =
+        [this](const SignalingAttemptSnapshot& snapshot, const SignedAnswer& answer,
+               const SignalingTranscriptSha256&) {
+          auto iterator = peer_attempts.find(snapshot.request_id);
+          if (iterator == peer_attempts.end() || !iterator->second.transport) {
+            fail_peer_attempt(snapshot.request_id,
+                              node_error(ErrorCode::internal,
+                                         "peer_transport_missing_for_answer"));
+            return;
+          }
+          iterator->second.candidate_signing_ready = true;
+          auto candidates_sent = flush_local_candidates(snapshot.request_id);
+          if (!candidates_sent) {
+            fail_peer_attempt(snapshot.request_id, *candidates_sent.error_if());
+            return;
+          }
+          auto applied = apply_remote_description(snapshot.request_id, answer.sdp,
+                                                  "answer");
+          if (!applied) {
+            fail_peer_attempt(snapshot.request_id, *applied.error_if());
+            return;
+          }
+          auto session = start_verified_peer_session(snapshot.request_id);
+          if (!session) fail_peer_attempt(snapshot.request_id, *session.error_if());
+        };
+    coordinator_delegate->on_verified_candidate =
+        [this](const SignalingAttemptSnapshot& snapshot,
+               const SignedCandidate& candidate) {
+          auto iterator = peer_attempts.find(snapshot.request_id);
+          if (iterator == peer_attempts.end() || !iterator->second.transport) {
+            fail_peer_attempt(snapshot.request_id,
+                              node_error(ErrorCode::internal,
+                                         "peer_transport_missing_for_candidate"));
+            return;
+          }
+          if (!iterator->second.remote_description_ready) {
+            if (iterator->second.pending_remote_candidates.size() >= 128U) {
+              fail_peer_attempt(snapshot.request_id,
+                                node_error(ErrorCode::resource_exhausted,
+                                           "pending_remote_candidate_capacity_full"));
+              return;
+            }
+            iterator->second.pending_remote_candidates.push_back(candidate.candidate);
+            return;
+          }
+          auto applied = iterator->second.transport->add_remote_candidate(
+              candidate.candidate);
+          if (!applied) fail_peer_attempt(snapshot.request_id, *applied.error_if());
+        };
+    coordinator_delegate->on_attempt_error =
+        [this](const SignalingAttemptSnapshot& snapshot, const Error& error) {
+          fail_peer_attempt(snapshot.request_id, error);
+        };
+
+    SignalingCoordinatorConfig config;
+    config.local = local_key();
+    config.identity = &identity;
+    config.max_pending_attempts = lan.pending_signaling_capacity;
+    config.max_inbound_attempts = lan.pending_signaling_capacity;
+    config.max_candidates_per_attempt = 128U;
+    auto created = SignalingCoordinator::create(config, coordinator_delegate);
+    if (!created) return Result<void>::failure(*created.error_if());
+    coordinator.emplace(std::move(*created.value_if()));
+    lan_coordinator_route = std::make_unique<LanCoordinatorRoute>(*this);
+    coordinator->attach_route(lan_coordinator_route.get());
+    return Result<void>::success();
+  }
+
+  bool admit_inbound_attempt(const SignalingAttemptSnapshot& snapshot) {
+    if (peers_closed || peer_attempts.size() >= lan.pending_signaling_capacity ||
+        peer_attempt_by_endpoint.contains(snapshot.peer)) {
+      return false;
+    }
+    auto public_key = peer_identity(snapshot.peer);
+    if (!public_key) return false;
+    PeerAttempt attempt;
+    attempt.snapshot.peer = snapshot.peer;
+    attempt.snapshot.request_id = snapshot.request_id;
+    attempt.snapshot.session_id = snapshot.session_id;
+    attempt.snapshot.signaling_route = snapshot.route;
+    attempt.snapshot.state = NodePeerSessionState::signaling;
+    attempt.snapshot.initiator = false;
+    attempt.peer_public_key = *public_key;
+    attempt.timeline = std::make_shared<ConnectionAttemptTimeline>();
+    auto resolved = attempt.timeline->transition(ConnectionStage::resolving_endpoint,
+                                                  "node", "inbound_peer_resolved");
+    if (!resolved) return false;
+    auto signaling = attempt.timeline->transition(ConnectionStage::signaling,
+                                                   "signaling", "connect_accepted");
+    if (!signaling) return false;
+    peer_attempt_by_endpoint.emplace(snapshot.peer, snapshot.request_id);
+    peer_attempts.emplace(snapshot.request_id, std::move(attempt));
+    publish_peer_sessions();
+    return true;
+  }
+
+  Result<void> begin_peer_attempt(DeviceEndpointKey peer) {
+    if (!coordinator || peers_closed || producers_stopped) {
+      return Result<void>::failure(
+          node_error(ErrorCode::cancelled, "peer_session_admission_closed"));
+    }
+    if (peer_attempt_by_endpoint.contains(peer)) return Result<void>::success();
+    if (peer_attempts.size() >= lan.pending_signaling_capacity) {
+      return Result<void>::failure(
+          node_error(ErrorCode::resource_exhausted, "peer_attempt_capacity_full"));
+    }
+    auto public_key = peer_identity(peer);
+    if (!public_key) {
+      return Result<void>::failure(
+          node_error(ErrorCode::authentication, "peer_identity_unavailable"));
+    }
+    auto request = coordinator->begin_attempt(peer, SignalingRouteKind::lan);
+    if (!request) return Result<void>::failure(*request.error_if());
+    PeerAttempt attempt;
+    attempt.snapshot.peer = peer;
+    attempt.snapshot.request_id = *request.value_if();
+    attempt.snapshot.signaling_route = SignalingRouteKind::lan;
+    attempt.snapshot.state = NodePeerSessionState::signaling;
+    attempt.snapshot.initiator = true;
+    attempt.peer_public_key = *public_key;
+    attempt.timeline = std::make_shared<ConnectionAttemptTimeline>();
+    auto resolved = attempt.timeline->transition(ConnectionStage::resolving_endpoint,
+                                                  "node", "endpoint_selected");
+    if (!resolved) return Result<void>::failure(*resolved.error_if());
+    auto signaling = attempt.timeline->transition(ConnectionStage::signaling,
+                                                   "signaling", "connect_requested");
+    if (!signaling) return Result<void>::failure(*signaling.error_if());
+    peer_attempt_by_endpoint.emplace(peer, *request.value_if());
+    peer_attempts.emplace(*request.value_if(), std::move(attempt));
+    publish_peer_sessions();
+    return Result<void>::success();
+  }
+
+  Result<void> send_coordinator_envelope(const SignalingEnvelope& envelope) {
+    LanSignalingMessage message{.peer = envelope.peer,
+                                .kind = envelope.kind,
+                                .request_id = envelope.request_id,
+                                .payload = envelope.payload};
+    auto valid = validate_signaling_message_shape(message);
+    if (!valid) return valid;
+    return queue_outbound_message(std::move(message));
+  }
+
+  transport::webrtc::RuntimeDispatcher peer_dispatcher() {
+    auto weak = weak_from_this();
+    return [weak](std::string_view, std::function<Result<void>()> task) {
+      auto self = weak.lock();
+      if (!self || self->peers_closed) {
+        return Result<void>::failure(
+            node_error(ErrorCode::cancelled, "peer_dispatch_closed"));
+      }
+      try {
+        boost::asio::post(self->strand,
+                          [weak, task = std::move(task)]() mutable {
+                            if (auto current = weak.lock(); current && !current->peers_closed) {
+                              auto completed = task();
+                              if (!completed) {
+                                current->record_signaling_error(*completed.error_if());
+                              }
+                            }
+                          });
+      } catch (...) {
+        return Result<void>::failure(
+            node_error(ErrorCode::internal, "peer_dispatch_failed"));
+      }
+      return Result<void>::success();
+    };
+  }
+
+  Result<void> start_webrtc_transport(
+      const SignalingAttemptSnapshot& snapshot, bool offerer,
+      std::optional<std::vector<std::byte>> remote_offer) {
+    auto iterator = peer_attempts.find(snapshot.request_id);
+    if (iterator == peer_attempts.end() || iterator->second.transport) {
+      return Result<void>::failure(
+          node_error(ErrorCode::signaling, "peer_attempt_transport_conflict"));
+    }
+    transport::webrtc::WebRtcTransportConfig config;
+    config.offerer = offerer;
+    config.signaling_path = transport::SignalingPathKind::lan;
+    config.ice_servers.clear();
+    config.candidates.allow_server_reflexive = false;
+    config.candidates.allow_turn_udp = false;
+    config.candidates.allow_turn_tcp = false;
+    config.candidates.allow_turn_tls = false;
+
+    auto weak = weak_from_this();
+    const auto request_id = snapshot.request_id;
+    transport::webrtc::WebRtcSignalingHandler signaling;
+    signaling.on_local_description =
+        [weak, request_id](std::vector<std::byte> sdp, std::string type,
+                           DtlsFingerprint fingerprint) {
+          auto self = weak.lock();
+          if (!self || !self->coordinator) return;
+          Result<void> sent = type == "offer"
+                                  ? self->coordinator->send_local_offer(
+                                        request_id, sdp, fingerprint)
+                                  : self->coordinator->send_local_answer(
+                                        request_id, sdp, fingerprint);
+          if (!sent) {
+            self->fail_peer_attempt(request_id, *sent.error_if());
+            return;
+          }
+          auto iterator = self->peer_attempts.find(request_id);
+          if (iterator == self->peer_attempts.end()) return;
+          if (type == "answer") {
+            iterator->second.candidate_signing_ready = true;
+          }
+          auto candidates_sent = self->flush_local_candidates(request_id);
+          if (!candidates_sent) {
+            self->fail_peer_attempt(request_id, *candidates_sent.error_if());
+            return;
+          }
+          if (type == "answer") {
+            auto started = self->start_verified_peer_session(request_id);
+            if (!started) self->fail_peer_attempt(request_id, *started.error_if());
+          }
+        };
+    signaling.on_local_candidate =
+        [weak, request_id](std::vector<std::byte> candidate) {
+          auto self = weak.lock();
+          if (!self || !self->coordinator) return;
+          auto iterator = self->peer_attempts.find(request_id);
+          if (iterator == self->peer_attempts.end()) return;
+          if (!iterator->second.candidate_signing_ready) {
+            if (iterator->second.pending_local_candidates.size() >= 128U) {
+              self->fail_peer_attempt(
+                  request_id,
+                  node_error(ErrorCode::resource_exhausted,
+                             "pending_local_candidate_capacity_full"));
+              return;
+            }
+            iterator->second.pending_local_candidates.push_back(std::move(candidate));
+            return;
+          }
+          auto sent = self->coordinator->send_local_candidate(request_id, candidate);
+          if (!sent) self->fail_peer_attempt(request_id, *sent.error_if());
+        };
+    auto created = transport::webrtc::WebRtcTransportSession::create(
+        config, peer_dispatcher(), std::move(signaling));
+    if (!created) return Result<void>::failure(*created.error_if());
+    iterator->second.transport = *created.value_if();
+    iterator->second.snapshot.state = NodePeerSessionState::transport_connecting;
+    publish_peer_sessions();
+    if (offerer) {
+      transport::ChannelOptions control_options;
+      control_options.priority = transport::ChannelPriority::control;
+      control_options.send_queue_bytes = 64U * 1024U;
+      control_options.max_message_bytes = 64U * 1024U;
+      auto prepared =
+          iterator->second.transport->prepare_channel(transport::ChannelKind::control,
+                                                      control_options);
+      if (!prepared) return prepared;
+    }
+    if (remote_offer) {
+      auto applied = apply_remote_description(snapshot.request_id, *remote_offer,
+                                              "offer");
+      if (!applied) return applied;
+    }
+    return iterator->second.transport->start();
+  }
+
+  Result<void> flush_local_candidates(RequestId request_id) {
+    auto iterator = peer_attempts.find(request_id);
+    if (iterator == peer_attempts.end() || !coordinator) {
+      return Result<void>::failure(
+          node_error(ErrorCode::signaling, "peer_attempt_unknown"));
+    }
+    if (!iterator->second.candidate_signing_ready) {
+      return Result<void>::success();
+    }
+    while (!iterator->second.pending_local_candidates.empty()) {
+      auto candidate = std::move(iterator->second.pending_local_candidates.front());
+      iterator->second.pending_local_candidates.pop_front();
+      auto sent = coordinator->send_local_candidate(request_id, candidate);
+      if (!sent) return sent;
+    }
+    return Result<void>::success();
+  }
+
+  Result<void> apply_remote_description(RequestId request_id,
+                                        std::span<const std::byte> sdp,
+                                        std::string_view type) {
+    auto iterator = peer_attempts.find(request_id);
+    if (iterator == peer_attempts.end() || !iterator->second.transport) {
+      return Result<void>::failure(
+          node_error(ErrorCode::internal, "peer_transport_missing_for_description"));
+    }
+    auto applied = iterator->second.transport->set_remote_description(sdp, type);
+    if (!applied) return applied;
+    iterator->second.remote_description_ready = true;
+    while (!iterator->second.pending_remote_candidates.empty()) {
+      auto candidate =
+          std::move(iterator->second.pending_remote_candidates.front());
+      iterator->second.pending_remote_candidates.pop_front();
+      auto added = iterator->second.transport->add_remote_candidate(candidate);
+      if (!added) return added;
+    }
+    return Result<void>::success();
+  }
+
+  Result<void> start_verified_peer_session(RequestId request_id) {
+    auto iterator = peer_attempts.find(request_id);
+    if (iterator == peer_attempts.end() || !iterator->second.transport ||
+        iterator->second.session) {
+      return Result<void>::failure(
+          node_error(ErrorCode::signaling, "peer_session_start_conflict"));
+    }
+    auto binding = coordinator->verified_session_binding(request_id, 1U);
+    if (!binding) return Result<void>::failure(*binding.error_if());
+    iterator->second.snapshot.session_id = binding.value_if()->expectation.session_id;
+    iterator->second.snapshot.state = NodePeerSessionState::authenticating;
+    const auto expires = unix_milliseconds_now() + 60'000U;
+    auto weak = weak_from_this();
+    auto session = PeerSession::create_verified(
+        {.transport = iterator->second.transport,
+         .binding = *binding.value_if(),
+         .local_identity = &identity,
+         .peer_public_key = iterator->second.peer_public_key,
+         .local_protocol = {.version = current_protocol_version,
+                            .supported = {protocol_1_1_capability_bits},
+                            .required = {static_cast<std::uint64_t>(Capability::session)}},
+         .expires_unix_milliseconds = expires,
+         .now_unix_milliseconds = unix_milliseconds_now(),
+         .observer = [weak, request_id](const PeerSessionDiagnostics& diagnostics) {
+           if (auto self = weak.lock()) {
+             self->peer_session_changed(request_id, diagnostics);
+           }
+         },
+         .timeline = iterator->second.timeline,
+         .clock = {}});
+    if (!session) return Result<void>::failure(*session.error_if());
+    iterator->second.session = *session.value_if();
+    publish_peer_sessions();
+    return iterator->second.session->start();
+  }
+
+  void peer_session_changed(RequestId request_id,
+                            const PeerSessionDiagnostics& diagnostics) {
+    auto iterator = peer_attempts.find(request_id);
+    if (iterator == peer_attempts.end()) return;
+    if (diagnostics.last_error) iterator->second.snapshot.error = diagnostics.last_error;
+    switch (diagnostics.state) {
+      case PeerSessionState::idle:
+        break;
+      case PeerSessionState::authenticating:
+        iterator->second.snapshot.state = NodePeerSessionState::authenticating;
+        break;
+      case PeerSessionState::authenticated:
+        iterator->second.snapshot.state = NodePeerSessionState::authenticated;
+        if (coordinator) {
+          (void)coordinator->cancel_attempt(request_id,
+                                            std::chrono::steady_clock::now());
+        }
+        close_peer(iterator->second.snapshot.peer);
+        break;
+      case PeerSessionState::pairing_restricted:
+        iterator->second.snapshot.state = NodePeerSessionState::authenticating;
+        break;
+      case PeerSessionState::closed:
+        iterator->second.snapshot.state = NodePeerSessionState::closed;
+        if (!peers_closed && !iterator->second.retiring) {
+          const auto error = diagnostics.last_error.value_or(
+              node_error(ErrorCode::transport, "peer_session_closed"));
+          fail_peer_attempt(request_id, error);
+          return;
+        }
+        break;
+    }
+    publish_peer_sessions();
+  }
+
+  void fail_peer_attempt(RequestId request_id, Error error) {
+    auto iterator = peer_attempts.find(request_id);
+    if (iterator == peer_attempts.end()) {
+      record_signaling_error(error);
+      return;
+    }
+    if (iterator->second.retiring) return;
+    iterator->second.retiring = true;
+    iterator->second.snapshot.state = NodePeerSessionState::closed;
+    iterator->second.snapshot.error = error;
+    if (coordinator) {
+      (void)coordinator->cancel_attempt(request_id,
+                                        std::chrono::steady_clock::now());
+    }
+    if (iterator->second.session) {
+      iterator->second.session->close(transport::CloseReason::protocol_error);
+    } else if (iterator->second.transport) {
+      iterator->second.transport->close(transport::CloseReason::protocol_error);
+    }
+    const auto peer = iterator->second.snapshot.peer;
+    auto completed = iterator->second.snapshot;
+    peer_attempt_by_endpoint.erase(peer);
+    peer_attempts.erase(iterator);
+    finished_peer_sessions.push_back(std::move(completed));
+    while (finished_peer_sessions.size() > lan.diagnostic_capacity) {
+      finished_peer_sessions.pop_front();
+    }
+    record_signaling_error(error);
+    publish_peer_sessions();
   }
 
   std::optional<LanEndpointSnapshot> find_lan_endpoint(DeviceEndpointKey peer) {
@@ -2404,6 +2894,10 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     update_tls_counts([](LanTlsSnapshot&) {});
     publish_signaling_connections();
     start_signaling_read(connection);
+    if (coordinator && is_lan_offer_owner(local_key(), peer)) {
+      auto begun = begin_peer_attempt(peer);
+      if (!begun) record_signaling_error(*begun.error_if());
+    }
   }
 
   void start_signaling_read(const std::shared_ptr<TlsConnection>& connection) {
@@ -2432,6 +2926,24 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
 
   void dispatch_signaling_callback(const std::shared_ptr<TlsConnection>& connection,
                                    LanSignalingMessage message, bool outbound) {
+    if (coordinator && !signaling_validator && !signaling_handler) {
+      if (outbound) {
+        write_outbound_message(connection, message);
+        return;
+      }
+      SignalingEnvelope envelope{.peer = message.peer,
+                                 .kind = message.kind,
+                                 .request_id = message.request_id,
+                                 .payload = std::move(message.payload)};
+      auto handled = coordinator->handle_message(envelope, SignalingRouteKind::lan);
+      connection->inbound_callback_in_flight = false;
+      if (!handled) {
+        signaling_failed(connection->id, *handled.error_if());
+        return;
+      }
+      start_signaling_read(connection);
+      return;
+    }
     const auto connection_id = connection->id;
     ++signaling_callbacks_in_flight;
     publish_resource_snapshot();
@@ -2533,19 +3045,21 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     }
   }
 
-  void queue_outbound_message(LanSignalingMessage message) {
+  Result<void> queue_outbound_message(LanSignalingMessage message) {
     const auto active = active_connections.find(message.peer);
     if (active == active_connections.end()) {
-      record_signaling_error(
-          tls_error(ErrorCode::would_block, "lan_signaling_not_authenticated"));
-      return;
+      const auto error =
+          tls_error(ErrorCode::would_block, "lan_signaling_not_authenticated");
+      record_signaling_error(error);
+      return Result<void>::failure(error);
     }
     auto iterator = connections.find(active->second);
     if (iterator == connections.end()) {
       active_connections.erase(active);
-      record_signaling_error(
-          tls_error(ErrorCode::would_block, "lan_signaling_not_authenticated"));
-      return;
+      const auto error =
+          tls_error(ErrorCode::would_block, "lan_signaling_not_authenticated");
+      record_signaling_error(error);
+      return Result<void>::failure(error);
     }
     std::size_t pending = 0U;
     for (const auto& [id, connection] : connections) {
@@ -2553,12 +3067,14 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       pending += connection->outbound_messages.size();
     }
     if (pending >= lan.pending_signaling_capacity) {
-      record_signaling_error(tls_error(ErrorCode::resource_exhausted,
-                                       "pending_signaling_capacity_full"));
-      return;
+      const auto error = tls_error(ErrorCode::resource_exhausted,
+                                   "pending_signaling_capacity_full");
+      record_signaling_error(error);
+      return Result<void>::failure(error);
     }
     iterator->second->outbound_messages.push_back(std::move(message));
     process_next_outbound(iterator->second);
+    return Result<void>::success();
   }
 
   void process_next_outbound(const std::shared_ptr<TlsConnection>& connection) {
@@ -2568,7 +3084,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     }
     connection->outbound_busy = true;
     const auto message = connection->outbound_messages.front();
-    if (is_signed_signaling_kind(message.kind)) {
+    if (is_signed_signaling_kind(message.kind) && signaling_validator) {
       dispatch_signaling_callback(connection, message, true);
     } else {
       write_outbound_message(connection, message);
@@ -2625,7 +3141,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
             if constexpr (std::is_same_v<Command, ConnectCommand>) {
               start_outbound_connection(value.peer);
             } else if constexpr (std::is_same_v<Command, SendCommand>) {
-              queue_outbound_message(std::move(value.message));
+              (void)queue_outbound_message(std::move(value.message));
             } else {
               close_peer(value.peer);
             }
@@ -2647,6 +3163,14 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     auto iterator = connections.find(id);
     if (iterator == connections.end()) {
       return;
+    }
+    const auto peer = iterator->second->peer.value_or(iterator->second->expected_peer);
+    const auto active_attempt = peer_attempt_by_endpoint.find(peer);
+    if (active_attempt != peer_attempt_by_endpoint.end()) {
+      const auto attempt = peer_attempts.find(active_attempt->second);
+      if (attempt != peer_attempts.end() && !attempt->second.session) {
+        fail_peer_attempt(active_attempt->second, error);
+      }
     }
     record_signaling_error(error);
     retire_connection(iterator->second, LanSignalingConnectionState::failed, error);
@@ -2848,6 +3372,16 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return;
     }
     peers_closed = true;
+    for (auto& [request_id, attempt] : peer_attempts) {
+      (void)request_id;
+      if (attempt.session) {
+        attempt.session->close(transport::CloseReason::local_shutdown);
+      } else if (attempt.transport) {
+        attempt.transport->close(transport::CloseReason::local_shutdown);
+      }
+      attempt.snapshot.state = NodePeerSessionState::closed;
+    }
+    publish_peer_sessions();
     signaling_results.close();
     SignalingCallbackResult discarded_result;
     while (signaling_results.try_receive(discarded_result)) {
@@ -2963,10 +3497,17 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   executor::comm::MpscChannel<SignalingCommand> signaling_commands;
   executor::comm::MpscChannel<SignalingCallbackResult> signaling_results;
   executor::comm::DoubleBuffer<std::vector<LanSignalingConnectionSnapshot>> signaling_snapshots;
+  executor::comm::DoubleBuffer<std::vector<NodePeerSessionSnapshot>> peer_session_snapshots;
   executor::comm::PhaseGate stopped;
   std::set<DeviceId> trusted_devices;
   LanSignalingValidator signaling_validator;
   LanSignalingHandler signaling_handler;
+  std::shared_ptr<SignalingDelegate> coordinator_delegate;
+  std::optional<SignalingCoordinator> coordinator;
+  std::unique_ptr<LanCoordinatorRoute> lan_coordinator_route;
+  std::map<RequestId, PeerAttempt> peer_attempts;
+  std::map<DeviceEndpointKey, RequestId> peer_attempt_by_endpoint;
+  std::deque<NodePeerSessionSnapshot> finished_peer_sessions;
   std::optional<RelayNodeConfig> relay_override;
   std::map<std::uint64_t, std::shared_ptr<TlsConnection>> connections;
   std::map<DeviceEndpointKey, std::uint64_t> active_connections;
@@ -3106,6 +3647,11 @@ std::vector<LanSignalingConnectionSnapshot> Node::signaling_connections() const 
                : std::vector<LanSignalingConnectionSnapshot>{};
 }
 
+std::vector<NodePeerSessionSnapshot> Node::peer_sessions() const {
+  return impl_ ? impl_->peer_session_snapshots.load().value
+               : std::vector<NodePeerSessionSnapshot>{};
+}
+
 Result<void> Node::refresh_interfaces() {
   if (!impl_) {
     return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
@@ -3238,6 +3784,22 @@ std::string_view relay_node_state_name(RelayNodeState state) noexcept {
       return "stopped";
   }
   return "unknown";
+}
+
+std::string_view node_peer_session_state_name(NodePeerSessionState state) noexcept {
+  switch (state) {
+    case NodePeerSessionState::signaling:
+      return "signaling";
+    case NodePeerSessionState::transport_connecting:
+      return "transport_connecting";
+    case NodePeerSessionState::authenticating:
+      return "authenticating";
+    case NodePeerSessionState::authenticated:
+      return "authenticated";
+    case NodePeerSessionState::closed:
+      return "closed";
+  }
+  return "closed";
 }
 
 bool is_lan_offer_owner(DeviceEndpointKey local, DeviceEndpointKey peer) noexcept {

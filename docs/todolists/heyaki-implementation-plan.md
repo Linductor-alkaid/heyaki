@@ -783,7 +783,7 @@ Linux GCC/Clang Debug/Release、Windows Debug/Release、ASan/UBSan/TSAN 全部�
 
 ### 7.3 最小身份会话与诊断 UI
 
-- [ ] `M4-13` 实现 `SESSION_HELLO`，在 fingerprint 已验证的 DataChannel 上绑定签名 signaling transcript、session ID/epoch、endpoint、能力摘要和签名。
+- [x] `M4-13` 实现 `SESSION_HELLO`，在 fingerprint 已验证的 DataChannel 上绑定签名 signaling transcript、session ID/epoch、endpoint、能力摘要和签名。
 - [x] `M4-14` 实现最小状态机 `Idle -> ResolvingEndpoint -> Signaling -> Gathering -> Checking -> TransportConnected -> Authenticating -> Closed`，每次转换记录 source/reason/timestamp。
 - [x] `M4-15` 在授权功能尚未实现时，成功认证的测试设备只开放内部 control ping，不开放通用业务通道。
 - [ ] `M4-16` TUI 设备/诊断视图展示 LAN/relay endpoint 来源、建连阶段、signaling/data path、candidate、RTT 和结构化失败。
@@ -990,6 +990,34 @@ fingerprint 的真实 control DataChannel 和 Node/PeerSession 生命周期后�
 本机验证：GCC Debug 的全部 M4、public-header boundary、fuzz smoke 与 installed consumer
 定向 9/9 通过；禁异常、ASan、UBSan 的 PeerSession/WebRTC/fuzz 各 3/3 通过；TSAN 在关闭
 ASLR 后 PeerSession 3/3、真实 WebRTC 连续 10 轮 2/2 通过，无数据竞争报告。
+
+### M4 实施进度（2026-08-19，第8轮）
+
+- Node 的默认 LAN-only 路径现由 TLS 双向身份绑定自动装配 `SignalingCoordinator`、
+  `ConnectionAttemptTimeline`、`WebRtcTransportSession` 与 `PeerSession`；完整 endpoint tuple
+  决定唯一 offer owner，自定义 signaling validator/handler 仍保留原显式接管语义。
+- libdatachannel 关闭隐式自动协商，offer 前预建 control DataChannel，并从结构化
+  `Description::fingerprint()` 取得 SHA-256 DTLS fingerprint。只有 coordinator 验证后的
+  offer、answer 与 candidate 才进入 transport；本地 candidate 在双方 transcript 完整前、
+  远端 candidate 在 remote description 设置前分别进入 128 项有界 staging，满载显式失败。
+- coordinator 产生的 `VerifiedSessionBinding` 直接传入 `PeerSession::create_verified()`；双方在
+  真实 host-candidate DTLS/SCTP DataChannel 上完成 mutual signed `SESSION_HELLO`，绑定 session
+  ID/epoch、双方 endpoint/nonce、signaling transcript、peer fingerprint、能力摘要和长期身份签名。
+  认证完成后释放 coordinator attempt 并关闭 LAN signaling；较慢一端已创建 verified
+  `PeerSession` 时不会因另一端先关闭 signaling 而误杀 DataChannel。
+- 新增公共只读 `Node::peer_sessions()` 诊断快照。失败 attempt 释放 endpoint/pending 槽并进入
+  `diagnostic_capacity` 有界历史；Node 的 500 ms expiry 驱动 coordinator TTL，expiry 先擦除
+  attempt 再调用错误回调，并由重入取消回归测试固定该顺序。shutdown 的 close-peers 阶段关闭
+  PeerSession/transport，旧 TLS route 生命周期测试通过显式 handler 继续只验证原有边界。
+- 新增 `NodeAutomaticallyAssemblesAuthenticatedWebRtcPeerSession` 验收：两个无 relay Node 经
+  multicast discovery、LAN TLS、signed offer/answer/candidate、真实 host candidate 和 mutual
+  hello，在两端达到相同 request/session ID 的 authenticated 状态并完成 shutdown。
+
+本机验证：GCC 13.3 Debug `-Werror` 全量 CTest 28/28 通过，coturn allocation 因本机未安装
+coturn 按既有规则 skip；禁异常 `-Werror`、ASan、UBSan 与关闭 ASLR 的 TSAN 定向各 5/5
+通过，均覆盖完整 LAN Node 闭环、signaling、PeerSession、真实 WebRTC 与 fuzz smoke。
+据此完成 `M4-13`。`M4-02` 仍待 Node relay route 自动装配，`M4-04` 仍待所有 session epoch
+迟到信令门禁，`M4-16` 与 Connectivity MVP 三设备/网络矩阵退出条件也继续保持未勾选。
 
 ---
 

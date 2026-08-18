@@ -60,6 +60,24 @@ enum class SignalingRouteKind : std::uint8_t {
   relay,
 };
 
+enum class NodePeerSessionState : std::uint8_t {
+  signaling,
+  transport_connecting,
+  authenticating,
+  authenticated,
+  closed,
+};
+
+struct NodePeerSessionSnapshot {
+  DeviceEndpointKey peer;
+  RequestId request_id;
+  SessionId session_id;
+  SignalingRouteKind signaling_route{SignalingRouteKind::lan};
+  NodePeerSessionState state{NodePeerSessionState::signaling};
+  bool initiator{false};
+  std::optional<Error> error;
+};
+
 struct LanSignalingMessage {
   DeviceEndpointKey peer;
   LanSignalingMessageKind kind{LanSignalingMessageKind::connect_request};
@@ -203,6 +221,7 @@ class Node {
   [[nodiscard]] NodeSnapshot snapshot() const;
   [[nodiscard]] std::vector<EndpointDirectoryEntrySnapshot> endpoints() const;
   [[nodiscard]] std::vector<LanSignalingConnectionSnapshot> signaling_connections() const;
+  [[nodiscard]] std::vector<NodePeerSessionSnapshot> peer_sessions() const;
   [[nodiscard]] Result<void> refresh_interfaces();
   [[nodiscard]] Result<void> connect_lan(DeviceEndpointKey peer);
   [[nodiscard]] Result<void> send_lan_signaling(LanSignalingMessage message);
@@ -216,6 +235,8 @@ class Node {
 
 [[nodiscard]] std::string_view lan_readiness_state_name(LanReadinessState state) noexcept;
 [[nodiscard]] std::string_view relay_node_state_name(RelayNodeState state) noexcept;
+[[nodiscard]] std::string_view node_peer_session_state_name(
+    NodePeerSessionState state) noexcept;
 [[nodiscard]] bool is_lan_offer_owner(DeviceEndpointKey local,
                                       DeviceEndpointKey peer) noexcept;
 [[nodiscard]] Result<SignalingRouteKind> select_signaling_route(

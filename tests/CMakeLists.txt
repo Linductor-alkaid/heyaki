@@ -265,6 +265,7 @@ heyaki_add_runtime_test(
   heyaki_m2_runtime heyaki_m2_runtime_tests "unit;runtime;concurrency")
 
 add_executable(heyaki_m3a_lan_tests unit/m3a_lan_test.cpp)
+heyaki_enable_executor_exception_adapter_source(unit/m3a_lan_test.cpp)
 target_link_libraries(heyaki_m3a_lan_tests PRIVATE
   heyaki::client
   executor::executor

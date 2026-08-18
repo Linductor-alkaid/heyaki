@@ -138,7 +138,9 @@ TEST(M4WebRtcTransport, HostCandidateDataChannelUsesExecutorDispatcher) {
 
   heyaki::transport::webrtc::WebRtcSignalingHandler left_signaling;
   left_signaling.on_local_description =
-      [&](std::vector<std::byte> sdp, std::string type) {
+      [&](std::vector<std::byte> sdp, std::string type,
+          heyaki::DtlsFingerprint fingerprint) {
+        EXPECT_NE(fingerprint, heyaki::DtlsFingerprint{});
         ASSERT_TRUE(right);
         EXPECT_TRUE(right->set_remote_description(sdp, type).has_value());
       };
@@ -148,7 +150,9 @@ TEST(M4WebRtcTransport, HostCandidateDataChannelUsesExecutorDispatcher) {
   };
   heyaki::transport::webrtc::WebRtcSignalingHandler right_signaling;
   right_signaling.on_local_description =
-      [&](std::vector<std::byte> sdp, std::string type) {
+      [&](std::vector<std::byte> sdp, std::string type,
+          heyaki::DtlsFingerprint fingerprint) {
+        EXPECT_NE(fingerprint, heyaki::DtlsFingerprint{});
         ASSERT_TRUE(left);
         EXPECT_TRUE(left->set_remote_description(sdp, type).has_value());
       };

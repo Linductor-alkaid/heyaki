@@ -3,6 +3,7 @@
 #include "transport_session.hpp"
 
 #include <heyaki/error.hpp>
+#include <heyaki/signaling_protocol.hpp>
 
 #include <chrono>
 #include <cstddef>
@@ -75,7 +76,8 @@ using RuntimeDispatcher =
     std::function<Result<void>(std::string_view, std::function<Result<void>()>)>;
 
 struct WebRtcSignalingHandler {
-  std::function<void(std::vector<std::byte>, std::string)> on_local_description;
+  std::function<void(std::vector<std::byte>, std::string, DtlsFingerprint)>
+      on_local_description;
   std::function<void(std::vector<std::byte>)> on_local_candidate;
 };
 
@@ -93,6 +95,8 @@ class WebRtcTransportSession final
   WebRtcTransportSession& operator=(const WebRtcTransportSession&) = delete;
 
   [[nodiscard]] Result<void> start();
+  [[nodiscard]] Result<void> prepare_channel(ChannelKind kind,
+                                             ChannelOptions options);
   [[nodiscard]] Result<void> set_remote_description(std::span<const std::byte> sdp,
                                                     std::string_view type);
   [[nodiscard]] Result<void> add_remote_candidate(std::span<const std::byte> candidate);

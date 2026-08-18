@@ -369,13 +369,14 @@ class SignalingCoordinator::Impl {
     for (auto it = attempts_.begin(); it != attempts_.end();) {
       const auto deadline = it->second.created_at + config_.attempt_ttl;
       if (now >= deadline) {
+        const auto expired = snapshot_of(it->second, config_.attempt_ttl);
+        it = attempts_.erase(it);
+        ++diagnostics_.attempts_expired;
         if (delegate_->on_attempt_error) {
-          delegate_->on_attempt_error(snapshot_of(it->second, config_.attempt_ttl),
+          delegate_->on_attempt_error(expired,
                                      coordinator_error(ErrorCode::timeout,
                                                        "attempt_expired"));
         }
-        it = attempts_.erase(it);
-        ++diagnostics_.attempts_expired;
       } else {
         ++it;
       }

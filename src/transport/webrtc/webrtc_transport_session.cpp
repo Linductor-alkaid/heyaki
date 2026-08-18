@@ -91,6 +91,9 @@ std::optional<ChannelKind> kind_for(std::string_view label) {
 
 rtc::Configuration rtc_config(const WebRtcTransportConfig& config) {
   rtc::Configuration output;
+  // Heyaki signs every offer/answer generation. libdatachannel must not create an
+  // implicit renegotiation that bypasses SignalingCoordinator.
+  output.disableAutoNegotiation = true;
   output.maxMessageSize = config.maximum_message_bytes;
   output.iceTransportPolicy = config.candidates.relay_only
                                   ? rtc::TransportPolicy::Relay
@@ -141,6 +144,37 @@ bool candidate_allowed(const rtc::Candidate& candidate,
       return false;
   }
   return false;
+}
+
+std::optional<DtlsFingerprint> sha256_fingerprint(
+    const rtc::CertificateFingerprint& input) noexcept {
+  if (input.algorithm != rtc::CertificateFingerprint::Algorithm::Sha256) {
+    return std::nullopt;
+  }
+  DtlsFingerprint output{};
+  std::size_t byte_index = 0U;
+  std::uint8_t value = 0U;
+  bool high_nibble = true;
+  for (const char character : input.value) {
+    if (character == ':') continue;
+    const auto nibble = character >= '0' && character <= '9'
+                            ? static_cast<int>(character - '0')
+                        : character >= 'a' && character <= 'f'
+                            ? static_cast<int>(character - 'a' + 10)
+                        : character >= 'A' && character <= 'F'
+                            ? static_cast<int>(character - 'A' + 10)
+                            : -1;
+    if (nibble < 0 || byte_index >= output.size()) return std::nullopt;
+    if (high_nibble) {
+      value = static_cast<std::uint8_t>(nibble << 4U);
+    } else {
+      value = static_cast<std::uint8_t>(value | static_cast<std::uint8_t>(nibble));
+      output[byte_index++] = static_cast<std::byte>(value);
+    }
+    high_nibble = !high_nibble;
+  }
+  if (!high_nibble || byte_index != output.size()) return std::nullopt;
+  return output;
 }
 
 }  // namespace
@@ -243,6 +277,7 @@ class WebRtcTransportSession::Impl
   struct LocalDescriptionEvent {
     std::vector<std::byte> sdp;
     std::string type;
+    std::optional<DtlsFingerprint> fingerprint;
   };
   struct LocalCandidateEvent {
     std::vector<std::byte> candidate;
@@ -300,11 +335,13 @@ class WebRtcTransportSession::Impl
     peer_->onLocalDescription([weak](rtc::Description description) {
       if (auto self = weak.lock()) {
         const auto text = description.generateSdp();
+        const auto fingerprint = description.fingerprint();
         self->enqueue(LocalDescriptionEvent{
             std::vector<std::byte>{reinterpret_cast<const std::byte*>(text.data()),
                                    reinterpret_cast<const std::byte*>(text.data()) +
                                        text.size()},
-            description.typeString()});
+            description.typeString(),
+            fingerprint ? sha256_fingerprint(*fingerprint) : std::nullopt});
       }
     });
     peer_->onLocalCandidate([weak](rtc::Candidate candidate) {
@@ -379,8 +416,14 @@ class WebRtcTransportSession::Impl
   }
 
   void handle(LocalDescriptionEvent& event) {
+    if (!event.fingerprint) {
+      fail(transport_error(ErrorCode::authentication,
+                           "local_dtls_fingerprint_invalid"));
+      return;
+    }
     if (signaling_.on_local_description) {
-      signaling_.on_local_description(std::move(event.sdp), std::move(event.type));
+      signaling_.on_local_description(std::move(event.sdp), std::move(event.type),
+                                      *event.fingerprint);
     }
   }
   void handle(LocalCandidateEvent& event) {
@@ -589,7 +632,28 @@ class WebRtcTransportSession::Impl
 
   void open_channel(ChannelKind kind, ChannelOptions options,
                     OpenCompletion completion) {
-    if (channels_.contains(kind) || channels_.size() >= config_.channel_capacity ||
+    const auto existing = channels_.find(kind);
+    if (existing != channels_.end()) {
+      const auto& prepared = existing->second->options();
+      if (pending_opens_.contains(kind) ||
+          prepared.reliability != options.reliability ||
+          prepared.ordering != options.ordering || prepared.priority != options.priority ||
+          prepared.send_queue_bytes != options.send_queue_bytes ||
+          prepared.max_message_bytes != options.max_message_bytes) {
+        ++channels_rejected_;
+        completion(Result<TransportChannel*>::failure(
+            transport_error(ErrorCode::configuration,
+                            "prepared_channel_options_mismatch")));
+        return;
+      }
+      if (existing->second->rtc_channel()->isOpen()) {
+        completion(Result<TransportChannel*>::success(existing->second.get()));
+      } else {
+        pending_opens_.emplace(kind, std::move(completion));
+      }
+      return;
+    }
+    if (channels_.size() >= config_.channel_capacity ||
         options.send_queue_bytes == 0U || options.max_message_bytes == 0U ||
         options.max_message_bytes > config_.maximum_message_bytes) {
       ++channels_rejected_;
@@ -610,6 +674,31 @@ class WebRtcTransportSession::Impl
     } catch (...) {
       ++channels_rejected_;
       fail_pending_open(kind, ErrorCode::transport, "channel_create_failed");
+    }
+  }
+
+  Result<void> prepare_channel(ChannelKind kind, ChannelOptions options) {
+    if (channels_.contains(kind)) return Result<void>::success();
+    if (channels_.size() >= config_.channel_capacity ||
+        options.send_queue_bytes == 0U || options.max_message_bytes == 0U ||
+        options.max_message_bytes > config_.maximum_message_bytes) {
+      return Result<void>::failure(
+          transport_error(ErrorCode::resource_exhausted,
+                          "channel_admission_rejected"));
+    }
+    try {
+      rtc::DataChannelInit init;
+      init.reliability.unordered = options.ordering == Ordering::unordered;
+      if (options.reliability == Reliability::unreliable) {
+        init.reliability.maxRetransmits = 0U;
+      }
+      auto rtc_channel = peer_->createDataChannel(label_for(kind), std::move(init));
+      (void)attach_channel(kind, std::move(options), std::move(rtc_channel));
+      return Result<void>::success();
+    } catch (...) {
+      ++channels_rejected_;
+      return Result<void>::failure(
+          transport_error(ErrorCode::transport, "channel_create_failed"));
     }
   }
 
@@ -678,6 +767,15 @@ Result<void> WebRtcTransportSession::start() {
   }
 }
 
+Result<void> WebRtcTransportSession::prepare_channel(ChannelKind kind,
+                                                     ChannelOptions options) {
+  if (!impl_ || impl_->closed_.load(std::memory_order_acquire)) {
+    return Result<void>::failure(
+        transport_error(ErrorCode::cancelled, "transport_closed"));
+  }
+  return impl_->prepare_channel(kind, std::move(options));
+}
+
 Result<void> WebRtcTransportSession::set_remote_description(
     std::span<const std::byte> sdp, std::string_view type) {
   if (!impl_ || sdp.empty() || sdp.size() > max_signaling_object_bytes ||
@@ -688,6 +786,9 @@ Result<void> WebRtcTransportSession::set_remote_description(
   try {
     const std::string text{reinterpret_cast<const char*>(sdp.data()), sdp.size()};
     impl_->peer_->setRemoteDescription(rtc::Description{text, std::string{type}});
+    if (type == "offer") {
+      impl_->peer_->setLocalDescription(rtc::Description::Type::Answer);
+    }
     return Result<void>::success();
   } catch (...) {
     return Result<void>::failure(transport_error(ErrorCode::transport,

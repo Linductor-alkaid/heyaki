@@ -870,10 +870,14 @@ TEST(M4Coordinator, BoundsTtlAndRateLimits) {
 
   // TTL expiry moves attempts to a terminal state and clears the table.
   int expired_errors = 0;
-  a.delegate->on_attempt_error = [&](const heyaki::SignalingAttemptSnapshot&,
+  a.delegate->on_attempt_error = [&](const heyaki::SignalingAttemptSnapshot& snapshot,
                                     const heyaki::Error& error) {
     if (error.code() == heyaki::ErrorCode::timeout) {
       ++expired_errors;
+      const auto cancelled = a.coordinator->cancel_attempt(
+          snapshot.request_id, kSteadyNow + std::chrono::milliseconds{1001});
+      EXPECT_FALSE(cancelled.has_value());
+      EXPECT_EQ(cancelled.error_if()->safe_detail(), "attempt_unknown");
     }
   };
   a.coordinator->expire(kSteadyNow + std::chrono::milliseconds{1001});
