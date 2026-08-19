@@ -1,7 +1,7 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：M3B 已关闭；M4 活动中（已推进至第十四轮：路径策略/测试强制门禁与
->   association 丢失新物理 session 已落地；in-place ICE restart 重协商与网络矩阵继续）
+> - 状态：M3B 已关闭；M4 活动中（已推进至第十五轮：三设备 LAN host-candidate
+>   认证会话退出条件已达成；in-place ICE restart、网络矩阵与 TUI 选择建连继续）
 > - 日期：2026-08-19
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)、[局域网无服务器连接设计](../design/lan-serverless-connectivity.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
@@ -791,7 +791,7 @@ Linux GCC/Clang Debug/Release、Windows Debug/Release、ASan/UBSan/TSAN 全部�
 
 ### M4 测试与 Connectivity MVP 退出条件
 
-- [ ] relay/STUN/TURN 全部未运行时，同一测试 LAN 的三台设备可发现正确 endpoint 并通过 host candidate 建立认证 DataChannel。
+- [x] relay/STUN/TURN 全部未运行时，同一测试 LAN 的三台设备可发现正确 endpoint 并通过 host candidate 建立认证 DataChannel。
 - [ ] 覆盖 LAN IPv4/IPv6、同 DeviceId 多 endpoint、交叉连接、direct、强制 TURN、对称 NAT、hairpin、IPv6-only、UDP blocked、高延迟、丢包、重复 candidate 和 relay 中途重启。
 - [ ] 伪造/替换 LAN hello 证书指纹、fingerprint、offer、endpoint、nonce 或 expiry 时双方都拒绝，LAN MITM 与 relay 都无法冒充 peer。
 - [ ] LAN 与 relay 同时可用时 endpoint 正确去重、LAN 优先/relay fallback 受策略控制，每个逻辑 attempt 只有一个 transport winner。
@@ -1158,6 +1158,22 @@ LAN、网络矩阵、P95、泄漏与 TUI 选择建连退出条件继续推进；
 
 本机验证：GCC Debug `-Werror` 树全量构建干净，全量 CTest 35/35 通过（coturn 两项
 环境 skip），m3a 全套 12.9s 通过；新 e2e 在禁异常、ASan、UBSan、TSan 定向通过。
+
+### M4 实施进度（2026-08-19，第15轮）
+
+- CI 基础设施修复：ubuntu-24.04 runner 的 `azure.archive.ubuntu.com` apt 镜像停滞
+  且不触发 per-read 超时，第十四轮提交的 coturn-topology job 因此在 10 分钟步超时
+  失败（其余 9 job 全部成功）。安装步骤现把 apt 源固定为失败日志中证实可达的
+  `archive.ubuntu.com`。
+- 新增 e2e `ThreeLanNodesEstablishAuthenticatedHostDataChannels`：三个无 relay、
+  无 STUN/TURN（`lan_only` 默认策略即 host-only 且零 ICE server）的真实 Node 在
+  同一 LAN 各自发现另外两台设备的正确 endpoint，三对配对并发建连全部达到双方
+  authenticated，data path 均为 `direct_host` 且 selected candidate 非空；同一
+  Node 的两个会话 session ID 互不相同，证明三路并发 attempt 不串扰。本机连续
+  3 次通过；ASan、UBSan、TSan（关 ASLR）、禁异常定向各 1/1 通过。
+- 据此勾选 Connectivity MVP 第一条退出条件（三设备 LAN host-candidate 认证
+  DataChannel）。网络矩阵、伪造审计、LAN+relay 仲裁、P95、泄漏与 TUI 选择建连
+  退出条件与 `M4-10` 的 in-place ICE restart 重协商继续推进。
 
 ---
 

@@ -1603,6 +1603,145 @@ TEST_F(M3aNodeTest, AuthenticatedSessionReestablishesNewPhysicalSessionAfterLoss
   EXPECT_TRUE(second_again.value_if()->shutdown().stopped);
 }
 
+TEST_F(M3aNodeTest, ThreeLanNodesEstablishAuthenticatedHostDataChannels) {
+  // M4 Connectivity MVP exit condition: with relay/STUN/TURN entirely absent
+  // (lan_only configures no ICE server and host-only candidates), three
+  // devices on one LAN discover the correct endpoints and build authenticated
+  // DataChannels over host candidates for every pair.
+  LanConfiguration configuration;
+  configuration.connectivity_mode = ConnectivityMode::lan_only;
+  configuration.announcement_interval = std::chrono::milliseconds{100};
+  configuration.announcement_jitter = std::chrono::milliseconds{0};
+  configuration.presence_lease = std::chrono::milliseconds{1000};
+  configuration.interface_refresh_interval = std::chrono::seconds{2};
+  configuration.announcement_rate_per_second = 100U;
+  configuration.per_source_announcement_rate = 100U;
+  auto first_profile =
+      initialized_profile("mesh-first", "com.example.mesh.first", configuration);
+  auto second_profile =
+      initialized_profile("mesh-second", "com.example.mesh.second", configuration);
+  auto third_profile =
+      initialized_profile("mesh-third", "com.example.mesh.third", configuration);
+  ASSERT_TRUE(first_profile && second_profile && third_profile);
+
+  auto first = Node::create(node_config(*first_profile.value_if(),
+                                        "com.example.mesh.first"));
+  auto second = Node::create(node_config(*second_profile.value_if(),
+                                         "com.example.mesh.second"));
+  auto third = Node::create(node_config(*third_profile.value_if(),
+                                        "com.example.mesh.third"));
+  ASSERT_TRUE(first && second && third);
+  const bool interfaces_missing =
+      first.value_if()->snapshot().interfaces.empty() ||
+      second.value_if()->snapshot().interfaces.empty() ||
+      third.value_if()->snapshot().interfaces.empty();
+  if (interfaces_missing) {
+    (void)first.value_if()->shutdown();
+    (void)second.value_if()->shutdown();
+    (void)third.value_if()->shutdown();
+    if (environment_enabled("HEYAKI_REQUIRE_LAN_INTERFACES")) {
+      FAIL() << "Required LAN interface is unavailable";
+    }
+    GTEST_SKIP() << "No multicast-capable non-loopback interface";
+  }
+
+  // Each device must discover exactly the other two endpoints.
+  ASSERT_TRUE(wait_until(
+      [&] {
+        return first.value_if()->endpoints().size() == 2U &&
+               second.value_if()->endpoints().size() == 2U &&
+               third.value_if()->endpoints().size() == 2U;
+      },
+      std::chrono::seconds{6}));
+
+  const auto first_peers = first.value_if()->endpoints();
+  const auto second_peers = second.value_if()->endpoints();
+  const auto third_peers = third.value_if()->endpoints();
+  ASSERT_EQ(first_peers.size(), 2U);
+  ASSERT_EQ(second_peers.size(), 2U);
+  ASSERT_EQ(third_peers.size(), 2U);
+  const auto second_key =
+      DeviceEndpointKey{second.value_if()->snapshot().device_id,
+                        second.value_if()->snapshot().endpoint_id};
+  const auto third_key = DeviceEndpointKey{third.value_if()->snapshot().device_id,
+                                           third.value_if()->snapshot().endpoint_id};
+  EXPECT_TRUE(std::any_of(first_peers.begin(), first_peers.end(),
+                          [&](const auto& entry) { return entry.key == second_key; }));
+  EXPECT_TRUE(std::any_of(first_peers.begin(), first_peers.end(),
+                          [&](const auto& entry) { return entry.key == third_key; }));
+  EXPECT_TRUE(std::any_of(second_peers.begin(), second_peers.end(),
+                          [&](const auto& entry) { return entry.key == third_key; }));
+
+  // Establish all three pairings; every logical pair must reach mutual
+  // authenticated state over a direct host data path with its own session.
+  ASSERT_TRUE(first.value_if()->connect_lan(second_key));
+  ASSERT_TRUE(first.value_if()->connect_lan(third_key));
+  const auto first_key = DeviceEndpointKey{first.value_if()->snapshot().device_id,
+                                           first.value_if()->snapshot().endpoint_id};
+  const auto second_to_third = std::find_if(
+      second_peers.begin(), second_peers.end(),
+      [&](const auto& entry) { return entry.key == third_key; });
+  ASSERT_NE(second_to_third, second_peers.end());
+  ASSERT_TRUE(second.value_if()->connect_lan(third_key));
+
+  const auto authenticated_sessions_for = [](const Node& node,
+                                             DeviceEndpointKey peer) {
+    const auto sessions = node.peer_sessions();
+    return std::count_if(sessions.begin(), sessions.end(),
+                         [&](const NodePeerSessionSnapshot& session) {
+                           return session.peer == peer &&
+                                  session.state ==
+                                      NodePeerSessionState::authenticated;
+                         });
+  };
+  ASSERT_TRUE(wait_until(
+      [&] {
+        return authenticated_sessions_for(*first.value_if(), second_key) == 1U &&
+               authenticated_sessions_for(*first.value_if(), third_key) == 1U &&
+               authenticated_sessions_for(*second.value_if(), first_key) == 1U &&
+               authenticated_sessions_for(*second.value_if(), third_key) == 1U &&
+               authenticated_sessions_for(*third.value_if(), first_key) == 1U &&
+               authenticated_sessions_for(*third.value_if(), second_key) == 1U;
+      },
+      std::chrono::seconds{15}));
+
+  const auto assert_host_session = [&](const Node& node,
+                                       DeviceEndpointKey peer) {
+    const auto sessions = node.peer_sessions();
+    const auto session = std::find_if(
+        sessions.begin(), sessions.end(), [&](const NodePeerSessionSnapshot& item) {
+          return item.peer == peer &&
+                 item.state == NodePeerSessionState::authenticated;
+        });
+    ASSERT_NE(session, sessions.end());
+    EXPECT_EQ(session->data_path, NodeDataPathKind::direct_host);
+    EXPECT_FALSE(session->selected_candidate.empty());
+    EXPECT_FALSE(session->error.has_value());
+  };
+  assert_host_session(*first.value_if(), second_key);
+  assert_host_session(*first.value_if(), third_key);
+  assert_host_session(*second.value_if(), first_key);
+  assert_host_session(*second.value_if(), third_key);
+  assert_host_session(*third.value_if(), first_key);
+  assert_host_session(*third.value_if(), second_key);
+
+  // Each pairing owns a distinct session: no cross-wiring between the three
+  // simultaneous attempts.
+  const auto first_sessions = first.value_if()->peer_sessions();
+  std::vector<SessionId> first_session_ids;
+  for (const auto& session : first_sessions) {
+    if (session.state == NodePeerSessionState::authenticated) {
+      first_session_ids.push_back(session.session_id);
+    }
+  }
+  ASSERT_EQ(first_session_ids.size(), 2U);
+  EXPECT_NE(first_session_ids[0], first_session_ids[1]);
+
+  EXPECT_TRUE(first.value_if()->shutdown().stopped);
+  EXPECT_TRUE(second.value_if()->shutdown().stopped);
+  EXPECT_TRUE(third.value_if()->shutdown().stopped);
+}
+
 TEST_F(M3aNodeTest, TrustedAutoConnectUsesOnlyTheTupleOfferOwner) {
   LanConfiguration configuration;
   configuration.connectivity_mode = ConnectivityMode::lan_only;
