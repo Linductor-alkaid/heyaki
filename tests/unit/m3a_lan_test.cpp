@@ -1460,6 +1460,149 @@ TEST_F(M3aNodeTest, NodeAutomaticallyAssemblesAuthenticatedWebRtcPeerSession) {
   EXPECT_TRUE(second.value_if()->peer_sessions().empty());
 }
 
+TEST_F(M3aNodeTest, AuthenticatedSessionReestablishesNewPhysicalSessionAfterLoss) {
+  LanConfiguration configuration;
+  configuration.connectivity_mode = ConnectivityMode::lan_only;
+  configuration.auto_connect_trusted = true;
+  configuration.announcement_interval = std::chrono::milliseconds{100};
+  configuration.announcement_jitter = std::chrono::milliseconds{0};
+  configuration.presence_lease = std::chrono::milliseconds{1000};
+  configuration.interface_refresh_interval = std::chrono::seconds{2};
+  configuration.announcement_rate_per_second = 100U;
+  configuration.per_source_announcement_rate = 100U;
+  auto first_profile =
+      initialized_profile("reconnect-first", "com.example.reconnect.first",
+                          configuration);
+  auto second_profile =
+      initialized_profile("reconnect-second", "com.example.reconnect.second",
+                          configuration);
+  ASSERT_TRUE(first_profile && second_profile);
+  ASSERT_TRUE(trust_peer(*first_profile.value_if(),
+                         second_profile.value_if()->device_id(), 1U));
+  ASSERT_TRUE(trust_peer(*second_profile.value_if(),
+                         first_profile.value_if()->device_id(), 2U));
+
+  auto first = Node::create(
+      node_config(*first_profile.value_if(), "com.example.reconnect.first"));
+  auto second = Node::create(
+      node_config(*second_profile.value_if(), "com.example.reconnect.second"));
+  ASSERT_TRUE(first && second);
+  std::optional<Node> second_node{std::move(*second.value_if())};
+  const auto first_snapshot = first.value_if()->snapshot();
+  const auto second_snapshot = second_node->snapshot();
+  if (first_snapshot.interfaces.empty() || second_snapshot.interfaces.empty()) {
+    (void)first.value_if()->shutdown();
+    (void)second_node->shutdown();
+    if (environment_enabled("HEYAKI_REQUIRE_LAN_INTERFACES")) {
+      FAIL() << "Required LAN interface is unavailable";
+    }
+    GTEST_SKIP() << "No multicast-capable non-loopback interface";
+  }
+
+  ASSERT_TRUE(wait_until(
+      [&] {
+        return first.value_if()->endpoints().size() == 1U &&
+               second_node->endpoints().size() == 1U;
+      },
+      std::chrono::seconds{4}));
+  const auto peer = first.value_if()->endpoints().front().key;
+  ASSERT_TRUE(first.value_if()->connect_lan(peer));
+  ASSERT_TRUE(wait_until(
+      [&] {
+        const auto first_sessions = first.value_if()->peer_sessions();
+        const auto second_sessions = second_node->peer_sessions();
+        const auto authenticated = [](const NodePeerSessionSnapshot& session) {
+          return session.state == NodePeerSessionState::authenticated;
+        };
+        return std::any_of(first_sessions.begin(), first_sessions.end(),
+                           authenticated) &&
+               std::any_of(second_sessions.begin(), second_sessions.end(),
+                           authenticated);
+      },
+      std::chrono::seconds{10}));
+  const auto first_sessions = first.value_if()->peer_sessions();
+  const auto first_authenticated = std::find_if(
+      first_sessions.begin(), first_sessions.end(),
+      [](const NodePeerSessionSnapshot& session) {
+        return session.state == NodePeerSessionState::authenticated;
+      });
+  ASSERT_NE(first_authenticated, first_sessions.end());
+  const auto original_request_id = first_authenticated->request_id;
+  const auto original_session_id = first_authenticated->session_id;
+
+  // Destroy the peer entirely: the authenticated association is lost, so the
+  // local session must reach an explicit closed state with an error rather
+  // than pretending the connection still exists.
+  EXPECT_TRUE(second_node->shutdown().stopped);
+  second_node.reset();
+  ASSERT_TRUE(wait_until(
+      [&] {
+        const auto sessions = first.value_if()->peer_sessions();
+        return std::any_of(sessions.begin(), sessions.end(),
+                           [&](const NodePeerSessionSnapshot& session) {
+                             return session.request_id == original_request_id &&
+                                    session.state == NodePeerSessionState::closed &&
+                                    session.error.has_value();
+                           });
+      },
+      std::chrono::seconds{5}));
+
+  // Restart the peer from the same profile: identical DeviceId/EndpointId but
+  // a new boot nonce and TLS port. The relationship must return as a NEW
+  // physical session with fresh request and session IDs.
+  auto second_again = Node::create(
+      node_config(*second_profile.value_if(), "com.example.reconnect.second"));
+  ASSERT_TRUE(second_again);
+  const auto restored = wait_until(
+      [&] {
+        const auto sessions = first.value_if()->peer_sessions();
+        return std::any_of(
+            sessions.begin(), sessions.end(),
+            [&](const NodePeerSessionSnapshot& session) {
+              return session.state == NodePeerSessionState::authenticated &&
+                     session.request_id != original_request_id &&
+                     session.session_id != original_session_id;
+            });
+      },
+      std::chrono::seconds{15});
+  ASSERT_TRUE(restored)
+      << "node did not re-establish a new physical session after peer restart";
+  ASSERT_TRUE(wait_until(
+      [&] {
+        const auto sessions = second_again.value_if()->peer_sessions();
+        return std::any_of(sessions.begin(), sessions.end(),
+                           [](const NodePeerSessionSnapshot& session) {
+                             return session.state ==
+                                    NodePeerSessionState::authenticated;
+                           });
+      },
+      std::chrono::seconds{10}));
+  const auto reestablished = first.value_if()->peer_sessions();
+  const auto new_session = std::find_if(
+      reestablished.begin(), reestablished.end(),
+      [](const NodePeerSessionSnapshot& session) {
+        return session.state == NodePeerSessionState::authenticated;
+      });
+  ASSERT_NE(new_session, reestablished.end());
+  EXPECT_EQ(new_session->request_id, second_again.value_if()
+                                        ->peer_sessions()
+                                        .front()
+                                        .request_id);
+  // The lost session stays in diagnostics as an explicit closed failure: the
+  // re-establishment is a new physical session, not lossless migration.
+  const auto lost_session = std::find_if(
+      reestablished.begin(), reestablished.end(),
+      [&](const NodePeerSessionSnapshot& session) {
+        return session.request_id == original_request_id;
+      });
+  ASSERT_NE(lost_session, reestablished.end());
+  EXPECT_EQ(lost_session->state, NodePeerSessionState::closed);
+  EXPECT_TRUE(lost_session->error.has_value());
+
+  EXPECT_TRUE(first.value_if()->shutdown().stopped);
+  EXPECT_TRUE(second_again.value_if()->shutdown().stopped);
+}
+
 TEST_F(M3aNodeTest, TrustedAutoConnectUsesOnlyTheTupleOfferOwner) {
   LanConfiguration configuration;
   configuration.connectivity_mode = ConnectivityMode::lan_only;

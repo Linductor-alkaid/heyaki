@@ -1,7 +1,7 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：M3B 已关闭；M4 活动中（已推进至第十三轮：路径策略与测试强制门禁已落地；
->   接口变化 ICE restart、网络矩阵与 TUI 选择建连继续实施）
+> - 状态：M3B 已关闭；M4 活动中（已推进至第十四轮：路径策略/测试强制门禁与
+>   association 丢失新物理 session 已落地；in-place ICE restart 重协商与网络矩阵继续）
 > - 日期：2026-08-19
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)、[局域网无服务器连接设计](../design/lan-serverless-connectivity.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
@@ -1128,6 +1128,36 @@ UBSan 8/8；TSan（关闭 ASLR）path-policy 8/8、peer-session 3/3、WebRTC tra
 3/3 无竞争报告。据此完成 `M4-07`、`M4-17`。`M4-10` 与 Connectivity MVP 的三设备
 LAN、网络矩阵、P95、泄漏与 TUI 选择建连退出条件继续推进；正向强制 TURN（经 coturn
 真实 allocation）属于网络矩阵门禁，依赖本环境不可用的 CAP_NET_ADMIN/coturn 拓扑。
+
+### M4 实施进度（2026-08-19，第14轮）
+
+- authenticated 会话 association 丢失后自动建立新物理 session：`peer_session_changed`
+  的 closed 分支在 attempt 失败后调用 `maybe_reestablish_peer_session`，按
+  `auto_connect_trusted` 且对端受信任的策略门控，以全新 request/session ID 走完整
+  重信令（LAN TLS 或 relay 路由自动选择），每次丢失只触发一次；presence 驱动的
+  auto-connect 路径保留为兜底。关闭期（close-peers 阶段）不触发。
+- relay WSS 断开不再误杀已认证会话：`relay_failed` 只终止尚无 PeerSession 的
+  relay 路由 attempt（与 LAN `signaling_failed` 同一判据）。已认证会话的数据面
+  不依赖 relay，仅当 association 自身死亡时经上一条路径重建。
+- 新增 e2e `AuthenticatedSessionReestablishesNewPhysicalSessionAfterLoss`：真实
+  双 Node 建立认证会话后将对端 Node 连同进程内状态整体销毁，本端会话进入带错误的
+  显式 closed 终态；随后对端用同一 profile 重启（同 DeviceId/EndpointId、新 boot
+  nonce 与 TLS 端口），本端自动重建 authenticated 会话且 request/session ID 与原会话
+  不同，原会话以 closed+error 保留在诊断历史，证明不是无损迁移伪装。本机连续 3 次
+  通过；禁异常、ASan、UBSan、TSan（关 ASLR）定向各 1/1 通过。
+- 接口变化侧：M3A 的接口扫描在 binding 变化时已重开 discovery socket 并立即刷新
+  presence（`announce_now`）；authenticated 会话在 ICE 尚可存活时不被主动拆除。
+  `M4-10` 保持未勾选：剩余工作是接口变化时的 in-place ICE restart 重协商。设计
+  结论——认证后 LAN/relay signaling 已按第八轮设计关闭，且 offer/answer transcript
+  绑定禁止静默重生成描述，因此 in-place restart 必须经已认证 control DataChannel
+  携带带签名的重协商帧（session epoch +1、同 session ID）并复用既有
+  offer/answer/candidate 签名对象；这是一个独立的协议扩展（round 15 候选），不在
+  本轮以"transport 只调 restart_ice 却无处送达新描述"的假实现充当完成。
+- 本轮未新增并发原语：重建复用 `start_outbound_connection` 与既有 strand/timer；
+  relay 判据修改为纯状态检查。按 EXEC-09 复核无新 executor API。
+
+本机验证：GCC Debug `-Werror` 树全量构建干净，全量 CTest 35/35 通过（coturn 两项
+环境 skip），m3a 全套 12.9s 通过；新 e2e 在禁异常、ASan、UBSan、TSan 定向通过。
 
 ---
 

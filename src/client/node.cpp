@@ -1359,7 +1359,11 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     relay_client.reset();
     std::vector<RequestId> relay_attempts;
     for (const auto& [request_id, attempt] : peer_attempts) {
-      if (attempt.snapshot.signaling_route == SignalingRouteKind::relay) {
+      // Relay loss ends attempts still depending on relay signaling. A session
+      // that already authenticated keeps its direct DataChannel and now owns
+      // its transport; it only re-establishes if the association itself dies.
+      if (attempt.snapshot.signaling_route == SignalingRouteKind::relay &&
+          !attempt.session) {
         relay_attempts.push_back(request_id);
       }
     }
@@ -2785,17 +2789,58 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       case PeerSessionState::pairing_restricted:
         iterator->second.snapshot.state = NodePeerSessionState::authenticating;
         break;
-      case PeerSessionState::closed:
+      case PeerSessionState::closed: {
+        const bool was_authenticated =
+            iterator->second.snapshot.state == NodePeerSessionState::authenticated;
         iterator->second.snapshot.state = NodePeerSessionState::closed;
         if (!peers_closed && !iterator->second.retiring) {
           const auto error = diagnostics.last_error.value_or(
               node_error(ErrorCode::transport, "peer_session_closed"));
+          const auto peer = iterator->second.snapshot.peer;
           fail_peer_attempt(request_id, error);
+          maybe_reestablish_peer_session(peer, was_authenticated);
           return;
         }
         break;
+      }
     }
     publish_peer_sessions();
+  }
+
+  // Architecture 6.4/9.3: losing the association of a previously
+  // authenticated session establishes a NEW physical session with fresh
+  // request/session IDs. Post-authentication signaling is closed by design
+  // and the signed transcript binding forbids regenerating offer/answer
+  // mid-session, so an in-place ICE restart is realized as a full
+  // re-signaling instead of a lossless migration. Automatic restoration is
+  // policy-gated (auto_connect_trusted plus a trusted peer) and fires once
+  // per loss; the presence-driven auto-connect path remains the backstop.
+  void maybe_reestablish_peer_session(const DeviceEndpointKey& peer,
+                                      bool was_authenticated) {
+    if (!was_authenticated || producers_stopped || peers_closed || !coordinator) {
+      return;
+    }
+    if (!lan.auto_connect_trusted || !trusted_devices.contains(peer.device_id)) {
+      return;
+    }
+    if (peer_attempt_by_endpoint.contains(peer)) return;
+    const auto entries = directory.snapshot();
+    const auto endpoint = std::find_if(
+        entries.begin(), entries.end(),
+        [&](const auto& entry) { return entry.key == peer; });
+    const bool lan_available =
+        endpoint != entries.end() && endpoint->lan.has_value() &&
+        lan_coordinator_route != nullptr;
+    const bool relay_available =
+        endpoint != entries.end() && endpoint->relay.has_value() &&
+        relay_coordinator_route != nullptr && relay_phase == RelayLoginPhase::ready;
+    const auto route =
+        select_signaling_route(lan.connectivity_mode, lan_available, relay_available);
+    if (!route) {
+      record_signaling_error(*route.error_if());
+      return;
+    }
+    start_outbound_connection(peer, true, *route.value_if());
   }
 
   void fail_peer_attempt(RequestId request_id, Error error) {
