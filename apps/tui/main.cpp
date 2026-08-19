@@ -706,7 +706,8 @@ int run_tui(const Options& options) {
                            .runtime_config = heyaki::RuntimeConfig{},
                            .signaling_validator = {},
                            .signaling_handler = handler,
-                           .relay_override = std::nullopt});
+                           .relay_override = std::nullopt,
+                           .path_policy_override = std::nullopt});
   };
   std::optional<heyaki::Node> node;
   auto created_node = make_node();

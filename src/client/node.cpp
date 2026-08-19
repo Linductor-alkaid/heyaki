@@ -2023,6 +2023,24 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     });
   }
 
+  void check_peer_transport_failures() {
+    for (auto iterator = peer_attempts.begin(); iterator != peer_attempts.end();
+         ++iterator) {
+      if (!iterator->second.transport || iterator->second.session ||
+          iterator->second.retiring) {
+        continue;
+      }
+      // PeerSession owns the transport state handler once it exists; before
+      // that only this bounded tick observes ICE/transport failure, so a
+      // failed attempt terminates explicitly instead of waiting for the
+      // coordinator TTL.
+      const auto snapshot = iterator->second.transport->snapshot();
+      if (snapshot.state == transport::TransportState::failed && snapshot.error) {
+        fail_peer_attempt(iterator->first, *snapshot.error);
+      }
+    }
+  }
+
   void schedule_expiry() {
     if (producers_stopped) {
       return;
@@ -2036,6 +2054,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
           const auto now = std::chrono::steady_clock::now();
           self->directory.expire(now);
           if (self->coordinator) self->coordinator->expire(now);
+          self->check_peer_transport_failures();
           self->publish_directory();
           self->schedule_expiry();
         }
@@ -2557,11 +2576,36 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     config.signaling_path = snapshot.route == SignalingRouteKind::relay
                                 ? transport::SignalingPathKind::relay
                                 : transport::SignalingPathKind::lan;
-    config.ice_servers.clear();
-    config.candidates.allow_server_reflexive = false;
-    config.candidates.allow_turn_udp = false;
-    config.candidates.allow_turn_tcp = false;
-    config.candidates.allow_turn_tls = false;
+    config.candidates.allow_ipv6_host = path_policy.allow_ipv6_host;
+    config.candidates.allow_ipv4_host = path_policy.allow_ipv4_host;
+    config.candidates.allow_server_reflexive = path_policy.allow_server_reflexive;
+    config.candidates.allow_turn_udp = path_policy.allow_turn_udp;
+    config.candidates.allow_turn_tcp = path_policy.allow_turn_tcp;
+    config.candidates.allow_turn_tls = path_policy.allow_turn_tls;
+    config.candidates.relay_only = path_policy.force_turn_data_path;
+    config.ice_servers.reserve(path_policy.ice_servers.size());
+    for (const auto& server : path_policy.ice_servers) {
+      transport::webrtc::IceServerConfig mapped;
+      switch (server.kind) {
+        case NodeIceServerKind::stun:
+          mapped.kind = transport::webrtc::IceServerKind::stun;
+          break;
+        case NodeIceServerKind::turn_udp:
+          mapped.kind = transport::webrtc::IceServerKind::turn_udp;
+          break;
+        case NodeIceServerKind::turn_tcp:
+          mapped.kind = transport::webrtc::IceServerKind::turn_tcp;
+          break;
+        case NodeIceServerKind::turn_tls:
+          mapped.kind = transport::webrtc::IceServerKind::turn_tls;
+          break;
+      }
+      mapped.hostname = server.hostname;
+      mapped.port = server.port;
+      mapped.username = server.username;
+      mapped.credential = server.credential;
+      config.ice_servers.push_back(std::move(mapped));
+    }
 
     auto weak = weak_from_this();
     const auto request_id = snapshot.request_id;
@@ -2718,7 +2762,12 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
                             const PeerSessionDiagnostics& diagnostics) {
     auto iterator = peer_attempts.find(request_id);
     if (iterator == peer_attempts.end()) return;
-    if (diagnostics.last_error) iterator->second.snapshot.error = diagnostics.last_error;
+    // A retiring attempt already carries its root-cause error; late
+    // close-cascade diagnostics (for example a pending channel open failing
+    // with transport_closed) must not overwrite it.
+    if (!iterator->second.retiring && diagnostics.last_error) {
+      iterator->second.snapshot.error = diagnostics.last_error;
+    }
     switch (diagnostics.state) {
       case PeerSessionState::idle:
         break;
@@ -3700,6 +3749,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   Runtime* runtime;
   std::string application_id;
   LanConfiguration lan;
+  PeerPathPolicy path_policy;
   IdentityKeyPair identity;
   EndpointId endpoint_id;
   LanBootNonce boot_nonce{};
@@ -3808,6 +3858,18 @@ Result<Node> Node::create(NodeConfig config) {
   if (!valid_lan) {
     return Result<Node>::failure(*valid_lan.error_if());
   }
+  auto path_policy =
+      config.path_policy_override
+          ? Result<PeerPathPolicy>::success(*config.path_policy_override)
+          : default_peer_path_policy(lan.value_if()->connectivity_mode);
+  if (!path_policy) {
+    return Result<Node>::failure(*path_policy.error_if());
+  }
+  auto valid_path_policy = validate_peer_path_policy(
+      *path_policy.value_if(), lan.value_if()->connectivity_mode);
+  if (!valid_path_policy) {
+    return Result<Node>::failure(*valid_path_policy.error_if());
+  }
   auto identity = config.profile->load_identity();
   if (!identity) {
     return Result<Node>::failure(*identity.error_if());
@@ -3851,6 +3913,7 @@ Result<Node> Node::create(NodeConfig config) {
       std::move(*directory.value_if()), std::move(*executor.value_if()),
       std::move(trusted_set), std::move(config.signaling_validator),
       std::move(config.signaling_handler), std::move(config.relay_override));
+  impl->path_policy = std::move(*path_policy.value_if());
   auto initialized = impl->initialize();
   if (!initialized) {
     if (impl->owned_runtime) {
@@ -4124,6 +4187,106 @@ std::string_view node_data_path_kind_name(NodeDataPathKind kind) noexcept {
 
 bool is_lan_offer_owner(DeviceEndpointKey local, DeviceEndpointKey peer) noexcept {
   return local != peer && local < peer;
+}
+
+namespace {
+
+constexpr std::size_t maximum_ice_servers{8U};
+constexpr std::size_t maximum_ice_server_hostname_bytes{255U};
+constexpr std::size_t maximum_ice_server_credential_bytes{256U};
+
+bool turn_server_kind(NodeIceServerKind kind) noexcept {
+  return kind == NodeIceServerKind::turn_udp || kind == NodeIceServerKind::turn_tcp ||
+         kind == NodeIceServerKind::turn_tls;
+}
+
+Error path_policy_error(const char* detail) {
+  return Error{ErrorCode::configuration, "peer_path_policy", detail};
+}
+
+}  // namespace
+
+Result<PeerPathPolicy> default_peer_path_policy(ConnectivityMode mode) noexcept {
+  PeerPathPolicy policy;
+  switch (mode) {
+    case ConnectivityMode::automatic:
+    case ConnectivityMode::relay_only:
+      return Result<PeerPathPolicy>::success(std::move(policy));
+    case ConnectivityMode::lan_only:
+      policy.allow_server_reflexive = false;
+      policy.allow_turn_udp = false;
+      return Result<PeerPathPolicy>::success(std::move(policy));
+  }
+  return Result<PeerPathPolicy>::failure(
+      path_policy_error("connectivity_mode_invalid"));
+}
+
+Result<void> validate_peer_path_policy(const PeerPathPolicy& policy,
+                                       ConnectivityMode mode) {
+  if (mode != ConnectivityMode::automatic && mode != ConnectivityMode::relay_only &&
+      mode != ConnectivityMode::lan_only) {
+    return Result<void>::failure(path_policy_error("connectivity_mode_invalid"));
+  }
+  if (!policy.allow_ipv6_host && !policy.allow_ipv4_host &&
+      !policy.allow_server_reflexive && !policy.allow_turn_udp &&
+      !policy.allow_turn_tcp && !policy.allow_turn_tls) {
+    return Result<void>::failure(path_policy_error("no_candidate_class_allowed"));
+  }
+  if (mode == ConnectivityMode::lan_only) {
+    if (!policy.ice_servers.empty()) {
+      return Result<void>::failure(
+          path_policy_error("lan_only_disallows_ice_servers"));
+    }
+    if (policy.allow_server_reflexive) {
+      return Result<void>::failure(
+          path_policy_error("lan_only_disallows_reflexive_candidates"));
+    }
+    if (policy.allow_turn_udp || policy.allow_turn_tcp || policy.allow_turn_tls ||
+        policy.force_turn_data_path) {
+      return Result<void>::failure(path_policy_error("lan_only_disallows_turn"));
+    }
+  }
+  if (policy.allow_turn_tcp || policy.allow_turn_tls) {
+    return Result<void>::failure(path_policy_error("tcp_turn_backend_not_verified"));
+  }
+  const bool any_turn_class =
+      policy.allow_turn_udp || policy.allow_turn_tcp || policy.allow_turn_tls;
+  const bool has_turn_server = std::any_of(
+      policy.ice_servers.begin(), policy.ice_servers.end(), [](const auto& server) {
+        return turn_server_kind(server.kind);
+      });
+  if (policy.force_turn_data_path && (!any_turn_class || !has_turn_server)) {
+    return Result<void>::failure(
+        path_policy_error("forced_turn_requires_turn_class_and_server"));
+  }
+  if (policy.ice_servers.size() > maximum_ice_servers) {
+    return Result<void>::failure(path_policy_error("ice_server_capacity_exceeded"));
+  }
+  for (const auto& server : policy.ice_servers) {
+    if (server.hostname.empty() ||
+        server.hostname.size() > maximum_ice_server_hostname_bytes ||
+        server.port == 0U ||
+        server.username.size() > maximum_ice_server_credential_bytes ||
+        server.credential.size() > maximum_ice_server_credential_bytes) {
+      return Result<void>::failure(path_policy_error("ice_server_fields_invalid"));
+    }
+    if (server.kind == NodeIceServerKind::stun) {
+      if (!server.username.empty() || !server.credential.empty()) {
+        return Result<void>::failure(
+            path_policy_error("stun_server_disallows_credentials"));
+      }
+      continue;
+    }
+    if (server.kind != NodeIceServerKind::turn_udp &&
+        server.kind != NodeIceServerKind::turn_tcp &&
+        server.kind != NodeIceServerKind::turn_tls) {
+      return Result<void>::failure(path_policy_error("ice_server_kind_invalid"));
+    }
+    if (server.username.empty() || server.credential.empty()) {
+      return Result<void>::failure(path_policy_error("turn_server_requires_credentials"));
+    }
+  }
+  return Result<void>::success();
 }
 
 Result<SignalingRouteKind> select_signaling_route(

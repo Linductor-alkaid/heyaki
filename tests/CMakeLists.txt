@@ -355,6 +355,22 @@ target_compile_definitions(heyaki_m4_relay_route_tests PRIVATE
 heyaki_add_runtime_test(
   heyaki_m4_relay_route heyaki_m4_relay_route_tests "unit;relay;signaling;security")
 
+add_executable(heyaki_m4_path_policy_tests unit/m4_path_policy_test.cpp)
+heyaki_enable_executor_exception_adapter_source(unit/m4_path_policy_test.cpp)
+target_link_libraries(heyaki_m4_path_policy_tests PRIVATE
+  heyaki::client
+  executor::executor
+  GTest::gtest_main
+  OpenSSL::SSL)
+heyaki_target_use_pinned_boost_asio(heyaki_m4_path_policy_tests)
+heyaki_configure_target(heyaki_m4_path_policy_tests)
+target_compile_definitions(heyaki_m4_path_policy_tests PRIVATE
+  "HEYAKI_M4_PATH_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}\"")
+heyaki_add_runtime_test(
+  heyaki_m4_path_policy heyaki_m4_path_policy_tests "unit;transport;lan;security")
+set_tests_properties(heyaki_m4_path_policy PROPERTIES
+  RESOURCE_LOCK heyaki_m3a_profile_state)
+
 add_executable(heyaki_m3b_relay_tests
   unit/m3b_relay_test.cpp
   unit/m3b_relay_database_test.cpp

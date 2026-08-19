@@ -193,6 +193,20 @@ Result<void> PeerSession::start() {
             return;
           }
           timeline_changed = true;
+        } else if (snapshot.state == transport::TransportState::failed) {
+          // A failed transport must keep its real failure reason (for example
+          // ice_failed) instead of letting the follow-up closed notification
+          // masquerade as a clean close.
+          self->diagnostics_.state = PeerSessionState::closed;
+          if (snapshot.error) {
+            self->diagnostics_.last_error = *snapshot.error;
+          }
+          const std::string_view reason =
+              snapshot.error ? snapshot.error->safe_detail() : "transport_failed";
+          auto recorded = self->record(ConnectionStage::closed, "transport", reason);
+          if (!recorded) self->diagnostics_.last_error = *recorded.error_if();
+          self->notify();
+          return;
         } else if (snapshot.state == transport::TransportState::closed) {
           self->diagnostics_.state = PeerSessionState::closed;
           auto recorded =

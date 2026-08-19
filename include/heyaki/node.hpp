@@ -89,6 +89,49 @@ enum class NodeDataPathKind : std::uint8_t {
   turn_tls,
 };
 
+enum class NodeIceServerKind : std::uint8_t {
+  stun,
+  turn_udp,
+  turn_tcp,
+  turn_tls,
+};
+
+struct NodeIceServer {
+  NodeIceServerKind kind{NodeIceServerKind::stun};
+  std::string hostname;
+  std::uint16_t port{};
+  std::string username;
+  std::string credential;
+};
+
+// Transport-neutral data-path policy following the architecture's candidate
+// priority order: IPv6 host, LAN IPv4 host, server-reflexive UDP, TURN/UDP,
+// then verified TURN/TCP/TLS. A disabled class is excluded from local
+// gathering and remote admission; enabling a class never invents connectivity
+// the network cannot provide. TURN/TCP and TURN/TLS stay disabled until a
+// backend providing them is explicitly verified for the pinned dependency.
+struct PeerPathPolicy {
+  bool allow_ipv6_host{true};
+  bool allow_ipv4_host{true};
+  bool allow_server_reflexive{true};
+  bool allow_turn_udp{true};
+  bool allow_turn_tcp{false};
+  bool allow_turn_tls{false};
+  // Restricts ICE to relayed candidates so the data path must traverse TURN.
+  // Requires at least one allowed TURN class and one TURN server.
+  bool force_turn_data_path{false};
+  std::vector<NodeIceServer> ice_servers;
+};
+
+// Returns the policy a Node resolves for the mode when no explicit override is
+// configured: lan_only never configures ICE servers or non-host candidates,
+// while automatic and relay_only keep every class available for the ICE agent
+// to use as the network allows.
+[[nodiscard]] Result<PeerPathPolicy> default_peer_path_policy(
+    ConnectivityMode mode) noexcept;
+[[nodiscard]] Result<void> validate_peer_path_policy(const PeerPathPolicy& policy,
+                                                    ConnectivityMode mode);
+
 struct NodePeerSessionSnapshot {
   DeviceEndpointKey peer;
   RequestId request_id;
@@ -224,6 +267,7 @@ struct NodeConfig {
   LanSignalingValidator signaling_validator;
   LanSignalingHandler signaling_handler;
   std::optional<RelayNodeConfig> relay_override;
+  std::optional<PeerPathPolicy> path_policy_override;
 };
 
 struct NodeShutdownReport {

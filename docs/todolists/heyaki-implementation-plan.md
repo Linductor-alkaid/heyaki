@@ -1,7 +1,7 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：M3B 已关闭；M4 活动中（已推进至第七轮：真实 WebRTC、签名会话与连接
->   timeline 已落地；Node 自动装配、策略/背压、诊断 UI 与网络矩阵继续实施）
+> - 状态：M3B 已关闭；M4 活动中（已推进至第十三轮：路径策略与测试强制门禁已落地；
+>   接口变化 ICE restart、网络矩阵与 TUI 选择建连继续实施）
 > - 日期：2026-08-19
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)、[局域网无服务器连接设计](../design/lan-serverless-connectivity.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
@@ -774,7 +774,7 @@ Linux GCC/Clang Debug/Release、Windows Debug/Release、ASan/UBSan/TSAN 全部�
 ### 7.2 WebRTC/ICE/TURN
 
 - [x] `M4-06` 实现 `WebRtcTransportSession`，包装 libdatachannel PeerConnection、DataChannel callback、错误和关闭状态。
-- [ ] `M4-07` 配置 candidate 优先级：IPv6 host、LAN IPv4、srflx UDP、TURN/UDP、已验证的 TURN/TCP/TLS；`lan_only` 不配置 ICE server 且失败时明确终止。
+- [x] `M4-07` 配置 candidate 优先级：IPv6 host、LAN IPv4、srflx UDP、TURN/UDP、已验证的 TURN/TCP/TLS；`lan_only` 不配置 ICE server 且失败时明确终止。
 - [x] `M4-08` 并行收集/检查 direct 与 relay candidate，relay 可提前分配但低优先级提名，禁止串行等待长直连超时后才开始 TURN。
 - [x] `M4-09` 实现 `path_info()`、signaling route、selected candidate/data path、RTT、buffered amount、ICE state 和 restart 事件观测。
 - [ ] `M4-10` 实现网络接口变化的 presence 刷新与 ICE restart；association 或 signaling route 丢失则建立新物理 session，不伪装为无损迁移。
@@ -787,7 +787,7 @@ Linux GCC/Clang Debug/Release、Windows Debug/Release、ASan/UBSan/TSAN 全部�
 - [x] `M4-14` 实现最小状态机 `Idle -> ResolvingEndpoint -> Signaling -> Gathering -> Checking -> TransportConnected -> Authenticating -> Closed`，每次转换记录 source/reason/timestamp。
 - [x] `M4-15` 在授权功能尚未实现时，成功认证的测试设备只开放内部 control ping，不开放通用业务通道。
 - [x] `M4-16` TUI 设备/诊断视图展示 LAN/relay endpoint 来源、建连阶段、signaling/data path、candidate、RTT 和结构化失败。
-- [ ] `M4-17` 增加测试专用策略强制 `lan_only`、`relay_only`、direct、TURN/UDP、TURN/TCP/TLS 或禁止某类 candidate，避免公网偶测。
+- [x] `M4-17` 增加测试专用策略强制 `lan_only`、`relay_only`、direct、TURN/UDP、TURN/TCP/TLS 或禁止某类 candidate，避免公网偶测。
 
 ### M4 测试与 Connectivity MVP 退出条件
 
@@ -1089,6 +1089,45 @@ relay 72/72、真实 Node relay-only session 通过；`git diff --check` 通过�
 据此完成 `M4-16`。Connectivity MVP 的 TUI 选择并建连门禁仍未勾选，因为当前验收证明诊断
 呈现和 Node 自动会话，但尚未覆盖 TUI 交互选择 endpoint 的完整路径。`M4-07`、`M4-10`、
 `M4-17` 与 Connectivity MVP 网络矩阵继续推进，M4 goal 保持 active。
+
+### M4 实施进度（2026-08-19，第13轮）
+
+- 新增公共 transport-neutral `PeerPathPolicy`、`NodeIceServer`/`NodeIceServerKind` 与
+  `NodeConfig::path_policy_override`：按架构 6.3 的优先级顺序（IPv6 host、LAN IPv4、
+  srflx UDP、TURN/UDP、已验证 TURN/TCP/TLS）逐类启停 candidate，`force_turn_data_path`
+  将 ICE transport policy 收敛为 relay-only。不引入 libdatachannel 类型，公共头边界
+  与逐头独立编译继续通过。
+- `default_peer_path_policy` 按 connectivity mode 解析默认策略：`lan_only` 永不配置
+  ICE server 且只允许 host candidate；automatic/relay_only 保留全部类别交由 ICE agent
+  按网络实际可用性收集。`validate_peer_path_policy` 在 `Node::create` 阶段 fail-fast：
+  禁止全部类别、`lan_only` 携带 ICE server/srflx/TURN/强制 TURN、未验证 backend 的
+  TURN/TCP/TLS、强制 TURN 缺 TURN server、STUN 携带凭据、TURN 缺凭据、空主机/零端口、
+  hostname/credential 长度与 server 数量（<=8）上限均返回稳定 configuration 错误。
+- Node 不再硬编码 host-only：`start_webrtc_transport` 将解析后的策略映射为内部
+  `CandidatePolicy` 与 ICE server 列表；默认策略下无 STUN/TURN server 时行为与此前
+  host-only 等价。候选优先级由 ICE 标准排序实现，pinned libjuice 无 per-candidate
+  priority API，类别启停顺序与 relay-only 强制是可用的表达方式。
+- 失败显式终止补强：PeerSession 状态回调新增 `TransportState::failed` 分支，保留
+  `ice_failed`/`peer_connection_failed` 等真实失败原因，不再让后续 closed 通知伪装成
+  干净关闭；`peer_session_changed` 对已 retiring 的 attempt 不再用关闭级联错误（如
+  `transport_closed`）覆盖根因错误；500 ms expiry tick 对尚无 PeerSession 的 transport
+  检查 failed 快照并显式终止。强制 TURN 指向不可达 server 的 e2e 证明 attempt 在有界
+  时间内进入带错误的终态（coordinator `attempt_expired` timeout 或 ICE 失败码）。
+- 测试新增 `heyaki_m4_path_policy_tests` 8 项：默认策略随 mode 解析、空类别/lan_only
+  冲突/未验证 TCP TURN/强制 TURN 前置/ICE server 字段与容量校验、Node::create
+  fail-fast，以及 host-only override 仍完成真实 LAN 双 Node authenticated 会话和
+  强制 TURN 无可达 server 的显式终止。测试与 m3a 共享 `heyaki_m3a_profile_state`
+  资源锁，避免 LAN 发现 e2e 并发互扰；m3a/TUI 的 `NodeConfig` 指定初始化器同步补齐
+  新字段。
+- 本轮无新增并发工作负载：策略解析为同步校验，expiry tick 与状态回调复用既有
+  strand/timer/executor 通道；按 EXEC-09 复核未引入新的 executor API。
+
+本机验证：GCC 13.3 Debug 全量 CTest 35/35 通过（coturn 两项按环境规则 skip），
+`-Werror` 树全量构建干净且 m3a/path-policy/公共头定向通过；禁异常 8/8；ASan 8/8、
+UBSan 8/8；TSan（关闭 ASLR）path-policy 8/8、peer-session 3/3、WebRTC transport
+3/3 无竞争报告。据此完成 `M4-07`、`M4-17`。`M4-10` 与 Connectivity MVP 的三设备
+LAN、网络矩阵、P95、泄漏与 TUI 选择建连退出条件继续推进；正向强制 TURN（经 coturn
+真实 allocation）属于网络矩阵门禁，依赖本环境不可用的 CAP_NET_ADMIN/coturn 拓扑。
 
 ---
 
