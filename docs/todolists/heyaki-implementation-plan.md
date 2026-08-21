@@ -1273,6 +1273,19 @@ LAN、网络矩阵、P95、泄漏与 TUI 选择建连退出条件继续推进；
 CAP_NET_ADMIN/coturn 环境）、P95、泄漏全枚举退出条件与 `M4-10` in-place
 ICE restart 重协商。
 
+### M4 实施进度（2026-08-21，第20轮）
+
+- 新增 `heyaki_m4_session_latency`（performance 标签，共享 m3a LAN 资源锁）：
+  10 轮独立双 Node 循环，测量 `connect_lan` 准入到 authenticated 的端到端
+  建连时长并计算 P95。本机 Debug P95=1086ms（min 1036/max 1086），ASan
+  P95=1121ms、TSan（关 ASLR）P95=1110ms，全部低于 3000ms 目标并保留约 3 倍
+  余量；无 LAN 接口环境按既有规则 skip，`HEYAKI_REQUIRE_LAN_INTERFACES=1`
+  时失败。
+- 第五条退出条件保持未勾选：直连（可打洞环境）半边已有测量证据；"直连失败
+  TURN fallback P95 < 5s" 半边需要真实 coturn allocation 的网络拓扑环境
+  （CI coturn-topology job 或 CAP_NET_ADMIN 专用环境），与网络矩阵门禁同批
+  补跑。
+
 ---
 
 ## 8. M5：会话授权、调度与 ByteStream

@@ -371,6 +371,24 @@ heyaki_add_runtime_test(
 set_tests_properties(heyaki_m4_path_policy PROPERTIES
   RESOURCE_LOCK heyaki_m3a_profile_state)
 
+add_executable(heyaki_m4_session_latency_tests unit/m4_session_latency_test.cpp)
+heyaki_enable_executor_exception_adapter_source(unit/m4_session_latency_test.cpp)
+target_link_libraries(heyaki_m4_session_latency_tests PRIVATE
+  heyaki::client
+  executor::executor
+  GTest::gtest_main
+  OpenSSL::SSL)
+heyaki_target_use_pinned_boost_asio(heyaki_m4_session_latency_tests)
+heyaki_configure_target(heyaki_m4_session_latency_tests)
+target_compile_definitions(heyaki_m4_session_latency_tests PRIVATE
+  "HEYAKI_M4_LATENCY_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}\"")
+heyaki_add_runtime_test(
+  heyaki_m4_session_latency heyaki_m4_session_latency_tests
+  "performance;transport;lan")
+set_tests_properties(heyaki_m4_session_latency PROPERTIES
+  RESOURCE_LOCK heyaki_m3a_profile_state
+  TIMEOUT 300)
+
 add_executable(heyaki_m3b_relay_tests
   unit/m3b_relay_test.cpp
   unit/m3b_relay_database_test.cpp
