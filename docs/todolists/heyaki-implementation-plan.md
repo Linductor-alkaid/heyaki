@@ -1,8 +1,9 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：M3B 已关闭；M4 活动中（已推进至第十六轮：三设备 LAN 与伪造双方拒绝
->   两条退出条件已达成；in-place ICE restart、网络矩阵与 TUI 选择建连继续）
-> - 日期：2026-08-19
+> - 状态：M3B 已关闭；M4 活动中（已推进至第十七轮：三设备 LAN、伪造双方拒绝与
+>   LAN/relay 双路由仲裁三条退出条件已达成；in-place ICE restart、网络矩阵与
+>   TUI 选择建连继续）
+> - 日期：2026-08-21
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)、[局域网无服务器连接设计](../design/lan-serverless-connectivity.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
 
@@ -794,7 +795,7 @@ Linux GCC/Clang Debug/Release、Windows Debug/Release、ASan/UBSan/TSAN 全部�
 - [x] relay/STUN/TURN 全部未运行时，同一测试 LAN 的三台设备可发现正确 endpoint 并通过 host candidate 建立认证 DataChannel。
 - [ ] 覆盖 LAN IPv4/IPv6、同 DeviceId 多 endpoint、交叉连接、direct、强制 TURN、对称 NAT、hairpin、IPv6-only、UDP blocked、高延迟、丢包、重复 candidate 和 relay 中途重启。
 - [x] 伪造/替换 LAN hello 证书指纹、fingerprint、offer、endpoint、nonce 或 expiry 时双方都拒绝，LAN MITM 与 relay 都无法冒充 peer。
-- [ ] LAN 与 relay 同时可用时 endpoint 正确去重、LAN 优先/relay fallback 受策略控制，每个逻辑 attempt 只有一个 transport winner。
+- [x] LAN 与 relay 同时可用时 endpoint 正确去重、LAN 优先/relay fallback 受策略控制，每个逻辑 attempt 只有一个 transport winner。
 - [ ] 可打洞环境建连 P95 小于 3 秒；直连失败 TURN fallback P95 小于 5 秒。
 - [ ] 100% 失败/取消/关闭路径最终进入终态，executor worker、Asio work、DataChannel 和 replay cache 无泄漏。
 - [ ] TUI 可以从 LAN/relay 合并列表选择正确 endpoint 建立认证后的最小会话，并准确显示 signaling/data path。
@@ -1206,6 +1207,31 @@ LAN、网络矩阵、P95、泄漏与 TUI 选择建连退出条件继续推进；
 
 据此勾选第三条退出条件（伪造/替换双方拒绝）。剩余：网络矩阵、LAN+relay 仲裁
 与单 winner、P95、泄漏、TUI 选择建连退出条件及 `M4-10` in-place ICE restart。
+
+### M4 实施进度（2026-08-21，第17轮）
+
+- 新增双路由 e2e `DualRouteNodesDedupEndpointsAndPreferLanByPolicy`：两个 Node
+  同时启用 LAN discovery（真实 multicast presence）与 relay enrollment（真实
+  TLS/WSS RelayServer 登录、heartbeat、endpoint publish/query），等待对端在
+  EndpointDirectory 中合并为**单一条目且同时携带 lan 与 relay hint**（去重证
+  据），随后 `connect()` 在 automatic 策略下选择 LAN 信令路由，双方各只有
+  一个 authenticated 会话（单 transport winner）、data path 为 direct_host、
+  session/request ID 一致。
+- 新增 `AutomaticFallsBackToRelayWhenLanHintAbsent`：automatic 策略在对端无
+  LAN hint、仅 relay hint 时回退 relay 信令路由并完成认证，同样单会话收尾；
+  与既有 `NodesAssembleAuthenticatedSessionOverRelayOnlyRoute`（relay_only 强
+  制）及 `select_signaling_route` 单元矩阵共同覆盖"策略控制"三分支
+  （LAN 优先 / 回退 / 强制）。
+- 目录级身份冲突拒绝（同 endpoint LAN/relay 公钥不一致）由既有
+  `RejectsIdentityConflictAcrossLanAndRelayHints` 覆盖；TLS/attempt 层单一
+  connection 仲裁由 M3A 既有测试覆盖。
+- `heyaki_m3b_relay` 测试现在包含启用 LAN 的 e2e，CTest 增加
+  `heyaki_m3a_profile_state` 资源锁避免与 m3a/网络 harness 的 LAN 发现并发
+  互扰。本机连续 3 次通过；ASan、UBSan 定向通过；全量 `-j4` CTest 35/35。
+
+据此勾选第四条退出条件（LAN/relay 去重、策略路由与单 winner）。剩余：网络
+矩阵（需 CAP_NET_ADMIN/coturn 环境）、P95、泄漏、TUI 选择建连退出条件与
+`M4-10` in-place ICE restart。
 
 ---
 

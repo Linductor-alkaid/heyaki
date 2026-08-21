@@ -402,6 +402,8 @@ target_compile_definitions(heyaki_m3b_relay_tests PRIVATE
   "HEYAKI_M3B_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}\"")
 heyaki_add_runtime_test(
   heyaki_m3b_relay heyaki_m3b_relay_tests "unit;relay;network;security")
+set_tests_properties(heyaki_m3b_relay PROPERTIES
+  RESOURCE_LOCK heyaki_m3a_profile_state)
 
 set(heyaki_public_header_sources)
 foreach(public_header IN ITEMS
