@@ -1499,14 +1499,22 @@ TEST_F(M3aNodeTest, AuthenticatedSessionReestablishesNewPhysicalSessionAfterLoss
     GTEST_SKIP() << "No multicast-capable non-loopback interface";
   }
 
+  const auto second_key = DeviceEndpointKey{second_node->snapshot().device_id,
+                                            second_node->snapshot().endpoint_id};
+  const auto first_key = DeviceEndpointKey{first.value_if()->snapshot().device_id,
+                                           first.value_if()->snapshot().endpoint_id};
+  const auto discovered = [](const Node& node, const DeviceEndpointKey& peer) {
+    const auto entries = node.endpoints();
+    return std::any_of(entries.begin(), entries.end(),
+                       [&](const auto& entry) { return entry.key == peer; });
+  };
   ASSERT_TRUE(wait_until(
       [&] {
-        return first.value_if()->endpoints().size() == 1U &&
-               second_node->endpoints().size() == 1U;
+        return discovered(*first.value_if(), second_key) &&
+               discovered(*second_node, first_key);
       },
       std::chrono::seconds{4}));
-  const auto peer = first.value_if()->endpoints().front().key;
-  ASSERT_TRUE(first.value_if()->connect_lan(peer));
+  ASSERT_TRUE(first.value_if()->connect_lan(second_key));
   ASSERT_TRUE(wait_until(
       [&] {
         const auto first_sessions = first.value_if()->peer_sessions();
@@ -1645,43 +1653,41 @@ TEST_F(M3aNodeTest, ThreeLanNodesEstablishAuthenticatedHostDataChannels) {
     GTEST_SKIP() << "No multicast-capable non-loopback interface";
   }
 
-  // Each device must discover exactly the other two endpoints.
+  // Each device must discover the other two specific endpoints; other LAN
+  // tests may announce concurrently on the same multicast group, so exact
+  // directory sizes are not asserted.
+  const auto discovered = [](const Node& node, const DeviceEndpointKey& peer) {
+    const auto entries = node.endpoints();
+    return std::any_of(entries.begin(), entries.end(),
+                       [&](const auto& entry) { return entry.key == peer; });
+  };
+  const auto second_key = DeviceEndpointKey{
+      second.value_if()->snapshot().device_id,
+      second.value_if()->snapshot().endpoint_id};
+  const auto third_key = DeviceEndpointKey{third.value_if()->snapshot().device_id,
+                                           third.value_if()->snapshot().endpoint_id};
   ASSERT_TRUE(wait_until(
       [&] {
-        return first.value_if()->endpoints().size() == 2U &&
-               second.value_if()->endpoints().size() == 2U &&
-               third.value_if()->endpoints().size() == 2U;
+        return discovered(*first.value_if(), second_key) &&
+               discovered(*first.value_if(), third_key) &&
+               discovered(*second.value_if(),
+                          DeviceEndpointKey{first.value_if()->snapshot().device_id,
+                                            first.value_if()->snapshot().endpoint_id}) &&
+               discovered(*second.value_if(), third_key) &&
+               discovered(*third.value_if(),
+                          DeviceEndpointKey{first.value_if()->snapshot().device_id,
+                                            first.value_if()->snapshot().endpoint_id}) &&
+               discovered(*third.value_if(), second_key);
       },
       std::chrono::seconds{6}));
 
-  const auto first_peers = first.value_if()->endpoints();
-  const auto second_peers = second.value_if()->endpoints();
-  const auto third_peers = third.value_if()->endpoints();
-  ASSERT_EQ(first_peers.size(), 2U);
-  ASSERT_EQ(second_peers.size(), 2U);
-  ASSERT_EQ(third_peers.size(), 2U);
-  const auto second_key =
-      DeviceEndpointKey{second.value_if()->snapshot().device_id,
-                        second.value_if()->snapshot().endpoint_id};
-  const auto third_key = DeviceEndpointKey{third.value_if()->snapshot().device_id,
-                                           third.value_if()->snapshot().endpoint_id};
-  EXPECT_TRUE(std::any_of(first_peers.begin(), first_peers.end(),
-                          [&](const auto& entry) { return entry.key == second_key; }));
-  EXPECT_TRUE(std::any_of(first_peers.begin(), first_peers.end(),
-                          [&](const auto& entry) { return entry.key == third_key; }));
-  EXPECT_TRUE(std::any_of(second_peers.begin(), second_peers.end(),
-                          [&](const auto& entry) { return entry.key == third_key; }));
+  const auto first_key = DeviceEndpointKey{first.value_if()->snapshot().device_id,
+                                           first.value_if()->snapshot().endpoint_id};
 
   // Establish all three pairings; every logical pair must reach mutual
   // authenticated state over a direct host data path with its own session.
   ASSERT_TRUE(first.value_if()->connect_lan(second_key));
   ASSERT_TRUE(first.value_if()->connect_lan(third_key));
-  const auto first_key = DeviceEndpointKey{first.value_if()->snapshot().device_id,
-                                           first.value_if()->snapshot().endpoint_id};
-  const auto second_to_third = std::find_if(
-      second_peers.begin(), second_peers.end(),
-      [&](const auto& entry) { return entry.key == third_key; });
-  ASSERT_NE(second_to_third, second_peers.end());
   ASSERT_TRUE(second.value_if()->connect_lan(third_key));
 
   const auto authenticated_sessions_for = [](const Node& node,

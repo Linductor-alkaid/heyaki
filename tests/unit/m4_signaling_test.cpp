@@ -643,6 +643,103 @@ TEST(M4Coordinator, TamperedOfferNeverReachesSession) {
             heyaki::SignalingAttemptPhase::responding);
 }
 
+TEST(M4Coordinator, TamperedAnswerNeverReachesInitiatorSession) {
+  // The M4 exit condition requires BOTH sides to reject forged signaling:
+  // this is the initiator's half, mirroring TamperedOfferNeverReachesSession.
+  ManualFlow flow;
+  ASSERT_TRUE(flow.init());
+  bool verified = false;
+  flow.a.delegate->on_verified_answer =
+      [&](const heyaki::SignalingAttemptSnapshot&, const heyaki::SignedAnswer&,
+          const heyaki::SignalingTranscriptSha256&) {
+        verified = true;
+      };
+
+  const auto request = flow.connect_accepted();
+  ASSERT_TRUE(flow.a.coordinator
+                  ->send_local_offer(request, sdp_bytes(kSdpA), test_fingerprint(0x10U),
+                                     kSteadyNow, kNowUnix)
+                  .has_value());
+  const auto offer_envelope =
+      flow.route_a.last_of(heyaki::LanSignalingMessageKind::signed_offer);
+  ASSERT_TRUE(offer_envelope.has_value());
+  auto inbound_offer = *offer_envelope;
+  inbound_offer.peer = flow.a.self;
+  ASSERT_TRUE(flow.b.coordinator
+                  ->handle_message(inbound_offer, heyaki::SignalingRouteKind::lan,
+                                   kSteadyNow, kNowUnix)
+                  .has_value());
+  ASSERT_TRUE(flow.b.coordinator
+                  ->send_local_answer(request, sdp_bytes(kSdpB), test_fingerprint(0x30U),
+                                      kSteadyNow, kNowUnix)
+                  .has_value());
+  const auto answer_envelope =
+      flow.route_b.last_of(heyaki::LanSignalingMessageKind::signed_answer);
+  ASSERT_TRUE(answer_envelope.has_value());
+  auto tampered = *answer_envelope;
+  tampered.peer = flow.b.self;
+  tampered.payload[tampered.payload.size() - 1U] ^= std::byte{1U};
+  const auto rejected = flow.a.coordinator->handle_message(
+      tampered, heyaki::SignalingRouteKind::lan, kSteadyNow, kNowUnix);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_FALSE(verified);
+  EXPECT_FALSE(flow.a_answer_binding.has_value());
+  EXPECT_GE(flow.a.coordinator->diagnostics().signature_rejected, 1U);
+}
+
+TEST(M4Coordinator, ResignedAnswerWithSwappedEndpointsRejected) {
+  // A relay or LAN MITM that fully re-signs an answer cannot swap the bound
+  // endpoints: the initiator rejects a structurally valid, correctly signed
+  // answer whose binding no longer matches the attempt identities.
+  ManualFlow flow;
+  ASSERT_TRUE(flow.init());
+  bool verified = false;
+  flow.a.delegate->on_verified_answer =
+      [&](const heyaki::SignalingAttemptSnapshot&, const heyaki::SignedAnswer&,
+          const heyaki::SignalingTranscriptSha256&) {
+        verified = true;
+      };
+
+  const auto request = flow.connect_accepted();
+  ASSERT_TRUE(flow.a.coordinator
+                  ->send_local_offer(request, sdp_bytes(kSdpA), test_fingerprint(0x10U),
+                                     kSteadyNow, kNowUnix)
+                  .has_value());
+  const auto offer_envelope =
+      flow.route_a.last_of(heyaki::LanSignalingMessageKind::signed_offer);
+  ASSERT_TRUE(offer_envelope.has_value());
+  auto inbound_offer = *offer_envelope;
+  inbound_offer.peer = flow.a.self;
+  ASSERT_TRUE(flow.b.coordinator
+                  ->handle_message(inbound_offer, heyaki::SignalingRouteKind::lan,
+                                   kSteadyNow, kNowUnix)
+                  .has_value());
+  ASSERT_TRUE(flow.b.coordinator
+                  ->send_local_answer(request, sdp_bytes(kSdpB), test_fingerprint(0x30U),
+                                      kSteadyNow, kNowUnix)
+                  .has_value());
+  const auto answer_envelope =
+      flow.route_b.last_of(heyaki::LanSignalingMessageKind::signed_answer);
+  ASSERT_TRUE(answer_envelope.has_value());
+  auto parsed = heyaki::parse_signed_answer(answer_envelope->payload);
+  ASSERT_TRUE(parsed.has_value());
+  auto forged = *parsed.value_if();
+  std::swap(forged.binding.initiator, forged.binding.responder);
+  auto signed_forged = heyaki::sign_signed_answer(forged, *flow.b.identity);
+  ASSERT_TRUE(signed_forged.has_value());
+
+  auto swapped = *answer_envelope;
+  swapped.peer = flow.b.self;
+  swapped.payload =
+      *heyaki::encode_signed_answer(forged).value_if();
+  const auto rejected = flow.a.coordinator->handle_message(
+      swapped, heyaki::SignalingRouteKind::lan, kSteadyNow, kNowUnix);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_FALSE(verified);
+  EXPECT_FALSE(flow.a_answer_binding.has_value());
+  EXPECT_GE(flow.a.coordinator->diagnostics().binding_rejected, 1U);
+}
+
 TEST(M4Coordinator, DuplicateOfferDeliveryIsRejected) {
   ManualFlow flow;
   ASSERT_TRUE(flow.init());

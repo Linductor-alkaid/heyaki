@@ -42,6 +42,14 @@ bool environment_requires_lan_interfaces() {
   return value != nullptr && std::string_view{value} == "1";
 }
 
+// Waiting for a specific peer endpoint keeps the e2e cases robust when other
+// concurrently running LAN tests announce presence on the same multicast group.
+bool discovered(const Node& node, const DeviceEndpointKey& peer) {
+  const auto entries = node.endpoints();
+  return std::any_of(entries.begin(), entries.end(),
+                     [&](const auto& entry) { return entry.key == peer; });
+}
+
 TEST(M4PathPolicy, DefaultsFollowConnectivityMode) {
   const auto automatic = default_peer_path_policy(ConnectivityMode::automatic);
   ASSERT_TRUE(automatic);
@@ -376,13 +384,17 @@ TEST_F(M4PathPolicyNodeTest, HostOnlyOverrideStillAssemblesAuthenticatedSession)
     GTEST_SKIP() << "No multicast-capable non-loopback interface";
   }
 
+  const auto second_key = DeviceEndpointKey{second.value_if()->snapshot().device_id,
+                                            second.value_if()->snapshot().endpoint_id};
+  const auto first_key = DeviceEndpointKey{first.value_if()->snapshot().device_id,
+                                           first.value_if()->snapshot().endpoint_id};
   ASSERT_TRUE(wait_until(
       [&] {
-        return first.value_if()->endpoints().size() == 1U &&
-               second.value_if()->endpoints().size() == 1U;
+        return discovered(*first.value_if(), second_key) &&
+               discovered(*second.value_if(), first_key);
       },
-      std::chrono::seconds{4}));
-  const auto peer = first.value_if()->endpoints().front().key;
+      std::chrono::seconds{10}));
+  const auto peer = second_key;
   ASSERT_TRUE(first.value_if()->connect_lan(peer));
   const bool authenticated = wait_until(
       [&] {
@@ -437,13 +449,17 @@ TEST_F(M4PathPolicyNodeTest, ForcedTurnWithoutReachableServerTerminatesExplicitl
     GTEST_SKIP() << "No multicast-capable non-loopback interface";
   }
 
+  const auto second_key = DeviceEndpointKey{second.value_if()->snapshot().device_id,
+                                            second.value_if()->snapshot().endpoint_id};
+  const auto first_key = DeviceEndpointKey{first.value_if()->snapshot().device_id,
+                                           first.value_if()->snapshot().endpoint_id};
   ASSERT_TRUE(wait_until(
       [&] {
-        return first.value_if()->endpoints().size() == 1U &&
-               second.value_if()->endpoints().size() == 1U;
+        return discovered(*first.value_if(), second_key) &&
+               discovered(*second.value_if(), first_key);
       },
-      std::chrono::seconds{4}));
-  const auto peer = first.value_if()->endpoints().front().key;
+      std::chrono::seconds{10}));
+  const auto peer = second_key;
   ASSERT_TRUE(first.value_if()->connect_lan(peer));
   const bool terminated = wait_until(
       [&] {

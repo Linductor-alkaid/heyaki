@@ -1,7 +1,7 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：M3B 已关闭；M4 活动中（已推进至第十五轮：三设备 LAN host-candidate
->   认证会话退出条件已达成；in-place ICE restart、网络矩阵与 TUI 选择建连继续）
+> - 状态：M3B 已关闭；M4 活动中（已推进至第十六轮：三设备 LAN 与伪造双方拒绝
+>   两条退出条件已达成；in-place ICE restart、网络矩阵与 TUI 选择建连继续）
 > - 日期：2026-08-19
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)、[局域网无服务器连接设计](../design/lan-serverless-connectivity.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
@@ -793,7 +793,7 @@ Linux GCC/Clang Debug/Release、Windows Debug/Release、ASan/UBSan/TSAN 全部�
 
 - [x] relay/STUN/TURN 全部未运行时，同一测试 LAN 的三台设备可发现正确 endpoint 并通过 host candidate 建立认证 DataChannel。
 - [ ] 覆盖 LAN IPv4/IPv6、同 DeviceId 多 endpoint、交叉连接、direct、强制 TURN、对称 NAT、hairpin、IPv6-only、UDP blocked、高延迟、丢包、重复 candidate 和 relay 中途重启。
-- [ ] 伪造/替换 LAN hello 证书指纹、fingerprint、offer、endpoint、nonce 或 expiry 时双方都拒绝，LAN MITM 与 relay 都无法冒充 peer。
+- [x] 伪造/替换 LAN hello 证书指纹、fingerprint、offer、endpoint、nonce 或 expiry 时双方都拒绝，LAN MITM 与 relay 都无法冒充 peer。
 - [ ] LAN 与 relay 同时可用时 endpoint 正确去重、LAN 优先/relay fallback 受策略控制，每个逻辑 attempt 只有一个 transport winner。
 - [ ] 可打洞环境建连 P95 小于 3 秒；直连失败 TURN fallback P95 小于 5 秒。
 - [ ] 100% 失败/取消/关闭路径最终进入终态，executor worker、Asio work、DataChannel 和 replay cache 无泄漏。
@@ -1174,6 +1174,38 @@ LAN、网络矩阵、P95、泄漏与 TUI 选择建连退出条件继续推进；
 - 据此勾选 Connectivity MVP 第一条退出条件（三设备 LAN host-candidate 认证
   DataChannel）。网络矩阵、伪造审计、LAN+relay 仲裁、P95、泄漏与 TUI 选择建连
   退出条件与 `M4-10` 的 in-place ICE restart 重协商继续推进。
+
+### M4 实施进度（2026-08-19，第16轮）
+
+- 伪造/替换矩阵补齐"双方都拒绝"的发起方侧证据并完成逐向量审计：
+  - LAN hello 证书指纹替换与 LAN MITM：`RejectsRelayedHelloAndCertificateSubstitution`
+    （M3A，TLS 双证书替换 + hello relay 拒绝）。
+  - offer/DTLS fingerprint 字节篡改（响应方拒绝）：
+    `TamperedOfferNeverReachesSession`。
+  - answer 字节篡改（发起方拒绝，本轮新增）：
+    `TamperedAnswerNeverReachesInitiatorSession`——篡改 answer 任意字节在
+    验签层拒绝，`on_verified_answer` 不触发、无 verified binding。
+  - endpoint 篡改（本轮新增）：`ResignedAnswerWithSwappedEndpointsRejected`——
+    攻击者用响应方真实密钥重签但交换 initiator/responder endpoint，发起方按
+    binding mismatch 拒绝；LAN MITM/relay 即使持有效签名也无法改绑身份。
+  - nonce/重放：`DuplicateOfferDeliveryIsRejected`、`M4ReplayCache.*`、
+    `OfferRejectsResponderNonceAndAnswerRequiresIt`。
+  - expiry：`ExpiryWindowEnforced`。
+  - 未知身份冒充（relay 转发伪造签名对象）：`UnknownPeerIdentityRejected`；
+    relay 全程不解码 payload（M4-02 转发测试），任何篡改字节走与 LAN 路由相同
+    的设备端验签路径。
+  - candidate 绑定（transcript/ufrag/fingerprint/sequence）：
+    `CandidateBindingViolationsRejected`。
+- 本地并行 CTest 偶发失败定位与修复：`-j4` 下其他无共享资源锁的 LAN 测试
+  （如 M3B onboarding harness 的 TUI/demo 节点）会向同一 multicast group 发
+  presence，使按目录大小断言（`endpoints().size()==N`）的 e2e 永不满足。本轮
+  起 M4/M3A 新增 e2e 全部改为等待发现**具体对端 endpoint key**，语义即"发现
+  正确 endpoint"；连续 3 次 `-j4` 全量 CTest 35/35 通过。CI 为串行执行不受
+  影响。
+- `heyaki_m4_signaling_tests` 现 22 项（新增 2），ASan/UBSan 定向 22/22 通过。
+
+据此勾选第三条退出条件（伪造/替换双方拒绝）。剩余：网络矩阵、LAN+relay 仲裁
+与单 winner、P95、泄漏、TUI 选择建连退出条件及 `M4-10` in-place ICE restart。
 
 ---
 
