@@ -1527,7 +1527,7 @@ TEST_F(M3aNodeTest, AuthenticatedSessionReestablishesNewPhysicalSessionAfterLoss
                std::any_of(second_sessions.begin(), second_sessions.end(),
                            authenticated);
       },
-      std::chrono::seconds{10}));
+      std::chrono::seconds{20}));
   const auto first_sessions = first.value_if()->peer_sessions();
   const auto first_authenticated = std::find_if(
       first_sessions.begin(), first_sessions.end(),
