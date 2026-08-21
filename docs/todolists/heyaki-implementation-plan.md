@@ -1,8 +1,8 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：M3B 已关闭；M4 活动中（已推进至第十七轮：三设备 LAN、伪造双方拒绝与
->   LAN/relay 双路由仲裁三条退出条件已达成；in-place ICE restart、网络矩阵与
->   TUI 选择建连继续）
+> - 状态：M3B 已关闭；M4 活动中（已推进至第十八轮：三设备 LAN、伪造双方拒绝、
+>   LAN/relay 双路由仲裁三条退出条件已达成，循环丢失有界性证据落地；in-place
+>   ICE restart、P95、泄漏全枚举、TUI 选择建连与网络矩阵继续）
 > - 日期：2026-08-21
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)、[局域网无服务器连接设计](../design/lan-serverless-connectivity.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
