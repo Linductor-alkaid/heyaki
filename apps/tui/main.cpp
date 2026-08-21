@@ -206,19 +206,6 @@ void print_error(const heyaki::Error& error) {
             << error.safe_detail();
 }
 
-heyaki::RequestId make_request_id() {
-  heyaki::RequestId::Storage bytes{};
-  std::random_device random;
-  for (auto& byte : bytes) {
-    byte = static_cast<std::byte>(random() & 0xffU);
-  }
-  if (std::all_of(bytes.begin(), bytes.end(),
-                  [](std::byte byte) { return byte == std::byte{0}; })) {
-    bytes[0] = std::byte{1U};
-  }
-  return heyaki::RequestId{bytes};
-}
-
 void drain_ui_events(UiBridge& bridge, UiState& state, std::size_t capacity) {
   heyaki::LanSignalingMessage message;
   while (bridge.events.try_receive(message)) {
@@ -236,41 +223,6 @@ std::optional<heyaki::DeviceEndpointKey> endpoint_at(
     return std::nullopt;
   }
   return endpoints[one_based_index - 1U].key;
-}
-
-bool connection_authenticated(const heyaki::Node& node,
-                              heyaki::DeviceEndpointKey peer) {
-  const auto connections = node.signaling_connections();
-  return std::any_of(connections.begin(), connections.end(), [&](const auto& connection) {
-    return connection.peer == peer &&
-           connection.state == heyaki::LanSignalingConnectionState::authenticated;
-  });
-}
-
-heyaki::Result<void> wait_for_authenticated(heyaki::Node& node,
-                                           heyaki::DeviceEndpointKey peer,
-                                           std::chrono::milliseconds timeout) {
-  const auto deadline = std::chrono::steady_clock::now() + timeout;
-  executor::comm::PhaseGate poll{"heyaki-tui-authentication-poll"};
-  while (std::chrono::steady_clock::now() < deadline) {
-    if (connection_authenticated(node, peer)) {
-      return heyaki::Result<void>::success();
-    }
-    const auto connections = node.signaling_connections();
-    const auto failed = std::find_if(connections.begin(), connections.end(),
-                                     [&](const auto& connection) {
-                                       return connection.peer == peer &&
-                                              connection.state ==
-                                                  heyaki::LanSignalingConnectionState::failed;
-                                     });
-    if (failed != connections.end() && failed->error) {
-      return heyaki::Result<void>::failure(*failed->error);
-    }
-    (void)poll.wait_for(1U, std::chrono::milliseconds{1});
-  }
-  return heyaki::Result<void>::failure(
-      heyaki::Error{heyaki::ErrorCode::timeout, "tui",
-                    "lan_authentication_timeout"});
 }
 
 void render_uninitialized(std::string_view profile_name,
@@ -365,20 +317,6 @@ void render_node(std::string_view profile_name, const heyaki::Node& node,
             << " rejected=" << bridge.rejected.load(std::memory_order_relaxed) << '\n';
 }
 
-std::optional<heyaki::LanSignalingMessage> pairing_request_at(
-    const UiState& state, std::size_t one_based_index) {
-  std::size_t current = 0U;
-  for (const auto& event : state.signaling_events) {
-    if (event.kind != heyaki::LanSignalingMessageKind::connect_request) {
-      continue;
-    }
-    if (++current == one_based_index) {
-      return event;
-    }
-  }
-  return std::nullopt;
-}
-
 void set_command_result(UiState& state, heyaki::Result<void> result,
                         std::string success) {
   if (result) {
@@ -411,27 +349,6 @@ void run_command(std::string line, heyaki::Node& node, UiState& state,
                                         "command_index_invalid"};
     return;
   }
-  if (command == "accept" || command == "deny") {
-    const auto request = pairing_request_at(state, index);
-    if (!request) {
-      state.command_status.clear();
-      state.command_error = heyaki::Error{heyaki::ErrorCode::configuration, "tui",
-                                          "pairing_request_not_found"};
-      return;
-    }
-    const auto kind = command == "accept"
-                          ? heyaki::LanSignalingMessageKind::connect_accept
-                          : heyaki::LanSignalingMessageKind::connect_deny;
-    auto result = node.send_lan_signaling(
-        heyaki::LanSignalingMessage{.peer = request->peer,
-                                    .kind = kind,
-                                    .request_id = request->request_id,
-                                    .payload = {}});
-    set_command_result(state, std::move(result),
-                       command == "accept" ? "pair-request-accepted"
-                                           : "pair-request-denied");
-    return;
-  }
   const auto endpoints = node.endpoints();
   const auto peer = endpoint_at(endpoints, index);
   if (!peer) {
@@ -441,31 +358,14 @@ void run_command(std::string line, heyaki::Node& node, UiState& state,
     return;
   }
   if (command == "connect") {
-    set_command_result(state, node.connect_lan(*peer), "lan-connect-admitted");
+    // Route selection follows the merged LAN/relay directory and connectivity
+    // policy; the resulting session reports its actual signaling route and
+    // data path in the SESSIONS view.
+    set_command_result(state, node.connect(*peer), "connect-admitted");
     return;
   }
   if (command == "close") {
     set_command_result(state, node.close_lan(*peer), "lan-signaling-closed");
-    return;
-  }
-  if (command == "pair") {
-    auto connected = connection_authenticated(node, *peer)
-                         ? heyaki::Result<void>::success()
-                         : node.connect_lan(*peer);
-    if (connected && !connection_authenticated(node, *peer)) {
-      connected = wait_for_authenticated(node, *peer, 8s);
-    }
-    if (!connected) {
-      set_command_result(state, std::move(connected), {});
-      return;
-    }
-    auto requested = node.send_lan_signaling(
-        heyaki::LanSignalingMessage{
-            .peer = *peer,
-            .kind = heyaki::LanSignalingMessageKind::connect_request,
-            .request_id = make_request_id(),
-            .payload = {}});
-    set_command_result(state, std::move(requested), "pair-request-sent");
     return;
   }
   state.command_status.clear();
@@ -688,15 +588,8 @@ int run_tui(const Options& options) {
     return 1;
   }
   auto bridge = std::make_shared<UiBridge>(lan.value_if()->pending_signaling_capacity);
-  auto handler = [bridge](const heyaki::LanSignalingMessage& message) {
-    if (!bridge->events.try_send(message)) {
-      bridge->rejected.fetch_add(1U, std::memory_order_relaxed);
-      return heyaki::Result<void>::failure(
-          heyaki::Error{heyaki::ErrorCode::resource_exhausted, "tui",
-                        "ui_event_capacity_full"});
-    }
-    return heyaki::Result<void>::success();
-  };
+  // No custom signaling handler: the Node assembles signed sessions
+  // automatically, and the renderer observes bounded latest-only snapshots.
   auto make_node = [&]() {
     return heyaki::Node::create(
         heyaki::NodeConfig{.profile = &*profile,
@@ -705,7 +598,7 @@ int run_tui(const Options& options) {
                            .lan_override = std::nullopt,
                            .runtime_config = heyaki::RuntimeConfig{},
                            .signaling_validator = {},
-                           .signaling_handler = handler,
+                           .signaling_handler = {},
                            .relay_override = std::nullopt,
                            .path_policy_override = std::nullopt});
   };
@@ -744,7 +637,7 @@ int run_tui(const Options& options) {
     std::cout << "\x1b[2J\x1b[H";
     render_node(options.profile_name, *node, *bridge, state,
                 lan.value_if()->pending_signaling_capacity);
-    std::cout << "\ncommand [refresh|relay|connect N|pair N|accept N|deny N|close N|quit]> "
+    std::cout << "\ncommand [refresh|relay|connect N|close N|quit]> "
               << std::flush;
     std::string line;
     if (!std::getline(std::cin, line)) {

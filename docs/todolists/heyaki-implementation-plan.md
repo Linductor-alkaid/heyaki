@@ -1,8 +1,8 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：M3B 已关闭；M4 活动中（已推进至第十八轮：三设备 LAN、伪造双方拒绝、
->   LAN/relay 双路由仲裁三条退出条件已达成，循环丢失有界性证据落地；in-place
->   ICE restart、P95、泄漏全枚举、TUI 选择建连与网络矩阵继续）
+> - 状态：M3B 已关闭；M4 活动中（已推进至第十九轮：三设备 LAN、伪造双方拒绝、
+>   LAN/relay 双路由仲裁与 TUI 选择建连四条退出条件已达成；in-place ICE
+>   restart、P95、泄漏全枚举与网络矩阵继续）
 > - 日期：2026-08-21
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)、[局域网无服务器连接设计](../design/lan-serverless-connectivity.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
@@ -798,7 +798,7 @@ Linux GCC/Clang Debug/Release、Windows Debug/Release、ASan/UBSan/TSAN 全部�
 - [x] LAN 与 relay 同时可用时 endpoint 正确去重、LAN 优先/relay fallback 受策略控制，每个逻辑 attempt 只有一个 transport winner。
 - [ ] 可打洞环境建连 P95 小于 3 秒；直连失败 TURN fallback P95 小于 5 秒。
 - [ ] 100% 失败/取消/关闭路径最终进入终态，executor worker、Asio work、DataChannel 和 replay cache 无泄漏。
-- [ ] TUI 可以从 LAN/relay 合并列表选择正确 endpoint 建立认证后的最小会话，并准确显示 signaling/data path。
+- [x] TUI 可以从 LAN/relay 合并列表选择正确 endpoint 建立认证后的最小会话，并准确显示 signaling/data path。
 
 ### M4 实施进度（2026-08-17，第1轮）
 
@@ -1247,6 +1247,31 @@ LAN、网络矩阵、P95、泄漏与 TUI 选择建连退出条件继续推进；
   保持未勾选：剩余工作为系统化枚举全部失败/取消/关闭路径（含 coordinator
   replay cache 的外部可观测泄漏断言——当前仅有单元级容量/TTL 测试）与网络
   harness 压力下的 M4 会话循环。
+
+### M4 实施进度（2026-08-21，第19轮）
+
+- `heyaki-tui` 的 Node 不再注入自定义 `signaling_handler`，M4 自动会话装配
+  （coordinator + WebRTC + PeerSession）在 TUI 进程内直接生效；渲染层只消费
+  有界 latest-only 快照。基于 M3A 人工 accept/deny 信令的 `pair/accept/deny`
+  命令与配套 helper 移除（M5 将以真实 pairing 协议重新交付配对 UI）。
+- `connect N` 命令从 `connect_lan` 改为 transport-neutral `Node::connect()`：
+  从 LAN/relay 合并目录按 connectivity policy 选路，SESSIONS 视图展示实际
+  signaling route 与 data path。REPL 提示更新为
+  `command [refresh|relay|connect N|close N|quit]`（前缀保持，既有 pty 驱动
+  步骤兼容）。
+- 新增 `heyaki_m4_tui_session_harness`（Linux pty，77 skip 语义，资源锁与
+  m3a 共享）：两个独立 profile 的 `heyaki-tui` 实例各自完成本地初始化
+  （pre-init 菜单 + 隐藏密码输入），LAN 相互发现后，驱动解析 TUI A 合并
+  endpoint 列表中 B 的条目索引并发送 `connect N`；断言 A 的 SESSIONS 出现
+  `authenticated  signaling=lan  data=direct_host` 且 B 侧同时 authenticated，
+  进程以 quit 正常退出。pty 驱动处理 CRLF 归一化、按命令重渲染（REPL 只在
+  命令后重绘）与 LAN 不可达时的 77 skip。
+- 回归：m3b onboarding harness、tui local status/version/setup 全部通过；
+  全量 CTest 36/36（含新 harness），连续 3 次通过。
+
+据此勾选第七条退出条件（TUI 合并列表选择建连）。剩余：网络矩阵（需
+CAP_NET_ADMIN/coturn 环境）、P95、泄漏全枚举退出条件与 `M4-10` in-place
+ICE restart 重协商。
 
 ---
 

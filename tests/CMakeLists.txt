@@ -611,6 +611,18 @@ if(HEYAKI_BUILD_APPS)
     LABELS "network;relay;tui;security"
     SKIP_RETURN_CODE 77
     TIMEOUT 120)
+
+  add_test(
+    NAME heyaki_m4_tui_session_harness
+    COMMAND "${HEYAKI_BASH_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/network/run_m4_tui_session_harness.sh"
+      --tui-bin "$<TARGET_FILE:heyaki-tui>"
+      --work-dir "${HEYAKI_TEST_STATE_DIR}/m4-tui-session")
+  set_tests_properties(heyaki_m4_tui_session_harness PROPERTIES
+    LABELS "network;tui;lan;security"
+    RESOURCE_LOCK heyaki_m3a_profile_state
+    SKIP_RETURN_CODE 77
+    TIMEOUT 180)
 endif()
 
 if(WIN32)
