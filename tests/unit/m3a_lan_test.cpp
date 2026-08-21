@@ -1748,6 +1748,145 @@ TEST_F(M3aNodeTest, ThreeLanNodesEstablishAuthenticatedHostDataChannels) {
   EXPECT_TRUE(third.value_if()->shutdown().stopped);
 }
 
+TEST_F(M3aNodeTest, RepeatedAssociationLossCyclesStayBounded) {
+  // M4 leak evidence for the session layer: repeated loss/re-establishment
+  // cycles must drain signaling connections, keep one merged directory entry
+  // per peer endpoint, and bound the diagnostic session history.
+  LanConfiguration configuration;
+  configuration.connectivity_mode = ConnectivityMode::lan_only;
+  configuration.auto_connect_trusted = true;
+  configuration.announcement_interval = std::chrono::milliseconds{100};
+  configuration.announcement_jitter = std::chrono::milliseconds{0};
+  configuration.presence_lease = std::chrono::milliseconds{1000};
+  configuration.interface_refresh_interval = std::chrono::seconds{2};
+  configuration.announcement_rate_per_second = 100U;
+  configuration.per_source_announcement_rate = 100U;
+  auto first_profile = initialized_profile("cycle-first", "com.example.cycle.first",
+                                           configuration);
+  auto second_profile = initialized_profile("cycle-second", "com.example.cycle.second",
+                                            configuration);
+  ASSERT_TRUE(first_profile && second_profile);
+  ASSERT_TRUE(trust_peer(*first_profile.value_if(),
+                         second_profile.value_if()->device_id(), 1U));
+  ASSERT_TRUE(trust_peer(*second_profile.value_if(),
+                         first_profile.value_if()->device_id(), 2U));
+
+  auto first = Node::create(
+      node_config(*first_profile.value_if(), "com.example.cycle.first"));
+  ASSERT_TRUE(first);
+  const auto first_state = first.value_if()->snapshot();
+  if (first_state.interfaces.empty()) {
+    (void)first.value_if()->shutdown();
+    GTEST_SKIP() << "No multicast-capable non-loopback interface";
+  }
+
+  std::optional<Node> peer_node;
+  const auto start_peer = [&]() {
+    auto second = Node::create(
+        node_config(*second_profile.value_if(), "com.example.cycle.second"));
+    EXPECT_TRUE(second);
+    peer_node.emplace(std::move(*second.value_if()));
+  };
+  const auto stop_peer = [&]() {
+    ASSERT_TRUE(peer_node.has_value());
+    EXPECT_TRUE(peer_node->shutdown().stopped);
+    peer_node.reset();
+  };
+
+  constexpr std::size_t kCycles = 5U;
+  std::optional<SessionId> previous_session;
+  for (std::size_t cycle = 0U; cycle < kCycles; ++cycle) {
+    start_peer();
+    ASSERT_TRUE(peer_node.has_value());
+    const auto peer_state = peer_node->snapshot();
+    if (peer_state.interfaces.empty()) {
+      stop_peer();
+      (void)first.value_if()->shutdown();
+      GTEST_SKIP() << "No multicast-capable non-loopback interface";
+    }
+    const auto peer_key = DeviceEndpointKey{peer_state.device_id,
+                                            peer_state.endpoint_id};
+    const auto discovered = [&](const Node& node, const DeviceEndpointKey& key) {
+      const auto entries = node.endpoints();
+      return std::any_of(entries.begin(), entries.end(),
+                         [&](const auto& entry) { return entry.key == key; });
+    };
+    ASSERT_TRUE(wait_until(
+        [&] { return discovered(*first.value_if(), peer_key); },
+        std::chrono::seconds{4}))
+        << "cycle " << cycle << ": peer not discovered";
+    if (cycle == 0U) {
+      ASSERT_TRUE(first.value_if()->connect_lan(peer_key));
+    }
+    ASSERT_TRUE(wait_until(
+        [&] {
+          const auto sessions = first.value_if()->peer_sessions();
+          return std::any_of(sessions.begin(), sessions.end(),
+                             [&](const NodePeerSessionSnapshot& session) {
+                               return session.state ==
+                                          NodePeerSessionState::authenticated &&
+                                      (!previous_session ||
+                                       session.session_id != *previous_session);
+                             });
+        },
+        std::chrono::seconds{12}))
+        << "cycle " << cycle << ": no fresh authenticated session";
+    const auto sessions = first.value_if()->peer_sessions();
+    const auto active = std::find_if(
+        sessions.begin(), sessions.end(),
+        [](const NodePeerSessionSnapshot& session) {
+          return session.state == NodePeerSessionState::authenticated;
+        });
+    ASSERT_NE(active, sessions.end());
+    previous_session = active->session_id;
+
+    // The peer endpoint stays a single merged entry across boot nonce changes.
+    const auto entries = first.value_if()->endpoints();
+    EXPECT_EQ(std::count_if(entries.begin(), entries.end(),
+                            [&](const auto& entry) {
+                              return entry.key == peer_key;
+                            }),
+              1U)
+        << "cycle " << cycle << ": directory entry duplicated";
+
+    stop_peer();
+    ASSERT_TRUE(wait_until(
+        [&] {
+          const auto current = first.value_if()->peer_sessions();
+          return std::any_of(current.begin(), current.end(),
+                             [&](const NodePeerSessionSnapshot& session) {
+                               return session.session_id == *previous_session &&
+                                      session.state ==
+                                          NodePeerSessionState::closed &&
+                                      session.error.has_value();
+                             });
+        },
+        std::chrono::seconds{5}))
+        << "cycle " << cycle << ": lost session did not reach terminal state";
+    // Failed immediate re-establishment attempts must drain: no live TLS
+    // signaling connections linger while the peer is gone.
+    ASSERT_TRUE(wait_until(
+        [&] {
+          return first.value_if()->snapshot().resources.signaling_connections ==
+                 0U;
+        },
+        std::chrono::seconds{5}))
+        << "cycle " << cycle << ": signaling connections did not drain";
+  }
+
+  // Diagnostic history stays bounded by the cycle count plus one active try.
+  const auto final_sessions = first.value_if()->peer_sessions();
+  EXPECT_LE(final_sessions.size(), kCycles * 2U + 1U);
+  const auto closed_with_error = std::count_if(
+      final_sessions.begin(), final_sessions.end(),
+      [](const NodePeerSessionSnapshot& session) {
+        return session.state == NodePeerSessionState::closed &&
+               session.error.has_value();
+      });
+  EXPECT_EQ(closed_with_error, kCycles);
+  EXPECT_TRUE(first.value_if()->shutdown().stopped);
+}
+
 TEST_F(M3aNodeTest, TrustedAutoConnectUsesOnlyTheTupleOfferOwner) {
   LanConfiguration configuration;
   configuration.connectivity_mode = ConnectivityMode::lan_only;

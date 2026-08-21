@@ -1233,6 +1233,21 @@ LAN、网络矩阵、P95、泄漏与 TUI 选择建连退出条件继续推进；
 矩阵（需 CAP_NET_ADMIN/coturn 环境）、P95、泄漏、TUI 选择建连退出条件与
 `M4-10` in-place ICE restart。
 
+### M4 实施进度（2026-08-21，第18轮）
+
+- 新增 `RepeatedAssociationLossCyclesStayBounded`：5 轮"认证会话 -> 对端整体
+  销毁 -> 显式 closed+error 终态 -> 同 profile 重启 -> 新 session ID 重建"循环。
+  每轮断言：丢失会话进入带错误的终态、立即重建的失败 TLS 连接完全排干
+  （`resources.signaling_connections == 0`）、对端 endpoint 在目录中始终只有
+  一个合并条目（跨 boot nonce 不累积）；结束后诊断会话历史有界（恰为循环数
+  的 closed+error + 少量余量）。本机连续 3 次通过，ASan、TSan（关 ASLR）定向
+  通过，全量 `-j4` CTest 35/35。
+- 该测试与 ForcedTurn 显式终止、shutdown 排空断言、M3A LAN 压力测试、M2
+  runtime/executor 测试共同构成第六条退出条件的 session 层证据。退出条件仍
+  保持未勾选：剩余工作为系统化枚举全部失败/取消/关闭路径（含 coordinator
+  replay cache 的外部可观测泄漏断言——当前仅有单元级容量/TTL 测试）与网络
+  harness 压力下的 M4 会话循环。
+
 ---
 
 ## 8. M5：会话授权、调度与 ByteStream
