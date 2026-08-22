@@ -2339,6 +2339,20 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     published.insert(published.end(), finished_peer_sessions.begin(),
                      finished_peer_sessions.end());
     peer_session_snapshots.publish(std::move(published));
+    if (coordinator) {
+      const auto diagnostics = coordinator->diagnostics();
+      update_snapshot([&](NodeSnapshot& snapshot) {
+        snapshot.session_coordinator =
+            NodeSessionCoordinatorDiagnostics{
+                .replay_rejected = diagnostics.replay_rejected,
+                .attempts_expired = diagnostics.attempts_expired,
+                .attempts_closed = diagnostics.attempts_closed,
+                .current_attempts = diagnostics.current_attempts,
+                .peak_attempts = diagnostics.peak_attempts,
+                .replay_current_entries = diagnostics.replay_current_entries,
+                .replay_peak_entries = diagnostics.replay_peak_entries};
+      });
+    }
   }
 
   Result<void> initialize_session_coordinator() {

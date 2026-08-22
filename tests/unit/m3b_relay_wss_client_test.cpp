@@ -1704,7 +1704,7 @@ TEST(M3BRelayWssClientTest, DualRouteNodesDedupEndpointsAndPreferLanByPolicy) {
       [&] {
         return entry_with_both_hints(*first.value_if(), second_key) &&
                entry_with_both_hints(*second.value_if(), first_key);
-      }, 10s))
+      }, 15s))
       << "dual-source endpoint merge did not complete";
 
   ASSERT_TRUE(first.value_if()->connect(second_key));
@@ -1715,7 +1715,7 @@ TEST(M3BRelayWssClientTest, DualRouteNodesDedupEndpointsAndPreferLanByPolicy) {
         return left.size() == 1U && right.size() == 1U &&
                left.front().state == NodePeerSessionState::authenticated &&
                right.front().state == NodePeerSessionState::authenticated;
-      }, 10s);
+      }, 25s);
   ASSERT_TRUE(authenticated)
       << "first_error="
       << (first.value_if()->snapshot().last_error
@@ -1860,7 +1860,7 @@ TEST(M3BRelayWssClientTest, AutomaticFallsBackToRelayWhenLanHintAbsent) {
         return left.size() == 1U && right.size() == 1U &&
                left.front().state == NodePeerSessionState::authenticated &&
                right.front().state == NodePeerSessionState::authenticated;
-      }, 10s);
+      }, 25s);
   ASSERT_TRUE(authenticated);
   const auto left = first.value_if()->peer_sessions().front();
   const auto right = second.value_if()->peer_sessions().front();

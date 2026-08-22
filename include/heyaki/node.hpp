@@ -239,6 +239,19 @@ struct RelayNodeSnapshot {
   std::optional<Error> last_error;
 };
 
+// Session-coordinator health as observed by the owning Node: bounded attempt
+// state and the signed-object replay guard depth. Executor facilities remain
+// the source of truth for task health; these fields cover protocol state.
+struct NodeSessionCoordinatorDiagnostics {
+  std::uint64_t replay_rejected{};
+  std::uint64_t attempts_expired{};
+  std::uint64_t attempts_closed{};
+  std::size_t current_attempts{};
+  std::size_t peak_attempts{};
+  std::size_t replay_current_entries{};
+  std::size_t replay_peak_entries{};
+};
+
 struct NodeSnapshot {
   bool local_initialized{false};
   DeviceId device_id;
@@ -254,6 +267,7 @@ struct NodeSnapshot {
   std::uint64_t datagrams_received{};
   std::uint64_t datagrams_rejected{};
   RelayNodeSnapshot relay;
+  NodeSessionCoordinatorDiagnostics session_coordinator;
   LanResourceSnapshot resources;
   std::optional<Error> last_error;
 };

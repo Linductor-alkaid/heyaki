@@ -110,6 +110,8 @@ struct SignalingCoordinatorDiagnostics {
   std::uint64_t route_missing{};
   std::size_t current_attempts{};
   std::size_t peak_attempts{};
+  std::size_t replay_current_entries{};
+  std::size_t replay_peak_entries{};
 };
 
 // Delegate callbacks run synchronously on the coordinator's driving context. Every signed

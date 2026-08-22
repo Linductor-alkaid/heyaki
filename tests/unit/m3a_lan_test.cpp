@@ -1864,14 +1864,24 @@ TEST_F(M3aNodeTest, RepeatedAssociationLossCyclesStayBounded) {
         std::chrono::seconds{5}))
         << "cycle " << cycle << ": lost session did not reach terminal state";
     // Failed immediate re-establishment attempts must drain: no live TLS
-    // signaling connections linger while the peer is gone.
+    // signaling connections linger while the peer is gone, and the
+    // coordinator holds no open attempts between cycles.
     ASSERT_TRUE(wait_until(
         [&] {
           return first.value_if()->snapshot().resources.signaling_connections ==
-                 0U;
+                     0U &&
+                 first.value_if()
+                         ->snapshot()
+                         .session_coordinator.current_attempts == 0U;
         },
         std::chrono::seconds{5}))
         << "cycle " << cycle << ": signaling connections did not drain";
+    // The replay guard is bounded: entries accumulate only within capacity
+    // across every loss/re-establishment round.
+    const auto coordinator_state =
+        first.value_if()->snapshot().session_coordinator;
+    EXPECT_LE(coordinator_state.replay_current_entries, 4096U);
+    EXPECT_LE(coordinator_state.peak_attempts, 8U);
   }
 
   // Diagnostic history stays bounded by the cycle count plus one active try.

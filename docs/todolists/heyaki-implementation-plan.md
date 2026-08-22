@@ -1,9 +1,10 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：M3B 已关闭；M4 活动中（已推进至第十九轮：三设备 LAN、伪造双方拒绝、
->   LAN/relay 双路由仲裁与 TUI 选择建连四条退出条件已达成；in-place ICE
->   restart、P95、泄漏全枚举与网络矩阵继续）
-> - 日期：2026-08-21
+> - 状态：M3B 已关闭；M4 活动中（已推进至第二十一轮：三设备 LAN、伪造双方
+>   拒绝、LAN/relay 双路由仲裁与 TUI 选择建连四条退出条件已达成，直连 P95
+>   与 coordinator/replay 可观测有界证据落地；in-place ICE restart、TURN
+>   fallback P95、泄漏全枚举与网络矩阵继续）
+> - 日期：2026-08-22
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)、[局域网无服务器连接设计](../design/lan-serverless-connectivity.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
 
@@ -1285,6 +1286,22 @@ ICE restart 重协商。
   TURN fallback P95 < 5s" 半边需要真实 coturn allocation 的网络拓扑环境
   （CI coturn-topology job 或 CAP_NET_ADMIN 专用环境），与网络矩阵门禁同批
   补跑。
+
+### M4 实施进度（2026-08-22，第21轮）
+
+- `NodeSnapshot` 新增公共 `NodeSessionCoordinatorDiagnostics`：coordinator 的
+  尝试计数（current/peak attempts、expired/closed）与签名对象 replay guard
+  深度（current/peak entries）在 peer-session 变化时于 owning strand 发布。
+  executor 设施仍是任务健康事实源，该结构只覆盖协议状态。
+- `RepeatedAssociationLossCyclesStayBounded` 相应增加外部可观测有界断言：
+  每轮排空后 coordinator `current_attempts == 0`，replay entries 始终在
+  容量内（<=4096），peak attempts 有界（<=8）。
+- Windows Release CI 时序整改：双路由与 relay 回退 e2e 的认证等待预算从
+  10s 提高到 25s（relay 登录/publish/query + WebRTC 握手在双核 Windows
+  Release runner 上偶发超过 10s；第 17 轮同流程通过证明为临界预算而非功能
+  回归），双 hint 合并等待提高到 15s。
+- 第 19 轮 CI（1e3cb5b，TUI 选择建连）success；第 20 轮 CI（f597b1f）仅在
+  Windows Release 的上述时序用例失败，其余 9 job 成功。
 
 ---
 

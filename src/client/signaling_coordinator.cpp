@@ -414,7 +414,13 @@ class SignalingCoordinator::Impl {
         .initiator = !attempt->inbound});
   }
 
-  SignalingCoordinatorDiagnostics diagnostics() const noexcept { return diagnostics_; }
+  SignalingCoordinatorDiagnostics diagnostics() const noexcept {
+    SignalingCoordinatorDiagnostics snapshot = diagnostics_;
+    const auto replay = replay_.diagnostics();
+    snapshot.replay_current_entries = replay.current_entries;
+    snapshot.replay_peak_entries = replay.peak_entries;
+    return snapshot;
+  }
 
   Result<void> check_create() {
     if (config_.identity == nullptr) {
