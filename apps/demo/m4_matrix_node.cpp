@@ -274,10 +274,15 @@ int run_node(const std::filesystem::path& database, std::string_view application
                            std::chrono::steady_clock::now() - begin)
                            .count();
   std::string data_path = "none";
+  std::string stage = "none";
+  std::string session_error = "-";
   heyaki::NodePeerSessionState final_state = heyaki::NodePeerSessionState::closed;
   const auto sessions = node.value_if()->peer_sessions();
   for (const auto& session : sessions) {
     final_state = session.state;
+    stage = std::string{heyaki::node_connection_stage_name(session.connection_stage)};
+    session_error =
+        session.error ? std::string{session.error->safe_detail()} : std::string{"-"};
     if (session.state == heyaki::NodePeerSessionState::authenticated) {
       data_path = std::string{
           heyaki::node_data_path_kind_name(session.data_path)};
@@ -293,6 +298,8 @@ int run_node(const std::filesystem::path& database, std::string_view application
             << " data_path=" << data_path << " duration_ms=" << elapsed
             << " attempted=" << (attempted ? 1 : 0)
             << " state=" << heyaki::node_peer_session_state_name(final_state)
+            << " stage=" << stage
+            << " session_error=" << session_error
             << " relay_state=" << heyaki::relay_node_state_name(snapshot.relay.state)
             << '\n';
   const auto shutdown = node.value_if()->shutdown();

@@ -95,6 +95,8 @@ cleanup() {
   tc qdisc del dev "${veth1}" root 2>/dev/null
   iptables -D FORWARD -s "${client0}" -d "${client1}" -j DROP 2>/dev/null
   iptables -D FORWARD -s "${client1}" -d "${client0}" -j DROP 2>/dev/null
+  iptables -D FORWARD -s "${client0}" -d "${client1}" -j ACCEPT 2>/dev/null
+  iptables -D FORWARD -s "${client1}" -d "${client0}" -j ACCEPT 2>/dev/null
   iptables -D INPUT -i "${br0}" -p udp --dport "${turn_port}" -j DROP 2>/dev/null
   iptables -D INPUT -i "${br1}" -p udp --dport "${turn_port}" -j DROP 2>/dev/null
   ip netns delete "${ns0}" 2>/dev/null
@@ -129,13 +131,27 @@ create_namespace() {
 create_namespace "${ns0}" "${br0}" "${host0}" "${client0}" "${veth0}" "${peer0}"
 create_namespace "${ns1}" "${br1}" "${host1}" "${client1}" "${veth1}" "${peer1}"
 
-block_forwarding() {
-  iptables -I FORWARD -s "${client0}" -d "${client1}" -j DROP
-  iptables -I FORWARD -s "${client1}" -d "${client0}" -j DROP
-}
 allow_forwarding() {
   iptables -D FORWARD -s "${client0}" -d "${client1}" -j DROP 2>/dev/null || true
   iptables -D FORWARD -s "${client1}" -d "${client0}" -j DROP 2>/dev/null || true
+  # GitHub runners carry Docker's FORWARD policy DROP; an explicit ACCEPT in
+  # front of it is required for direct host-candidate checks to cross the
+  # host routing between the two client bridges.
+  iptables -I FORWARD 1 -s "${client0}" -d "${client1}" -j ACCEPT
+  iptables -I FORWARD 1 -s "${client1}" -d "${client0}" -j ACCEPT
+}
+drop_forward_accept_rules() {
+  while iptables -C FORWARD -s "${client0}" -d "${client1}" -j ACCEPT 2>/dev/null; do
+    iptables -D FORWARD -s "${client0}" -d "${client1}" -j ACCEPT
+  done
+  while iptables -C FORWARD -s "${client1}" -d "${client0}" -j ACCEPT 2>/dev/null; do
+    iptables -D FORWARD -s "${client1}" -d "${client0}" -j ACCEPT
+  done
+}
+block_forwarding() {
+  drop_forward_accept_rules
+  iptables -I FORWARD -s "${client0}" -d "${client1}" -j DROP
+  iptables -I FORWARD -s "${client1}" -d "${client0}" -j DROP
 }
 block_turn_udp() {
   iptables -I INPUT -i "${br0}" -p udp --dport "${turn_port}" -j DROP
@@ -264,6 +280,9 @@ result_field() {
 run_pair() {
   local tag=$1 budget=$2; shift 2
   prepare_participants "${tag}"
+  # Let endpoints from the previous scenario fall out of the relay directory
+  # (3 s presence lease) so the initiator cannot dial a stale endpoint.
+  sleep 4
   run_in "${ns1}" run "${work_dir}/${tag}-second.sqlite" matrix.second \
     "wss://${host1}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" "${budget}" \
     --role responder "$@" &
@@ -285,6 +304,8 @@ dump_outputs() {
   sed -n '1,12p' "${work_dir}/${ns1}-output.txt" 2>/dev/null || true
   log "RELAY_LOG ${scenario}:"
   tail -n 12 "${work_dir}/relay.log" 2>/dev/null || true
+  log "TURN_LOG ${scenario}:"
+  tail -n 20 "${work_dir}/turn.log" 2>/dev/null || true
 }
 require_authenticated_turn() {
   local line=$1 scenario=$2
@@ -390,6 +411,7 @@ for scenario in "${scenarios[@]}"; do
         failures=$((failures + 1))
         continue
       }
+      sleep 4
       run_in "${ns1}" run "${work_dir}/restart-second.sqlite" matrix.second \
         "wss://${host1}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" 30000 \
         --role responder --turn "${host1}:${turn_port}" \
