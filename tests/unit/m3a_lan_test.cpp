@@ -1515,6 +1515,9 @@ TEST_F(M3aNodeTest, AuthenticatedSessionReestablishesNewPhysicalSessionAfterLoss
       },
       std::chrono::seconds{4}));
   ASSERT_TRUE(first.value_if()->connect_lan(second_key));
+  // The 20 s budget flaked on a loaded ASan runner (run 32546019506): the
+  // full re-signaling after peer destruction plus the WebRTC handshake can
+  // exceed it under sanitizer overhead, so match the widened relay budgets.
   ASSERT_TRUE(wait_until(
       [&] {
         const auto first_sessions = first.value_if()->peer_sessions();
@@ -1527,7 +1530,7 @@ TEST_F(M3aNodeTest, AuthenticatedSessionReestablishesNewPhysicalSessionAfterLoss
                std::any_of(second_sessions.begin(), second_sessions.end(),
                            authenticated);
       },
-      std::chrono::seconds{20}));
+      std::chrono::seconds{35}));
   const auto first_sessions = first.value_if()->peer_sessions();
   const auto first_authenticated = std::find_if(
       first_sessions.begin(), first_sessions.end(),
