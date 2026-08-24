@@ -322,7 +322,7 @@ int main(int argc, char** argv) {
   }
   const std::string command = argv[1];
   if (command == "init-profile") {
-    if (argc != 5) {
+    if (argc != 4) {
       return usage();
     }
     auto profile = initialized_profile(argv[2], argv[3]);
@@ -333,7 +333,7 @@ int main(int argc, char** argv) {
     return 0;
   }
   if (command == "enroll") {
-    if (argc != 9) {
+    if (argc != 8) {
       return usage();
     }
     auto profile = heyaki::ProfileStore::open(argv[2]);

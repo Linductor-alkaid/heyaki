@@ -2527,9 +2527,27 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   }
 
   bool admit_inbound_attempt(const SignalingAttemptSnapshot& snapshot) {
-    if (peers_closed || peer_attempts.size() >= lan.pending_signaling_capacity ||
-        peer_attempt_by_endpoint.contains(snapshot.peer)) {
+    if (peers_closed || peer_attempts.size() >= lan.pending_signaling_capacity) {
       return false;
+    }
+    const auto existing_index = peer_attempt_by_endpoint.find(snapshot.peer);
+    if (existing_index != peer_attempt_by_endpoint.end()) {
+      // Simultaneous dial glare: both peers dialed each other and each
+      // inbound request arrives while our own outbound attempt is still
+      // signaling. The deterministic offer owner keeps its outbound attempt;
+      // the other side cancels its own dial and accepts the inbound one, so
+      // exactly one connection survives regardless of arrival order.
+      const auto existing = peer_attempts.find(existing_index->second);
+      const bool dialing =
+          existing != peer_attempts.end() &&
+          existing->second.snapshot.initiator &&
+          existing->second.snapshot.state == NodePeerSessionState::signaling;
+      if (!dialing || is_lan_offer_owner(local_key(), snapshot.peer)) {
+        return false;
+      }
+      fail_peer_attempt(existing_index->second,
+                        node_error(ErrorCode::cancelled,
+                                   "simultaneous_dial_arbitrated"));
     }
     auto public_key = peer_identity(snapshot.peer);
     if (!public_key) return false;
