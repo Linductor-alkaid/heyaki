@@ -136,6 +136,7 @@ struct NodePeerSessionSnapshot {
   DeviceEndpointKey peer;
   RequestId request_id;
   SessionId session_id;
+  std::uint64_t session_epoch{1U};
   SignalingRouteKind signaling_route{SignalingRouteKind::lan};
   NodePeerSessionState state{NodePeerSessionState::signaling};
   NodeConnectionStage connection_stage{NodeConnectionStage::idle};
@@ -144,6 +145,7 @@ struct NodePeerSessionSnapshot {
   std::chrono::milliseconds rtt{};
   std::size_t buffered_amount{};
   bool initiator{false};
+  bool restart_in_flight{false};
   std::optional<Error> error;
 };
 
@@ -252,6 +254,18 @@ struct NodeSessionCoordinatorDiagnostics {
   std::size_t replay_peak_entries{};
 };
 
+// Protocol-1.2 in-place restart renegotiation state: a replacement transport
+// negotiated over an authenticated control channel. Executor facilities remain
+// the source of truth for task health; these fields cover protocol state.
+struct NodeSessionRestartDiagnostics {
+  std::uint64_t restarts_initiated{};
+  std::uint64_t restarts_completed{};
+  std::uint64_t restarts_failed{};
+  std::uint64_t restarts_suppressed{};
+  std::size_t current_restarts{};
+  std::size_t peak_restarts{};
+};
+
 struct NodeSnapshot {
   bool local_initialized{false};
   DeviceId device_id;
@@ -268,6 +282,7 @@ struct NodeSnapshot {
   std::uint64_t datagrams_rejected{};
   RelayNodeSnapshot relay;
   NodeSessionCoordinatorDiagnostics session_coordinator;
+  NodeSessionRestartDiagnostics session_restarts;
   LanResourceSnapshot resources;
   std::optional<Error> last_error;
 };
@@ -309,6 +324,12 @@ class Node {
   [[nodiscard]] Result<void> refresh_interfaces();
   [[nodiscard]] Result<void> connect(DeviceEndpointKey peer);
   [[nodiscard]] Result<void> connect_lan(DeviceEndpointKey peer);
+  // Initiates the protocol-1.2 in-place restart renegotiation for an
+  // authenticated session: a replacement transport is negotiated over the
+  // existing control channel, preserving the SessionId with a bumped epoch.
+  // The same path is triggered automatically when the interface binding set
+  // changes; it is not a lossless migration.
+  [[nodiscard]] Result<void> restart_session(DeviceEndpointKey peer);
   [[nodiscard]] Result<void> send_lan_signaling(LanSignalingMessage message);
   [[nodiscard]] Result<void> close_lan(DeviceEndpointKey peer);
   [[nodiscard]] NodeShutdownReport shutdown();

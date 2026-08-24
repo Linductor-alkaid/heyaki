@@ -302,6 +302,69 @@ heyaki_add_runtime_test(
   heyaki_m4_session_hello heyaki_m4_session_hello_tests
   "unit;session;security;protocol")
 
+add_executable(heyaki_m4_session_restart_tests unit/m4_session_restart_test.cpp)
+target_link_libraries(heyaki_m4_session_restart_tests PRIVATE
+  heyaki::core
+  GTest::gtest_main)
+heyaki_configure_target(heyaki_m4_session_restart_tests)
+heyaki_add_runtime_test(
+  heyaki_m4_session_restart heyaki_m4_session_restart_tests
+  "unit;session;security;protocol")
+
+add_executable(heyaki_m4_topology_matrix_tests unit/m4_topology_matrix_test.cpp)
+heyaki_enable_executor_exception_adapter_source(unit/m4_topology_matrix_test.cpp)
+target_link_libraries(heyaki_m4_topology_matrix_tests PRIVATE
+  heyaki::client
+  executor::executor
+  GTest::gtest_main
+  OpenSSL::SSL)
+heyaki_target_use_pinned_boost_asio(heyaki_m4_topology_matrix_tests)
+heyaki_configure_target(heyaki_m4_topology_matrix_tests)
+target_compile_definitions(heyaki_m4_topology_matrix_tests PRIVATE
+  "HEYAKI_M4_TOPOLOGY_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}\"")
+heyaki_add_runtime_test(
+  heyaki_m4_topology_matrix heyaki_m4_topology_matrix_tests
+  "unit;session;transport;lan")
+set_tests_properties(heyaki_m4_topology_matrix PROPERTIES
+  RESOURCE_LOCK heyaki_m3a_profile_state
+  TIMEOUT 300)
+
+add_executable(heyaki_m4_shutdown_matrix_tests unit/m4_shutdown_matrix_test.cpp)
+heyaki_enable_executor_exception_adapter_source(unit/m4_shutdown_matrix_test.cpp)
+target_link_libraries(heyaki_m4_shutdown_matrix_tests PRIVATE
+  heyaki::client
+  executor::executor
+  GTest::gtest_main
+  OpenSSL::SSL)
+heyaki_target_use_pinned_boost_asio(heyaki_m4_shutdown_matrix_tests)
+heyaki_configure_target(heyaki_m4_shutdown_matrix_tests)
+target_compile_definitions(heyaki_m4_shutdown_matrix_tests PRIVATE
+  "HEYAKI_M4_SHUTDOWN_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}\"")
+heyaki_add_runtime_test(
+  heyaki_m4_shutdown_matrix heyaki_m4_shutdown_matrix_tests
+  "unit;session;transport;lan;reliability")
+set_tests_properties(heyaki_m4_shutdown_matrix PROPERTIES
+  RESOURCE_LOCK heyaki_m3a_profile_state
+  TIMEOUT 600)
+
+add_executable(heyaki_m4_session_restart_e2e_tests unit/m4_session_restart_e2e_test.cpp)
+heyaki_enable_executor_exception_adapter_source(unit/m4_session_restart_e2e_test.cpp)
+target_link_libraries(heyaki_m4_session_restart_e2e_tests PRIVATE
+  heyaki::client
+  executor::executor
+  GTest::gtest_main
+  OpenSSL::SSL)
+heyaki_target_use_pinned_boost_asio(heyaki_m4_session_restart_e2e_tests)
+heyaki_configure_target(heyaki_m4_session_restart_e2e_tests)
+target_compile_definitions(heyaki_m4_session_restart_e2e_tests PRIVATE
+  "HEYAKI_M4_RESTART_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}\"")
+heyaki_add_runtime_test(
+  heyaki_m4_session_restart_e2e heyaki_m4_session_restart_e2e_tests
+  "unit;session;transport;lan;security")
+set_tests_properties(heyaki_m4_session_restart_e2e PROPERTIES
+  RESOURCE_LOCK heyaki_m3a_profile_state
+  TIMEOUT 300)
+
 add_executable(heyaki_m4_peer_session_tests unit/m4_peer_session_test.cpp)
 target_link_libraries(heyaki_m4_peer_session_tests PRIVATE
   heyaki::client
@@ -677,6 +740,18 @@ if(HEYAKI_BUILD_APPS)
     LABELS "relay;network"
     SKIP_RETURN_CODE 77
     TIMEOUT 60)
+
+  add_test(
+    NAME heyaki_m4_network_matrix
+    COMMAND "${HEYAKI_BASH_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/../deploy/coturn/run_network_matrix.sh"
+      --relay-bin "$<TARGET_FILE:heyaki-relay>"
+      --matrix-bin "$<TARGET_FILE:heyaki-m4-matrix-node>"
+      --demo-bin "$<TARGET_FILE:heyaki-m3b-relay-demo>")
+  set_tests_properties(heyaki_m4_network_matrix PROPERTIES
+    LABELS "relay;network;transport"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 900)
 endif()
 
 add_test(

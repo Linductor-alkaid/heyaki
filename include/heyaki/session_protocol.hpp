@@ -24,7 +24,7 @@ struct SignedSessionHello {
   SignalingNonce responder_nonce{};
   SignalingTranscriptSha256 signaling_transcript_sha256{};
   ProtocolVersion protocol_version{current_protocol_version};
-  CapabilitySet supported{protocol_1_1_capability_bits};
+  CapabilitySet supported{protocol_1_2_capability_bits};
   CapabilitySet required{static_cast<std::uint64_t>(Capability::session)};
   std::uint64_t expires_unix_milliseconds{};
   IdentitySignature signature{};

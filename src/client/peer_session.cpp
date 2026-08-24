@@ -288,6 +288,43 @@ Result<void> PeerSession::send_ping(std::uint64_t ping_id) {
   return Result<void>::success();
 }
 
+void PeerSession::set_restart_handler(PeerSessionRestartHandler handler) {
+  restart_handler_ = std::move(handler);
+}
+
+const SignedSessionHello& PeerSession::local_hello() const noexcept {
+  return config_.local_hello;
+}
+
+Result<void> PeerSession::send_restart_frame(FrameType type,
+                                             std::span<const std::byte> payload) {
+  if (type != FrameType::session_restart_offer &&
+      type != FrameType::session_restart_answer &&
+      type != FrameType::session_restart_candidate) {
+    return Result<void>::failure(
+        session_error(ErrorCode::configuration, "restart_frame_type_invalid"));
+  }
+  if (!authenticated() || control_ == nullptr) {
+    return Result<void>::failure(
+        session_error(ErrorCode::permission, "restart_frame_not_available"));
+  }
+  if (payload.empty() || payload.size() > max_signaling_object_bytes) {
+    return Result<void>::failure(
+        session_error(ErrorCode::protocol, "restart_frame_payload_invalid"));
+  }
+  Frame frame{.type = static_cast<std::uint8_t>(type),
+              .channel_id = 0U,
+              .message_id = random_message_id(),
+              .payload = std::vector<std::byte>{payload.begin(), payload.end()}};
+  auto encoded = encode_frame(frame);
+  if (!encoded) return Result<void>::failure(*encoded.error_if());
+  auto sent = control_->send(*encoded.value_if());
+  if (!sent) return Result<void>::failure(*sent.error_if());
+  ++diagnostics_.restart_frames_sent;
+  notify();
+  return Result<void>::success();
+}
+
 void PeerSession::handle_message(transport::TransportChannel& channel,
                                  std::vector<std::byte> payload) {
   if (channel.kind() != transport::ChannelKind::control) {
@@ -329,6 +366,9 @@ void PeerSession::handle_message(transport::TransportChannel& channel,
     }
     ++diagnostics_.hellos_received;
     if (admitted.value_if()->action == SessionHelloAdmissionAction::accepted) {
+      diagnostics_.negotiated_capabilities =
+          admitted.value_if()->negotiated_protocol.value_or(NegotiatedProtocol{})
+              .capabilities;
       if (diagnostics_.hellos_sent == 0U) {
         auto sent = send_hello(channel);
         if (!sent) {
@@ -345,6 +385,34 @@ void PeerSession::handle_message(transport::TransportChannel& channel,
       diagnostics_.state = PeerSessionState::authenticated;
       notify();
     }
+    return;
+  }
+  if (frame.type == static_cast<std::uint8_t>(FrameType::session_restart_offer) ||
+      frame.type == static_cast<std::uint8_t>(FrameType::session_restart_answer) ||
+      frame.type == static_cast<std::uint8_t>(FrameType::session_restart_candidate)) {
+    // Restart frames are optional protocol-1.2 control frames: without a
+    // handler they are skipped like any unknown optional frame; with one the
+    // Node's restart admission owns verification.
+    ++diagnostics_.restart_frames_received;
+    if (diagnostics_.state != PeerSessionState::authenticated) {
+      fail(session_error(ErrorCode::authentication, "restart_frame_before_hello"));
+      return;
+    }
+    if (frame.type == static_cast<std::uint8_t>(FrameType::session_restart_offer) &&
+        restart_handler_.on_restart_offer) {
+      restart_handler_.on_restart_offer(
+          std::vector<std::byte>{frame.payload.begin(), frame.payload.end()});
+    } else if (frame.type == static_cast<std::uint8_t>(FrameType::session_restart_answer) &&
+               restart_handler_.on_restart_answer) {
+      restart_handler_.on_restart_answer(
+          std::vector<std::byte>{frame.payload.begin(), frame.payload.end()});
+    } else if (frame.type ==
+                   static_cast<std::uint8_t>(FrameType::session_restart_candidate) &&
+               restart_handler_.on_restart_candidate) {
+      restart_handler_.on_restart_candidate(
+          std::vector<std::byte>{frame.payload.begin(), frame.payload.end()});
+    }
+    notify();
     return;
   }
   if (frame.type == static_cast<std::uint8_t>(FrameType::ping) &&

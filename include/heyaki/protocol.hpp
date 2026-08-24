@@ -32,6 +32,7 @@ enum class Capability : std::uint64_t {
   shell = 1ULL << 9U,
   lan_discovery_v1 = 1ULL << 10U,
   lan_signaling_v1 = 1ULL << 11U,
+  session_restart_v1 = 1ULL << 12U,
 };
 
 inline constexpr std::uint64_t protocol_1_0_capability_bits =
@@ -49,9 +50,16 @@ inline constexpr std::uint64_t protocol_1_1_capability_bits =
     protocol_1_0_capability_bits |
     static_cast<std::uint64_t>(Capability::lan_discovery_v1) |
     static_cast<std::uint64_t>(Capability::lan_signaling_v1);
-inline constexpr std::uint64_t known_capability_bits = protocol_1_1_capability_bits;
+// Protocol 1.2 adds the optional session-restart capability: a signed
+// renegotiation of a new ICE/DTLS transport over the authenticated control
+// channel of an existing session, preserving the SessionId and bumping the
+// session epoch. A 1.1 peer ignores the bit and never receives restart frames.
+inline constexpr std::uint64_t protocol_1_2_capability_bits =
+    protocol_1_1_capability_bits |
+    static_cast<std::uint64_t>(Capability::session_restart_v1);
+inline constexpr std::uint64_t known_capability_bits = protocol_1_2_capability_bits;
 
-inline constexpr ProtocolVersion current_protocol_version{1U, 1U};
+inline constexpr ProtocolVersion current_protocol_version{1U, 2U};
 
 enum class LanDatagramType : std::uint8_t {
   presence = 1U,

@@ -45,7 +45,7 @@ struct LanSignalingFrame {
 
 struct LanPresence {
   ProtocolVersion protocol_version{current_protocol_version};
-  CapabilitySet supported{protocol_1_1_capability_bits};
+  CapabilitySet supported{protocol_1_2_capability_bits};
   CapabilitySet required{
       static_cast<std::uint64_t>(Capability::lan_discovery_v1) |
       static_cast<std::uint64_t>(Capability::lan_signaling_v1)};
@@ -77,7 +77,7 @@ struct LanHello {
   TlsCertificateFingerprint observed_peer_tls_certificate_sha256{};
   LanBootNonce sender_boot_nonce{};
   ProtocolVersion protocol_version{current_protocol_version};
-  CapabilitySet supported{protocol_1_1_capability_bits};
+  CapabilitySet supported{protocol_1_2_capability_bits};
   CapabilitySet required{static_cast<std::uint64_t>(Capability::lan_signaling_v1)};
   std::chrono::milliseconds expiry{5000};
   IdentitySignature signature{};

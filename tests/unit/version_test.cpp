@@ -9,7 +9,7 @@ TEST(BuildInfo, ExposesVersionProtocolAndFeatures) {
   EXPECT_FALSE(info.version.empty());
   EXPECT_FALSE(info.commit.empty());
   EXPECT_EQ(info.protocol_major, 1U);
-  EXPECT_EQ(info.protocol_minor, 1U);
+  EXPECT_EQ(info.protocol_minor, 2U);
   EXPECT_EQ(info.protocol_major, heyaki::current_protocol_version.major);
   EXPECT_EQ(info.protocol_minor, heyaki::current_protocol_version.minor);
   EXPECT_TRUE(info.features.has(heyaki::BuildFeature::profile));

@@ -149,7 +149,9 @@ TEST(GoldenVectors, ProtobufEnvelopeAndFrameBytesAreExact) {
   EXPECT_EQ(heyaki::test_vectors::protocol_major, 1U);
   EXPECT_EQ(heyaki::test_vectors::protocol_minor, 0U);
   EXPECT_EQ(info.protocol_major, heyaki::test_vectors::lan::protocol_major);
-  EXPECT_EQ(info.protocol_minor, heyaki::test_vectors::lan::protocol_minor);
+  // The M3A vectors freeze the 1.1 wire bytes; the running build must be at
+  // least that minor so the frozen vectors stay reproducible.
+  EXPECT_GE(info.protocol_minor, heyaki::test_vectors::lan::protocol_minor);
 }
 
 TEST(GoldenVectors, LanDiscoveryConstantsAreExact) {

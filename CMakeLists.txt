@@ -119,7 +119,7 @@ if(NOT HEYAKI_SANITIZER STREQUAL "none" AND
 endif()
 
 set(HEYAKI_PROTOCOL_VERSION_MAJOR 1)
-set(HEYAKI_PROTOCOL_VERSION_MINOR 1)
+set(HEYAKI_PROTOCOL_VERSION_MINOR 2)
 set(HEYAKI_BUILD_FEATURE_RELAY ${HEYAKI_BUILD_APPS})
 set(HEYAKI_BUILD_FEATURE_TUI ${HEYAKI_BUILD_APPS})
 set(HEYAKI_BUILD_FEATURE_ZSTD OFF)
@@ -139,6 +139,7 @@ add_library(heyaki_core
   src/core/protocol.cpp
   src/core/security.cpp
   src/core/session_protocol.cpp
+  src/core/session_restart.cpp
   src/core/signaling_protocol.cpp
   src/core/signaling_replay_cache.cpp
   src/core/signing.cpp
@@ -318,8 +319,15 @@ if(HEYAKI_BUILD_APPS)
   heyaki_configure_target(heyaki-m3b-relay-demo)
   heyaki_enable_executor_exception_adapter_source(apps/demo/m3b_relay_demo.cpp)
 
+  add_executable(heyaki-m4-matrix-node apps/demo/m4_matrix_node.cpp)
+  target_link_libraries(heyaki-m4-matrix-node
+    PRIVATE heyaki::client heyaki::profile executor::executor OpenSSL::SSL OpenSSL::Crypto)
+  heyaki_target_use_pinned_boost_asio(heyaki-m4-matrix-node)
+  heyaki_configure_target(heyaki-m4-matrix-node)
+  heyaki_enable_executor_exception_adapter_source(apps/demo/m4_matrix_node.cpp)
+
   list(APPEND HEYAKI_INSTALL_TARGETS heyaki-relay heyaki-tui heyaki-m2-profile-demo
-       heyaki-m3b-relay-demo)
+       heyaki-m3b-relay-demo heyaki-m4-matrix-node)
 endif()
 
 heyaki_add_developer_targets()

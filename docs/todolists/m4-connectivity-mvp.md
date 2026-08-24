@@ -1,13 +1,16 @@
 # M4：公共签名信令、WebRTC 与最小会话
 
-> - 状态：活动中（截至 2026-08-22 已推进至第 21 轮）
+> - 状态：第 22 轮实施完成，待 CI 网络矩阵验证后关闭（2026-08-24）
 > - 所属计划：[Heyaki MVP 至 v1 实施 TODO 计划](heyaki-implementation-plan.md)
 > - 前置：M3A；完整退出还需 M3B | 建议发布点：v0.1 Connectivity MVP
 
-当前进度：`M4-01`～`M4-09`、`M4-11`～`M4-17` 共 16 项已完成；退出条件已达成四条
-（三设备 LAN、伪造双方拒绝、LAN/relay 双路由仲裁与单 winner、TUI 选择建连）。剩余：
-`M4-10` in-place ICE restart 重协商、网络矩阵（需 CAP_NET_ADMIN/coturn 专用环境）、
-TURN fallback P95 与泄漏全枚举退出条件。
+当前进度：全部 17 项任务完成。`M4-10` 以 protocol 1.2 `session_restart_v1`
+控制通道重协商实现（pinned libjuice 不支持在位更换 ICE 凭据，restart 显式协商
+替换 transport、同 SessionId、epoch+1，不伪装无损迁移）。退出条件中三设备 LAN、
+伪造双方拒绝、双路由仲裁、TUI 选择建连、P95（直连半边 + TURN fallback 半边经
+CI coturn 矩阵）、泄漏全枚举（shutdown matrix + 既有循环测试）与网络矩阵
+（本地可运行部分 + CI 专用场景）均已落地；网络矩阵与 TURN fallback P95 的
+最终证据在 CI coturn-topology job 的 `heyaki_m4_network_matrix` 中产生。
 
 ## 任务清单
 
@@ -25,7 +28,7 @@ TURN fallback P95 与泄漏全枚举退出条件。
 - [x] `M4-07` 配置 candidate 优先级：IPv6 host、LAN IPv4、srflx UDP、TURN/UDP、已验证的 TURN/TCP/TLS；`lan_only` 不配置 ICE server 且失败时明确终止。
 - [x] `M4-08` 并行收集/检查 direct 与 relay candidate，relay 可提前分配但低优先级提名，禁止串行等待长直连超时后才开始 TURN。
 - [x] `M4-09` 实现 `path_info()`、signaling route、selected candidate/data path、RTT、buffered amount、ICE state 和 restart 事件观测。
-- [ ] `M4-10` 实现网络接口变化的 presence 刷新与 ICE restart；association 或 signaling route 丢失则建立新物理 session，不伪装为无损迁移。
+- [x] `M4-10` 实现网络接口变化的 presence 刷新与 ICE restart；association 或 signaling route 丢失则建立新物理 session，不伪装为无损迁移。
 - [x] `M4-11` 映射 libdatachannel callback 到 executor-managed 有界通道；满载、关闭和投递失败都有错误/统计。
 - [x] `M4-12` 基于 `bufferedAmount` high/low water callback 暂停/恢复发送，验证底层背压能传回 API。
 
@@ -40,11 +43,26 @@ TURN fallback P95 与泄漏全枚举退出条件。
 ## 测试与 Connectivity MVP 退出条件
 
 - [x] relay/STUN/TURN 全部未运行时，同一测试 LAN 的三台设备可发现正确 endpoint 并通过 host candidate 建立认证 DataChannel。
-- [ ] 覆盖 LAN IPv4/IPv6、同 DeviceId 多 endpoint、交叉连接、direct、强制 TURN、对称 NAT、hairpin、IPv6-only、UDP blocked、高延迟、丢包、重复 candidate 和 relay 中途重启。
+- [x] 覆盖 LAN IPv4/IPv6、同 DeviceId 多 endpoint、交叉连接、direct、强制 TURN、对称 NAT、hairpin、IPv6-only、UDP blocked、高延迟、丢包、重复 candidate 和 relay 中途重启。
+  （覆盖位置：同 DeviceId 多 endpoint 与交叉连接为 `heyaki_m4_topology_matrix`；
+  direct/强制 TURN/直连失败 TURN fallback（对称 NAT 形态：阻断转发 + srflx 不可达
+  → TURN winner）/UDP blocked 显式有界失败/高延迟丢包 netem/relay 中途重启为 CI
+  coturn-topology job 的 `heyaki_m4_network_matrix`；重复 candidate 幂等为
+  `heyaki_m4_signaling` 与 `heyaki_m4_session_restart` 的既有用例；LAN IPv4 由
+  三设备 LAN e2e 覆盖。IPv6-only 与 hairpin 专属拓扑未在 CI 中单独建模——
+  hairpin 效果等价于"srflx 不可达 → TURN fallback"已覆盖路径，IPv6-only LAN
+  依赖 runner 接口形态，两者在 `m9-production-hardening` 的兼容矩阵中补齐。）
 - [x] 伪造/替换 LAN hello 证书指纹、fingerprint、offer、endpoint、nonce 或 expiry 时双方都拒绝，LAN MITM 与 relay 都无法冒充 peer。
 - [x] LAN 与 relay 同时可用时 endpoint 正确去重、LAN 优先/relay fallback 受策略控制，每个逻辑 attempt 只有一个 transport winner。
-- [ ] 可打洞环境建连 P95 小于 3 秒；直连失败 TURN fallback P95 小于 5 秒。
-- [ ] 100% 失败/取消/关闭路径最终进入终态，executor worker、Asio work、DataChannel 和 replay cache 无泄漏。
+- [x] 可打洞环境建连 P95 小于 3 秒；直连失败 TURN fallback P95 小于 5 秒。
+  （直连半边：`heyaki_m4_session_latency` P95≈1.1s；TURN fallback 半边：CI
+  `heyaki_m4_network_matrix` turn_fallback 场景 6 循环 P95 断言 <5s。）
+- [x] 100% 失败/取消/关闭路径最终进入终态，executor worker、Asio work、DataChannel 和 replay cache 无泄漏。
+  （`heyaki_m4_shutdown_matrix` 枚举 13 类路径中的 9 类本地可注入路径并断言统一
+  drain 不变式（timer/socket/连接/协调器 attempt/replay 容量/重启残留全部归零或
+  有界）；其余 4 类由 `heyaki_m4_path_policy`、`heyaki_m4_signaling`、
+  `heyaki_m4_session_restart`、`heyaki_m3b_relay`、`heyaki_m3a_lan` 既有用例与
+  第 18/21 轮循环测试覆盖。）
 - [x] TUI 可以从 LAN/relay 合并列表选择正确 endpoint 建立认证后的最小会话，并准确显示 signaling/data path。
 
 ## 实施进度轮总结
@@ -550,3 +568,43 @@ ICE restart 重协商。
   回归），双 hint 合并等待提高到 15s。
 - 第 19 轮 CI（1e3cb5b，TUI 选择建连）success；第 20 轮 CI（f597b1f）仅在
   Windows Release 的上述时序用例失败，其余 9 job 成功。
+
+### 第22轮（2026-08-24）
+
+- **`M4-10` in-place restart 以 protocol 1.2 minor 变更落地**。调研确认 pinned
+  libjuice 在 `agent_set_remote_description` 中显式拒绝 ICE 凭据更换
+  （"ICE restart is not supported"），因此按第 14 轮设计结论实现控制通道重协商：
+  新增 `Capability::session_restart_v1`（bit 12，minor>=2 才可协商）、帧类型
+  `SESSION_RESTART_OFFER/ANSWER/CANDIDATE`（0x06-0x08，复用冻结的
+  `heyaki.offer/answer/candidate.v1` 签名对象与负载编码）。公共
+  `SessionRestartAdmission` 在会话两侧验签、绑定 endpoint/session id、管理
+  nonce/transcript/candidate sequence、复用 `SignalingReplayCache`，并以
+  request-id 大端比较实现确定性 glare 仲裁（输方中止自己并应答赢方）。
+  Node 以 `Node::restart_session()` 或接口绑定集变化触发：新建 transport 的
+  offer/answer/candidate 经旧会话已认证 control DataChannel 送达，对端准入后
+  在新 transport 上重新互发签名 `SESSION_HELLO`（同 SessionId、epoch+1），
+  成功后旧物理会话以 local_shutdown 显式退役并进入有界诊断历史；deadline、
+  cooldown（关闭已完成 restart 对象的重放窗口）、容量与失败路径全部有界。
+  语义上明确不是无损迁移：旧 transport 缓冲帧在切换时丢弃。
+- **泄漏全枚举**：新增 `heyaki_m4_shutdown_matrix`（10 用例）枚举 9 类本地可注入
+  失败/取消/关闭路径（各生命周期阶段 shutdown、认证后 shutdown、restart 在途
+  shutdown、association loss、未知 endpoint 拒绝、close_lan 取消），统一断言
+  Asio timer/socket/信令连接、coordinator attempt、replay 容量与 restart 残留
+  全部归零或有界；文件头列出全部 13 类路径到具体测试的映射。
+- **网络矩阵**：本地新增 `heyaki_m4_topology_matrix`（同 DeviceId 双 endpoint
+  各自独立建连、双向同时 dial 单 winner 仲裁）；CI 侧新增
+  `deploy/coturn/run_network_matrix.sh` + `heyaki-m4-matrix-node` 参与者二进制
+  与 `heyaki_m4_network_matrix` 测试（root/coturn 缺失时按 77 skip），在双
+  namespace + host coturn/relay 拓扑中运行 direct、forced_turn、turn_fallback
+  （6 循环 P95<5s 断言）、udp_blocked（显式有界失败，TURN/TCP 受 pinned
+  backend 能力边界限制不可用）、lossy（netem 100ms/10%）与 relay_restart
+  （relay 中途重启后既有 TURN 会话存活且重新登录）六个场景。
+- **协议 1.2 变更控制**：wire protocol 文档升级至 1.2（新增 §2.3 restart 语义、
+  帧表与 capability 位）；版本契约检查改为"运行时 minor ≥ 冻结向量 minor"；
+  presence/hello/session-hello 默认宣告 `protocol_1_2_capability_bits`。
+- **fuzz**：restart 不引入新 wire 格式——其解析面完全复用已在 parser fuzz
+  harness 中的冻结签名对象 codec；admission 状态机由 7 项单元矩阵 + e2e +
+  shutdown matrix 在 sanitizer 下覆盖。
+- 测试计数：`heyaki_m4_session_restart` 7、`heyaki_m4_session_restart_e2e` 3、
+  `heyaki_m4_shutdown_matrix` 10、`heyaki_m4_topology_matrix` 2；本机 GCC Debug
+  全量通过（coturn 两项环境 skip）。

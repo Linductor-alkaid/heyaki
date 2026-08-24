@@ -126,8 +126,10 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
           -DHEYAKI_BUILD_APPS=ON
           -DHEYAKI_WARNINGS_AS_ERRORS=ON
-      - name: Build relay
-        run: cmake --build build --target heyaki-relay --parallel 2
+      - name: Build relay and matrix apps
+        run: >-
+          cmake --build build --target heyaki-relay heyaki-m4-matrix-node
+          heyaki-m3b-relay-demo --parallel 2
       - name: Install coturn fallback package
         timeout-minutes: 10
         run: |
@@ -154,6 +156,13 @@ jobs:
         run: >-
           sudo deploy/coturn/run_topology.sh
           --relay-bin "$PWD/build/heyaki-relay"
+      - name: Run M4 network matrix in namespaces
+        timeout-minutes: 25
+        run: >-
+          sudo deploy/coturn/run_network_matrix.sh
+          --relay-bin "$PWD/build/heyaki-relay"
+          --matrix-bin "$PWD/build/heyaki-m4-matrix-node"
+          --demo-bin "$PWD/build/heyaki-m3b-relay-demo"
 
   sanitizer:
     runs-on: ubuntu-24.04

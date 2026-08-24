@@ -18,6 +18,12 @@ enum class FrameType : std::uint8_t {
   ping = 0x03,
   pong = 0x04,
   cancel = 0x05,
+  // Protocol 1.2 session-restart frames (optional capability session_restart_v1):
+  // renegotiation of a replacement ICE/DTLS transport over the authenticated
+  // control channel. Payloads reuse the signed signaling objects verbatim.
+  session_restart_offer = 0x06,
+  session_restart_answer = 0x07,
+  session_restart_candidate = 0x08,
   pairing_request = 0x10,
   pairing_result = 0x11,
   message = 0x20,

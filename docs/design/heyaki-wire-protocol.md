@@ -1,8 +1,8 @@
 # Heyaki Wire Protocol v1
 
-> Status: M3A protocol 1.1 baseline
+> Status: M4 protocol 1.2 baseline
 >
-> Protocol version: 1.1
+> Protocol version: 1.2
 >
 > Incompatible changes require a protocol major increment.
 
@@ -10,10 +10,11 @@ This document is normative for Heyaki framing, identifiers, negotiation, signed 
 per-domain state handling. The schemas under `proto/heyaki/*/v1` are normative for Protobuf fields.
 The words MUST, MUST NOT, SHOULD, and MAY describe interoperability requirements.
 
-Protocol 1.1 adds optional serverless LAN discovery and TLS signaling binding. The 1.0 framing,
-identifiers, signed objects, schemas, and state transitions remain unchanged. A 1.0 peer ignores the
-new optional capability bits and does not participate in LAN discovery or LAN signaling; a 1.1 peer
-MUST NOT infer either LAN capability from a negotiated 1.0 session.
+Protocol 1.1 added optional serverless LAN discovery and TLS signaling binding. Protocol 1.2 adds
+the optional session-restart renegotiation (capability `session_restart_v1`, frames `0x06`-`0x08`,
+section 2.3). The 1.0/1.1 framing, identifiers, signed objects, schemas, and state transitions
+remain unchanged. Older peers ignore the new optional capability bits and never receive restart
+frames; a newer peer MUST NOT infer the restart capability from a negotiated older session.
 
 ## 1. Primitive encodings
 
@@ -138,7 +139,9 @@ frames that violate a domain limit are protocol errors.
 
 The v1 numeric values and payload codecs are frozen below. `PB` means one complete Protobuf Lite
 message of the named type with no length prefix inside `payload`. `RAW` means the exact layout in
-section 2.1. Values not listed are unknown frame types and MUST NOT be assigned a v1 meaning later.
+section 2.1. Values not listed are unknown frame types and MUST NOT be assigned a v1 meaning later;
+protocol 1.2 assigned `0x06`-`0x08` through the documented minor-change path, and no further v1.x
+assignment of unlisted values is permitted.
 
 | Value | Frame | Channel | Payload codec |
 | ---: | --- | ---: | --- |
@@ -147,6 +150,9 @@ section 2.1. Values not listed are unknown frame types and MUST NOT be assigned 
 | `0x03` | `PING` | `0` | RAW `ping_id: U64` |
 | `0x04` | `PONG` | `0` | RAW `ping_id: U64`, exactly echoing a received PING |
 | `0x05` | `CANCEL` | target channel, `0` for session operation | RAW `operation_id: ID16, session_epoch: U64` |
+| `0x06` | `SESSION_RESTART_OFFER` | `0` | PB `heyaki.protocol.signaling.v1.SignedOffer` (1.2) |
+| `0x07` | `SESSION_RESTART_ANSWER` | `0` | PB `heyaki.protocol.signaling.v1.SignedAnswer` (1.2) |
+| `0x08` | `SESSION_RESTART_CANDIDATE` | `0` | PB `heyaki.protocol.signaling.v1.SignedCandidate` (1.2) |
 | `0x10` | `PAIRING_REQUEST` | `0` | PB `heyaki.protocol.pairing.v1.PairingRequest` |
 | `0x11` | `PAIRING_RESULT` | `0` | PB `heyaki.protocol.pairing.v1.PairingResult` |
 | `0x20` | `MESSAGE` | non-zero | PB `heyaki.protocol.message.v1.MessageEnvelope` |
@@ -221,6 +227,34 @@ alignment, or control-channel integrity is no longer trustworthy. A malformed co
 session. Resource exhaustion rejects the operation before state mutation and remains observable as
 `resource_exhausted` or `would_block`.
 
+### 2.3 Session restart renegotiation (protocol 1.2)
+
+Capability `session_restart_v1` lets an authenticated session renegotiate a replacement ICE/DTLS
+transport when its data path degrades (for example after a network-interface change). The pinned
+libjuice backend cannot change ICE credentials on a live association, so the restart negotiates a NEW
+transport while the OLD session's control channel carries and authenticates the renegotiation:
+
+1. Either side MAY initiate. The initiator allocates a fresh `RequestId` and `SignalingNonce`, builds
+   a new offer on the replacement transport, signs it with the frozen `heyaki.offer.v1` domain, and
+   sends `SESSION_RESTART_OFFER` on the authenticated control channel (channel `0`).
+2. The responder verifies signature, expiry, endpoints, and that the binding preserves the live
+   `SessionId`, then answers with `SESSION_RESTART_ANSWER` carrying a `heyaki.answer.v1` object with a
+   fresh responder nonce. Candidates flow as `SESSION_RESTART_CANDIDATE` (`heyaki.candidate.v1`)
+   only after the answer, exactly like the initial negotiation.
+3. When the replacement transport connects, both peers exchange signed `SESSION_HELLO` again. The
+   successor session keeps the SAME `SessionId` and runs at `session_epoch + 1`; the superseded
+   physical session closes explicitly. Buffered frames on the old transport are dropped at the swap,
+   so a restart is NOT a lossless migration and section 2.2's old-epoch exclusion still applies to
+   bytes from the retired transport.
+4. Simultaneous initiations resolve deterministically: the offer whose `RequestId` compares greater
+   in big-endian byte order wins; the losing side aborts its own attempt and answers the winner.
+   Duplicate byte-identical objects are idempotent; conflicting or tampered objects fail the session.
+5. Each side bounds the renegotiation with a deadline, per-attempt candidate counts, and replay-cache
+   admission over the same signed domains. A restart that fails validation closes the session; a
+   restart that merely times out keeps the still-authenticated old session and may fall back to the
+   full re-signaling recovery path. A peer SHOULD ignore inbound restart offers for a bounded cooldown
+   after completing one, which closes the replay window of the completed attempt's objects.
+
 ## 3. Limits
 
 `heyaki::Limits` is the single public baseline. Defaults are 2 MiB/frame, 64 KiB/control frame,
@@ -246,8 +280,9 @@ smaller minor and negotiated capabilities are the intersection. If either peer r
 does not support, negotiation fails explicitly with `protocol`; unknown optional bits are ignored.
 
 Capability bits v1 are: enrollment `0`, signaling `1`, session `2`, pairing `3`, message `4`, unary RPC
-`5`, event `6`, byte stream `7`, file `8`, shell `9`, `lan_discovery_v1` `10`, and
-`lan_signaling_v1` `11`. Bits 10 and 11 require negotiated minor version 1 or newer. A schema field
+`5`, event `6`, byte stream `7`, file `8`, shell `9`, `lan_discovery_v1` `10`, `lan_signaling_v1`
+`11`, and `session_restart_v1` `12`. Bits 10 and 11 require negotiated minor version 1 or newer;
+bit 12 requires negotiated minor version 2 or newer. A schema field
 being parseable does not enable its behavior without the corresponding negotiated capability.
 
 Protobuf unknown fields follow normal proto3 preservation/skipping rules. Adding an optional field or

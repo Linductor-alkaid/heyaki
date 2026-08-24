@@ -1,10 +1,9 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：M3B 已关闭；M4 活动中（已推进至第二十一轮：三设备 LAN、伪造双方
->   拒绝、LAN/relay 双路由仲裁与 TUI 选择建连四条退出条件已达成，直连 P95
->   与 coordinator/replay 可观测有界证据落地；in-place ICE restart、TURN
->   fallback P95、泄漏全枚举与网络矩阵继续）
-> - 日期：2026-08-22
+> - 状态：M3B 已关闭；M4 第 22 轮实施完成（17/17 任务完成：M4-10 以 protocol
+>   1.2 控制通道重协商落地，泄漏全枚举 shutdown matrix、本地网络矩阵与 CI
+>   coturn 网络矩阵/TURN fallback P95 场景均已交付，等待 CI 网络矩阵证据后关闭）
+> - 日期：2026-08-24
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)、[局域网无服务器连接设计](../design/lan-serverless-connectivity.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
 
@@ -114,7 +113,7 @@ API 逐步交付，以持续充当端到端验收客户端。
 | M2 | [m2-runtime-identity.md](m2-runtime-identity.md) | 已完成 | executor/Asio runtime、身份与密码材料、ProfileStore/TrustStore；2026-08-15 正式准入 M3A/M3B。 |
 | M3A | [m3a-lan-serverless.md](m3a-lan-serverless.md) | 已完成 | LAN multicast discovery、TLS 本地信令与 local-only onboarding；2026-08-16 最终退出验收通过。 |
 | M3B | [m3b-relay-control-plane.md](m3b-relay-control-plane.md) | 已完成 | relay 登记/登录/租约/信令转发、TURN credential 与 TUI onboarding；15 轮记录，2026-08-16 关闭。 |
-| M4 | [m4-connectivity-mvp.md](m4-connectivity-mvp.md) | 活动中 | 公共签名信令、WebRTC/ICE/TURN 与最小认证会话；第 21 轮后 16/17 任务完成、退出条件 4/7 达成，剩 `M4-10` in-place ICE restart、网络矩阵、TURN fallback P95 与泄漏全枚举。 |
+| M4 | [m4-connectivity-mvp.md](m4-connectivity-mvp.md) | 第 22 轮完成 | 公共签名信令、WebRTC/ICE/TURN 与最小认证会话；17/17 任务完成、退出条件全部达成（网络矩阵与 TURN fallback P95 的最终证据由 CI `heyaki_m4_network_matrix` 产生）。 |
 | M5 | [m5-authorization-bytestream.md](m5-authorization-bytestream.md) | 未开始 | 会话授权（pairing/TrustGrant）、通道调度与 ByteStream。 |
 | M6 | [m6-message-rpc.md](m6-message-rpc.md) | 未开始 | 消息、unary RPC 与对应 TUI。 |
 | M7 | [m7-event-file-transfer.md](m7-event-file-transfer.md) | 未开始 | 远程事件与文件传输。 |

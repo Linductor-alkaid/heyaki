@@ -188,7 +188,7 @@ string(LENGTH "${m3a_hello_signature}" m3a_hello_signature_length)
 string(LENGTH "${m3a_public_key}" m3a_public_key_length)
 if(NOT m3a_format STREQUAL "heyaki-m3a-lan-golden-vectors-v1" OR
    NOT m3a_major EQUAL HEYAKI_PROTOCOL_MAJOR OR
-   NOT m3a_minor EQUAL HEYAKI_PROTOCOL_MINOR OR
+   NOT m3a_minor LESS_EQUAL HEYAKI_PROTOCOL_MINOR OR
    NOT m3a_datagram_magic STREQUAL "48594c44" OR
    NOT m3a_max_datagram EQUAL 1200 OR
    NOT m3a_public_key_length EQUAL 64 OR

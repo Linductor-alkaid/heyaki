@@ -11,6 +11,7 @@
 #include "../transport/webrtc/webrtc_transport_session.hpp"
 
 #include <heyaki/relay_wss_control.hpp>
+#include <heyaki/session_restart.hpp>
 
 #include <executor/comm.hpp>
 
@@ -499,9 +500,46 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     std::shared_ptr<PeerSession> session;
     std::deque<std::vector<std::byte>> pending_local_candidates;
     std::deque<std::vector<std::byte>> pending_remote_candidates;
+    CapabilitySet negotiated_capabilities;
     bool candidate_signing_ready{false};
     bool remote_description_ready{false};
     bool retiring{false};
+  };
+
+  // One in-flight protocol-1.2 session restart per peer: a replacement
+  // transport negotiated over the authenticated control channel of the
+  // session named by superseded_attempt. The pinned libjuice backend cannot
+  // change ICE credentials on a live association, so the restart swaps to a
+  // freshly negotiated transport instead of restarting ICE in place.
+  struct SessionRestart {
+    DeviceEndpointKey peer;
+    RequestId request_id;
+    RequestId superseded_attempt;
+    bool initiator{false};
+    SessionRestartContext context;
+    SessionRestartAdmission admission;
+    std::shared_ptr<ConnectionAttemptTimeline> timeline;
+    std::shared_ptr<transport::webrtc::WebRtcTransportSession> transport;
+    std::shared_ptr<PeerSession> session;
+    std::deque<std::vector<std::byte>> pending_local_candidates;
+    std::deque<std::vector<std::byte>> pending_remote_candidates;
+    SignalingNonce local_nonce{};
+    std::string local_ufrag;
+    DtlsFingerprint local_fingerprint{};
+    std::uint32_t local_candidate_sequence{0U};
+    bool local_restart_registered{false};
+    bool candidate_signing_ready{false};
+    bool remote_description_ready{false};
+    bool deadline_armed{false};
+    std::optional<boost::asio::steady_timer> deadline;
+
+    SessionRestart(DeviceEndpointKey peer_key, RequestId request,
+                   RequestId superseded, SessionRestartContext restart_context)
+        : peer(std::move(peer_key)),
+          request_id(request),
+          superseded_attempt(superseded),
+          context(restart_context),
+          admission(std::move(restart_context)) {}
   };
 
   struct DiscoverySocket : public std::enable_shared_from_this<DiscoverySocket> {
@@ -890,6 +928,14 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     LanBootNonce value{};
     randombytes_buf(value.data(), value.size());
     return value;
+  }
+
+  static RequestId random_request_id() {
+    RequestId::Storage bytes{};
+    do {
+      randombytes_buf(bytes.data(), bytes.size());
+    } while (RequestId{bytes}.is_zero());
+    return RequestId{bytes};
   }
 
   Result<void> initialize() {
@@ -2043,6 +2089,21 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         fail_peer_attempt(iterator->first, *snapshot.error);
       }
     }
+    for (auto iterator = session_restarts.begin();
+         iterator != session_restarts.end();) {
+      auto& restart = *iterator->second;
+      if (!restart.session && restart.transport) {
+        const auto snapshot = restart.transport->snapshot();
+        if (snapshot.state == transport::TransportState::failed && snapshot.error) {
+          const auto peer = iterator->first;
+          const auto error = *snapshot.error;
+          ++iterator;
+          abort_session_restart(peer, error);
+          continue;
+        }
+      }
+      ++iterator;
+    }
   }
 
   void schedule_expiry() {
@@ -2173,6 +2234,10 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       arm_multicast_readiness_timeout();
       announce_now();
       update_lan_readiness();
+      // M4-10: an interface change refreshes presence above and renegotiates
+      // the data path of authenticated sessions through the signed restart
+      // frames on their control channels.
+      begin_session_restarts_for_interface_change();
     }
     schedule_interface_refresh();
     publish_resource_snapshot();
@@ -2334,7 +2399,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     published.reserve(peer_attempts.size() + finished_peer_sessions.size());
     for (const auto& [request_id, attempt] : peer_attempts) {
       (void)request_id;
-      published.push_back(peer_session_snapshot(attempt));
+      auto snapshot = peer_session_snapshot(attempt);
+      snapshot.restart_in_flight = session_restarts.contains(attempt.snapshot.peer);
+      published.push_back(std::move(snapshot));
     }
     published.insert(published.end(), finished_peer_sessions.begin(),
                      finished_peer_sessions.end());
@@ -2759,7 +2826,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
          .local_identity = &identity,
          .peer_public_key = iterator->second.peer_public_key,
          .local_protocol = {.version = current_protocol_version,
-                            .supported = {protocol_1_1_capability_bits},
+                            .supported = {protocol_1_2_capability_bits},
                             .required = {static_cast<std::uint64_t>(Capability::session)}},
          .expires_unix_milliseconds = expires,
          .now_unix_milliseconds = unix_milliseconds_now(),
@@ -2772,6 +2839,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
          .clock = {}});
     if (!session) return Result<void>::failure(*session.error_if());
     iterator->second.session = *session.value_if();
+    attach_restart_handler(request_id);
     publish_peer_sessions();
     return iterator->second.session->start();
   }
@@ -2794,6 +2862,12 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         break;
       case PeerSessionState::authenticated:
         iterator->second.snapshot.state = NodePeerSessionState::authenticated;
+        iterator->second.negotiated_capabilities =
+            diagnostics.negotiated_capabilities;
+        if (iterator->second.session) {
+          iterator->second.snapshot.session_epoch =
+              iterator->second.session->local_hello().session_epoch;
+        }
         if (coordinator) {
           (void)coordinator->cancel_attempt(request_id,
                                             std::chrono::steady_clock::now());
@@ -2855,6 +2929,736 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return;
     }
     start_outbound_connection(peer, true, *route.value_if());
+  }
+
+  // ---- Protocol-1.2 in-place session restart renegotiation (M4-10) ----
+  //
+  // The pinned libjuice backend rejects ICE credential changes on a live
+  // association, so the restart negotiates a REPLACEMENT transport: fresh
+  // signed offer/answer/candidate objects flow over the still-authenticated
+  // control channel, the SessionId is preserved, and the successor session
+  // runs at epoch + 1. Buffered frames on the old transport are dropped at
+  // the swap; this is deliberately not a lossless migration.
+
+  static constexpr std::chrono::milliseconds session_restart_deadline{15000};
+
+  PeerAttempt* authenticated_attempt(const DeviceEndpointKey& peer) {
+    const auto index = peer_attempt_by_endpoint.find(peer);
+    if (index == peer_attempt_by_endpoint.end()) return nullptr;
+    const auto iterator = peer_attempts.find(index->second);
+    if (iterator == peer_attempts.end()) return nullptr;
+    if (!iterator->second.session || !iterator->second.session->authenticated()) {
+      return nullptr;
+    }
+    return &iterator->second;
+  }
+
+  void publish_restart_diagnostics() {
+    update_snapshot([&](NodeSnapshot& snapshot) {
+      snapshot.session_restarts =
+          NodeSessionRestartDiagnostics{
+              .restarts_initiated = restarts_initiated,
+              .restarts_completed = restarts_completed,
+              .restarts_failed = restarts_failed,
+              .restarts_suppressed = restarts_suppressed,
+              .current_restarts = session_restarts.size(),
+              .peak_restarts = peak_restarts};
+    });
+  }
+
+  void attach_restart_handler(RequestId request_id) {
+    auto iterator = peer_attempts.find(request_id);
+    if (iterator == peer_attempts.end() || !iterator->second.session) return;
+    const auto peer = iterator->second.snapshot.peer;
+    auto weak = weak_from_this();
+    PeerSessionRestartHandler handler;
+    handler.on_restart_offer = [weak, peer](std::vector<std::byte> payload) {
+      if (auto self = weak.lock()) {
+        self->handle_restart_offer(peer, std::move(payload));
+      }
+    };
+    handler.on_restart_answer = [weak, peer](std::vector<std::byte> payload) {
+      if (auto self = weak.lock()) {
+        self->handle_restart_answer(peer, std::move(payload));
+      }
+    };
+    handler.on_restart_candidate = [weak, peer](std::vector<std::byte> payload) {
+      if (auto self = weak.lock()) {
+        self->handle_restart_candidate(peer, std::move(payload));
+      }
+    };
+    iterator->second.session->set_restart_handler(std::move(handler));
+  }
+
+  Result<std::unique_ptr<SessionRestart>> new_restart_record(
+      const DeviceEndpointKey& peer, PeerAttempt& attempt, bool initiator) {
+    if (session_restarts.size() >= lan.pending_signaling_capacity) {
+      return Result<std::unique_ptr<SessionRestart>>::failure(
+          node_error(ErrorCode::resource_exhausted, "session_restart_capacity_full"));
+    }
+    const auto& hello = attempt.session->local_hello();
+    SessionRestartContext context;
+    context.local = local_key();
+    context.peer = peer;
+    context.session_id = hello.session_id;
+    context.current_epoch = hello.session_epoch;
+    context.peer_public_key = attempt.peer_public_key;
+    RequestId request_id = random_request_id();
+    SignalingNonce local_nonce{};
+    randombytes_buf(local_nonce.data(), local_nonce.size());
+    auto restart = std::make_unique<SessionRestart>(peer, request_id,
+                                                    attempt.snapshot.request_id,
+                                                    context);
+    restart->initiator = initiator;
+    restart->local_nonce = local_nonce;
+    restart->timeline = std::make_shared<ConnectionAttemptTimeline>();
+    auto resolved = restart->timeline->transition(ConnectionStage::resolving_endpoint,
+                                                   "session_restart",
+                                                   "restart_initiated_over_control_channel");
+    if (!resolved) {
+      return Result<std::unique_ptr<SessionRestart>>::failure(*resolved.error_if());
+    }
+    auto signaling = restart->timeline->transition(
+        ConnectionStage::signaling, "session_restart", initiator
+                                          ? "restart_offer_pending"
+                                          : "restart_offer_received");
+    if (!signaling) {
+      return Result<std::unique_ptr<SessionRestart>>::failure(*signaling.error_if());
+    }
+    if (session_restarts.size() + 1U > peak_restarts) {
+      peak_restarts = session_restarts.size() + 1U;
+    }
+    return Result<std::unique_ptr<SessionRestart>>::success(std::move(restart));
+  }
+
+  Result<void> begin_session_restart(const DeviceEndpointKey& peer) {
+    if (peers_closed || producers_stopped) {
+      return Result<void>::failure(
+          node_error(ErrorCode::cancelled, "session_restart_admission_closed"));
+    }
+    if (session_restarts.contains(peer)) {
+      return Result<void>::failure(
+          node_error(ErrorCode::signaling, "session_restart_already_in_flight"));
+    }
+    auto* attempt = authenticated_attempt(peer);
+    if (attempt == nullptr) {
+      return Result<void>::failure(
+          node_error(ErrorCode::signaling,
+                  "session_restart_requires_authenticated_session"));
+    }
+    if (!attempt->negotiated_capabilities.has(Capability::session_restart_v1)) {
+      return Result<void>::failure(
+          node_error(ErrorCode::permission, "session_restart_not_negotiated"));
+    }
+    auto restart = new_restart_record(peer, *attempt, true);
+    if (!restart) return Result<void>::failure(*restart.error_if());
+    auto* record = restart.value_if()->get();
+    session_restarts.emplace(peer, std::move(*restart.value_if()));
+    ++restarts_initiated;
+    publish_restart_diagnostics();
+    publish_peer_sessions();
+    auto started = start_restart_transport(*record, std::nullopt);
+    if (!started) {
+      abort_session_restart(peer, *started.error_if());
+      return started;
+    }
+    arm_restart_deadline(peer);
+    return Result<void>::success();
+  }
+
+  void begin_session_restarts_for_interface_change() {
+    if (peers_closed || producers_stopped) return;
+    for (const auto& [request_id, attempt] : peer_attempts) {
+      (void)request_id;
+      if (attempt.retiring || !attempt.session || !attempt.session->authenticated()) {
+        continue;
+      }
+      if (!attempt.negotiated_capabilities.has(Capability::session_restart_v1)) {
+        continue;
+      }
+      const auto peer = attempt.snapshot.peer;
+      if (session_restarts.contains(peer)) continue;
+      (void)begin_session_restart(peer);
+    }
+  }
+
+  void arm_restart_deadline(const DeviceEndpointKey& peer) {
+    auto iterator = session_restarts.find(peer);
+    if (iterator == session_restarts.end() || iterator->second->deadline_armed) {
+      return;
+    }
+    iterator->second->deadline_armed = true;
+    iterator->second->deadline.emplace(strand);
+    iterator->second->deadline->expires_after(session_restart_deadline);
+    auto weak = weak_from_this();
+    iterator->second->deadline->async_wait(
+        [weak, peer](const boost::system::error_code& error) {
+          if (error) return;
+          if (auto self = weak.lock()) {
+            auto restart = self->session_restarts.find(peer);
+            if (restart != self->session_restarts.end()) {
+              self->abort_session_restart(
+                  peer, node_error(ErrorCode::timeout, "session_restart_deadline"));
+            }
+          }
+        });
+  }
+
+  Result<void> start_restart_transport(
+      SessionRestart& restart, std::optional<std::vector<std::byte>> remote_offer) {
+    transport::webrtc::WebRtcTransportConfig config;
+    config.offerer = restart.initiator;
+    config.signaling_path = transport::SignalingPathKind::none;
+    config.candidates.allow_ipv6_host = path_policy.allow_ipv6_host;
+    config.candidates.allow_ipv4_host = path_policy.allow_ipv4_host;
+    config.candidates.allow_server_reflexive = path_policy.allow_server_reflexive;
+    config.candidates.allow_turn_udp = path_policy.allow_turn_udp;
+    config.candidates.allow_turn_tcp = path_policy.allow_turn_tcp;
+    config.candidates.allow_turn_tls = path_policy.allow_turn_tls;
+    config.candidates.relay_only = path_policy.force_turn_data_path;
+    config.ice_servers.reserve(path_policy.ice_servers.size());
+    for (const auto& server : path_policy.ice_servers) {
+      transport::webrtc::IceServerConfig mapped;
+      switch (server.kind) {
+        case NodeIceServerKind::stun:
+          mapped.kind = transport::webrtc::IceServerKind::stun;
+          break;
+        case NodeIceServerKind::turn_udp:
+          mapped.kind = transport::webrtc::IceServerKind::turn_udp;
+          break;
+        case NodeIceServerKind::turn_tcp:
+          mapped.kind = transport::webrtc::IceServerKind::turn_tcp;
+          break;
+        case NodeIceServerKind::turn_tls:
+          mapped.kind = transport::webrtc::IceServerKind::turn_tls;
+          break;
+      }
+      mapped.hostname = server.hostname;
+      mapped.port = server.port;
+      mapped.username = server.username;
+      mapped.credential = server.credential;
+      config.ice_servers.push_back(std::move(mapped));
+    }
+    auto weak = weak_from_this();
+    const auto peer = restart.peer;
+    transport::webrtc::WebRtcSignalingHandler signaling;
+    signaling.on_local_description =
+        [weak, peer](std::vector<std::byte> sdp, std::string type,
+                     DtlsFingerprint fingerprint) {
+          auto self = weak.lock();
+          if (!self) return;
+          auto restart = self->session_restarts.find(peer);
+          if (restart == self->session_restarts.end() || !restart->second->transport) {
+            return;
+          }
+          self->handle_restart_local_description(*restart->second, std::move(sdp),
+                                                 std::move(type), fingerprint);
+        };
+    signaling.on_local_candidate = [weak, peer](std::vector<std::byte> candidate) {
+      auto self = weak.lock();
+      if (!self) return;
+      auto restart = self->session_restarts.find(peer);
+      if (restart == self->session_restarts.end()) return;
+      auto& record = *restart->second;
+      if (!record.candidate_signing_ready) {
+        if (record.pending_local_candidates.size() >= 128U) {
+          self->abort_session_restart(
+              peer, node_error(ErrorCode::resource_exhausted,
+                               "restart_pending_candidate_capacity_full"));
+          return;
+        }
+        record.pending_local_candidates.push_back(std::move(candidate));
+        return;
+      }
+      auto sent = self->send_restart_candidate(record, candidate);
+      if (!sent) self->abort_session_restart(peer, *sent.error_if());
+    };
+    auto created = transport::webrtc::WebRtcTransportSession::create(
+        config, peer_dispatcher(), std::move(signaling));
+    if (!created) return Result<void>::failure(*created.error_if());
+    restart.transport = *created.value_if();
+    if (restart.initiator) {
+      transport::ChannelOptions control_options;
+      control_options.priority = transport::ChannelPriority::control;
+      control_options.send_queue_bytes = 64U * 1024U;
+      control_options.max_message_bytes = 64U * 1024U;
+      auto prepared = restart.transport->prepare_channel(transport::ChannelKind::control,
+                                                          control_options);
+      if (!prepared) return prepared;
+    }
+    if (remote_offer) {
+      auto applied = apply_restart_remote_description(
+          restart, *remote_offer, "offer");
+      if (!applied) return applied;
+    }
+    return restart.transport->start();
+  }
+
+  Result<void> apply_restart_remote_description(SessionRestart& restart,
+                                                std::span<const std::byte> sdp,
+                                                std::string_view type) {
+    if (!restart.transport) {
+      return Result<void>::failure(
+          node_error(ErrorCode::internal, "restart_transport_missing_for_description"));
+    }
+    auto applied = restart.transport->set_remote_description(sdp, type);
+    if (!applied) return applied;
+    restart.remote_description_ready = true;
+    while (!restart.pending_remote_candidates.empty()) {
+      auto candidate = std::move(restart.pending_remote_candidates.front());
+      restart.pending_remote_candidates.pop_front();
+      auto added = restart.transport->add_remote_candidate(candidate);
+      if (!added) return added;
+    }
+    return Result<void>::success();
+  }
+
+  void handle_restart_local_description(SessionRestart& restart,
+                                        std::vector<std::byte> sdp, std::string type,
+                                        const DtlsFingerprint& fingerprint) {
+    auto* attempt = peer_attempts.find(restart.superseded_attempt) !=
+                            peer_attempts.end()
+                        ? &peer_attempts[restart.superseded_attempt]
+                        : nullptr;
+    if (attempt == nullptr || !attempt->session || !attempt->session->authenticated()) {
+      abort_session_restart(restart.peer,
+                            node_error(ErrorCode::cancelled,
+                                       "restart_source_session_lost"));
+      return;
+    }
+    auto ufrag = parse_sdp_ice_ufrag(sdp);
+    if (!ufrag) {
+      abort_session_restart(restart.peer, *ufrag.error_if());
+      return;
+    }
+    restart.local_ufrag = *ufrag.value_if();
+    restart.local_fingerprint = fingerprint;
+    const auto now_unix = unix_milliseconds_now();
+    if (type == "offer") {
+      auto payload = build_session_restart_offer(
+          restart.context, identity, restart.request_id, restart.local_nonce, sdp,
+          fingerprint, now_unix);
+      if (!payload) {
+        abort_session_restart(restart.peer, *payload.error_if());
+        return;
+      }
+      auto parsed = parse_signed_offer(*payload.value_if());
+      if (!parsed) {
+        abort_session_restart(restart.peer, *parsed.error_if());
+        return;
+      }
+      auto canonical = canonical_signed_offer(*parsed.value_if());
+      if (!canonical) {
+        abort_session_restart(restart.peer, *canonical.error_if());
+        return;
+      }
+      restart.admission.set_local_restart(restart.request_id, restart.local_nonce,
+                                          *canonical.value_if());
+      restart.local_restart_registered = true;
+      auto sent = attempt->session->send_restart_frame(
+          FrameType::session_restart_offer, *payload.value_if());
+      if (!sent) {
+        abort_session_restart(restart.peer, *sent.error_if());
+        return;
+      }
+      return;
+    }
+    if (type == "answer") {
+      auto payload = build_session_restart_answer(
+          restart.context, identity, restart.request_id,
+          restart.admission.initiator_nonce().value_or(restart.local_nonce),
+          restart.local_nonce, sdp, fingerprint, now_unix);
+      if (!payload) {
+        abort_session_restart(restart.peer, *payload.error_if());
+        return;
+      }
+      auto parsed = parse_signed_answer(*payload.value_if());
+      if (!parsed) {
+        abort_session_restart(restart.peer, *parsed.error_if());
+        return;
+      }
+      auto canonical = canonical_signed_answer(*parsed.value_if());
+      if (!canonical) {
+        abort_session_restart(restart.peer, *canonical.error_if());
+        return;
+      }
+      auto registered = restart.admission.set_local_restart_answer(
+          restart.local_nonce, *canonical.value_if());
+      if (!registered) {
+        abort_session_restart(restart.peer, *registered.error_if());
+        return;
+      }
+      auto sent = attempt->session->send_restart_frame(
+          FrameType::session_restart_answer, *payload.value_if());
+      if (!sent) {
+        abort_session_restart(restart.peer, *sent.error_if());
+        return;
+      }
+      restart.candidate_signing_ready = true;
+      auto flushed = flush_restart_local_candidates(restart);
+      if (!flushed) {
+        abort_session_restart(restart.peer, *flushed.error_if());
+        return;
+      }
+      auto session = start_restart_peer_session(restart);
+      if (!session) abort_session_restart(restart.peer, *session.error_if());
+    }
+  }
+
+  Result<void> send_restart_candidate(SessionRestart& restart,
+                                      std::span<const std::byte> candidate) {
+    if (!restart.candidate_signing_ready || !restart.transport) {
+      return Result<void>::failure(
+          node_error(ErrorCode::signaling, "restart_candidate_not_ready"));
+    }
+    if (restart.local_candidate_sequence == std::numeric_limits<std::uint32_t>::max()) {
+      return Result<void>::failure(
+          node_error(ErrorCode::resource_exhausted, "restart_candidate_sequence_exhausted"));
+    }
+    auto* attempt = peer_attempts.find(restart.superseded_attempt) !=
+                            peer_attempts.end()
+                        ? &peer_attempts[restart.superseded_attempt]
+                        : nullptr;
+    if (attempt == nullptr || !attempt->session || !attempt->session->authenticated()) {
+      return Result<void>::failure(
+          node_error(ErrorCode::cancelled, "restart_source_session_lost"));
+    }
+    SignalBinding binding;
+    binding.initiator = restart.initiator ? restart.context.local : restart.context.peer;
+    binding.responder = restart.initiator ? restart.context.peer : restart.context.local;
+    binding.request_id = restart.request_id;
+    binding.session_id = restart.context.session_id;
+    binding.initiator_nonce = restart.admission.initiator_nonce().value_or(restart.local_nonce);
+    binding.responder_nonce =
+        restart.admission.responder_nonce().value_or(restart.local_nonce);
+    auto payload = build_session_restart_candidate(
+        identity, binding, restart.local_candidate_sequence + 1U, candidate,
+        restart.admission.transcript().value_or(SignalingTranscriptSha256{}),
+        restart.local_ufrag, restart.local_fingerprint, unix_milliseconds_now());
+    if (!payload) return Result<void>::failure(*payload.error_if());
+    auto sent = attempt->session->send_restart_frame(
+        FrameType::session_restart_candidate, *payload.value_if());
+    if (!sent) return Result<void>::failure(*sent.error_if());
+    ++restart.local_candidate_sequence;
+    return Result<void>::success();
+  }
+
+  Result<void> flush_restart_local_candidates(SessionRestart& restart) {
+    if (!restart.candidate_signing_ready) return Result<void>::success();
+    while (!restart.pending_local_candidates.empty()) {
+      auto candidate = std::move(restart.pending_local_candidates.front());
+      restart.pending_local_candidates.pop_front();
+      auto sent = send_restart_candidate(restart, candidate);
+      if (!sent) return sent;
+    }
+    return Result<void>::success();
+  }
+
+  void handle_restart_offer(const DeviceEndpointKey& peer, std::vector<std::byte> payload) {
+    if (peers_closed) return;
+    auto existing = session_restarts.find(peer);
+    if (existing != session_restarts.end()) {
+      auto& restart = *existing->second;
+      if (restart.initiator && !restart.local_restart_registered) {
+        // Glare window before this side produced its offer: resolve with the
+        // deterministic rule without failing the session.
+        auto parsed = parse_signed_offer(payload);
+        if (!parsed) {
+          fail_session_protocol(peer, *parsed.error_if());
+          return;
+        }
+        if (!session_restart_offer_wins(parsed.value_if()->binding.request_id,
+                                        restart.request_id)) {
+          ++restarts_suppressed;
+          publish_restart_diagnostics();
+          return;
+        }
+        abort_session_restart(peer, node_error(ErrorCode::cancelled,
+                                               "restart_glare_lost"));
+      }
+    }
+    auto* attempt = authenticated_attempt(peer);
+    if (attempt == nullptr) {
+      ++restarts_suppressed;
+      publish_restart_diagnostics();
+      return;
+    }
+    const auto cooldown = restart_cooldown_until.find(peer);
+    if (cooldown != restart_cooldown_until.end() &&
+        std::chrono::steady_clock::now() < cooldown->second) {
+      ++restarts_suppressed;
+      publish_restart_diagnostics();
+      return;
+    }
+    auto restart = new_restart_record(peer, *attempt, false);
+    if (!restart) {
+      fail_session_protocol(peer, *restart.error_if());
+      return;
+    }
+    auto& record = **restart.value_if();
+    auto admitted =
+        record.admission.admit_offer(payload, unix_milliseconds_now());
+    if (!admitted) {
+      fail_session_protocol(peer, *admitted.error_if());
+      return;
+    }
+    if (!admitted.value_if()->has_value()) {
+      // Byte-identical duplicate or a suppressed glare offer.
+      return;
+    }
+    if ((**admitted.value_if()).supersedes_local_restart) {
+      abort_session_restart(peer, node_error(ErrorCode::cancelled, "restart_glare_lost"));
+    }
+    // The responder inherits the initiator's restart request id; only the
+    // responder nonce is locally generated.
+    record.request_id = (**admitted.value_if()).offer.binding.request_id;
+    session_restarts.emplace(peer, std::move(*restart.value_if()));
+    publish_restart_diagnostics();
+    publish_peer_sessions();
+    auto started = start_restart_transport(
+        *session_restarts[peer], (**admitted.value_if()).offer.sdp);
+    if (!started) {
+      abort_session_restart(peer, *started.error_if());
+      return;
+    }
+    arm_restart_deadline(peer);
+  }
+
+  void handle_restart_answer(const DeviceEndpointKey& peer, std::vector<std::byte> payload) {
+    auto iterator = session_restarts.find(peer);
+    if (iterator == session_restarts.end()) {
+      fail_session_protocol(peer, node_error(ErrorCode::protocol,
+                                             "restart_answer_without_restart"));
+      return;
+    }
+    auto& restart = *iterator->second;
+    auto admitted = restart.admission.admit_answer(payload, unix_milliseconds_now());
+    if (!admitted) {
+      fail_session_protocol(peer, *admitted.error_if());
+      return;
+    }
+    if (!admitted.value_if()->has_value()) return;
+    auto applied = apply_restart_remote_description(
+        restart, (**admitted.value_if()).answer.sdp, "answer");
+    if (!applied) {
+      abort_session_restart(peer, *applied.error_if());
+      return;
+    }
+    restart.candidate_signing_ready = true;
+    auto flushed = flush_restart_local_candidates(restart);
+    if (!flushed) {
+      abort_session_restart(peer, *flushed.error_if());
+      return;
+    }
+    auto session = start_restart_peer_session(restart);
+    if (!session) abort_session_restart(peer, *session.error_if());
+  }
+
+  void handle_restart_candidate(const DeviceEndpointKey& peer,
+                                std::vector<std::byte> payload) {
+    auto iterator = session_restarts.find(peer);
+    if (iterator == session_restarts.end()) {
+      // Candidates for an unknown restart cannot be validated; drop them.
+      ++restarts_suppressed;
+      publish_restart_diagnostics();
+      return;
+    }
+    auto& restart = *iterator->second;
+    auto admitted =
+        restart.admission.admit_candidate(payload, unix_milliseconds_now());
+    if (!admitted) {
+      fail_session_protocol(peer, *admitted.error_if());
+      return;
+    }
+    if (!admitted.value_if()->has_value()) return;
+    if (!restart.remote_description_ready) {
+      if (restart.pending_remote_candidates.size() >= 128U) {
+        abort_session_restart(
+            peer, node_error(ErrorCode::resource_exhausted,
+                             "restart_pending_remote_candidate_capacity_full"));
+        return;
+      }
+      restart.pending_remote_candidates.push_back(
+          std::move((**admitted.value_if()).candidate.candidate));
+      return;
+    }
+    auto added = restart.transport
+                     ? restart.transport->add_remote_candidate(
+                           (**admitted.value_if()).candidate.candidate)
+                     : Result<void>::failure(
+                           node_error(ErrorCode::internal, "restart_transport_missing"));
+    if (!added) abort_session_restart(peer, *added.error_if());
+  }
+
+  Result<void> start_restart_peer_session(SessionRestart& restart) {
+    if (restart.session) {
+      return Result<void>::failure(
+          node_error(ErrorCode::signaling, "restart_session_start_conflict"));
+    }
+    const auto initiator_nonce = restart.admission.initiator_nonce();
+    const auto responder_nonce = restart.admission.responder_nonce();
+    const auto transcript = restart.admission.transcript();
+    const auto peer_fingerprint = restart.admission.peer_fingerprint();
+    const auto peer_ufrag = restart.admission.peer_ufrag();
+    if (!restart.transport || !initiator_nonce.has_value() ||
+        !responder_nonce.has_value() || !transcript.has_value() ||
+        !peer_fingerprint.has_value() || !peer_ufrag.has_value()) {
+      return Result<void>::failure(
+          node_error(ErrorCode::signaling, "restart_binding_incomplete"));
+    }
+    VerifiedSessionBinding binding;
+    binding.expectation.sender = restart.context.peer;
+    binding.expectation.peer = restart.context.local;
+    binding.expectation.session_id = restart.context.session_id;
+    binding.expectation.session_epoch = restart.context.current_epoch + 1U;
+    binding.expectation.initiator_nonce = *initiator_nonce;
+    binding.expectation.responder_nonce = *responder_nonce;
+    binding.expectation.signaling_transcript_sha256 = *transcript;
+    binding.peer_fingerprint = *peer_fingerprint;
+    binding.peer_ufrag = *peer_ufrag;
+    binding.initiator = restart.initiator;
+    auto weak = weak_from_this();
+    const auto peer = restart.peer;
+    auto session = PeerSession::create_verified(
+        {.transport = restart.transport,
+         .binding = binding,
+         .local_identity = &identity,
+         .peer_public_key = restart.context.peer_public_key,
+         .local_protocol = {.version = current_protocol_version,
+                            .supported = {protocol_1_2_capability_bits},
+                            .required = {static_cast<std::uint64_t>(Capability::session)}},
+         .expires_unix_milliseconds = unix_milliseconds_now() + 60'000U,
+         .now_unix_milliseconds = unix_milliseconds_now(),
+         .observer = [weak, peer](const PeerSessionDiagnostics& diagnostics) {
+           if (auto self = weak.lock()) {
+             self->restart_session_changed(peer, diagnostics);
+           }
+         },
+         .timeline = restart.timeline,
+         .clock = {}});
+    if (!session) return Result<void>::failure(*session.error_if());
+    restart.session = *session.value_if();
+    attach_restart_handler_to_session(**session.value_if(), peer);
+    return restart.session->start();
+  }
+
+  void attach_restart_handler_to_session(PeerSession& session,
+                                         const DeviceEndpointKey& peer) {
+    auto weak = weak_from_this();
+    PeerSessionRestartHandler handler;
+    handler.on_restart_offer = [weak, peer](std::vector<std::byte> payload) {
+      if (auto self = weak.lock()) {
+        self->handle_restart_offer(peer, std::move(payload));
+      }
+    };
+    handler.on_restart_answer = [weak, peer](std::vector<std::byte> payload) {
+      if (auto self = weak.lock()) {
+        self->handle_restart_answer(peer, std::move(payload));
+      }
+    };
+    handler.on_restart_candidate = [weak, peer](std::vector<std::byte> payload) {
+      if (auto self = weak.lock()) {
+        self->handle_restart_candidate(peer, std::move(payload));
+      }
+    };
+    session.set_restart_handler(std::move(handler));
+  }
+
+  void restart_session_changed(const DeviceEndpointKey& peer,
+                               const PeerSessionDiagnostics& diagnostics) {
+    auto iterator = session_restarts.find(peer);
+    if (iterator == session_restarts.end()) return;
+    switch (diagnostics.state) {
+      case PeerSessionState::authenticated:
+        complete_session_restart(peer);
+        return;
+      case PeerSessionState::closed: {
+        const auto error = diagnostics.last_error.value_or(
+            node_error(ErrorCode::transport, "restart_session_closed"));
+        abort_session_restart(peer, error);
+        return;
+      }
+      default:
+        return;
+    }
+  }
+
+  void complete_session_restart(const DeviceEndpointKey& peer) {
+    auto iterator = session_restarts.find(peer);
+    if (iterator == session_restarts.end()) return;
+    auto restart = std::move(iterator->second);
+    session_restarts.erase(iterator);
+    ++restarts_completed;
+    restart_cooldown_until[peer] =
+        std::chrono::steady_clock::now() + session_restart_deadline * 2;
+    if (restart_cooldown_until.size() > lan.pending_signaling_capacity) {
+      restart_cooldown_until.erase(restart_cooldown_until.begin());
+    }
+    // Retire the superseded physical session first so its close callback
+    // cannot trigger the reestablish path.
+    auto route = SignalingRouteKind::lan;
+    const auto old = peer_attempts.find(restart->superseded_attempt);
+    if (old != peer_attempts.end()) {
+      route = old->second.snapshot.signaling_route;
+      old->second.retiring = true;
+      old->second.snapshot.state = NodePeerSessionState::closed;
+      if (old->second.session) {
+        old->second.session->close(transport::CloseReason::local_shutdown);
+      }
+      finished_peer_sessions.push_back(peer_session_snapshot(old->second));
+      while (finished_peer_sessions.size() > lan.diagnostic_capacity) {
+        finished_peer_sessions.pop_front();
+      }
+      peer_attempts.erase(old);
+    }
+    PeerAttempt attempt;
+    attempt.snapshot.peer = peer;
+    attempt.snapshot.request_id = restart->request_id;
+    attempt.snapshot.session_id = restart->context.session_id;
+    attempt.snapshot.session_epoch = restart->context.current_epoch + 1U;
+    attempt.snapshot.signaling_route = route;
+    attempt.snapshot.state = NodePeerSessionState::authenticated;
+    attempt.snapshot.initiator = restart->initiator;
+    attempt.peer_public_key = restart->context.peer_public_key;
+    attempt.timeline = restart->timeline;
+    attempt.transport = restart->transport;
+    attempt.session = restart->session;
+    attempt.negotiated_capabilities = CapabilitySet{protocol_1_2_capability_bits};
+    const auto request_id = restart->request_id;
+    peer_attempts.emplace(request_id, std::move(attempt));
+    peer_attempt_by_endpoint[peer] = request_id;
+    attach_restart_handler(request_id);
+    publish_restart_diagnostics();
+    publish_peer_sessions();
+  }
+
+  void abort_session_restart(const DeviceEndpointKey& peer, Error error) {
+    auto iterator = session_restarts.find(peer);
+    if (iterator == session_restarts.end()) return;
+    auto restart = std::move(iterator->second);
+    session_restarts.erase(iterator);
+    ++restarts_failed;
+    if (restart->session) {
+      restart->session->close(transport::CloseReason::protocol_error);
+    } else if (restart->transport) {
+      restart->transport->close(transport::CloseReason::protocol_error);
+    }
+    // The superseded session keeps running when it is still authenticated;
+    // otherwise the association was lost and the established re-signaling
+    // recovery applies.
+    auto* attempt = authenticated_attempt(peer);
+    if (attempt == nullptr) {
+      maybe_reestablish_peer_session(peer, true);
+    }
+    update_snapshot([&](NodeSnapshot& snapshot) { snapshot.last_error = error; });
+    publish_restart_diagnostics();
+    publish_peer_sessions();
+  }
+
+  void fail_session_protocol(const DeviceEndpointKey& peer, Error error) {
+    const auto index = peer_attempt_by_endpoint.find(peer);
+    if (index == peer_attempt_by_endpoint.end()) return;
+    fail_peer_attempt(index->second, error);
   }
 
   void fail_peer_attempt(RequestId request_id, Error error) {
@@ -3049,7 +3853,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   void handle_initial_hello(const std::shared_ptr<TlsConnection>& connection,
                             Result<LanHello> hello) {
     if (!hello || !initial_hello_matches(connection, *hello.value_if())) {
-      connection_failed(connection->id, "initial_hello_invalid", {}, false, true);
+        connection_failed(connection->id, "initial_hello_invalid", {}, false, true);
       return;
     }
     connection->initial_hello = *hello.value_if();
@@ -3720,6 +4524,16 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return;
     }
     peers_closed = true;
+    for (auto& [peer, restart] : session_restarts) {
+      (void)peer;
+      if (restart->session) {
+        restart->session->close(transport::CloseReason::local_shutdown);
+      } else if (restart->transport) {
+        restart->transport->close(transport::CloseReason::local_shutdown);
+      }
+    }
+    session_restarts.clear();
+    restart_cooldown_until.clear();
     for (auto& [request_id, attempt] : peer_attempts) {
       (void)request_id;
       if (attempt.session) {
@@ -3859,6 +4673,13 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   std::map<RequestId, PeerAttempt> peer_attempts;
   std::map<DeviceEndpointKey, RequestId> peer_attempt_by_endpoint;
   std::deque<NodePeerSessionSnapshot> finished_peer_sessions;
+  std::map<DeviceEndpointKey, std::unique_ptr<SessionRestart>> session_restarts;
+  std::map<DeviceEndpointKey, SteadyTime> restart_cooldown_until;
+  std::uint64_t restarts_initiated{0U};
+  std::uint64_t restarts_completed{0U};
+  std::uint64_t restarts_failed{0U};
+  std::uint64_t restarts_suppressed{0U};
+  std::size_t peak_restarts{0U};
   std::optional<RelayNodeConfig> relay_override;
   std::map<std::uint64_t, std::shared_ptr<TlsConnection>> connections;
   std::map<DeviceEndpointKey, std::uint64_t> active_connections;
@@ -4030,6 +4851,29 @@ Result<void> Node::refresh_interfaces() {
   } catch (...) {
     return Result<void>::failure(node_error(ErrorCode::internal,
                                             "interface_refresh_schedule_failed"));
+  }
+  return Result<void>::success();
+}
+
+Result<void> Node::restart_session(DeviceEndpointKey peer) {
+  if (!impl_) {
+    return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  if (peer.device_id.is_zero() || peer.endpoint_id.is_zero() ||
+      peer == impl_->local_key()) {
+    return Result<void>::failure(
+        node_error(ErrorCode::configuration, "signaling_peer_invalid"));
+  }
+  auto weak = std::weak_ptr<Impl>{impl_};
+  try {
+    boost::asio::post(impl_->strand, [weak, peer] {
+      if (auto self = weak.lock()) {
+        (void)self->begin_session_restart(peer);
+      }
+    });
+  } catch (...) {
+    return Result<void>::failure(node_error(ErrorCode::internal,
+                                            "session_restart_schedule_failed"));
   }
   return Result<void>::success();
 }

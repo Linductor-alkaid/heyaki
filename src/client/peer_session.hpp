@@ -7,11 +7,14 @@
 #include <heyaki/identity.hpp>
 #include <heyaki/protocol.hpp>
 #include <heyaki/session_protocol.hpp>
+#include <heyaki/wire.hpp>
 
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
+#include <vector>
 
 namespace heyaki {
 
@@ -60,7 +63,19 @@ struct PeerSessionDiagnostics {
   std::uint64_t pongs_sent{};
   std::uint64_t pongs_received{};
   std::uint64_t business_frames_rejected{};
+  std::uint64_t restart_frames_sent{};
+  std::uint64_t restart_frames_received{};
+  CapabilitySet negotiated_capabilities;
   std::optional<Error> last_error;
+};
+
+// Inbound session-restart objects (protocol 1.2 session_restart_v1) already
+// framed on the control channel. Verification is owned by the Node's restart
+// state machine; PeerSession only routes the payloads.
+struct PeerSessionRestartHandler {
+  std::function<void(std::vector<std::byte>)> on_restart_offer;
+  std::function<void(std::vector<std::byte>)> on_restart_answer;
+  std::function<void(std::vector<std::byte>)> on_restart_candidate;
 };
 
 class PeerSession final : public std::enable_shared_from_this<PeerSession> {
@@ -76,6 +91,12 @@ class PeerSession final : public std::enable_shared_from_this<PeerSession> {
 
   [[nodiscard]] Result<void> start();
   [[nodiscard]] Result<void> send_ping(std::uint64_t ping_id);
+  // Sends one signed restart object on the authenticated control channel.
+  // Fails without sending unless the session is authenticated.
+  [[nodiscard]] Result<void> send_restart_frame(FrameType type,
+                                                std::span<const std::byte> payload);
+  void set_restart_handler(PeerSessionRestartHandler handler);
+  [[nodiscard]] const SignedSessionHello& local_hello() const noexcept;
   [[nodiscard]] PeerSessionDiagnostics diagnostics() const noexcept;
   [[nodiscard]] bool authenticated() const noexcept;
   void close(transport::CloseReason reason);
@@ -94,6 +115,7 @@ class PeerSession final : public std::enable_shared_from_this<PeerSession> {
   std::unique_ptr<SessionHelloAdmission> admission_;
   transport::TransportChannel* control_{nullptr};
   PeerSessionDiagnostics diagnostics_;
+  PeerSessionRestartHandler restart_handler_;
   std::optional<std::uint64_t> pending_ping_;
   bool started_{false};
 };

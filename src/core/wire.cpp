@@ -137,6 +137,9 @@ bool is_known_frame_type(std::uint8_t type) noexcept {
     case FrameType::ping:
     case FrameType::pong:
     case FrameType::cancel:
+    case FrameType::session_restart_offer:
+    case FrameType::session_restart_answer:
+    case FrameType::session_restart_candidate:
     case FrameType::pairing_request:
     case FrameType::pairing_result:
     case FrameType::message:

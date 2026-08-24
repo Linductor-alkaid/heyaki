@@ -20,10 +20,13 @@ data stays peer-to-peer. All concurrency is centralized through the pinned
 
 The engineering baseline (M0), protocol and crypto layer (M1), runtime and identity (M2),
 LAN serverless connectivity (M3A), and relay control plane (M3B) milestones are complete.
-M4 (Connectivity MVP) is active: authenticated WebRTC sessions, LAN/relay dual-route
-arbitration, path diagnostics, and the TUI selection flow are in place; in-place ICE
-restart, TURN-fallback latency gates, and the full network matrix remain. See the
-[implementation plan](docs/todolists/heyaki-implementation-plan.md) for details.
+M4 (Connectivity MVP) is implemented: authenticated WebRTC sessions, LAN/relay dual-route
+arbitration, path diagnostics, the TUI selection flow, and protocol-1.2 session restart
+(a signed renegotiation of a replacement transport over the authenticated control
+channel) are in place, with the leak-enumeration matrix and the coturn network matrix
+(direct / forced TURN / TURN-fallback P95 / UDP-blocked / lossy / relay restart) wired
+into CI. See the [implementation plan](docs/todolists/heyaki-implementation-plan.md)
+for details.
 
 | Milestone | Scope | State |
 | --- | --- | --- |
@@ -32,7 +35,7 @@ restart, TURN-fallback latency gates, and the full network matrix remain. See th
 | M2 | Runtime, ProfileStore, identity, secret backend | Done |
 | M3A | LAN serverless discovery and connectivity | Done |
 | M3B | Relay control plane, coturn integration | Done |
-| M4 | Connectivity MVP (WebRTC sessions, dual routing, TUI) | In progress |
+| M4 | Connectivity MVP (WebRTC sessions, dual routing, session restart, TUI) | Implemented (CI matrix pending) |
 | M5–M9 | Authorization/byte-stream, message RPC, event & file transfer, remote shell, production hardening | Planned |
 
 ## Features
