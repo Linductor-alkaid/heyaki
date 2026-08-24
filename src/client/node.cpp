@@ -4542,7 +4542,14 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return;
     }
     peers_closed = true;
-    for (auto& [peer, restart] : session_restarts) {
+    // Move the restart records out before closing them: the session's close
+    // observer reenters through restart_session_changed -> abort_session_
+    // restart, which erases from session_restarts and would invalidate the
+    // iteration. With the map already empty the observer is a no-op.
+    auto restarts = std::move(session_restarts);
+    session_restarts.clear();
+    restart_cooldown_until.clear();
+    for (auto& [peer, restart] : restarts) {
       (void)peer;
       if (restart->session) {
         restart->session->close(transport::CloseReason::local_shutdown);
@@ -4550,8 +4557,6 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         restart->transport->close(transport::CloseReason::local_shutdown);
       }
     }
-    session_restarts.clear();
-    restart_cooldown_until.clear();
     for (auto& [request_id, attempt] : peer_attempts) {
       (void)request_id;
       if (attempt.session) {

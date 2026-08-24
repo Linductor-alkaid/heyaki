@@ -1,0 +1,335 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+  schedule:
+    # Nightly focused concurrency coverage. Regular PR gating also runs
+    # build-and-test, TSAN, and the lockfree worker queue functional suite.
+    - cron: '0 19 * * *'
+
+jobs:
+  build-and-test:
+    if: github.event_name != 'schedule'
+    name: ${{ matrix.os }} - ${{ matrix.compiler.name }} ${{ matrix.compiler.version }} - ${{ matrix.build_type }}
+    runs-on: ${{ matrix.os }}
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        # GitHub-hosted ARM64 runner is currently long queued/unavailable for this repo,
+        # so it is temporarily disabled; it can be restored later with self-hosted ARM64
+        # or a manual workflow.
+        os: [ubuntu-22.04, windows-latest]
+        build_type: [Release, Debug]
+        compiler:
+          - { name: gcc, version: 11 }
+          - { name: clang, version: 14 }
+        exclude:
+          # Windows 只用 MSVC
+          - os: windows-latest
+            compiler: { name: gcc }
+          - os: windows-latest
+            compiler: { name: clang }
+        include:
+          - os: windows-latest
+            build_type: Release
+            compiler: { name: msvc, version: '' }
+          - os: windows-latest
+            build_type: Debug
+            compiler: { name: msvc, version: '' }
+
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+
+    - name: 安装依赖 (Ubuntu)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake ninja-build
+        if [ "${{ matrix.compiler.name }}" = "gcc" ]; then
+          sudo apt-get install -y g++-${{ matrix.compiler.version }}
+          echo "CC=gcc-${{ matrix.compiler.version }}" >> $GITHUB_ENV
+          echo "CXX=g++-${{ matrix.compiler.version }}" >> $GITHUB_ENV
+        else
+          sudo apt-get install -y clang-${{ matrix.compiler.version }}
+          echo "CC=clang-${{ matrix.compiler.version }}" >> $GITHUB_ENV
+          echo "CXX=clang++-${{ matrix.compiler.version }}" >> $GITHUB_ENV
+        fi
+
+    - name: 配置 CMake (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        cmake -B build -G Ninja \
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+          -DEXECUTOR_BUILD_TESTS=ON \
+          -DEXECUTOR_BUILD_EXAMPLES=ON \
+          -DEXECUTOR_ENABLE_COVERAGE=OFF
+
+    - name: 配置 CMake (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        cmake -B build `
+          -DEXECUTOR_BUILD_TESTS=ON `
+          -DEXECUTOR_BUILD_EXAMPLES=ON `
+          -DEXECUTOR_ENABLE_COVERAGE=OFF
+
+    - name: 编译
+      run: cmake --build build --config ${{ matrix.build_type }} -j
+
+    - name: 运行测试
+      working-directory: build
+      run: ctest -C ${{ matrix.build_type }} --output-on-failure --verbose
+
+    - name: 上传构建产物 (Release)
+      if: matrix.build_type == 'Release'
+      uses: actions/upload-artifact@v4
+      with:
+        name: executor-${{ matrix.os }}-${{ matrix.compiler.name }}-${{ matrix.compiler.version }}
+        path: |
+          build/lib*
+          build/tests/executor_*_test
+        retention-days: 7
+
+  lockfree-queue:
+    # LockfreeWorkerQueue path is exercised as focused functional coverage.
+    # Benchmarks and stress tests are intentionally excluded by name below:
+    # on 2-vCPU GitHub runners they are too noisy to be reliable pass/fail
+    # signals for the lockfree queue implementation.
+    name: Lockfree worker queue - gcc 11 Release
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+
+    - name: 安装依赖
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake ninja-build g++-11 libgtest-dev
+
+    - name: 配置 CMake (Lockfree queue)
+      run: |
+        cmake -B build-lockfree -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_CXX_COMPILER=g++-11 \
+          -DEXECUTOR_BUILD_TESTS=ON \
+          -DEXECUTOR_BUILD_EXAMPLES=OFF \
+          -DEXECUTOR_ENABLE_GPU=OFF \
+          -DEXECUTOR_ENABLE_COVERAGE=OFF \
+          -DEXECUTOR_LOCKFREE_QUEUE=ON
+
+    - name: 编译
+      run: cmake --build build-lockfree --config Release -j
+
+    - name: 运行测试
+      working-directory: build-lockfree
+      run: ctest -C Release --output-on-failure --verbose -E '^(benchmark_|test_(performance|stress)$)'
+
+  thread-sanitizer:
+    name: ThreadSanitizer concurrency tests - gcc 11 Release
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+
+    - name: 安装依赖
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake ninja-build g++-11 libgtest-dev
+
+    - name: 配置 CMake (TSAN)
+      run: |
+        cmake -B build-tsan -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_CXX_COMPILER=g++-11 \
+          -DEXECUTOR_BUILD_TESTS=ON \
+          -DEXECUTOR_BUILD_EXAMPLES=OFF \
+          -DEXECUTOR_ENABLE_GPU=OFF \
+          -DEXECUTOR_ENABLE_COVERAGE=OFF \
+          -DEXECUTOR_ENABLE_TSAN=ON
+
+    - name: 编译 TSAN 并发测试
+      run: |
+        cmake --build build-tsan --config Release -j --target \
+          test_comm_channel \
+          test_comm_double_buffer \
+          test_comm_mailbox \
+          test_comm_phase_gate \
+          test_comm_topic \
+          test_thread_pool \
+          test_thread_pool_resize_uaf \
+          test_thread_pool_resize_status \
+          test_dispatcher_resize_under_load \
+          test_concurrent_stop_submit \
+          test_self_stop_handoff
+
+    - name: 运行 TSAN 并发测试
+      working-directory: build-tsan
+      env:
+        TSAN_OPTIONS: halt_on_error=1 history_size=7 second_deadlock_stack=1
+      run: |
+        ctest -C Release --output-on-failure --verbose \
+          -R '^(test_comm_channel|test_comm_double_buffer|test_comm_mailbox|test_comm_phase_gate|test_comm_topic|test_thread_pool|test_thread_pool_resize_uaf|test_thread_pool_resize_status|test_dispatcher_resize_under_load|test_concurrent_stop_submit|test_self_stop_handoff)$'
+
+  realtime-allocation-guard:
+    name: Realtime communication allocation guard - gcc 11 Release
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+
+    - name: 安装依赖
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake ninja-build g++-11 libgtest-dev
+
+    - name: 配置 CMake (Realtime allocation guard)
+      run: |
+        cmake -B build-realtime-allocation -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_CXX_COMPILER=g++-11 \
+          -DEXECUTOR_BUILD_TESTS=ON \
+          -DEXECUTOR_BUILD_EXAMPLES=OFF \
+          -DEXECUTOR_ENABLE_GPU=OFF \
+          -DEXECUTOR_ENABLE_COVERAGE=OFF \
+          -DEXECUTOR_ENABLE_REALTIME_ALLOCATION_GUARD=ON
+
+    - name: 编译实时分配测试
+      run: |
+        cmake --build build-realtime-allocation --config Release -j --target \
+          test_comm_realtime_memory
+
+    - name: 运行实时分配测试
+      working-directory: build-realtime-allocation
+      run: |
+        ctest -C Release --output-on-failure --verbose \
+          -R '^test_comm_realtime_memory$'
+
+  gpu-headers-build:
+    if: github.event_name != 'schedule'
+    name: GPU headers compile paths
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+
+    - name: 安装 GPU 头文件构建依赖
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake ninja-build g++-11 libgtest-dev opencl-headers ocl-icd-opencl-dev
+        mkdir -p "$RUNNER_TEMP/cuda-stub/include"
+        cat > "$RUNNER_TEMP/cuda-stub/include/cuda_runtime.h" <<'EOF'
+        #pragma once
+        #include <stddef.h>
+
+        typedef enum cudaError {
+            cudaSuccess = 0,
+            cudaErrorInvalidValue = 1,
+            cudaErrorMemoryAllocation = 2,
+            cudaErrorInitializationError = 3,
+            cudaErrorPeerAccessAlreadyEnabled = 217
+        } cudaError_t;
+
+        typedef void* cudaStream_t;
+
+        typedef struct cudaDeviceProp {
+            char name[256];
+            int major;
+            int minor;
+            int maxThreadsPerBlock;
+            int maxGridSize[3];
+        } cudaDeviceProp;
+
+        typedef enum cudaMemcpyKind {
+            cudaMemcpyHostToDevice = 1,
+            cudaMemcpyDeviceToHost = 2,
+            cudaMemcpyDeviceToDevice = 3
+        } cudaMemcpyKind;
+
+        enum { cudaMemAttachGlobal = 1 };
+        enum { cudaCpuDeviceId = -1 };
+        EOF
+        echo "CUDA_STUB_INCLUDE=$RUNNER_TEMP/cuda-stub/include" >> "$GITHUB_ENV"
+
+    - name: 配置 CMake (GPU headers)
+      run: |
+        cmake -B build-gpu-headers -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_CXX_COMPILER=g++-11 \
+          -DEXECUTOR_ENABLE_GPU=ON \
+          -DEXECUTOR_ENABLE_CUDA=ON \
+          -DEXECUTOR_ENABLE_OPENCL=ON \
+          -DEXECUTOR_BUILD_TESTS=ON \
+          -DEXECUTOR_BUILD_EXAMPLES=OFF \
+          -DCUDA_FOUND=TRUE \
+          -DCUDA_VERSION=0.0 \
+          -DCUDA_INCLUDE_DIRS="$CUDA_STUB_INCLUDE"
+
+    - name: 编译 GPU 头文件路径
+      run: cmake --build build-gpu-headers --config Release -j
+
+    - name: 运行无硬件 GPU 测试
+      working-directory: build-gpu-headers
+      run: ctest -C Release --output-on-failure --verbose -R '^(test_cuda_executor|test_opencl_executor|test_executor_manager_gpu)$'
+
+  # 可选：代码覆盖率任务
+  coverage:
+    if: github.event_name != 'schedule'
+    name: Code Coverage
+    runs-on: ubuntu-22.04
+    
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+
+    - name: 安装依赖
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake ninja-build g++-11 lcov libgtest-dev
+        cd /usr/src/gtest
+        sudo cmake .
+        sudo make
+        sudo cp lib/*.a /usr/lib
+
+    - name: 配置 CMake (启用覆盖率)
+      run: |
+        cmake -B build -G Ninja \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_CXX_COMPILER=g++-11 \
+          -DEXECUTOR_BUILD_TESTS=ON \
+          -DEXECUTOR_ENABLE_COVERAGE=ON
+
+    - name: 编译
+      run: cmake --build build -j
+
+    - name: 运行测试
+      working-directory: build
+      env:
+        # Code Coverage build 在 2 vCPU runner 上,mlockall(MCL_CURRENT|MCL_FUTURE)
+        # 会触发 OOM-killer。test_realtime_hardening 尊重这个 env 跳过 mlock 调用。
+        # 覆盖率插桩会显著放大 benchmark/stress 用例耗时；覆盖率任务只收集
+        # 功能测试覆盖率，性能基准由非 coverage benchmark 运行负责。
+        EXECUTOR_TEST_NO_MLOCKALL: 1
+      run: ctest --output-on-failure -E '^(benchmark_|test_(performance|stress)$)'
+
+    - name: 生成覆盖率报告
+      run: |
+        cd build
+        lcov --capture --directory . --output-file coverage.info
+        lcov --remove coverage.info '/usr/*' '*/tests/*' '*/examples/*' --output-file coverage.info
+        lcov --list coverage.info
+
+    - name: 上传到 Codecov
+      uses: codecov/codecov-action@v4
+      with:
+        files: ./build/coverage.info
+        flags: unittests
+        name: codecov-executor

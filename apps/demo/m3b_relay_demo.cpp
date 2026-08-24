@@ -77,13 +77,13 @@ heyaki::Result<void> init_profile(
 
 heyaki::Result<void> seed_token(const std::filesystem::path& database,
                                 std::string_view tenant, std::string_view token,
-                                std::uint64_t expiry) {
+                                std::uint64_t expiry, std::uint64_t uses = 1U) {
   auto opened = heyaki::RelayDatabase::open(database);
   if (!opened) {
     return heyaki::Result<void>::failure(*opened.error_if());
   }
   auto created = opened.value_if()->create_bootstrap_token(
-      std::string{tenant}, token, expiry, 1U);
+      std::string{tenant}, token, expiry, uses);
   if (!created) {
     return heyaki::Result<void>::failure(*created.error_if());
   }
@@ -167,7 +167,7 @@ std::uint64_t parse_u64(std::string_view text) {
 int usage() {
   std::cerr << "usage:\n"
             << "  heyaki-m3b-relay-demo init-profile DB APP_ID [APP_ID...]\n"
-            << "  heyaki-m3b-relay-demo seed-token DB TENANT TOKEN EXPIRY_UNIX_MS\n"
+            << "  heyaki-m3b-relay-demo seed-token DB TENANT TOKEN EXPIRY_UNIX_MS [USES]\n"
             << "  heyaki-m3b-relay-demo run DB APP_ID HOLD_MILLISECONDS\n";
   return 2;
 }
@@ -196,14 +196,18 @@ int main(int argc, char** argv) {
     return 0;
   }
   if (command == "seed-token") {
-    if (argc != 6) {
+    if (argc != 6 && argc != 7) {
       return usage();
     }
     const auto expiry = parse_u64(argv[5]);
     if (expiry == 0U) {
       return usage();
     }
-    auto result = seed_token(argv[2], argv[3], argv[4], expiry);
+    const auto uses = argc == 7 ? parse_u64(argv[6]) : 1U;
+    if (uses == 0U) {
+      return usage();
+    }
+    auto result = seed_token(argv[2], argv[3], argv[4], expiry, uses);
     if (!result) {
       std::cerr << heyaki::error_code_name(result.error_if()->code()) << ':'
                 << result.error_if()->safe_detail() << '\n';
