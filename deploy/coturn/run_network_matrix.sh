@@ -176,7 +176,9 @@ openssl x509 -req -in "${work_dir}/relay.csr" -CA "${work_dir}/ca.pem" \
   -extfile "${work_dir}/san.ext" -out "${work_dir}/relay-cert.pem" >/dev/null 2>&1
 
 expiry=$(python3 -c 'import time; print(int(time.time() * 1000) + 3600000)')
-"${demo_bin}" seed-token "${work_dir}/relay.sqlite" "${tenant}" "${token}" "${expiry}"
+# Every scenario enrolls two fresh participants; the token must cover all of
+# them or every scenario after the first exhausts it and reports relay=failed.
+"${demo_bin}" seed-token "${work_dir}/relay.sqlite" "${tenant}" "${token}" "${expiry}" 64
 
 write_relay_conf() {
   cat > "${work_dir}/relay.conf" <<RELAY_EOF
@@ -275,6 +277,15 @@ run_pair() {
 }
 
 failures=0
+dump_outputs() {
+  local scenario=$1
+  log "OUTPUTS ${scenario} ns0:"
+  sed -n '1,12p' "${work_dir}/${ns0}-output.txt" 2>/dev/null || true
+  log "OUTPUTS ${scenario} ns1:"
+  sed -n '1,12p' "${work_dir}/${ns1}-output.txt" 2>/dev/null || true
+  log "RELAY_LOG ${scenario}:"
+  tail -n 12 "${work_dir}/relay.log" 2>/dev/null || true
+}
 require_authenticated_turn() {
   local line=$1 scenario=$2
   local authenticated data_path
@@ -301,6 +312,7 @@ for scenario in "${scenarios[@]}"; do
       if [[ "${authenticated}" != "1" ||
             "${data_path}" != direct_host && "${data_path}" != direct_srflx ]]; then
         log "SCENARIO_FAILED direct: ${line}"
+        dump_outputs direct
         failures=$((failures + 1))
       else
         log "SCENARIO_OK direct: ${line}"
@@ -333,10 +345,12 @@ for scenario in "${scenarios[@]}"; do
         log "TURN_FALLBACK_P95_MS ${p95}"
         if ((p95 >= 5000)); then
           log "SCENARIO_FAILED turn_fallback: p95 ${p95}ms exceeds 5000ms"
+          dump_outputs turn_fallback
           failures=$((failures + 1))
         fi
       else
         log "SCENARIO_FAILED turn_fallback: missing samples"
+        dump_outputs turn_fallback
         failures=$((failures + 1))
       fi
       ;;
@@ -352,6 +366,7 @@ for scenario in "${scenarios[@]}"; do
       authenticated=$(result_field "${line}" authenticated)
       if [[ "${authenticated}" != "0" ]]; then
         log "SCENARIO_FAILED udp_blocked: unexpected session ${line}"
+        dump_outputs udp_blocked
         failures=$((failures + 1))
       else
         log "SCENARIO_OK udp_blocked (bounded explicit failure): ${line}"
@@ -370,7 +385,11 @@ for scenario in "${scenarios[@]}"; do
     relay_restart)
       block_forwarding
       remove_loss
-      prepare_participants "restart"
+      prepare_participants "restart" || {
+        dump_outputs relay_restart
+        failures=$((failures + 1))
+        continue
+      }
       run_in "${ns1}" run "${work_dir}/restart-second.sqlite" matrix.second \
         "wss://${host1}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" 30000 \
         --role responder --turn "${host1}:${turn_port}" \
@@ -392,6 +411,7 @@ for scenario in "${scenarios[@]}"; do
       relay_state=$(result_field "${line}" relay_state)
       if [[ "${authenticated}" != "1" || "${relay_state}" != ready ]]; then
         log "SCENARIO_FAILED relay_restart: ${line}"
+        dump_outputs relay_restart
         failures=$((failures + 1))
       else
         log "SCENARIO_OK relay_restart: ${line}"

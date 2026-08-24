@@ -8,6 +8,7 @@
 #include <rtc/configuration.hpp>
 #include <rtc/datachannel.hpp>
 #include <rtc/description.hpp>
+#include <rtc/global.hpp>
 #include <rtc/peerconnection.hpp>
 
 #include <algorithm>
@@ -15,6 +16,7 @@
 #include <atomic>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <variant>
@@ -775,6 +777,20 @@ Result<std::shared_ptr<WebRtcTransportSession>> WebRtcTransportSession::create(
     return Result<std::shared_ptr<WebRtcTransportSession>>::failure(
         transport_error(ErrorCode::configuration, "transport_config_invalid"));
   }
+  // Several Nodes may construct their first PeerConnection concurrently on
+  // different executor contexts. libdatachannel's global Init (including the
+  // mutex guarding its token) is constructed lazily on first use; the
+  // documented rtcPreload path performs that one-time initialization on a
+  // single thread so no construction races the first lock.
+  static std::once_flag preload_once;
+  std::call_once(preload_once, [] {
+    try {
+      rtc::Preload();
+    } catch (...) {
+      // Preload only primes global state; PeerConnection construction will
+      // surface any real failure explicitly.
+    }
+  });
   auto impl = std::make_shared<Impl>(std::move(config), std::move(dispatcher),
                                      std::move(signaling));
   auto initialized = impl->initialize();
