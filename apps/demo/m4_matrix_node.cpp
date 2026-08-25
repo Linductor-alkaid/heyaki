@@ -301,6 +301,11 @@ int run_node(const std::filesystem::path& database, std::string_view application
             << " stage=" << stage
             << " session_error=" << session_error
             << " relay_state=" << heyaki::relay_node_state_name(snapshot.relay.state)
+            << " coordinator_attempts="
+            << snapshot.session_coordinator.current_attempts
+            << " relay_reconnects=" << snapshot.relay.reconnect_count
+            << " heartbeats_missed=" << snapshot.relay.heartbeats_missed
+            << " endpoints_seen=" << node.value_if()->endpoints().size()
             << '\n';
   const auto shutdown = node.value_if()->shutdown();
   if (!shutdown.stopped) {
