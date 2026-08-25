@@ -194,7 +194,7 @@ sed -e "s#__TURN_SECRET__#${secret}#" \
 # concurrent allocations, which the matrix exhausted with 486 errors). Raise
 # the quotas and bandwidth budget; coturn cannot write /var/log/coturn in
 # this sandbox, so keep session-level logs in the work dir.
-printf 'log-file=%s/turn-a.log\nsimple-log\nVerbose\ntotal-quota=1000\nuser-quota=100\nmax-bps=10000000\nbps-capacity=100000000\n' "${work_dir}" \
+printf 'log-file=%s/turn-a.log\nsimple-log\nVerbose\ntotal-quota=1000\nuser-quota=100\nmax-bps=10000000\nbps-capacity=100000000\nallow-loopback-peers\n' "${work_dir}" \
   >> "${work_dir}/turnserver.conf"
 # A second instance serves the other bridge: a relayed<->relayed candidate
 # pair needs TWO TURN servers, because a single instance refuses peers on
