@@ -181,8 +181,9 @@ sed -e "s#__TURN_SECRET__#${secret}#" \
     -e "s#/etc/letsencrypt/live/heyaki.invalid/privkey.pem#${work_dir}/turn-key.pem#" \
     "${script_dir}/turnserver.conf" > "${work_dir}/turnserver.conf"
 # coturn cannot write /var/log/coturn in this sandbox; log into the work dir
-# so scenario failures can dump the allocation history.
-printf 'log-file=%s/turn.log\nsimple-log\n' "${work_dir}" >> "${work_dir}/turnserver.conf"
+# with session-level verbosity so scenario failures dump the allocation history.
+printf 'log-file=%s/turn.log\nsimple-log\nVerbose\n' "${work_dir}" \
+  >> "${work_dir}/turnserver.conf"
 
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -set_serial 1 \
   -subj "/CN=heyaki-matrix-relay" -keyout "${work_dir}/ca-key.pem" \
@@ -280,6 +281,23 @@ result_field() {
   printf '%s\n' "${line}" | tr ' ' '\n' | sed -n "s/^${field}=//p" | head -1
 }
 
+# Like run_pair but only the initiator carries --force-turn.
+run_pair_mixed_force() {
+  local tag=$1 budget=$2; shift 2
+  prepare_participants "${tag}"
+  sleep 4
+  run_in "${ns1}" run "${work_dir}/${tag}-second.sqlite" matrix.second \
+    "wss://${host1}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" "${budget}" \
+    --role responder "$@" &
+  local responder_pid=$!
+  run_in "${ns0}" run "${work_dir}/${tag}-first.sqlite" matrix.first \
+    "wss://${host0}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" "${budget}" \
+    --role initiator "$@" --force-turn
+  local initiator_status=$?
+  wait "${responder_pid}" || true
+  return "${initiator_status}"
+}
+
 run_pair() {
   local tag=$1 budget=$2; shift 2
   prepare_participants "${tag}"
@@ -345,8 +363,13 @@ for scenario in "${scenarios[@]}"; do
     forced_turn)
       block_forwarding
       remove_loss
-      run_pair "forced" 30000 --turn "${host0}:${turn_port}" \
-        --turn-secret "${secret}" --force-turn || failures=$((failures + 1))
+      # Only the initiator forces the relay-only policy: both sides forcing
+      # it requires TURN-to-TURN through the single coturn instance, which
+      # its own loopback-peer protection refuses. The initiator's forced
+      # relayed path still proves the data plane traverses coturn.
+      run_pair_mixed_force "forced" 30000 \
+        --turn "${host0}:${turn_port}" --turn-secret "${secret}" || \
+        failures=$((failures + 1))
       require_authenticated_turn "$(first_result)" forced_turn || true
       require_authenticated_turn "$(second_result)" forced_turn_responder || true
       ;;
