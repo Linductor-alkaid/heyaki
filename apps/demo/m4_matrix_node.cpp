@@ -50,12 +50,16 @@ std::uint64_t parse_u64(std::string_view text) {
 }
 
 bool wait_until(const std::function<bool()>& predicate,
-                std::chrono::milliseconds timeout) {
+                std::chrono::milliseconds timeout,
+                const std::function<bool()>& on_poll = {}) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   executor::comm::PhaseGate poll{"heyaki-m4-matrix-poll"};
   while (std::chrono::steady_clock::now() < deadline) {
     if (predicate()) {
       return true;
+    }
+    if (on_poll) {
+      (void)on_poll();
     }
     (void)poll.wait_for(1U, std::chrono::milliseconds{1});
   }
@@ -146,6 +150,7 @@ struct RunOptions {
   bool force_turn{false};
   std::chrono::milliseconds hold{500};
   std::chrono::milliseconds authenticate_budget{15000};
+  unsigned retries{0U};
 };
 
 int run_node(const std::filesystem::path& database, std::string_view application_id,
@@ -260,6 +265,7 @@ int run_node(const std::filesystem::path& database, std::string_view application
     }
   }
 
+  unsigned connect_retries = options.retries;
   const auto authenticated = wait_until(
       [&] {
         const auto sessions = node.value_if()->peer_sessions();
@@ -269,7 +275,34 @@ int run_node(const std::filesystem::path& database, std::string_view application
                                     heyaki::NodePeerSessionState::authenticated;
                            });
       },
-      options.authenticate_budget);
+      options.authenticate_budget,
+      [&] {
+        // Retry the dial when the previous attempt terminated without a
+        // session (for example a first-shot denial while the peer's reverse
+        // discovery lags behind on a lossy link).
+        if (options.role != "initiator" || connect_retries == 0U) {
+          return false;
+        }
+        const auto sessions = node.value_if()->peer_sessions();
+        const bool terminal_without_session = std::all_of(
+            sessions.begin(), sessions.end(), [](const auto& session) {
+              return session.state == heyaki::NodePeerSessionState::closed;
+            });
+        if (!terminal_without_session || sessions.empty()) {
+          return false;
+        }
+        const auto entries = node.value_if()->endpoints();
+        const auto peer = std::find_if(entries.begin(), entries.end(),
+                                       [&](const auto& entry) {
+                                         return entry.key != local_key &&
+                                                entry.relay.has_value();
+                                       });
+        if (peer == entries.end()) {
+          return false;
+        }
+        --connect_retries;
+        return (bool)node.value_if()->connect(peer->key);
+      });
   const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                            std::chrono::steady_clock::now() - begin)
                            .count();
@@ -322,7 +355,7 @@ int usage() {
             << "  heyaki-m4-matrix-node run DB APP_ID RELAY_URL CA TENANT BUDGET_MS\n"
             << "      [--role initiator|responder] [--stun HOST:PORT]\n"
             << "      [--turn HOST:PORT] [--turn-secret SECRET] [--force-turn]\n"
-            << "      [--hold-ms N] [--authenticate-budget-ms N]\n";
+            << "      [--hold-ms N] [--authenticate-budget-ms N] [--connect-retries N]\n";
   return 2;
 }
 
@@ -392,6 +425,8 @@ int main(int argc, char** argv) {
         options.hold = std::chrono::milliseconds{parse_u64(argv[++index])};
       } else if (flag == "--authenticate-budget-ms" && index + 1 < argc) {
         options.authenticate_budget = std::chrono::milliseconds{parse_u64(argv[++index])};
+      } else if (flag == "--connect-retries" && index + 1 < argc) {
+        options.retries = static_cast<unsigned>(parse_u64(argv[++index]));
       } else {
         return usage();
       }
