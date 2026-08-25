@@ -66,6 +66,7 @@ work_dir=$(mktemp -d /tmp/heyaki-m4-matrix.XXXXXX)
 chmod 700 "${work_dir}"
 relay_pid=""
 turn_pid=""
+turn_pid_b=""
 ns0="heyaki-m0"
 ns1="heyaki-m1"
 br0="heyaki-mb0"
@@ -80,6 +81,7 @@ client0="10.78.0.10"
 client1="10.78.1.10"
 relay_port=8443
 turn_port=3478
+turn_port_b=3479
 secret=$(openssl rand -base64 24)
 tenant="matrix-tenant"
 token="TEST-ONLY-m4-matrix-token-0123456789"
@@ -88,9 +90,11 @@ cleanup() {
   set +e
   [[ -n "${relay_pid}" ]] && kill -TERM "${relay_pid}" 2>/dev/null
   [[ -n "${turn_pid}" ]] && kill -TERM "${turn_pid}" 2>/dev/null
+  [[ -n "${turn_pid_b}" ]] && kill -TERM "${turn_pid_b}" 2>/dev/null
   sleep 0.2
   [[ -n "${relay_pid}" ]] && kill -KILL "${relay_pid}" 2>/dev/null
   [[ -n "${turn_pid}" ]] && kill -KILL "${turn_pid}" 2>/dev/null
+  [[ -n "${turn_pid_b}" ]] && kill -KILL "${turn_pid_b}" 2>/dev/null
   tc qdisc del dev "${veth0}" root 2>/dev/null
   tc qdisc del dev "${veth1}" root 2>/dev/null
   iptables -D FORWARD -s "${client0}" -d "${client1}" -j DROP 2>/dev/null
@@ -156,10 +160,14 @@ block_forwarding() {
 block_turn_udp() {
   iptables -I INPUT -i "${br0}" -p udp --dport "${turn_port}" -j DROP
   iptables -I INPUT -i "${br1}" -p udp --dport "${turn_port}" -j DROP
+  iptables -I INPUT -i "${br0}" -p udp --dport "${turn_port_b}" -j DROP
+  iptables -I INPUT -i "${br1}" -p udp --dport "${turn_port_b}" -j DROP
 }
 allow_turn_udp() {
   iptables -D INPUT -i "${br0}" -p udp --dport "${turn_port}" -j DROP 2>/dev/null || true
   iptables -D INPUT -i "${br1}" -p udp --dport "${turn_port}" -j DROP 2>/dev/null || true
+  iptables -D INPUT -i "${br0}" -p udp --dport "${turn_port_b}" -j DROP 2>/dev/null || true
+  iptables -D INPUT -i "${br1}" -p udp --dport "${turn_port_b}" -j DROP 2>/dev/null || true
 }
 add_loss() {
   tc qdisc add dev "${veth0}" root netem delay 100ms loss 10%
@@ -180,13 +188,22 @@ sed -e "s#__TURN_SECRET__#${secret}#" \
     -e "s#/etc/letsencrypt/live/heyaki.invalid/fullchain.pem#${work_dir}/turn-cert.pem#" \
     -e "s#/etc/letsencrypt/live/heyaki.invalid/privkey.pem#${work_dir}/turn-key.pem#" \
     "${script_dir}/turnserver.conf" > "${work_dir}/turnserver.conf"
-# coturn cannot write /var/log/coturn in this sandbox; log into the work dir
-# with session-level verbosity so scenario failures dump the allocation history.
 # The deploy baseline targets production abuse limits; the matrix topology
-# runs many short-lived participants, so raise the allocation quotas and keep
-# session-level logs for scenario forensics.
-printf 'log-file=%s/turn.log\nsimple-log\nVerbose\ntotal-quota=1000\nuser-quota=100\n' "${work_dir}" \
+# runs many short-lived participants, and coturn RESERVES max-bps of
+# bps-capacity per live allocation (the baseline budget admits only eight
+# concurrent allocations, which the matrix exhausted with 486 errors). Raise
+# the quotas and bandwidth budget; coturn cannot write /var/log/coturn in
+# this sandbox, so keep session-level logs in the work dir.
+printf 'log-file=%s/turn-a.log\nsimple-log\nVerbose\ntotal-quota=1000\nuser-quota=100\nmax-bps=10000000\nbps-capacity=100000000\n' "${work_dir}" \
   >> "${work_dir}/turnserver.conf"
+# A second instance serves the other bridge: a relayed<->relayed candidate
+# pair needs TWO TURN servers, because a single instance refuses peers on
+# its own address.
+sed -e "s#listening-port=${turn_port}#listening-port=${turn_port_b}#" \
+    -e "s#min-port=49160#min-port=49180#" \
+    -e "s#__ADVERTISED_ADDRESS__#${host1}#" \
+    -e "s#log-file=${work_dir}/turn-a.log#log-file=${work_dir}/turn-b.log#" \
+    "${work_dir}/turnserver.conf" > "${work_dir}/turnserver-b.conf"
 
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -set_serial 1 \
   -subj "/CN=heyaki-matrix-relay" -keyout "${work_dir}/ca-key.pem" \
@@ -236,8 +253,10 @@ stop_relay() {
   relay_pid=""
 }
 
-"${coturn_bin}" -c "${work_dir}/turnserver.conf" >"${work_dir}/turn.log" 2>&1 &
+"${coturn_bin}" -c "${work_dir}/turnserver.conf" >"${work_dir}/turn-a-stdout.log" 2>&1 &
 turn_pid=$!
+"${coturn_bin}" -c "${work_dir}/turnserver-b.conf" >"${work_dir}/turn-b-stdout.log" 2>&1 &
+turn_pid_b=$!
 start_relay
 
 for namespace in "${ns0}" "${ns1}"; do
@@ -256,6 +275,8 @@ wait_for() {
 }
 wait_for "${ns0}" "${host0}" "${turn_port}"
 wait_for "${ns1}" "${host1}" "${turn_port}"
+wait_for "${ns0}" "${host0}" "${turn_port_b}"
+wait_for "${ns1}" "${host1}" "${turn_port_b}"
 wait_for "${ns0}" "${host0}" "${relay_port}"
 wait_for "${ns1}" "${host1}" "${relay_port}"
 log "TOPOLOGY_OK turn=${turn_port} relay=${relay_port} secret_generated"
@@ -284,19 +305,50 @@ result_field() {
   printf '%s\n' "${line}" | tr ' ' '\n' | sed -n "s/^${field}=//p" | head -1
 }
 
+# Scenario arguments are side-agnostic: --stun/--turn take a ":PORT" form and
+# are expanded per side to that bridge's host address, with the TURN server of
+# the initiator on turn A and of the responder on turn B (a relayed<->relayed
+# candidate pair needs two distinct TURN servers).
 run_pair() {
   local tag=$1 budget=$2; shift 2
   prepare_participants "${tag}"
   # Let endpoints from the previous scenario fall out of the relay directory
   # (3 s presence lease) so the initiator cannot dial a stale endpoint.
   sleep 4
+  local shared=()
+  local stun_port="" turn_port_arg="" secret_arg="" force_arg=""
+  while (($# > 0)); do
+    case "$1" in
+      --stun) stun_port="${2#:}"; shift 2;;
+      --turn) turn_port_arg="${2#:}"; shift 2;;
+      --turn-secret) secret_arg="$2"; shift 2;;
+      --force-turn) force_arg="--force-turn"; shift;;
+      *) shared+=("$1"); shift;;
+    esac
+  done
+  local responder_args=(${shared[@]+"${shared[@]}"})
+  local initiator_args=(${shared[@]+"${shared[@]}"})
+  if [[ -n "${stun_port}" ]]; then
+    responder_args+=(--stun "${host1}:${stun_port}")
+    initiator_args+=(--stun "${host0}:${stun_port}")
+  fi
+  if [[ -n "${secret_arg}" ]]; then
+    # Initiator allocates on turn A; responder on turn B so a forced
+    # relayed<->relayed pair crosses two distinct TURN servers.
+    responder_args+=(--turn "${host1}:${turn_port_b}" --turn-secret "${secret_arg}")
+    initiator_args+=(--turn "${host0}:${turn_port_arg}" --turn-secret "${secret_arg}")
+  fi
+  if [[ -n "${force_arg}" ]]; then
+    responder_args+=("${force_arg}")
+    initiator_args+=("${force_arg}")
+  fi
   run_in "${ns1}" run "${work_dir}/${tag}-second.sqlite" matrix.second \
     "wss://${host1}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" "${budget}" \
-    --role responder "$@" &
+    --role responder ${responder_args[@]+"${responder_args[@]}"} &
   local responder_pid=$!
   run_in "${ns0}" run "${work_dir}/${tag}-first.sqlite" matrix.first \
     "wss://${host0}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" "${budget}" \
-    --role initiator "$@"
+    --role initiator ${initiator_args[@]+"${initiator_args[@]}"}
   local initiator_status=$?
   wait "${responder_pid}" || true
   return "${initiator_status}"
@@ -312,7 +364,10 @@ dump_outputs() {
   log "RELAY_LOG ${scenario}:"
   tail -n 12 "${work_dir}/relay.log" 2>/dev/null || true
   log "TURN_LOG ${scenario}:"
-  grep -E "session|allocate|error|quota|401 |403 |438 |peer " "${work_dir}/turn.log" 2>/dev/null | tail -n 40 || true
+  for turn_log_name in turn-a.log turn-b.log; do
+    grep -E "session [0-9]|allocated|error [0-9]+|quota" \
+      "${work_dir}/${turn_log_name}" 2>/dev/null | tail -n 30 || true
+  done
 }
 require_authenticated_turn() {
   local line=$1 scenario=$2
@@ -332,7 +387,7 @@ for scenario in "${scenarios[@]}"; do
     direct)
       allow_forwarding
       remove_loss
-      run_pair "direct" 30000 --stun "${host0}:${turn_port}" \
+      run_pair "direct" 30000 --stun ":${turn_port}" \
         || failures=$((failures + 1))
       line=$(first_result)
       authenticated=$(result_field "${line}" authenticated)
@@ -349,7 +404,7 @@ for scenario in "${scenarios[@]}"; do
     forced_turn)
       block_forwarding
       remove_loss
-      run_pair "forced" 30000 --turn "${host0}:${turn_port}" \
+      run_pair "forced" 30000 --turn ":${turn_port}" \
         --turn-secret "${secret}" --force-turn || failures=$((failures + 1))
       require_authenticated_turn "$(first_result)" forced_turn || true
       require_authenticated_turn "$(second_result)" forced_turn_responder || true
@@ -360,8 +415,8 @@ for scenario in "${scenarios[@]}"; do
       samples=()
       for cycle in $(seq 1 6); do
         run_pair "fallback-${cycle}" 30000 \
-          --stun "${host0}:${turn_port}" \
-          --turn "${host0}:${turn_port}" --turn-secret "${secret}" \
+          --stun ":${turn_port}" \
+          --turn ":${turn_port}" --turn-secret "${secret}" \
           || failures=$((failures + 1))
         line=$(first_result)
         require_authenticated_turn "${line}" "turn_fallback_cycle${cycle}" || true
@@ -387,8 +442,8 @@ for scenario in "${scenarios[@]}"; do
       remove_loss
       block_turn_udp
       run_pair "udp-blocked" 40000 \
-        --stun "${host0}:${turn_port}" \
-        --turn "${host0}:${turn_port}" --turn-secret "${secret}" \
+        --stun ":${turn_port}" \
+        --turn ":${turn_port}" --turn-secret "${secret}" \
         --authenticate-budget-ms 30000 || failures=$((failures + 1))
       line=$(first_result)
       authenticated=$(result_field "${line}" authenticated)
@@ -404,7 +459,7 @@ for scenario in "${scenarios[@]}"; do
     lossy)
       block_forwarding
       add_loss
-      run_pair "lossy" 90000 --turn "${host0}:${turn_port}" \
+      run_pair "lossy" 90000 --turn ":${turn_port}" \
         --turn-secret "${secret}" --force-turn --connect-retries 5 \
         --authenticate-budget-ms 75000 || failures=$((failures + 1))
       require_authenticated_turn "$(first_result)" lossy || true
@@ -421,7 +476,7 @@ for scenario in "${scenarios[@]}"; do
       sleep 4
       run_in "${ns1}" run "${work_dir}/restart-second.sqlite" matrix.second \
         "wss://${host1}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" 30000 \
-        --role responder --turn "${host1}:${turn_port}" \
+        --role responder --turn "${host1}:${turn_port_b}" \
         --turn-secret "${secret}" --force-turn --hold-ms 10000 &
       responder_pid=$!
       run_in "${ns0}" run "${work_dir}/restart-first.sqlite" matrix.first \
