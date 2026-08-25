@@ -311,6 +311,21 @@ heyaki_add_runtime_test(
   heyaki_m4_session_restart heyaki_m4_session_restart_tests
   "unit;session;security;protocol")
 
+add_executable(heyaki_m4_relay_cycle_repro unit/m4_relay_cycle_repro_test.cpp)
+heyaki_enable_executor_exception_adapter_source(unit/m4_relay_cycle_repro_test.cpp)
+target_link_libraries(heyaki_m4_relay_cycle_repro PRIVATE
+  heyaki::relay
+  executor::executor
+  GTest::gtest_main
+  OpenSSL::SSL OpenSSL::Crypto)
+heyaki_target_use_pinned_boost_beast(heyaki_m4_relay_cycle_repro)
+target_include_directories(heyaki_m4_relay_cycle_repro PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/relay"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+heyaki_configure_target(heyaki_m4_relay_cycle_repro)
+target_compile_definitions(heyaki_m4_relay_cycle_repro PRIVATE
+  "HEYAKI_M4_REPRO_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}/repro\"")
+
 add_executable(heyaki_m4_topology_matrix_tests unit/m4_topology_matrix_test.cpp)
 heyaki_enable_executor_exception_adapter_source(unit/m4_topology_matrix_test.cpp)
 target_link_libraries(heyaki_m4_topology_matrix_tests PRIVATE

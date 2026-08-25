@@ -180,6 +180,9 @@ sed -e "s#__TURN_SECRET__#${secret}#" \
     -e "s#/etc/letsencrypt/live/heyaki.invalid/fullchain.pem#${work_dir}/turn-cert.pem#" \
     -e "s#/etc/letsencrypt/live/heyaki.invalid/privkey.pem#${work_dir}/turn-key.pem#" \
     "${script_dir}/turnserver.conf" > "${work_dir}/turnserver.conf"
+# coturn cannot write /var/log/coturn in this sandbox; log into the work dir
+# so scenario failures can dump the allocation history.
+printf 'log-file=%s/turn.log\nsimple-log\n' "${work_dir}" >> "${work_dir}/turnserver.conf"
 
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -set_serial 1 \
   -subj "/CN=heyaki-matrix-relay" -keyout "${work_dir}/ca-key.pem" \
