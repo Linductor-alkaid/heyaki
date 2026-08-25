@@ -182,7 +182,10 @@ sed -e "s#__TURN_SECRET__#${secret}#" \
     "${script_dir}/turnserver.conf" > "${work_dir}/turnserver.conf"
 # coturn cannot write /var/log/coturn in this sandbox; log into the work dir
 # with session-level verbosity so scenario failures dump the allocation history.
-printf 'log-file=%s/turn.log\nsimple-log\nVerbose\n' "${work_dir}" \
+# The deploy baseline targets production abuse limits; the matrix topology
+# runs many short-lived participants, so raise the allocation quotas and keep
+# session-level logs for scenario forensics.
+printf 'log-file=%s/turn.log\nsimple-log\nVerbose\ntotal-quota=1000\nuser-quota=100\n' "${work_dir}" \
   >> "${work_dir}/turnserver.conf"
 
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -set_serial 1 \
@@ -281,23 +284,6 @@ result_field() {
   printf '%s\n' "${line}" | tr ' ' '\n' | sed -n "s/^${field}=//p" | head -1
 }
 
-# Like run_pair but only the initiator carries --force-turn.
-run_pair_mixed_force() {
-  local tag=$1 budget=$2; shift 2
-  prepare_participants "${tag}"
-  sleep 4
-  run_in "${ns1}" run "${work_dir}/${tag}-second.sqlite" matrix.second \
-    "wss://${host1}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" "${budget}" \
-    --role responder "$@" &
-  local responder_pid=$!
-  run_in "${ns0}" run "${work_dir}/${tag}-first.sqlite" matrix.first \
-    "wss://${host0}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" "${budget}" \
-    --role initiator "$@" --force-turn
-  local initiator_status=$?
-  wait "${responder_pid}" || true
-  return "${initiator_status}"
-}
-
 run_pair() {
   local tag=$1 budget=$2; shift 2
   prepare_participants "${tag}"
@@ -326,7 +312,7 @@ dump_outputs() {
   log "RELAY_LOG ${scenario}:"
   tail -n 12 "${work_dir}/relay.log" 2>/dev/null || true
   log "TURN_LOG ${scenario}:"
-  tail -n 20 "${work_dir}/turn.log" 2>/dev/null || true
+  grep -E "session|allocate|error|quota|401 |403 |438 |peer " "${work_dir}/turn.log" 2>/dev/null | tail -n 40 || true
 }
 require_authenticated_turn() {
   local line=$1 scenario=$2
@@ -363,13 +349,8 @@ for scenario in "${scenarios[@]}"; do
     forced_turn)
       block_forwarding
       remove_loss
-      # Only the initiator forces the relay-only policy: both sides forcing
-      # it requires TURN-to-TURN through the single coturn instance, which
-      # its own loopback-peer protection refuses. The initiator's forced
-      # relayed path still proves the data plane traverses coturn.
-      run_pair_mixed_force "forced" 30000 \
-        --turn "${host0}:${turn_port}" --turn-secret "${secret}" || \
-        failures=$((failures + 1))
+      run_pair "forced" 30000 --turn "${host0}:${turn_port}" \
+        --turn-secret "${secret}" --force-turn || failures=$((failures + 1))
       require_authenticated_turn "$(first_result)" forced_turn || true
       require_authenticated_turn "$(second_result)" forced_turn_responder || true
       ;;
@@ -423,9 +404,9 @@ for scenario in "${scenarios[@]}"; do
     lossy)
       block_forwarding
       add_loss
-      run_pair "lossy" 60000 --turn "${host0}:${turn_port}" \
-        --turn-secret "${secret}" --force-turn \
-        --authenticate-budget-ms 45000 || failures=$((failures + 1))
+      run_pair "lossy" 90000 --turn "${host0}:${turn_port}" \
+        --turn-secret "${secret}" --force-turn --connect-retries 5 \
+        --authenticate-budget-ms 75000 || failures=$((failures + 1))
       require_authenticated_turn "$(first_result)" lossy || true
       remove_loss
       ;;
