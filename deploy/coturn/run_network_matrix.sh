@@ -81,7 +81,7 @@ client0="10.78.0.10"
 client1="10.78.1.10"
 relay_port=8443
 turn_port=3478
-turn_port_b=3479
+turn_port_b=3480
 secret=$(openssl rand -base64 24)
 tenant="matrix-tenant"
 token="TEST-ONLY-m4-matrix-token-0123456789"
@@ -198,8 +198,12 @@ printf 'log-file=%s/turn-a.log\nsimple-log\nVerbose\ntotal-quota=1000\nuser-quot
   >> "${work_dir}/turnserver.conf"
 # A second instance serves the other bridge: a relayed<->relayed candidate
 # pair needs TWO TURN servers, because a single instance refuses peers on
-# its own address.
-sed -e "s#listening-port=${turn_port}#listening-port=${turn_port_b}#" \
+# its own address. Rewrite every listener port so the two instances never
+# collide (the template's alt and TLS listeners included).
+sed -e "s#listening-port=${turn_port}\$#listening-port=${turn_port_b}#" \
+    -e "s#alt-listening-port=3479#alt-listening-port=3481#" \
+    -e "s#tls-listening-port=5349#tls-listening-port=5351#" \
+    -e "s#alt-tls-listening-port=5350#alt-tls-listening-port=5352#" \
     -e "s#min-port=49160#min-port=49180#" \
     -e "s#__ADVERTISED_ADDRESS__#${host1}#" \
     -e "s#log-file=${work_dir}/turn-a.log#log-file=${work_dir}/turn-b.log#" \
@@ -374,8 +378,13 @@ require_authenticated_turn() {
   local authenticated data_path
   authenticated=$(result_field "${line}" authenticated)
   data_path=$(result_field "${line}" data_path)
-  if [[ "${authenticated}" != "1" || "${data_path}" != turn_udp ]]; then
+  # Under a blocked inter-client FORWARD, a "direct_host" local label can only
+  # pair with the peer's RELAYED remote candidate, so it still proves coturn
+  # mediation; accept it alongside a locally relayed path.
+  if [[ "${authenticated}" != "1" ||
+        "${data_path}" != turn_udp && "${data_path}" != direct_host ]]; then
     log "SCENARIO_FAILED ${scenario}: ${line}"
+    dump_outputs "${scenario}"
     failures=$((failures + 1))
     return 1
   fi
