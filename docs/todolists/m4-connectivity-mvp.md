@@ -608,3 +608,14 @@ ICE restart 重协商。
 - 测试计数：`heyaki_m4_session_restart` 7、`heyaki_m4_session_restart_e2e` 3、
   `heyaki_m4_shutdown_matrix` 10、`heyaki_m4_topology_matrix` 2；本机 GCC Debug
   全量通过（coturn 两项环境 skip）。
+- **CI 网络矩阵证据（run 32801103705，c3f94ef）**：direct（direct_host 759ms）、
+  turn_fallback 六循环全部 authenticated turn_udp（709-871ms，P95≈871ms ≪5s
+  门禁）、udp_blocked 显式有界失败、lossy（netem 100ms/10%）4768ms
+  authenticated；`forced_turn` 双方 relay-only 需 relayed<->relayed 提名，在
+  pinned libjuice（libdatachannel 仅过滤本地候选）+ coturn 组合下 allocation 与
+  permission 均成功、检查流经双实例但从不提名——与 TURN/TCP 同类 pinned 栈能力
+  边界，矩阵以 `SCENARIO_BOUNDARY` 显式报告（有界、不挂起），TURN 强制数据路径
+  本身由 fallback 六循环在阻断直连的拓扑下证明。连带修复：coturn 测试拓扑带宽
+  配额（max-bps 预留制，基线仅容 8 个并发 allocation，曾致 cycle4+ 全部 486）、
+  双实例端口冲突（模板 alt 监听 3479）、bootstrap token 次数、矩阵参与者 CLI
+  argc、m3a ASan/Windows 慢机的 discovery 预算与 relay_restart 场景脚本加固。

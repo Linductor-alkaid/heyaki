@@ -110,6 +110,7 @@ cleanup() {
   rm -rf "${work_dir}"
 }
 trap cleanup EXIT
+trap 'log "SCRIPT_ERROR at line ${LINENO} (status $?)"' ERR
 
 # ---- topology -----------------------------------------------------------
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
@@ -251,10 +252,13 @@ start_relay() {
   return 1
 }
 stop_relay() {
-  [[ -n "${relay_pid}" ]] && kill -TERM "${relay_pid}" 2>/dev/null
-  sleep 0.3
-  [[ -n "${relay_pid}" ]] && kill -KILL "${relay_pid}" 2>/dev/null
+  if [[ -n "${relay_pid}" ]]; then
+    kill -TERM "${relay_pid}" 2>/dev/null || true
+    sleep 0.3
+    kill -KILL "${relay_pid}" 2>/dev/null || true
+  fi
   relay_pid=""
+  return 0
 }
 
 "${coturn_bin}" -c "${work_dir}/turnserver.conf" >"${work_dir}/turn-a-stdout.log" 2>&1 &

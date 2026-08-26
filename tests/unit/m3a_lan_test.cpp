@@ -1513,7 +1513,7 @@ TEST_F(M3aNodeTest, AuthenticatedSessionReestablishesNewPhysicalSessionAfterLoss
         return discovered(*first.value_if(), second_key) &&
                discovered(*second_node, first_key);
       },
-      std::chrono::seconds{4}));
+      std::chrono::seconds{15}));
   ASSERT_TRUE(first.value_if()->connect_lan(second_key));
   // The 20 s budget flaked on a loaded ASan runner (run 32546019506): the
   // full re-signaling after peer destruction plus the WebRTC handshake can
