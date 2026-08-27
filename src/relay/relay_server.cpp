@@ -1663,7 +1663,17 @@ void RelayServer::Impl::publish() {
   }
   const bool observable_change =
       current.state != published_state || current.stop_requested != published_stop_requested;
-  (void)snapshots.try_publish(current);
+  // Waiting publish: try_publish silently drops the update when every version
+  // slot is pinned by a reader, which left observers (tests, embedders, the
+  // relay main loop) reading stale counters after the per-message publish was
+  // coalesced to exactly one flush. The waiting variant yields until readers
+  // finish their copies; readers never wait on writers, so this cannot
+  // deadlock on the strand.
+  try {
+    (void)snapshots.publish(current);
+  } catch (...) {
+    (void)snapshots.try_publish(current);
+  }
   if (observable_change) {
     published_state = current.state;
     published_stop_requested = current.stop_requested;
