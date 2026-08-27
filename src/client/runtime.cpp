@@ -6,6 +6,7 @@
 
 #include <executor/comm.hpp>
 #include <executor/executor.hpp>
+#include <executor/stop_token.hpp>
 
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
@@ -23,10 +24,8 @@
 #include <future>
 #include <memory>
 #include <optional>
-#include <stop_token>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -275,18 +274,25 @@ struct InternalTask {
 
 class AsioWorker final : public executor::IBlockingIoWorker {
  public:
-  explicit AsioWorker(boost::asio::io_context& io) : io_(io) {}
+  static constexpr std::uint64_t exit_phase = 1U;
 
-  void run(std::stop_token stop_token) override {
+  explicit AsioWorker(boost::asio::io_context& io,
+                      executor::comm::PhaseGate& exit_gate) noexcept
+      : io_(io), exit_gate_(exit_gate) {}
+
+  void run(executor::StopToken stop_token) override {
     if (!stop_token.stop_requested()) {
       io_.run();
     }
+    // Shutdown blocks on this phase instead of spinning on worker status.
+    (void)exit_gate_.advance_to(exit_phase);
   }
 
   void wakeup() noexcept override { io_.stop(); }
 
  private:
   boost::asio::io_context& io_;
+  executor::comm::PhaseGate& exit_gate_;
 };
 
 class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
@@ -331,7 +337,7 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
     spec.name = config_.worker_name;
     spec.config.thread_name = config_.worker_name;
     spec.config.startup_timeout = config_.worker_start_timeout;
-    spec.worker = std::make_unique<AsioWorker>(io_);
+    spec.worker = std::make_unique<AsioWorker>(io_, asio_exit_);
     worker_ = executor_->start_worker(std::move(spec));
     if (!worker_.started()) {
       work_guard_.reset();
@@ -515,12 +521,12 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
 
     work_guard_.reset();
     worker_.request_stop();
-    const auto worker_deadline = std::chrono::steady_clock::now() + config_.worker_stop_timeout;
-    while (worker_.status().is_running && std::chrono::steady_clock::now() < worker_deadline) {
-      std::this_thread::yield();
-    }
     if (worker_.status().is_running) {
-      report.worker_stop_timed_out = true;
+      const auto exited = asio_exit_.wait_for(AsioWorker::exit_phase,
+                                              config_.worker_stop_timeout);
+      if (!exited) {
+        report.worker_stop_timed_out = true;
+      }
     }
     worker_.stop();
 
@@ -563,7 +569,7 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
       auto tracked = std::make_shared<InternalTask>(
           InternalTask{.name = std::move(name), .future = std::move(future)});
       internal_tasks_.push_back(tracked);
-      watch_internal_task(tracked);
+      schedule_task_sweep();
       return Result<void>::success();
     } catch (...) {
       diagnostics_->record_executor_event();
@@ -752,11 +758,10 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
               throw;
             }
           });
-      prune_tracked_tasks();
       auto task = std::make_shared<TrackedTask>(
           TrackedTask{.operation = operation, .future = std::move(submission.future)});
       tracked_tasks_.push_back(task);
-      watch_task(task);
+      schedule_task_sweep();
     } catch (...) {
       operation->complete(
           OperationState::error,
@@ -786,24 +791,34 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
     }
   }
 
-  void watch_task(const std::shared_ptr<TrackedTask>& task) {
-    if (task->operation->terminal()) {
+  // Abnormal executor outcomes (rejection, timeout) are reaped by one shared
+  // sweep timer while tracked work is in flight; normal completion is signaled
+  // by the task itself, so no per-operation watcher is armed.
+  void schedule_task_sweep() {
+    if (task_sweep_active_) {
       return;
     }
-    if (task->future.valid() &&
-        task->future.wait_for(std::chrono::milliseconds{0}) == std::future_status::ready) {
-      observe_ready_task(task);
-      return;
-    }
-    auto timer = std::make_shared<boost::asio::steady_timer>(io_, std::chrono::milliseconds{10});
+    task_sweep_active_ = true;
+    task_sweep_timer_.expires_after(std::chrono::milliseconds{25});
     std::weak_ptr<RuntimeState> weak = weak_from_this();
-    timer->async_wait([weak, task, timer](const boost::system::error_code& error) {
-      if (!error) {
-        if (auto self = weak.lock()) {
-          self->watch_task(task);
+    task_sweep_timer_.async_wait([weak](const boost::system::error_code& error) {
+      if (auto self = weak.lock()) {
+        if (!error) {
+          self->task_sweep();
+        } else {
+          self->task_sweep_active_ = false;
         }
       }
     });
+  }
+
+  void task_sweep() {
+    task_sweep_active_ = false;
+    prune_tracked_tasks();
+    prune_internal_tasks();
+    if (!tracked_tasks_.empty() || !internal_tasks_.empty()) {
+      schedule_task_sweep();
+    }
   }
 
   void prune_tracked_tasks() {
@@ -824,27 +839,6 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
     } catch (...) {
       diagnostics_->record_executor_event();
     }
-  }
-
-  void watch_internal_task(const std::shared_ptr<InternalTask>& task) {
-    if (!task->future.valid()) {
-      return;
-    }
-    if (task->future.wait_for(std::chrono::milliseconds{0}) ==
-        std::future_status::ready) {
-      observe_internal_task(task);
-      return;
-    }
-    auto timer = std::make_shared<boost::asio::steady_timer>(
-        io_, std::chrono::milliseconds{10});
-    std::weak_ptr<RuntimeState> weak = weak_from_this();
-    timer->async_wait([weak, task, timer](const boost::system::error_code& error) {
-      if (!error) {
-        if (auto self = weak.lock()) {
-          self->watch_internal_task(task);
-        }
-      }
-    });
   }
 
   void prune_internal_tasks() {
@@ -949,6 +943,9 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
   RuntimeOwnership ownership_;
   RuntimeConfig config_;
   boost::asio::io_context io_;
+  boost::asio::steady_timer task_sweep_timer_{io_};
+  bool task_sweep_active_{false};
+  executor::comm::PhaseGate asio_exit_{"heyaki-asio-worker-exit"};
   std::optional<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>
       work_guard_;
   executor::comm::MpscChannel<RuntimeCallbackEvent> callbacks_;
