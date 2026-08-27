@@ -1397,6 +1397,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       if (!admitted) {
         record_signaling_error(*admitted.error_if());
       }
+      release_stashed_relay_requests();
       return;
     }
     if (relay_phase == RelayLoginPhase::ready &&
@@ -1406,6 +1407,11 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         record_signaling_error(envelope
             ? node_error(ErrorCode::cancelled, "relay_coordinator_unavailable")
             : *envelope.error_if());
+        return;
+      }
+      if (envelope.value_if()->kind == LanSignalingMessageKind::connect_request &&
+          !peer_identity(envelope.value_if()->peer)) {
+        stash_relay_connect_request(std::move(*envelope.value_if()));
         return;
       }
       auto handled = coordinator->handle_message(*envelope.value_if(),
@@ -1424,6 +1430,12 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return;
     }
     relay_client.reset();
+    for (auto entry = stashed_relay_requests.begin();
+         entry != stashed_relay_requests.end();) {
+      SignalingEnvelope envelope = entry->second.envelope;
+      entry = stashed_relay_requests.erase(entry);
+      deliver_relay_envelope(envelope);
+    }
     std::vector<RequestId> relay_attempts;
     for (const auto& [request_id, attempt] : peer_attempts) {
       // Relay loss ends attempts still depending on relay signaling. A session
@@ -1584,6 +1596,65 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return Result<void>::failure(*frame.error_if());
     }
     return relay_client->send(std::move(*frame.value_if()));
+  }
+
+  void deliver_relay_envelope(const SignalingEnvelope& envelope) {
+    if (!coordinator) {
+      record_signaling_error(
+          node_error(ErrorCode::cancelled, "relay_coordinator_unavailable"));
+      return;
+    }
+    auto handled = coordinator->handle_message(envelope, SignalingRouteKind::relay);
+    if (!handled) record_signaling_error(*handled.error_if());
+  }
+
+  void stash_relay_connect_request(SignalingEnvelope envelope) {
+    if (peers_closed ||
+        stashed_relay_requests.size() >= lan.pending_signaling_capacity) {
+      deliver_relay_envelope(envelope);
+      return;
+    }
+    const auto peer = envelope.peer;
+    auto& stashed = stashed_relay_requests[peer];
+    if (stashed.deadline &&
+        stashed.envelope.request_id == envelope.request_id) {
+      return;
+    }
+    stashed.envelope = std::move(envelope);
+    stashed.deadline.emplace(strand);
+    stashed.deadline->expires_after(std::chrono::milliseconds{2500});
+    std::weak_ptr<Impl> weak = weak_from_this();
+    stashed.deadline->async_wait(
+        [weak, peer](const boost::system::error_code& error) {
+          if (error) return;
+          if (auto self = weak.lock()) {
+            auto entry = self->stashed_relay_requests.find(peer);
+            if (entry != self->stashed_relay_requests.end()) {
+              SignalingEnvelope expired = entry->second.envelope;
+              self->stashed_relay_requests.erase(entry);
+              self->deliver_relay_envelope(expired);
+            }
+          }
+        });
+    // The refresh is best effort: a LAN presence or a heartbeat-driven
+    // directory update can also resolve the identity before the deadline.
+    (void)publish_and_query_relay_endpoints();
+  }
+
+  void release_stashed_relay_requests() {
+    std::vector<DeviceEndpointKey> resolved;
+    for (const auto& [peer, stashed] : stashed_relay_requests) {
+      if (peer_identity(peer)) {
+        resolved.push_back(peer);
+      }
+    }
+    for (const auto& peer : resolved) {
+      auto entry = stashed_relay_requests.find(peer);
+      if (entry == stashed_relay_requests.end()) continue;
+      SignalingEnvelope envelope = entry->second.envelope;
+      stashed_relay_requests.erase(entry);
+      deliver_relay_envelope(envelope);
+    }
   }
 
   Result<void> publish_and_query_relay_endpoints() {
@@ -2141,6 +2212,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
           self->directory.expire(now);
           if (self->coordinator) self->coordinator->expire(now);
           self->check_peer_transport_failures();
+          self->release_stashed_relay_requests();
           self->publish_directory();
           self->schedule_expiry();
         }
@@ -2410,7 +2482,12 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       snapshot.selected_candidate = transport.path.selected_candidate;
       snapshot.rtt = transport.path.rtt;
       snapshot.buffered_amount = transport.buffered_amount;
-      if (!snapshot.error && transport.error) snapshot.error = transport.error;
+      // A retiring attempt's close reason was already decided (clean
+      // supersession or its root-cause error); a transport teardown error
+      // arriving during the swap must not fabricate a session failure.
+      if (!snapshot.error && transport.error && !attempt.retiring) {
+        snapshot.error = transport.error;
+      }
     }
     return snapshot;
   }
@@ -2920,10 +2997,29 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         const bool was_authenticated =
             iterator->second.snapshot.state == NodePeerSessionState::authenticated;
         iterator->second.snapshot.state = NodePeerSessionState::closed;
+        const auto peer = iterator->second.snapshot.peer;
+        const auto restart = session_restarts.find(peer);
+        if (restart != session_restarts.end() &&
+            restart->second->superseded_attempt == request_id) {
+          // The peer completed the restart first and closed the superseded
+          // transport; the in-flight restart owns the successor, so record a
+          // clean supersession instead of a transport failure and do not
+          // reestablish on top of the pending replacement. The generic
+          // error-attach above already ran, so clear it before the snapshot.
+          iterator->second.snapshot.error.reset();
+          iterator->second.retiring = true;
+          finished_peer_sessions.push_back(peer_session_snapshot(iterator->second));
+          while (finished_peer_sessions.size() > lan.diagnostic_capacity) {
+            finished_peer_sessions.pop_front();
+          }
+          peer_attempt_by_endpoint.erase(peer);
+          peer_attempts.erase(iterator);
+          publish_peer_sessions();
+          return;
+        }
         if (!peers_closed && !iterator->second.retiring) {
           const auto error = diagnostics.last_error.value_or(
               node_error(ErrorCode::transport, "peer_session_closed"));
-          const auto peer = iterator->second.snapshot.peer;
           fail_peer_attempt(request_id, error);
           maybe_reestablish_peer_session(peer, was_authenticated);
           return;
@@ -4050,6 +4146,47 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     });
   }
 
+  // The deterministic LAN arbitration can retire the connection that
+  // authenticated first while its duplicate is still completing the hello
+  // exchange; coordinator frames queued on the doomed connection would be
+  // orphaned with no retransmission. Beginning the outbound attempt is
+  // therefore deferred until exactly one authenticated connection to the
+  // peer remains and no duplicate is still settling.
+  void maybe_begin_peer_attempt(DeviceEndpointKey peer) {
+    if (!coordinator || peers_closed || producers_stopped) {
+      return;
+    }
+    if (!is_lan_offer_owner(local_key(), peer)) {
+      return;
+    }
+    if (peer_attempt_by_endpoint.contains(peer)) {
+      return;
+    }
+    const auto active = active_connections.find(peer);
+    if (active == active_connections.end()) {
+      return;
+    }
+    auto winner = connections.find(active->second);
+    if (winner == connections.end() || !winner->second->authenticated) {
+      return;
+    }
+    const bool duplicate_settling = std::any_of(
+        connections.begin(), connections.end(), [&](const auto& item) {
+          const auto& candidate = item.second;
+          return candidate->id != winner->second->id &&
+                 (candidate->expected_peer == peer ||
+                  (candidate->peer && *candidate->peer == peer)) &&
+                 candidate->state != LanSignalingConnectionState::authenticated &&
+                 candidate->state != LanSignalingConnectionState::closed &&
+                 candidate->state != LanSignalingConnectionState::failed;
+        });
+    if (duplicate_settling) {
+      return;
+    }
+    auto begun = begin_peer_attempt(peer);
+    if (!begun) record_signaling_error(*begun.error_if());
+  }
+
   void authenticate_connection(const std::shared_ptr<TlsConnection>& connection,
                                DeviceEndpointKey peer) {
     if (!connections.contains(connection->id)) {
@@ -4069,6 +4206,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         if (!candidate_preferred || existing_preferred) {
           retire_connection(connection, LanSignalingConnectionState::closed,
                             arbitration);
+          // The surviving connection may have deferred its outbound attempt
+          // on this now-retired duplicate; the pair has settled.
+          maybe_begin_peer_attempt(peer);
           return;
         }
         retire_connection(existing_connection->second,
@@ -4085,10 +4225,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     update_tls_counts([](LanTlsSnapshot&) {});
     publish_signaling_connections();
     start_signaling_read(connection);
-    if (coordinator && is_lan_offer_owner(local_key(), peer)) {
-      auto begun = begin_peer_attempt(peer);
-      if (!begun) record_signaling_error(*begun.error_if());
-    }
+    maybe_begin_peer_attempt(peer);
   }
 
   void start_signaling_read(const std::shared_ptr<TlsConnection>& connection) {
@@ -4356,6 +4493,10 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return;
     }
     const auto peer = iterator->second->peer.value_or(iterator->second->expected_peer);
+    const bool was_active = [this, &peer, id] {
+      const auto active = active_connections.find(peer);
+      return active != active_connections.end() && active->second == id;
+    }();
     const auto active_attempt = peer_attempt_by_endpoint.find(peer);
     if (active_attempt != peer_attempt_by_endpoint.end()) {
       const auto attempt = peer_attempts.find(active_attempt->second);
@@ -4365,6 +4506,11 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     }
     record_signaling_error(error);
     retire_connection(iterator->second, LanSignalingConnectionState::failed, error);
+    // A failed duplicate that never won arbitration can be what kept the
+    // authenticated winner's outbound attempt deferred.
+    if (!was_active) {
+      maybe_begin_peer_attempt(peer);
+    }
   }
 
   void connection_failed(std::uint64_t id, const char* detail,
@@ -4375,6 +4521,11 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return;
     }
     auto connection = iterator->second;
+    const auto peer = connection->peer.value_or(connection->expected_peer);
+    const bool was_active = [this, &peer, id] {
+      const auto active = active_connections.find(peer);
+      return active != active_connections.end() && active->second == id;
+    }();
     const auto failure = tls_error(timeout ? ErrorCode::timeout : ErrorCode::signaling,
                                    detail, error);
     update_snapshot([&](NodeSnapshot& snapshot) {
@@ -4388,6 +4539,11 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       snapshot.last_error = failure;
     });
     retire_connection(connection, LanSignalingConnectionState::failed, failure);
+    // A failed duplicate that never won arbitration can be what kept the
+    // authenticated winner's outbound attempt deferred.
+    if (!was_active) {
+      maybe_begin_peer_attempt(peer);
+    }
   }
 
   void refresh_tls_counts(LanTlsSnapshot& tls) const {
@@ -4699,6 +4855,18 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   std::chrono::milliseconds relay_backoff{1000};
   bool relay_poll_timer_active{false};
   bool relay_heartbeat_timer_active{false};
+  // A relay-routed connect_request can arrive before the local directory has
+  // the initiator's verified public key: both nodes log in concurrently and
+  // the relay directory only refreshes on heartbeat. Denying there kills the
+  // initiator's attempt permanently (it has no retransmission), so such
+  // envelopes are stashed briefly while a directory refresh is triggered and
+  // delivered to the coordinator once the identity resolves. The deadline
+  // hands the envelope through unchanged, preserving the explicit deny.
+  struct StashedRelayRequest {
+    SignalingEnvelope envelope;
+    std::optional<boost::asio::steady_timer> deadline;
+  };
+  std::map<DeviceEndpointKey, StashedRelayRequest> stashed_relay_requests;
   executor::comm::MpscChannel<InterfaceScanResult> scan_results;
   executor::comm::DoubleBuffer<NodeSnapshot> snapshots;
   executor::comm::DoubleBuffer<std::vector<EndpointDirectoryEntrySnapshot>> endpoint_snapshots;
