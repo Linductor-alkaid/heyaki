@@ -37,6 +37,7 @@ for details.
 | M3B | Relay control plane, coturn integration | Done |
 | M4 | Connectivity MVP (WebRTC sessions, dual routing, session restart, TUI) | Implemented (CI matrix pending) |
 | M5–M9 | Authorization/byte-stream, message RPC, event & file transfer, remote shell, production hardening | Planned |
+| M10 | Gateway proxy service (scoped L4 gateway over an authorized session, protocol 1.3) | Planned |
 
 ## Features
 
@@ -110,6 +111,7 @@ is not present. Performance tests include session-establishment P95 budgets.
 - [Architecture](docs/design/heyaki-architecture.md)
 - [Wire Protocol v1](docs/design/heyaki-wire-protocol.md)
 - [LAN serverless connectivity](docs/design/lan-serverless-connectivity.md)
+- [Gateway proxy service](docs/design/gateway-service.md)
 - [Concurrency and shutdown](docs/design/concurrency-and-shutdown.md)
 - [Threat model](docs/security/threat-model.md)
 - [Implementation plan and milestones](docs/todolists/heyaki-implementation-plan.md)

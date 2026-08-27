@@ -1,13 +1,15 @@
 # Heyaki 设备通信基础设施设计
 
-> 状态：架构设计修订版（授权密码、自动登录、LAN 无服务器连接与 `heyaki-tui`）
-> 日期：2026-08-15
+> 状态：架构设计修订版（授权密码、自动登录、LAN 无服务器连接、`heyaki-tui` 与 Gateway 代理服务）
+> 日期：2026-08-27
 > 目标版本：MVP 至 v1
 > 适用范围：设备端 C++20 库、`heyaki-tui`、注册/信令服务、NAT 穿透与中继服务
 
 ## 1. 摘要
 
-Heyaki 是面向设备间通信的 C++ 基础设施库，并提供名为 `heyaki-tui` 的可直接使用的 FTXUI 终端程序。名称取自打招呼的声音 “heya”，并将 “kit” 的 `t` 隐去，与前缀组成 “aki”。它提供设备发现与连接、消息、双向字节流、文件传输、远程 Shell、RPC 和远程事件总线。同一局域网中的设备应能在没有中心服务器时自主发现并建立直连；跨 NAT 或受限网络则优先建立端到端直连，并在直连失败时自动切换到中继。
+Heyaki 是面向设备间通信的 C++ 基础设施库，并提供名为 `heyaki-tui` 的可直接使用的 FTXUI 终端程序。名称取自打招呼的声音 “heya”，并将 “kit” 的 `t` 隐去，与前缀组成 “aki”。它提供设备发现与连接、消息、双向字节流、文件传输、远程 Shell、RPC、远程事件总线，以及
+默认关闭的受限 Gateway 代理服务：已授权设备可以将对端作为应用层网关，访问对端网络内
+允许的目标或经对端出公网。同一局域网中的设备应能在没有中心服务器时自主发现并建立直连；跨 NAT 或受限网络则优先建立端到端直连，并在直连失败时自动切换到中继。
 
 系统采用“轻控制面、端到端数据面”原则：
 
@@ -46,17 +48,24 @@ Heyaki 是面向设备间通信的 C++ 基础设施库，并提供名为 `heyaki
 9. 设备本地初始化时设置授权密码，未知设备验证该密码后获得目标设备授予的持久信任。
 10. 已登记设备后续启动时自动完成 relay 身份认证与重连，不再次要求用户输入注册凭据。
 11. 提供覆盖所有 Heyaki 能力的 `heyaki-tui`，并允许库应用复用其创建的设备档案。
+12. 已授权设备可以请求将对端作为受限应用层网关：经对端的已认证会话，以字节流代理形态
+    访问对端 gateway profile 允许的 TCP 目标（对端所在网络的节点或经对端出公网）。该
+    能力默认关闭、范围显式受限、全程审计，且不创建虚拟网卡或透明 IP 路由。
 
 ### 2.2 非目标
 
-- 不实现通用 VPN、三层虚拟网络或透明 IP 路由。
+- 不实现通用 VPN、三层虚拟网络或透明 IP 路由。受限的应用层 Gateway 代理服务（§8.6）
+  不属于此类：它只提供显式授权的字节流代理，不创建虚拟网卡、不接管路由表；L3/TUN
+  网关形态仍为延后项（计划 `POST-11`），须先修订本条非目标并单独安全立项。
 - 不保证任意 NAT 下均可直连。对称 NAT、运营商级 NAT、UDP 禁止和企业代理场景必须依靠中继。
 - 不保证跨 VLAN、路由子网、阻止 multicast 的网络或启用 AP client isolation 的 Wi-Fi 能够无服务器发现/直连。
 - 不提供离线消息、持久化事件、全局有序广播或“恰好一次”投递。
 - 不让中继成为 RPC 网关、文件服务器、Shell 跳板机或业务授权中心。
 - 不向 relay 上传或保存设备授权密码明文；授权密码由目标设备端验证。
 - 不允许任意设备仅凭“已注册”就获得远程执行权限。
-- v1 不支持设备间多跳转发；A 到 C 的流量不能默认经 B 路由。
+- v1 不支持设备间多跳转发；A 到 C 的流量不能默认经 B 路由。访问另一台 Heyaki 设备 C
+  应使用 A 自身的 LAN/relay 路由直连；Gateway 代理服务只面向对端网络内的非 Heyaki
+  目标与公网出口，不转发 Heyaki 会话。
 
 ### 2.3 设计原则
 
@@ -294,6 +303,8 @@ rpc.device.configure
 event.telemetry.subscribe
 file.push:inbox
 shell.open:maintenance
+gateway.use
+gateway.provide:home-lan
 ```
 
 授权密码提供默认的首次信任获取方式：
@@ -497,6 +508,7 @@ public:
 | `heyaki.event.*` | 按订阅 QoS | 可选无序 | 高频遥测可使用 partial reliability |
 | `heyaki.file.<id>` | 可靠 | 有序 | 每个活跃传输一个或少量通道 |
 | `heyaki.shell.<id>` | 可靠 | 有序 | 交互数据与控制帧，延迟优先 |
+| `heyaki.gateway.<id>` | 可靠 | 有序 | 每个活跃 gateway 连接一个通道；STREAM_* 帧承载 §8.6 的受限代理字节流 |
 
 DataChannel 分离不能完全消除同一 SCTP association 上的带宽竞争。设备端必须实施加权调度：控制与 Shell 优先，RPC/消息次之，事件和文件使用剩余预算。文件发送需在 `bufferedAmount` 到达高水位时暂停，并在 low-water 回调后恢复。
 
@@ -656,6 +668,27 @@ PTY 模式通常合并 stdout/stderr。Linux 使用受控 PTY 子进程；Window
 - OS 沙箱、低权限账户、namespace/job object/seccomp 等由部署策略启用。
 
 对于自动化命令，优先暴露窄 RPC，而不是开放 Shell。Shell 主要用于经过审计的运维交互。
+
+### 8.6 Gateway 代理服务
+
+Gateway 代理让已授权设备 A 经与对端 B 的认证会话，访问 B 网络上下文中允许的目标：B
+所在网络的其他节点，或经 B 出公网。它是对架构原则的一次受控扩展，而不是 VPN：
+
+- **形态是 L4 字节流代理**：复用 `ByteStream` 与 `STREAM_*` 帧协议，B 侧准入通过后在
+  本机网络上下文 dial 目标并双向搬运字节；域名由 B 侧解析，A 侧应用通过库 API 或可选
+  的本地 SOCKS5 前端使用。不创建虚拟网卡、不做透明 IP 路由、不转发 Heyaki 会话。
+- **默认关闭、最小授权**：需要 A 侧 `gateway.use` 与 B 侧 `gateway.provide:<profile>`
+  双重 scope，不进入任何标准 pairing 模板；profile 显式约束 CIDR、端口、公网开关、并发
+  与字节配额、时长，默认仅允许 B 的直连网段。
+- **协议走 minor 路径**：protocol 1.3 新增 capability bit `gateway_v1` 与 `StreamOpen`
+  可选 `gateway` 字段，不新增帧类型（数值表在 1.2 后已封死）。
+- **网关侧安全义务**：对环回、链路本地、自身管理网段与隧道端点实施 SSRF 防护；错误映射
+  粗粒度化以防探测 oracle；满载 fail-closed；五元组审计且目标 host 遵守 `safe_detail`
+  纪律；TURN 数据路径上的 gateway 字节独立计量并可按策略限制。
+- **数据面不变**：gateway 流量走既有端到端加密会话，relay 与 TURN 仍只见密文。
+
+详细协议、授权、并发与测试设计见
+[Gateway 代理服务设计](gateway-service.md)。
 
 ## 9. 可靠性、背压与重连
 
@@ -879,6 +912,7 @@ TUI 至少提供以下工作视图：
 | Stream | 打开通用 ByteStream，以文本或十六进制模式双向收发并显式 FIN/reset |
 | 文件 | 本地/远端逻辑目录、push/pull、进度、限速、暂停、取消和断点续传 |
 | Shell | 选择获准 profile、交互终端、resize/signal、退出状态和会话审计 |
+| Gateway | A 侧发起 gateway、查看目标/路径/配额与 SOCKS 前端状态；B 侧请求同意/拒绝、profile 管理与活跃连接字节审计 |
 | 诊断 | 有界日志、discovery/信令/channel 队列、signaling/data path、吞吐和协议错误 |
 
 RPC explorer 优先使用受权限控制的 service descriptor/reflection；目标未提供 descriptor 时，用户可以载入 descriptor set 或使用 raw bytes/JSON mapping。TUI 不能假定任意远端 RPC 都可被动态调用。
@@ -933,6 +967,8 @@ resource_exhausted, remote_error, outcome_unknown, internal
 - RPC latency/status、进行中数量和 overload；
 - 文件吞吐、恢复次数、hash 失败、磁盘错误；
 - Shell 会话数、持续时间、退出原因；
+- gateway 准入结果分布、活跃流数、按 profile 的字节/速率与配额消耗、TURN 路径上的
+  gateway 字节占比、dial P95；
 - event subscriber lag 与 drop；
 - TUI event queue 深度、合并/drop 和渲染延迟。
 
@@ -961,6 +997,7 @@ resource_exhausted, remote_error, outcome_unknown, internal
 19. relay 与 TURN 实施认证、速率限制、带宽配额、连接上限和反射放大防护。
 20. 吊销设备后拒绝新登录与新会话；现有会话是否立即断开由安全策略明确配置。
 21. 发布前形成 threat model，至少覆盖恶意 LAN 设备、被控制的 relay、信令 MITM、授权密码猜测、ProfileStore 窃取、重放、资源耗尽、协议降级和供应链风险。
+22. Gateway 代理默认关闭；授权绑定最小范围 profile（CIDR/端口/公网开关/配额），B 侧对环回、链路本地、自身管理网段与隧道端点实施 SSRF 防护并在 DNS 解析后逐地址校验；错误映射粗粒度化；审计不记录未通过校验的目标 host 自由文本。
 
 ## 15. 测试与验收
 
@@ -1055,6 +1092,15 @@ LAN-only、direct-with-relay-signaling 与 TURN 三条组合。
 - LAN discovery/TLS signaling 的多网卡、Windows firewall、洪泛、长稳和资源上限；
 - 基于指标决定是否需要 QUIC backend、跨 region 或外部事件 Broker。
 
+### 阶段 6：Gateway 代理服务（v1.x，M10）
+
+- 冻结 protocol 1.3 变更单：capability bit `gateway_v1`、`StreamOpen` 可选 `gateway`
+  字段与 `GatewayConnect` schema，不新增帧类型，交付 golden vectors；
+- 实现 `gateway.use`/`gateway.provide:<profile>` 授权、profile 配置与 B 侧准入
+  （含 SSRF/环回/管理网段防护与审计）；
+- 实现 A 侧流 API 与可选 SOCKS5 前端，交付 TUI Gateway 视图；
+- 完成 TURN 路径计量与安全评审后按部署策略启用；v1.0 发布不被本阶段阻塞。
+
 ## 17. 需要尽早确认的产品决策
 
 这些决策不阻碍当前架构，但会改变默认限制和部署方式：
@@ -1071,6 +1117,7 @@ LAN-only、direct-with-relay-signaling 与 TURN 三条组合。
 10. LAN v1 是否明确只覆盖同一二层 multicast domain，跨 VLAN 统一依赖 relay 或手工 endpoint hint。
 11. 启用 LAN 模式时广播完整 `DeviceId`/`EndpointId` 的元数据暴露是否可接受。
 12. 自动连接是否保持“仅已信任 peer”，以及默认 peer/pending attempt 上限。
+13. Gateway 代理的默认 profile 范围与边界：默认仅 B 直连网段、公网出口是否允许及如何显式开启；首版仅 TCP；TURN 数据路径上 gateway 流量是允许、限速还是禁止；gateway 与 shell 同时授权是否要求显式确认。
 
 ## 18. 结论
 
@@ -1086,4 +1133,4 @@ Heyaki 的可行实现不应从自研可靠传输开始，而应把成熟的 ICE
 公钥身份。架构的关键不是隐藏所有失败，而是使发现、注册、信令路由、配对、路径变化、拥塞、
 重复、断线和不确定结果拥有明确语义。只要公共 API 保持 transport-neutral、发现不承担授权、
 服务端不吸收业务职责、设备身份与细粒度授权从第一版建立，后续增加 mDNS provider、本机
-agent、QUIC、跨区域 relay 或外部 Broker 都可以独立演进，而无需推翻上层协议。
+agent、QUIC、跨区域 relay、外部 Broker 或 Gateway 代理服务都可以独立演进，而无需推翻上层协议。
