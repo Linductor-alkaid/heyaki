@@ -1,6 +1,6 @@
 # M4：公共签名信令、WebRTC 与最小会话
 
-> - 状态：第 22 轮实施完成，待 CI 网络矩阵验证后关闭（2026-08-24）
+> - 状态：已完成，2026-08-27 关闭（第 23 轮 CI 网络矩阵证据落地后）
 > - 所属计划：[Heyaki MVP 至 v1 实施 TODO 计划](heyaki-implementation-plan.md)
 > - 前置：M3A；完整退出还需 M3B | 建议发布点：v0.1 Connectivity MVP
 
@@ -9,8 +9,12 @@
 替换 transport、同 SessionId、epoch+1，不伪装无损迁移）。退出条件中三设备 LAN、
 伪造双方拒绝、双路由仲裁、TUI 选择建连、P95（直连半边 + TURN fallback 半边经
 CI coturn 矩阵）、泄漏全枚举（shutdown matrix + 既有循环测试）与网络矩阵
-（本地可运行部分 + CI 专用场景）均已落地；网络矩阵与 TURN fallback P95 的
-最终证据在 CI coturn-topology job 的 `heyaki_m4_network_matrix` 中产生。
+（本地可运行部分 + CI 专用场景）均已落地。第 23 轮修复了 executor 升级与 relay
+唤醒工作放大出的三个时序竞态后，CI run 33094431955（提交 `22802b8`）10 个 job
+全部通过，`heyaki_m4_network_matrix` 以 `MATRIX_OK` 收官（direct 1072ms；
+turn_fallback 六循环全过、P95 2203ms < 5s 门禁；udp_blocked 有界显式失败；
+lossy 6364ms；relay_restart 重登录恢复 ready；forced_turn 维持已记录的
+pinned libjuice `SCENARIO_BOUNDARY`）。
 
 ## 任务清单
 
@@ -619,3 +623,46 @@ ICE restart 重协商。
   配额（max-bps 预留制，基线仅容 8 个并发 allocation，曾致 cycle4+ 全部 486）、
   双实例端口冲突（模板 alt 监听 3479）、bootstrap token 次数、矩阵参与者 CLI
   argc、m3a ASan/Windows 慢机的 discovery 预算与 relay_restart 场景脚本加固。
+
+### 第23轮（2026-08-27）
+
+- **背景**：executor pin 升级（077d854，Android 可移植性）与 relay 控制面工作
+  （有界写队列、活动唤醒、等待式快照发布）合入后线程交错改变，M4 CI 门禁出现
+  稳定回归：gcc/clang Release 的 `heyaki_m4_topology_matrix` 交叉建连、gcc
+  Release 的 relay 回退 e2e、ASan 的 `heyaki_m4_session_restart_e2e`，以及
+  coturn 矩阵 turn_fallback/relay_restart 的 `connect_denied`。本地 2 核绑核
+  复现并逐项定位，确认三个互相独立的**既有**时序竞态被放大，executor 本身无缺陷：
+  - **LAN 仲裁孤儿化 connect_request**：owner 侧第一条完成认证的连接（可能是
+    仲裁即将淘汰者）上启动出站 attempt；被淘汰连接上在途/排队的协调器帧无人
+    接管且无重发，attempt 直到 TTL 过期。修复：`maybe_begin_peer_attempt` 将
+    begin 推迟到该 peer 恰剩一条已认证连接且无未决重复连接（仲裁 settle），
+    重复连接的失败路径解锁 winner。本地 2 核循环从 3/8 失败到 0/30。
+  - **relay 身份缺失硬拒**：双方并发登录时，connect_request 可能先于响应方
+    relay 目录拿到发起方已验证公钥到达（目录仅随心跳刷新）；身份缺失被当作
+    硬 deny，发起方 attempt 永久死亡（矩阵 `connect_denied` 与 relay 回退 e2e
+    失败的公共签名）。修复：此类 envelope 有界暂存（≤2.5s，容量受
+    `pending_signaling_capacity` 约束）并触发目录重查，身份可解析后原样移交
+    协调器（replay cache 首见，语义不变）；超时按现状移交，deny 与 replay
+    姿态不变。m3b 回退 e2e 从 ~1/8 到 0/24。
+  - **restart 替换被记为 transport 失败**：对端先完成 restart 关闭旧 transport
+    时，响应侧 closed 竞态与 `peer_session_snapshot` 对退役快照的 transport
+    错误注入都会把干净替换伪造成 `peer_connection_failed`。修复：在途 restart
+    所替换 attempt 的关闭按干净替换记录（不触发 reestablish），retiring attempt
+    不再吸收迟到的 transport 拆除错误。restart e2e 从 2-6/10-20 到 0/25。
+- **矩阵参与者收尾竞态**：relay_restart 场景中参与者在 hold 结束即采样，快速
+  认证时退出瞬间与第二次重连+登录完成相撞，`relay_state` 偶报 degraded（会话
+  本身已恢复）。参与者 hold 后增加 ≤8s 的有界 relay 重登录宽限再采样（`22802b8`）。
+- **提交路径说明**：本地提交被 Mimosa L3 门禁以 third_party（protobuf/zstd
+  自带测试脚本）既有高危项强制拦截，与拟提交内容无关且 pinned 依赖不可修改；
+  按仓库既有先例走 AGENTS.md 的 GitHub Git Database API 回退（`1b3edf1`、
+  `22802b8`，均 `force:false` 基于已核实的远端 head）。
+- **验证**：本地 GCC Debug/Release 全量 42/42，ASan 全量（m3a 发现预算偶发
+  单独复跑通过）、UBSan/TSan（关 ASLR）定向与全量通过，禁异常树受影响的
+  topology/restart/shutdown 目标通过（m3b relay 测试目标在两个 executor 版本
+  下均因 `interfaces.hpp` 的 try/catch 无法以 `-fno-exceptions` 编译，先前已
+  存在、CI 无 noex job）；`NodeReconnectsAfterRelayRestart` 在 clang Debug 的
+  单次失败重跑通过（2cc91b0 加固过的计数竞态家族偶发）。最终 CI run
+  `33094431955`（`22802b8`）10 job 全绿，`heyaki_m4_network_matrix`
+  `MATRIX_OK`：direct 1072ms、turn_fallback 6/6 且 P95 2203ms、udp_blocked
+  有界显式失败、lossy 6364ms、relay_restart 恢复 ready、forced_turn 维持
+  `SCENARIO_BOUNDARY`。据此 M4 关闭。

@@ -1,9 +1,11 @@
 # Heyaki MVP 至 v1 实施 TODO 计划
 
-> - 状态：M3B 已关闭；M4 第 22 轮实施完成（17/17 任务完成：M4-10 以 protocol
->   1.2 控制通道重协商落地，泄漏全枚举 shutdown matrix、本地网络矩阵与 CI
->   coturn 网络矩阵/TURN fallback P95 场景均已交付，等待 CI 网络矩阵证据后关闭）
-> - 日期：2026-08-24
+> - 状态：M3B 已关闭；M4 已关闭（17/17 任务与全部退出条件完成：第 23 轮修复
+>   executor/relay 时序变化放大的三个既有竞态后，CI 网络矩阵以 MATRIX_OK 收官，
+>   2026-08-27）；
+>   2026-08-27 计划修订：新增 M10 Gateway 代理服务里程碑（设计见
+>   [Gateway 代理服务设计](../design/gateway-service.md)）
+> - 日期：2026-08-27
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)、[局域网无服务器连接设计](../design/lan-serverless-connectivity.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
 
@@ -30,6 +32,7 @@
 - [ ] `SCOPE-07` v1 支持同一二层 multicast domain 内无 relay/STUN/TURN 的自主发现、认证信令和 WebRTC host-candidate 直连。
 - [ ] `SCOPE-08` LAN 与 relay 是可组合的 discovery/signaling route；v1 数据面仍只有 `libdatachannel`，不新增 LAN 专用业务 transport。
 - [ ] `SCOPE-09` LAN serverless 不承诺跨 VLAN、访客 Wi-Fi client isolation、阻止 multicast/入站连接的网络；这些场景使用 relay 或明确失败。
+- [ ] `SCOPE-10` v1.0 不包含 Gateway 代理服务；gateway 以 M10（v1.x）交付，且只以显式授权的 L4 字节流代理形态存在，复用 ByteStream 与 TrustGrant，不新增帧类型。L3/TUN 网关、UDP 转发与 Heyaki 会话多跳转发不属于本计划。
 
 ### 1.2 不可破坏的架构约束
 
@@ -75,11 +78,13 @@
 | M7 | 远程事件、文件传输与对应 TUI | M6 | v0.3 Data beta |
 | M8 | Remote Shell 与安全终端 UI | M7 | v0.4 Shell beta |
 | M9 | 生产加固、跨平台、兼容性与发布 | M8 | v1.0 |
+| M10 | Gateway 代理服务（受限 L4 网关） | M5 | v1.1 Gateway beta |
 
 Serverless 关键路径为 `M0 -> M1 -> M2 -> M3A -> M4 -> M5 -> M6 -> M7 -> M8 -> M9`；
 relay 路径 `M2 -> M3B -> M4` 可与 M3A 并行，但 M4 完整退出要求 LAN 与 relay/TURN 两组门禁
 都通过。TUI 不作为最后一次性补做的界面工程，而是在 M3A、M3B、M4、M6、M7、M8 中按公共
-API 逐步交付，以持续充当端到端验收客户端。
+API 逐步交付，以持续充当端到端验收客户端。M10 依赖 M5 的 ByteStream 与 TrustGrant
+scope，可与 M7/M8 并行实施，但 gateway 不进入 v1.0 发布门禁，作为 v1.x 能力交付。
 
 ### 2.1 产品决策默认值
 
@@ -97,6 +102,7 @@ API 逐步交付，以持续充当端到端验收客户端。
 - [ ] `DEC-10` LAN serverless 范围（默认仅同一二层 multicast domain；跨 VLAN 使用 relay/显式 hint）。
 - [ ] `DEC-11` 发现协议（默认有界 Heyaki UDP multicast；mDNS/DNS-SD 延后）。
 - [ ] `DEC-12` LAN 可见性与自动连接（启用时暴露完整 DeviceId/EndpointId、不广播名称/manifest；仅自动连接已信任 peer）。
+- [ ] `DEC-13` Gateway 代理默认值（默认关闭、不入标准 pairing 模板；首版仅 TCP；默认 profile 仅允许 B 直连网段，公网出口显式开启；TURN 数据路径上 gateway 流量默认允许但独立计量，可配置限速或禁止；gateway 与 shell 同时授权要求显式确认）。
 
 ---
 
@@ -113,12 +119,13 @@ API 逐步交付，以持续充当端到端验收客户端。
 | M2 | [m2-runtime-identity.md](m2-runtime-identity.md) | 已完成 | executor/Asio runtime、身份与密码材料、ProfileStore/TrustStore；2026-08-15 正式准入 M3A/M3B。 |
 | M3A | [m3a-lan-serverless.md](m3a-lan-serverless.md) | 已完成 | LAN multicast discovery、TLS 本地信令与 local-only onboarding；2026-08-16 最终退出验收通过。 |
 | M3B | [m3b-relay-control-plane.md](m3b-relay-control-plane.md) | 已完成 | relay 登记/登录/租约/信令转发、TURN credential 与 TUI onboarding；15 轮记录，2026-08-16 关闭。 |
-| M4 | [m4-connectivity-mvp.md](m4-connectivity-mvp.md) | 第 22 轮完成 | 公共签名信令、WebRTC/ICE/TURN 与最小认证会话；17/17 任务完成、退出条件全部达成（网络矩阵与 TURN fallback P95 的最终证据由 CI `heyaki_m4_network_matrix` 产生）。 |
+| M4 | [m4-connectivity-mvp.md](m4-connectivity-mvp.md) | 已完成 | 公共签名信令、WebRTC/ICE/TURN 与最小认证会话；17/17 任务完成、退出条件全部达成；第 23 轮修复三个被时序变化放大的既有竞态后，CI run 33094431955 全绿、`heyaki_m4_network_matrix` MATRIX_OK（turn_fallback P95 2203ms），2026-08-27 关闭。 |
 | M5 | [m5-authorization-bytestream.md](m5-authorization-bytestream.md) | 未开始 | 会话授权（pairing/TrustGrant）、通道调度与 ByteStream。 |
 | M6 | [m6-message-rpc.md](m6-message-rpc.md) | 未开始 | 消息、unary RPC 与对应 TUI。 |
 | M7 | [m7-event-file-transfer.md](m7-event-file-transfer.md) | 未开始 | 远程事件与文件传输。 |
 | M8 | [m8-remote-shell.md](m8-remote-shell.md) | 未开始 | Remote Shell 与安全终端 UI（独立安全里程碑，默认关闭）。 |
 | M9 | [m9-production-hardening.md](m9-production-hardening.md) | 未开始 | 生产加固、跨平台、兼容性与 v1 发布。 |
+| M10 | [m10-gateway-proxy.md](m10-gateway-proxy.md) | 未开始 | 受限 L4 Gateway 代理：protocol 1.3 变更单、授权/profile、B 侧网关服务、A 侧 API 与可选 SOCKS5 前端。 |
 
 ---
 
@@ -155,6 +162,7 @@ API 逐步交付，以持续充当端到端验收客户端。
 9. M7 先事件、再 ByteStream 上的文件协议和安全落盘；恢复协议通过故障注入后再开放 TUI push/pull。
 10. M8 的 OS Shell backend、协议、VT UI 和安全评审分别提交；安全门禁未通过不启用生产配置。
 11. M9 只做加固、兼容、测量和交付，不在发布冲刺中加入 QUIC、跨 region、mDNS provider 或业务 Broker。
+12. M10 先冻结 protocol 1.3 变更单与 golden vectors（不新增帧类型），再实现 B 侧网关服务与授权准入，最后交付 A 侧流 API、SOCKS5 前端与 TUI Gateway 视图；v1.0 发布不被 M10 阻塞。
 
 每个里程碑建议以可回滚提交序列合入。若某阶段需要修改已冻结的身份、签名或 wire major，
 应暂停下游功能开发，先完成兼容性影响评审和 golden vector 更新。
@@ -173,3 +181,5 @@ API 逐步交付，以持续充当端到端验收客户端。
 - [ ] `POST-08` relay 离线 PAKE：只有产品明确要求目标设备离线时预验证密码，并接受扩大 relay 信任边界后立项。
 - [ ] `POST-09` mDNS/DNS-SD discovery provider：只有需要系统生态互操作或 multicast 私有协议受部署约束时立项；仍须服从 executor 生命周期和同一安全边界。
 - [ ] `POST-10` 隐私增强 LAN discovery：只有稳定 DeviceId/EndpointId 枚举不可接受时，设计配对窗口、旋转 hint 或已信任 peer 定向发现，不能以未认证名称替代身份。
+- [ ] `POST-11` L3 受限子网网关（TUN + NAT/受控放行）：只有 M10 的 L4 代理形态经真实使用证明不满足透明性/协议覆盖需求时立项；须先修订架构 §2.2 非目标条目（三层虚拟网络/透明 IP 路由），仿 M8 模式作为独立安全里程碑（默认关闭、特权部署、专项安全评审）。
+- [ ] `POST-12` Gateway UDP 转发（SOCKS5 UDP ASSOCIATE 或数据报流）：只有 TCP-only 的 M10 交付后出现明确 UDP 需求（如 QUIC、内网 UDP 服务）时立项；须定义数据报语义、无序通道选择与防放大策略。
