@@ -142,6 +142,8 @@ Result<std::uint64_t> count_rows(sqlite3* database, const char* table) {
       static_cast<std::uint64_t>(sqlite3_column_int64(statement.value_if()->get(), 0)));
 }
 
+RelayDatabaseSnapshot compute_snapshot(sqlite3* database);
+
 Result<void> validate_migration_history(sqlite3* database, int version) {
   auto statement = prepare(
       database, "SELECT COUNT(*) FROM schema_migrations WHERE version BETWEEN 1 AND ?");
@@ -444,6 +446,10 @@ struct RelayDatabase::Impl {
       : path(std::move(database_path)), database(handle) {}
 
   ~Impl() {
+    if (device_select != nullptr) {
+      sqlite3_finalize(device_select);
+      device_select = nullptr;
+    }
     if (database != nullptr) {
       sqlite3_close_v2(database);
     }
@@ -454,6 +460,13 @@ struct RelayDatabase::Impl {
 
   std::filesystem::path path;
   sqlite3* database{nullptr};
+  // Prepared once and reused; RelayDatabase calls are serialized by the owning
+  // relay strand (the connection itself is FULLMUTEX, but the cached statement
+  // is not safe for concurrent stepping).
+  mutable sqlite3_stmt* device_select{nullptr};
+  // Maintained incrementally by the mutators so snapshot() stays off the SQL
+  // hot path (login previously ran three COUNT(*) scans per call).
+  RelayDatabaseSnapshot cached_snapshot;
 };
 
 Result<RelayBootstrapTokenHash> hash_relay_bootstrap_token(
@@ -534,8 +547,9 @@ Result<RelayDatabase> RelayDatabase::open(const std::filesystem::path& database_
     sqlite3_close_v2(database);
     return Result<RelayDatabase>::failure(*validated.error_if());
   }
-  return Result<RelayDatabase>::success(
-      RelayDatabase{std::make_unique<Impl>(database_path, database)});
+  auto impl = std::make_unique<Impl>(database_path, database);
+  impl->cached_snapshot = compute_snapshot(database);
+  return Result<RelayDatabase>::success(RelayDatabase{std::move(impl)});
 }
 
 Result<void> RelayDatabase::validate_existing(const std::filesystem::path& database_path) {
@@ -553,28 +567,36 @@ const std::filesystem::path& RelayDatabase::path() const noexcept {
   return impl_ ? impl_->path : empty;
 }
 
-RelayDatabaseSnapshot RelayDatabase::snapshot() const {
+RelayDatabaseSnapshot compute_snapshot(sqlite3* database) {
   RelayDatabaseSnapshot output;
-  if (!impl_) {
-    return output;
-  }
-  auto version = pragma_int(impl_->database, "PRAGMA user_version");
+  auto version = pragma_int(database, "PRAGMA user_version");
   if (version) {
     output.schema_version = static_cast<std::uint32_t>(*version.value_if());
   }
-  auto devices = count_rows(impl_->database, "devices");
+  auto devices = count_rows(database, "devices");
   if (devices) {
     output.device_count = *devices.value_if();
   }
-  auto tokens = count_rows(impl_->database, "bootstrap_tokens");
+  auto tokens = count_rows(database, "bootstrap_tokens");
   if (tokens) {
     output.bootstrap_token_count = *tokens.value_if();
   }
-  auto audits = count_rows(impl_->database, "device_audit");
+  auto audits = count_rows(database, "device_audit");
   if (audits) {
     output.device_audit_count = *audits.value_if();
   }
   return output;
+}
+
+RelayDatabaseSnapshot RelayDatabase::snapshot() const {
+  if (!impl_) {
+    return RelayDatabaseSnapshot{};
+  }
+  return compute_snapshot(impl_->database);
+}
+
+RelayDatabaseSnapshot RelayDatabase::cached_snapshot() const {
+  return impl_ ? impl_->cached_snapshot : RelayDatabaseSnapshot{};
 }
 
 Result<RelayBootstrapTokenReceipt> RelayDatabase::create_bootstrap_token(
@@ -645,6 +667,7 @@ Result<RelayBootstrapTokenReceipt> RelayDatabase::create_bootstrap_token(
     rollback_best_effort(impl_->database);
     return Result<RelayBootstrapTokenReceipt>::failure(*committed.error_if());
   }
+  ++impl_->cached_snapshot.bootstrap_token_count;
   return Result<RelayBootstrapTokenReceipt>::success(RelayBootstrapTokenReceipt{
       .token_id = token_id,
       .token_hash = *hash.value_if(),
@@ -786,6 +809,7 @@ Result<RelayBootstrapConsumption> RelayDatabase::consume_bootstrap_token(
     rollback_best_effort(impl_->database);
     return Result<RelayBootstrapConsumption>::failure(*committed.error_if());
   }
+  ++impl_->cached_snapshot.device_audit_count;
 
   return Result<RelayBootstrapConsumption>::success(RelayBootstrapConsumption{
       .token_id = token_id,
@@ -836,6 +860,7 @@ Result<void> RelayDatabase::enroll_device(const RelayDeviceRecord& record,
     return Result<void>::failure(
         database_error(impl_->database, "relay_device_select_failed", step));
   }
+  const bool existing_device = step == SQLITE_ROW;
 
   if (step == SQLITE_ROW) {
     const auto existing_generation = static_cast<std::uint64_t>(
@@ -938,6 +963,10 @@ Result<void> RelayDatabase::enroll_device(const RelayDeviceRecord& record,
     rollback_best_effort(impl_->database);
     return Result<void>::failure(*committed.error_if());
   }
+  if (!existing_device) {
+    ++impl_->cached_snapshot.device_count;
+  }
+  ++impl_->cached_snapshot.device_audit_count;
   return Result<void>::success();
 }
 
@@ -951,34 +980,56 @@ Result<std::optional<RelayDeviceRecord>> RelayDatabase::device(
     return Result<std::optional<RelayDeviceRecord>>::failure(
         Error{ErrorCode::configuration, "relay_database", "relay_device_id_invalid"});
   }
-  auto select = prepare(
-      impl_->database,
+  constexpr const char* device_select_sql =
       "SELECT device_id, public_key, tenant, display_name, enrollment_generation, "
       "status, created_unix_milliseconds, updated_unix_milliseconds "
-      "FROM devices WHERE device_id = ?");
-  if (!select) {
-    return Result<std::optional<RelayDeviceRecord>>::failure(*select.error_if());
+      "FROM devices WHERE device_id = ?";
+  if (impl_->device_select == nullptr) {
+    sqlite3_stmt* statement = nullptr;
+    if (sqlite3_prepare_v2(impl_->database, device_select_sql, -1, &statement,
+                           nullptr) != SQLITE_OK) {
+      return Result<std::optional<RelayDeviceRecord>>::failure(
+          database_error(impl_->database, "relay_database_prepare_failed"));
+    }
+    impl_->device_select = statement;
   }
-  if (bind_blob(select.value_if()->get(), 1, device_id.bytes()) != SQLITE_OK) {
+  sqlite3_stmt* select = impl_->device_select;
+  (void)sqlite3_reset(select);
+  (void)sqlite3_clear_bindings(select);
+  if (bind_blob(select, 1, device_id.bytes()) != SQLITE_OK) {
     return Result<std::optional<RelayDeviceRecord>>::failure(
         database_error(impl_->database, "relay_device_select_bind_failed"));
   }
-  const int step = sqlite3_step(select.value_if()->get());
+  const int step = sqlite3_step(select);
   if (step == SQLITE_DONE) {
+    (void)sqlite3_reset(select);
     return Result<std::optional<RelayDeviceRecord>>::success(std::nullopt);
   }
   if (step != SQLITE_ROW) {
+    (void)sqlite3_reset(select);
     return Result<std::optional<RelayDeviceRecord>>::failure(
         database_error(impl_->database, "relay_device_select_failed", step));
   }
-  auto device_blob = column_blob<32U>(select.value_if()->get(), 0, "relay_device_id_corrupt");
-  auto public_key = column_blob<ed25519_public_key_bytes>(
-      select.value_if()->get(), 1, "relay_device_public_key_corrupt");
+  // Copy every column before resetting: an unreset statement holding a row
+  // keeps an implicit read transaction open and blocks later BEGIN IMMEDIATE
+  // on this connection (and writers on other connections).
+  auto device_blob = column_blob<32U>(select, 0, "relay_device_id_corrupt");
+  auto public_key =
+      column_blob<ed25519_public_key_bytes>(select, 1, "relay_device_public_key_corrupt");
+  const auto status_value = sqlite3_column_int(select, 5);
+  std::string tenant{column_string_view(select, 2)};
+  std::string display_name{column_string_view(select, 3)};
+  const auto enrollment_generation = static_cast<std::uint64_t>(
+      sqlite3_column_int64(select, 4));
+  const auto created_unix_milliseconds = static_cast<std::uint64_t>(
+      sqlite3_column_int64(select, 6));
+  const auto updated_unix_milliseconds = static_cast<std::uint64_t>(
+      sqlite3_column_int64(select, 7));
+  (void)sqlite3_reset(select);
   if (!device_blob || !public_key) {
     return Result<std::optional<RelayDeviceRecord>>::failure(
         device_blob ? *public_key.error_if() : *device_blob.error_if());
   }
-  const auto status_value = sqlite3_column_int(select.value_if()->get(), 5);
   if (status_value != 1 && status_value != 2) {
     return Result<std::optional<RelayDeviceRecord>>::failure(
         database_corrupt_error("relay_device_status_corrupt"));
@@ -986,15 +1037,12 @@ Result<std::optional<RelayDeviceRecord>> RelayDatabase::device(
   RelayDeviceRecord record;
   record.device_id = DeviceId{*device_blob.value_if()};
   record.public_key = *public_key.value_if();
-  record.tenant = std::string{column_string_view(select.value_if()->get(), 2)};
-  record.display_name = std::string{column_string_view(select.value_if()->get(), 3)};
-  record.enrollment_generation = static_cast<std::uint64_t>(
-      sqlite3_column_int64(select.value_if()->get(), 4));
+  record.tenant = std::move(tenant);
+  record.display_name = std::move(display_name);
+  record.enrollment_generation = enrollment_generation;
   record.status = static_cast<RelayDeviceStatus>(status_value);
-  record.created_unix_milliseconds = static_cast<std::uint64_t>(
-      sqlite3_column_int64(select.value_if()->get(), 6));
-  record.updated_unix_milliseconds = static_cast<std::uint64_t>(
-      sqlite3_column_int64(select.value_if()->get(), 7));
+  record.created_unix_milliseconds = created_unix_milliseconds;
+  record.updated_unix_milliseconds = updated_unix_milliseconds;
   return Result<std::optional<RelayDeviceRecord>>::success(std::move(record));
 }
 
@@ -1095,6 +1143,7 @@ Result<void> RelayDatabase::revoke_device(DeviceId device_id,
     rollback_best_effort(impl_->database);
     return Result<void>::failure(*committed.error_if());
   }
+  ++impl_->cached_snapshot.device_audit_count;
   return Result<void>::success();
 }
 
@@ -1123,10 +1172,14 @@ Result<void> RelayDatabase::record_device_audit(DeviceId device_id, std::string_
                          static_cast<sqlite3_int64>(occurred_unix_milliseconds)) != SQLITE_OK ||
       sqlite3_bind_text(insert.value_if()->get(), 4, metadata.data(),
                         static_cast<int>(metadata.size()), SQLITE_TRANSIENT) != SQLITE_OK) {
-    return Result<void>::failure(
-        database_error(impl_->database, "relay_database_audit_bind_failed"));
+      return Result<void>::failure(
+          database_error(impl_->database, "relay_database_audit_bind_failed"));
   }
-  return step_done(*insert.value_if());
+  auto inserted = step_done(*insert.value_if());
+  if (inserted) {
+    ++impl_->cached_snapshot.device_audit_count;
+  }
+  return inserted;
 }
 
 }  // namespace heyaki

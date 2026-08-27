@@ -136,9 +136,14 @@ Result<RelayLeaseHeartbeatResult> RelayLeaseTable::heartbeat(
   }
 
   if (impl_->entries.size() >= impl_->config.capacity) {
-    ++impl_->stats.capacity_rejected;
-    return Result<RelayLeaseHeartbeatResult>::failure(
-        lease_error(ErrorCode::resource_exhausted, "lease_capacity_exhausted"));
+    // Same policy as the TTL tables: evict expired leases before rejecting so
+    // stale entries cannot exhaust capacity between periodic sweeps.
+    expire(now);
+    if (impl_->entries.size() >= impl_->config.capacity) {
+      ++impl_->stats.capacity_rejected;
+      return Result<RelayLeaseHeartbeatResult>::failure(
+          lease_error(ErrorCode::resource_exhausted, "lease_capacity_exhausted"));
+    }
   }
   const auto device_it = impl_->endpoints_by_device.find(key.device_id);
   if (device_it != impl_->endpoints_by_device.end() &&
