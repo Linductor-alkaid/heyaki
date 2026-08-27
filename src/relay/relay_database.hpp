@@ -93,7 +93,11 @@ class RelayDatabase {
       const std::filesystem::path& database_path);
 
   [[nodiscard]] const std::filesystem::path& path() const noexcept;
+  // Live table counts straight from SQLite; reflects other connections.
   [[nodiscard]] RelayDatabaseSnapshot snapshot() const;
+  // In-process counters maintained by this connection's mutators. Accurate for
+  // the relay server (the sole writer) without per-login COUNT(*) scans.
+  [[nodiscard]] RelayDatabaseSnapshot cached_snapshot() const;
 
   [[nodiscard]] Result<RelayBootstrapTokenReceipt> create_bootstrap_token(
       std::string tenant, std::string_view bootstrap_token,
