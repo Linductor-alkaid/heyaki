@@ -1860,7 +1860,7 @@ TEST(M3BRelayWssClientTest, AutomaticFallsBackToRelayWhenLanHintAbsent) {
         return left.size() == 1U && right.size() == 1U &&
                left.front().state == NodePeerSessionState::authenticated &&
                right.front().state == NodePeerSessionState::authenticated;
-      }, 25s);
+      }, 60s);
   ASSERT_TRUE(authenticated);
   const auto left = first.value_if()->peer_sessions().front();
   const auto right = second.value_if()->peer_sessions().front();

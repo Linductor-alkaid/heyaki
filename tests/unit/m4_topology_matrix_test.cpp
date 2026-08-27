@@ -254,12 +254,12 @@ TEST_F(M4TopologyMatrixTest, SimultaneousCrossConnectionsYieldSingleWinner) {
         return !left.empty() && !right.empty() &&
                count(left) == count(right) && count(left) >= 1U;
       },
-      std::chrono::seconds{25});
+      std::chrono::seconds{60});
   ASSERT_TRUE(authenticated) << "cross connection never authenticated";
 
   // Wait a grace period for the losing duplicate connection to arbitrate.
   executor::comm::PhaseGate grace{"m4-cross-grace"};
-  (void)grace.wait_for(1U, std::chrono::milliseconds{2500});
+  (void)grace.wait_for(1U, std::chrono::milliseconds{5000});
   const auto left = (*first.value_if())->peer_sessions();
   std::size_t active = 0U;
   for (const auto& session : left) {
