@@ -1431,7 +1431,11 @@ TEST(M3BRelayWssClientTest, NodeReconnectsAfterRelayRestart) {
   ASSERT_TRUE(wait_until(
       [&] { return node.value_if()->snapshot().relay.state == RelayNodeState::ready; },
       3s));
-  ASSERT_GE(first_server.value_if()->snapshot().logins_completed, 1U);
+  ASSERT_TRUE(wait_until(
+      [&] {
+        return first_server.value_if()->snapshot().logins_completed >= 1U;
+      },
+      3s));
   ASSERT_TRUE(first_server.value_if()->shutdown().stopped);
 
   ASSERT_TRUE(wait_until(
@@ -1449,7 +1453,14 @@ TEST(M3BRelayWssClientTest, NodeReconnectsAfterRelayRestart) {
   ASSERT_TRUE(wait_until(
       [&] { return node.value_if()->snapshot().relay.state == RelayNodeState::ready; },
       5s));
-  ASSERT_GE(restarted_server.value_if()->snapshot().logins_completed, 1U);
+  // Node readiness only proves the login response reached the client; the
+  // server publishes its snapshot counters through the coalescing flush, so
+  // poll instead of asserting immediate visibility.
+  ASSERT_TRUE(wait_until(
+      [&] {
+        return restarted_server.value_if()->snapshot().logins_completed >= 1U;
+      },
+      3s));
   EXPECT_TRUE(node.value_if()->shutdown().stopped);
   EXPECT_TRUE(restarted_server.value_if()->shutdown().stopped);
 }

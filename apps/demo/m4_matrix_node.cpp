@@ -172,6 +172,12 @@ int run_node(const std::filesystem::path& database, std::string_view application
   relay.tenant = tenant;
   relay.heartbeat_interval = std::chrono::milliseconds{1000};
   relay.lease_duration = std::chrono::milliseconds{3000};
+  // The matrix exercises the protocol under adverse topologies, not the
+  // production reconnect backoff policy: cap the backoff so a lossy relay
+  // link recovers its control plane within the scenario budgets. Backoff
+  // semantics stay covered by NodeReconnectsWithBoundedBackoffAfterRelayOutage.
+  relay.minimum_backoff = std::chrono::milliseconds{1000};
+  relay.maximum_backoff = std::chrono::milliseconds{5000};
 
   auto profiled = profile.value_if();
   const auto device_id = profiled->device_id();
