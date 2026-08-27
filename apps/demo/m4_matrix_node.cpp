@@ -325,6 +325,18 @@ int run_node(const std::filesystem::path& database, std::string_view application
   if (authenticated) {
     executor::comm::PhaseGate hold{"heyaki-m4-matrix-hold"};
     (void)hold.wait_for(1U, options.hold);
+    // A relay restart mid-hold races this exit against the bounded-backoff
+    // re-login. Give the recovery a bounded grace to reach ready before
+    // sampling, so relay_state reports the recovery outcome instead of the
+    // exit instant; a genuinely broken re-login still surfaces as degraded.
+    const auto grace_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{8};
+    while (node.value_if()->snapshot().relay.state !=
+               heyaki::RelayNodeState::ready &&
+           std::chrono::steady_clock::now() < grace_deadline) {
+      executor::comm::PhaseGate grace{"heyaki-m4-matrix-grace"};
+      (void)grace.wait_for(1U, std::chrono::milliseconds{100});
+    }
   }
   const auto snapshot = node.value_if()->snapshot();
   std::cout << "MATRIX_RESULT authenticated=" << (authenticated ? 1 : 0)
