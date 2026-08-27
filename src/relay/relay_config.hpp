@@ -11,7 +11,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
-#include <functional>
 #include <string>
 
 namespace heyaki {
@@ -27,15 +26,6 @@ struct RelayServerConfig {
   std::chrono::milliseconds handshake_timeout{5000};
   std::chrono::milliseconds shutdown_timeout{2000};
   bool install_signal_handlers{true};
-  // Per-session watermark for queued outbound control frames (frame count and
-  // encoded byte total). Forwarded signaling to a session that stops reading is
-  // dropped with an endpoint_offline answer instead of growing without bound.
-  std::size_t control_write_queue_frames{64U};
-  std::size_t control_write_queue_bytes{1024U * 1024U};
-  // Invoked on the server strand whenever the observable snapshot tuple
-  // (state, stop_requested) changes. Lets embedders block on a completion
-  // notification (e.g. executor::comm::PhaseGate) instead of polling.
-  std::function<void()> on_state_changed;
   RelayLeaseConfig lease;
   RelayEndpointDirectoryConfig endpoint_directory;
   RelayTenantExposurePolicy endpoint_exposure;

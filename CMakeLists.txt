@@ -293,7 +293,7 @@ set(HEYAKI_INSTALL_TARGETS
 
 if(HEYAKI_BUILD_APPS)
   add_executable(heyaki-relay apps/relay/main.cpp)
-  target_link_libraries(heyaki-relay PRIVATE heyaki::relay)
+  target_link_libraries(heyaki-relay PRIVATE heyaki::relay executor::executor)
   heyaki_configure_target(heyaki-relay)
 
   add_library(heyaki_tui_setup STATIC

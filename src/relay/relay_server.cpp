@@ -98,14 +98,11 @@ struct RelayServer::Impl : std::enable_shared_from_this<RelayServer::Impl> {
         tls_context(boost::asio::ssl::context::tls_server),
         acceptor(strand),
         signals(strand),
-        sweep_timer(strand),
         snapshots("heyaki-relay-snapshots"),
         connection_capacity(config.max_connections) {
     current.state = RelayServerState::starting;
     current.listen_address = config.listen_address;
     current.connection_capacity = config.max_connections;
-    published_state = current.state;
-    published_stop_requested = current.stop_requested;
     publish();
   }
 
@@ -119,7 +116,6 @@ struct RelayServer::Impl : std::enable_shared_from_this<RelayServer::Impl> {
   Result<void> register_lifecycle();
   void begin();
   void start_accept();
-  void schedule_sweep();
   void on_accept(boost::system::error_code error, tcp::socket socket);
   void on_session_finished(const std::shared_ptr<RelaySession>& session,
                            bool handshake_timeout, bool handshake_error,
@@ -131,8 +127,7 @@ struct RelayServer::Impl : std::enable_shared_from_this<RelayServer::Impl> {
   void session_reject_policy(const std::shared_ptr<RelaySession>& session);
   Result<void> admit_control_request(const RelaySession& session,
                                      std::string_view tenant = {},
-                                     bool include_base_scopes = true,
-                                     const std::string* precomputed_rate_key = nullptr);
+                                     bool include_base_scopes = true);
   Result<void> require_active_device(const std::shared_ptr<RelaySession>& session,
                                      std::uint64_t now_unix_milliseconds);
   void session_handle_logged_in(const std::shared_ptr<RelaySession>& session,
@@ -161,7 +156,6 @@ struct RelayServer::Impl : std::enable_shared_from_this<RelayServer::Impl> {
   boost::asio::ssl::context tls_context;
   tcp::acceptor acceptor;
   boost::asio::signal_set signals;
-  boost::asio::steady_timer sweep_timer;
   std::optional<RelayDatabase> database;
   std::optional<RelayRateLimiter> rate_limiter;
   std::optional<RelayEnrollmentService> enrollment_service;
@@ -177,24 +171,6 @@ struct RelayServer::Impl : std::enable_shared_from_this<RelayServer::Impl> {
   bool shutdown_posted{false};
   bool shutdown_finished{false};
   std::atomic<bool> stop_requested{false};
-  RelayServerState published_state{RelayServerState::stopped};
-  bool published_stop_requested{false};
-  bool publish_deferred{false};
-  bool publish_pending{false};
-
-  // Coalesces the snapshot publications of one control message into a single
-  // DoubleBuffer write on message-handler exit.
-  struct DeferredPublish {
-    Impl& impl;
-    explicit DeferredPublish(Impl& value) : impl(value) { impl.publish_deferred = true; }
-    ~DeferredPublish() {
-      impl.publish_deferred = false;
-      if (impl.publish_pending) {
-        impl.publish_pending = false;
-        impl.publish();
-      }
-    }
-  };
 
   std::size_t connection_capacity{};
   std::uint64_t next_connection_id{1U};
@@ -203,20 +179,14 @@ struct RelayServer::Impl : std::enable_shared_from_this<RelayServer::Impl> {
 
 class RelaySession : public std::enable_shared_from_this<RelaySession> {
  public:
-  struct ControlWriteLimits {
-    std::size_t frames{64U};
-    std::size_t bytes{1024U * 1024U};
-  };
-
   RelaySession(tcp::socket socket, boost::asio::ssl::context& tls_context,
                std::shared_ptr<RelayServer::Impl> server, std::string connection_id_value,
-               std::string source_ip_value, ControlWriteLimits write_limits_value)
+               std::string source_ip_value)
       : websocket(std::move(socket), tls_context),
         timer(websocket.get_executor()),
         server(std::move(server)),
         connection_id(std::move(connection_id_value)),
-        source_ip(std::move(source_ip_value)),
-        write_limits(write_limits_value) {
+        source_ip(std::move(source_ip_value)) {
     websocket.read_message_max(max_relay_wss_control_frame_bytes);
     parser.header_limit(8192U);
     parser.body_limit(0U);
@@ -358,29 +328,20 @@ class RelaySession : public std::enable_shared_from_this<RelaySession> {
     }
   }
 
-  // Returns false when the per-session write watermark is exhausted; the
-  // caller decides between failing the session (responses) and answering the
-  // sender with endpoint_offline (forwarded signaling).
-  bool send_control(RelayWssControlType type, std::span<const std::byte> payload,
+  void send_control(RelayWssControlType type, std::span<const std::byte> payload,
                     bool close_after_write = false, bool protocol_error = false) {
     if (finished.load()) {
-      return false;
+      return;
     }
     auto encoded = encode_relay_wss_control_frame(type, payload);
     if (!encoded) {
       fail(false);
-      return false;
+      return;
     }
-    if (pending_control_writes.size() >= write_limits.frames ||
-        pending_control_bytes + encoded.value_if()->size() > write_limits.bytes) {
-      return false;
-    }
-    pending_control_bytes += encoded.value_if()->size();
     pending_control_writes.push_back(PendingControlWrite{std::move(*encoded.value_if()),
                                                          close_after_write,
                                                          protocol_error});
     pump_control_writes();
-    return true;
   }
 
   void pump_control_writes() {
@@ -389,7 +350,6 @@ class RelaySession : public std::enable_shared_from_this<RelaySession> {
     }
     auto entry = std::move(pending_control_writes.front());
     pending_control_writes.pop_front();
-    pending_control_bytes -= entry.bytes.size();
     control_write_in_flight = true;
     control_write_closes = entry.close_after_write;
     control_write_protocol_error = entry.protocol_error;
@@ -409,10 +369,8 @@ class RelaySession : public std::enable_shared_from_this<RelaySession> {
       fail(false);
       return;
     }
-    if (!send_control(RelayWssControlType::control_error, *payload.value_if(), true,
-                      protocol_error)) {
-      fail(false);
-    }
+    send_control(RelayWssControlType::control_error, *payload.value_if(), true,
+                 protocol_error);
   }
 
   // Operational signaling failures answer without terminating the control session;
@@ -423,10 +381,7 @@ class RelaySession : public std::enable_shared_from_this<RelaySession> {
       fail(false);
       return;
     }
-    if (!send_control(RelayWssControlType::control_error, *payload.value_if(), false,
-                      false)) {
-      fail(false);
-    }
+    send_control(RelayWssControlType::control_error, *payload.value_if(), false, false);
   }
 
   void on_control_written(boost::system::error_code error) {
@@ -529,9 +484,6 @@ class RelaySession : public std::enable_shared_from_this<RelaySession> {
   std::optional<DeviceId> logged_in_device_id;
   std::optional<EndpointId> logged_in_endpoint_id;
   std::string logged_in_tenant;
-  // SHA-256 rate-limit key of the logged-in tenant, computed once at login
-  // instead of on every admitted control message.
-  std::optional<std::string> logged_in_rate_key;
   std::uint64_t logged_in_generation{};
   std::chrono::steady_clock::time_point signaling_window_start{};
   std::size_t signaling_window_count{};
@@ -540,15 +492,13 @@ class RelaySession : public std::enable_shared_from_this<RelaySession> {
 
   // Serialized control writes: server-initiated pushes (forwarded signaling) may arrive
   // while a response write is in flight, so writes queue instead of assuming one
-  // request-response pair at a time. The queue is bounded by ControlWriteLimits.
+  // request-response pair at a time.
   struct PendingControlWrite {
     std::vector<std::byte> bytes;
     bool close_after_write{false};
     bool protocol_error{false};
   };
   std::deque<PendingControlWrite> pending_control_writes;
-  std::size_t pending_control_bytes{0};
-  ControlWriteLimits write_limits;
   bool control_write_in_flight{false};
   bool control_write_closes{false};
   bool control_write_protocol_error{false};
@@ -631,14 +581,14 @@ Result<void> RelayServer::Impl::initialize() {
       return Result<void>::failure(*memory_database.error_if());
     }
     database.emplace(std::move(*memory_database.value_if()));
-    current.database = database->cached_snapshot();
+    current.database = database->snapshot();
   } else {
     auto file_database = RelayDatabase::open(config.database_file);
     if (!file_database) {
       return Result<void>::failure(*file_database.error_if());
     }
     database.emplace(std::move(*file_database.value_if()));
-    current.database = database->cached_snapshot();
+    current.database = database->snapshot();
   }
   auto limits = RelayRateLimiter::create(config.rate_limits);
   if (!limits) {
@@ -732,36 +682,7 @@ void RelayServer::Impl::begin() {
       }
     });
   }
-  schedule_sweep();
   start_accept();
-}
-
-// Periodic expiry for the lease table and endpoint directory so per-message
-// handlers never run full-table scans; lookups still filter by expiry time, so
-// correctness does not depend on this cadence.
-void RelayServer::Impl::schedule_sweep() {
-  if (is_shutting_down(current.state)) {
-    return;
-  }
-  sweep_timer.expires_after(std::chrono::milliseconds{1000});
-  auto weak = weak_from_this();
-  sweep_timer.async_wait([weak](const boost::system::error_code& error) {
-    if (!error) {
-      if (auto self = weak.lock()) {
-        const auto now = std::chrono::steady_clock::now();
-        if (self->lease_table) {
-          self->lease_table->expire(now);
-          self->current.leases = self->lease_table->diagnostics();
-        }
-        if (self->endpoint_directory) {
-          self->endpoint_directory->expire(now);
-          self->current.endpoints = self->endpoint_directory->diagnostics();
-        }
-        self->publish();
-        self->schedule_sweep();
-      }
-    }
-  });
 }
 
 void RelayServer::Impl::start_accept() {
@@ -807,9 +728,7 @@ void RelayServer::Impl::on_accept(boost::system::error_code error,
   const std::string source_ip = endpoint_error ? "unknown" : remote.address().to_string();
   const std::string connection_id = std::to_string(next_connection_id++);
   auto session = std::make_shared<RelaySession>(
-      std::move(socket), tls_context, shared_from_this(), connection_id, source_ip,
-      RelaySession::ControlWriteLimits{config.control_write_queue_frames,
-                                       config.control_write_queue_bytes});
+      std::move(socket), tls_context, shared_from_this(), connection_id, source_ip);
   sessions.insert(session);
   current.active_sessions = sessions.size();
   publish();
@@ -854,7 +773,7 @@ void RelayServer::Impl::session_start_control(
 
 Result<void> RelayServer::Impl::admit_control_request(
     const RelaySession& session, std::string_view tenant,
-    bool include_base_scopes, const std::string* precomputed_rate_key) {
+    bool include_base_scopes) {
   if (!rate_limiter) {
     return Result<void>::failure(
         relay_error(ErrorCode::cancelled, "relay_rate_limiter_unavailable"));
@@ -874,15 +793,11 @@ Result<void> RelayServer::Impl::admit_control_request(
     }
   }
   if (admitted && !tenant.empty()) {
-    if (precomputed_rate_key != nullptr) {
-      admitted = rate_limiter->check_tenant(*precomputed_rate_key);
+    auto key = tenant_rate_key(tenant);
+    if (!key) {
+      admitted = Result<void>::failure(*key.error_if());
     } else {
-      auto key = tenant_rate_key(tenant);
-      if (!key) {
-        admitted = Result<void>::failure(*key.error_if());
-      } else {
-        admitted = rate_limiter->check_tenant(*key.value_if());
-      }
+      admitted = rate_limiter->check_tenant(*key.value_if());
     }
   }
   current.rate_limits = rate_limiter->diagnostics();
@@ -896,7 +811,6 @@ Result<void> RelayServer::Impl::admit_control_request(
 void RelayServer::Impl::session_handle_control(
     const std::shared_ptr<RelaySession>& session, std::span<const std::byte> payload,
     bool binary) {
-  DeferredPublish deferred_publish{*this};
   auto admitted = admit_control_request(*session);
   if (!admitted) {
     session->send_error(*admitted.error_if(), false);
@@ -969,12 +883,10 @@ void RelayServer::Impl::session_handle_control(
     current.login = login_service ? login_service->diagnostics()
                                   : RelayLoginServiceDiagnostics{};
     publish();
-    if (!session->send_control(
-            enrollment_challenge ? RelayWssControlType::enrollment_challenge_response
-                                 : RelayWssControlType::login_challenge_response,
-            *challenge.value_if())) {
-      session->fail(false);
-    }
+    session->send_control(
+        enrollment_challenge ? RelayWssControlType::enrollment_challenge_response
+                             : RelayWssControlType::login_challenge_response,
+        *challenge.value_if());
     return;
   }
 
@@ -1014,7 +926,7 @@ void RelayServer::Impl::session_handle_control(
         enrollment_service->complete(frame.value_if()->payload, unix_milliseconds_now());
     if (!completed) {
       ++current.control_rejected;
-      current.database = database->cached_snapshot();
+      current.database = database->snapshot();
       current.enrollment =
           enrollment_service->diagnostics();
       publish();
@@ -1037,13 +949,11 @@ void RelayServer::Impl::session_handle_control(
     session->challenge_kind = RelaySession::PendingChallengeKind::none;
     session->control_challenge_nonce.reset();
     ++current.enrollments_completed;
-    current.database = database->cached_snapshot();
+    current.database = database->snapshot();
     current.enrollment = enrollment_service->diagnostics();
     publish();
-    if (!session->send_control(RelayWssControlType::enrollment_result,
-                               *encoded.value_if())) {
-      session->fail(false);
-    }
+    session->send_control(RelayWssControlType::enrollment_result,
+                          *encoded.value_if());
     return;
   }
 
@@ -1082,7 +992,7 @@ void RelayServer::Impl::session_handle_control(
                                                      unix_milliseconds_now());
     if (!authenticated) {
       ++current.control_rejected;
-      current.database = database->cached_snapshot();
+      current.database = database->snapshot();
       current.login = login_service->diagnostics();
       publish();
       session->send_error(*authenticated.error_if(), false);
@@ -1094,17 +1004,13 @@ void RelayServer::Impl::session_handle_control(
     session->logged_in_device_id = authenticated.value_if()->device_id;
     session->logged_in_endpoint_id = authenticated.value_if()->endpoint_id;
     session->logged_in_tenant = authenticated.value_if()->tenant;
-    auto tenant_key = tenant_rate_key(authenticated.value_if()->tenant);
-    session->logged_in_rate_key =
-        tenant_key ? std::optional<std::string>{std::move(*tenant_key.value_if())}
-                   : std::nullopt;
     session->logged_in_generation =
         authenticated.value_if()->enrollment_generation;
     ++current.logins_completed;
     online_endpoints[RelayLeaseKey{.device_id = *session->logged_in_device_id,
                                    .endpoint_id = *session->logged_in_endpoint_id}] =
         session;
-    current.database = database->cached_snapshot();
+    current.database = database->snapshot();
     current.login = login_service->diagnostics();
     publish();
 
@@ -1121,9 +1027,7 @@ void RelayServer::Impl::session_handle_control(
       session->send_error(*encoded.error_if(), false);
       return;
     }
-    if (!session->send_control(RelayWssControlType::login_result, *encoded.value_if())) {
-      session->fail(false);
-    }
+    session->send_control(RelayWssControlType::login_result, *encoded.value_if());
     return;
   }
 
@@ -1138,10 +1042,8 @@ void RelayServer::Impl::session_handle_control(
           relay_error(ErrorCode::protocol, "relay_logged_in_message_invalid"), true);
       return;
     }
-    const std::string* tenant_rate_key_ptr =
-        session->logged_in_rate_key ? &*session->logged_in_rate_key : nullptr;
-    auto tenant_admitted = admit_control_request(*session, session->logged_in_tenant,
-                                                 false, tenant_rate_key_ptr);
+    auto tenant_admitted =
+        admit_control_request(*session, session->logged_in_tenant, false);
     if (!tenant_admitted) {
       session->send_error(*tenant_admitted.error_if(), false);
       return;
@@ -1311,19 +1213,9 @@ void RelayServer::Impl::session_handle_signaling_send(
     session->send_error(*encoded.error_if(), false);
     return;
   }
-  if (!target->send_control(RelayWssControlType::signaling_deliver,
-                            *encoded.value_if())) {
-    // The target session stopped reading and its bounded write queue filled;
-    // answer the sender instead of buffering the frame without bound.
-    ++current.signaling_rejected;
-    ++current.signaling_backpressure_dropped;
-    publish();
-    session->send_signaling_error(
-        relay_error(ErrorCode::endpoint_offline, "signaling_target_backpressure"));
-    return;
-  }
   ++current.signaling_forwarded;
   publish();
+  target->send_control(RelayWssControlType::signaling_deliver, *encoded.value_if());
 }
 
 void RelayServer::Impl::session_handle_logged_in(
@@ -1391,10 +1283,8 @@ void RelayServer::Impl::session_handle_heartbeat(
   ++current.heartbeats;
   current.leases = lease_table->diagnostics();
   publish();
-  if (!session->send_control(RelayWssControlType::heartbeat_ack,
-                             *encoded.value_if())) {
-    session->fail(false);
-  }
+  session->send_control(RelayWssControlType::heartbeat_ack,
+                        *encoded.value_if());
 }
 
 void RelayServer::Impl::session_handle_endpoint_publish(
@@ -1485,10 +1375,8 @@ void RelayServer::Impl::session_handle_endpoint_publish(
   ++current.endpoint_publications;
   current.endpoints = endpoint_directory->diagnostics();
   publish();
-  if (!session->send_control(RelayWssControlType::endpoint_publish_ack,
-                             *encoded.value_if())) {
-    session->fail(false);
-  }
+  session->send_control(RelayWssControlType::endpoint_publish_ack,
+                        *encoded.value_if());
 }
 
 void RelayServer::Impl::session_handle_endpoint_query(
@@ -1506,9 +1394,9 @@ void RelayServer::Impl::session_handle_endpoint_query(
         relay_error(ErrorCode::cancelled, "relay_directory_unavailable"), false);
     return;
   }
-  // Expiry runs on the periodic sweep timer; lookups below already treat
-  // expired entries as absent.
   const auto now_steady = std::chrono::steady_clock::now();
+  lease_table->expire(now_steady);
+  endpoint_directory->expire(now_steady);
   auto online = lease_table->online_tenant(session->logged_in_tenant, now_steady);
   if (online.size() > config.endpoint_query_max_results) {
     ++current.control_rejected;
@@ -1582,10 +1470,8 @@ void RelayServer::Impl::session_handle_endpoint_query(
   current.leases = lease_table->diagnostics();
   current.endpoints = endpoint_directory->diagnostics();
   publish();
-  if (!session->send_control(RelayWssControlType::endpoint_query_result,
-                             *encoded.value_if())) {
-    session->fail(false);
-  }
+  session->send_control(RelayWssControlType::endpoint_query_result,
+                        *encoded.value_if());
 }
 
 void RelayServer::Impl::session_reject_policy(
@@ -1633,7 +1519,6 @@ void RelayServer::Impl::finish_shutdown() {
   boost::system::error_code ignored;
   acceptor.close(ignored);
   signals.cancel(ignored);
-  (void)sweep_timer.cancel();
   for (const auto& session : sessions) {
     auto& lowest = boost::beast::get_lowest_layer(session->websocket);
     lowest.socket().shutdown(tcp::socket::shutdown_both, ignored);
@@ -1657,23 +1542,7 @@ void RelayServer::Impl::request_stop() {
 }
 
 void RelayServer::Impl::publish() {
-  if (publish_deferred) {
-    publish_pending = true;
-    return;
-  }
-  const bool observable_change =
-      current.state != published_state || current.stop_requested != published_stop_requested;
   (void)snapshots.try_publish(current);
-  if (observable_change) {
-    published_state = current.state;
-    published_stop_requested = current.stop_requested;
-    if (config.on_state_changed) {
-      try {
-        config.on_state_changed();
-      } catch (...) {
-      }
-    }
-  }
 }
 
 void RelayServer::Impl::publish_last_error(Error error) {

@@ -2,6 +2,8 @@
 
 #include <heyaki/version.hpp>
 
+#include <executor/comm.hpp>
+
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -10,7 +12,6 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <thread>
 
 namespace {
 
@@ -194,16 +195,27 @@ int main(int argc, char** argv) {
     return 0;
   }
 
+  // The server reports observable state changes on its strand; blocking on the
+  // gate replaces sleep-polling the snapshot.
+  executor::comm::PhaseGate server_events{"heyaki-relay-main"};
+  config.on_state_changed = [&server_events] {
+    (void)server_events.advance();
+  };
+
   auto server = heyaki::RelayServer::create(std::move(config));
   if (!server) {
     return print_error(*server.error_if());
   }
 
-  for (int attempt = 0; attempt < 200; ++attempt) {
+  bool running_reached = false;
+  const auto startup_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds{2};
+  while (std::chrono::steady_clock::now() < startup_deadline) {
     const auto snapshot = server.value_if()->snapshot();
     if (snapshot.state == heyaki::RelayServerState::running) {
       std::cout << "heyaki-relay listening on " << snapshot.listen_address << ":"
                 << snapshot.listen_port << " (TLS 1.3/WSS)\n";
+      running_reached = true;
       break;
     }
     if (snapshot.state == heyaki::RelayServerState::failed ||
@@ -212,20 +224,25 @@ int main(int argc, char** argv) {
       (void)server.value_if()->shutdown();
       return 1;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    (void)server_events.wait_for(server_events.current_phase() + 1U,
+                                 std::chrono::milliseconds{100});
   }
-  if (server.value_if()->snapshot().state != heyaki::RelayServerState::running) {
+  if (!running_reached) {
     std::cerr << "heyaki-relay: server startup timed out\n";
     (void)server.value_if()->shutdown();
     return 1;
   }
-  while (!server.value_if()->stop_requested()) {
+  for (;;) {
+    if (server.value_if()->stop_requested()) {
+      break;
+    }
     const auto snapshot = server.value_if()->snapshot();
     if (snapshot.state == heyaki::RelayServerState::failed ||
         snapshot.state == heyaki::RelayServerState::stopped) {
       break;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    (void)server_events.wait_for(server_events.current_phase() + 1U,
+                                 std::chrono::milliseconds{500});
   }
 
   const auto report = server.value_if()->shutdown();

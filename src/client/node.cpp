@@ -1126,6 +1126,11 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     config.handshake_timeout = relay.handshake_timeout;
     config.close_timeout = relay.close_timeout;
     config.runtime = RuntimeConfig{};
+    config.on_activity = [weak = weak_from_this()] {
+      if (auto self = weak.lock()) {
+        self->poke_relay_activity();
+      }
+    };
     auto client = RelayWssClient::create(std::move(config), runtime);
     if (!client) {
       relay_failed(*client.error_if(), is_relay_security_error(*client.error_if()));
@@ -1142,6 +1147,22 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       snapshot.relay.last_error.reset();
     });
     schedule_relay_poll();
+  }
+
+  // Wake-up path for relay control traffic: the WSS client reports activity on
+  // its own strand, so the drain is posted to the node strand and runs without
+  // waiting for the poll-interval watchdog.
+  void poke_relay_activity() {
+    auto weak = weak_from_this();
+    try {
+      boost::asio::post(strand, [weak] {
+        if (auto self = weak.lock()) {
+          self->relay_poll();
+        }
+      });
+    } catch (...) {
+      // Posting failed; the poll watchdog still drains the queue.
+    }
   }
 
   void schedule_relay_poll() {
@@ -1562,7 +1583,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     if (!frame) {
       return Result<void>::failure(*frame.error_if());
     }
-    return relay_client->send(*frame.value_if());
+    return relay_client->send(std::move(*frame.value_if()));
   }
 
   Result<void> publish_and_query_relay_endpoints() {

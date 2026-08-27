@@ -392,7 +392,7 @@ TEST(M3BRelayWssClientTest, RejectsInvalidUrlsAndPayloads) {
   config.tls_verify_peer = false;
   auto client = RelayWssClient::create(config);
   ASSERT_TRUE(client) << client.error_if()->safe_detail();
-  EXPECT_FALSE(client.value_if()->send({}));
+  EXPECT_FALSE(client.value_if()->send(std::vector<std::byte>{}));
   const std::vector<std::byte> large(70000U);
   EXPECT_FALSE(client.value_if()->send(large));
   (void)server.value_if()->shutdown();

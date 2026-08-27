@@ -196,6 +196,7 @@ struct RelayWssClient::Impl : std::enable_shared_from_this<RelayWssClient::Impl>
   void do_close();
   void on_close(boost::system::error_code error);
   void fail(Error error);
+  void notify_activity() noexcept;
   void publish();
 
   Result<ParsedUrl> parsed;
@@ -356,6 +357,7 @@ void RelayWssClient::Impl::on_handshake(boost::system::error_code error) {
   websocket.binary(true);
   current.state = RelayWssState::ready;
   publish();
+  notify_activity();
   try {
     connect_promise.set_value(Result<void>::success());
   } catch (...) {
@@ -385,6 +387,7 @@ void RelayWssClient::Impl::on_read(boost::system::error_code error,
       outgoing.close();
       current.state = RelayWssState::disconnected;
       publish();
+      notify_activity();
     } else if (error != boost::asio::error::operation_aborted &&
         current.state != RelayWssState::closing &&
         current.state != RelayWssState::disconnected && !failed) {
@@ -407,6 +410,7 @@ void RelayWssClient::Impl::on_read(boost::system::error_code error,
     fail(wss_error(ErrorCode::resource_exhausted, "wss_receive_queue_full"));
     return;
   }
+  notify_activity();
   start_read();
 }
 
@@ -517,6 +521,7 @@ void RelayWssClient::Impl::on_close(boost::system::error_code error) {
   }
   current.state = RelayWssState::disconnected;
   publish();
+  notify_activity();
   try {
     close_promise.set_value(close_failed ? Result<void>::failure(classify_error(error))
                                          : Result<void>::success());
@@ -537,12 +542,25 @@ void RelayWssClient::Impl::fail(Error error) {
   received.close();
   outgoing.close();
   publish();
+  notify_activity();
   try {
     connect_promise.set_value(Result<void>::failure(error));
   } catch (...) {
   }
   try {
     close_promise.set_value(Result<void>::failure(error));
+  } catch (...) {
+  }
+}
+
+void RelayWssClient::Impl::notify_activity() noexcept {
+  if (!config.on_activity) {
+    return;
+  }
+  // The observer is a wake-up hook; its failures must not take down the
+  // stream.
+  try {
+    config.on_activity();
   } catch (...) {
   }
 }
@@ -710,6 +728,10 @@ Result<RelayWssReceiveStatus> RelayWssClient::try_receive(
 }
 
 Result<void> RelayWssClient::send(std::span<const std::byte> payload) {
+  return send(std::vector<std::byte>{payload.begin(), payload.end()});
+}
+
+Result<void> RelayWssClient::send(std::vector<std::byte>&& payload) {
   if (!impl_) {
     return Result<void>::failure(wss_error(ErrorCode::cancelled, "wss_not_initialized"));
   }
@@ -719,8 +741,7 @@ Result<void> RelayWssClient::send(std::span<const std::byte> payload) {
   if (payload.empty() || payload.size() > max_relay_wss_control_frame_bytes) {
     return Result<void>::failure(wss_error(ErrorCode::configuration, "wss_payload_invalid"));
   }
-  std::vector<std::byte> copy(payload.begin(), payload.end());
-  if (!impl_->outgoing.try_send(std::move(copy))) {
+  if (!impl_->outgoing.try_send(std::move(payload))) {
     return Result<void>::failure(wss_error(ErrorCode::resource_exhausted,
                                            "wss_send_queue_full"));
   }

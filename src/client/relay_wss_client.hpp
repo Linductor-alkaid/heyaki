@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -29,6 +30,11 @@ struct RelayWssClientConfig {
   std::chrono::milliseconds connect_timeout{5000};
   std::chrono::milliseconds handshake_timeout{5000};
   std::chrono::milliseconds close_timeout{2000};
+  // Invoked on the client strand whenever observable progress happens: the
+  // connection turns ready, a message is enqueued for the consumer, or the
+  // stream ends (closed/failed). Use it to wake a consumer directly instead of
+  // polling try_receive; it must stay cheap and non-blocking.
+  std::function<void()> on_activity;
   RuntimeConfig runtime;
 };
 
@@ -84,6 +90,7 @@ class RelayWssClient {
   [[nodiscard]] Result<void> start_connect();
   [[nodiscard]] Result<RelayWssReceiveStatus> try_receive(RelayWssMessage& message);
   [[nodiscard]] Result<void> send(std::span<const std::byte> payload);
+  [[nodiscard]] Result<void> send(std::vector<std::byte>&& payload);
   [[nodiscard]] Result<RelayWssMessage> receive(
       std::chrono::milliseconds timeout = std::chrono::milliseconds{5000});
   [[nodiscard]] Result<void> start_close();

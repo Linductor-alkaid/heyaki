@@ -139,15 +139,9 @@ Result<RelayTtlUpsertOutcome> RelayTtlTable<Key, Value>::upsert(
   }
 
   if (impl_->entries.size() >= impl_->capacity) {
-    // Capacity pressure first evicts already-expired entries so abandoned
-    // challenges cannot lock out new ones; rejection only happens when the
-    // table is full of live entries.
-    expire(now);
-    if (impl_->entries.size() >= impl_->capacity) {
-      ++impl_->stats.capacity_rejected;
-      return Result<RelayTtlUpsertOutcome>::failure(
-          Error{ErrorCode::resource_exhausted, "relay_ttl", "relay_ttl_capacity_exhausted"});
-    }
+    ++impl_->stats.capacity_rejected;
+    return Result<RelayTtlUpsertOutcome>::failure(
+        Error{ErrorCode::resource_exhausted, "relay_ttl", "relay_ttl_capacity_exhausted"});
   }
 
   const RelayTtlEntry<Key, Value> entry{.key = key,

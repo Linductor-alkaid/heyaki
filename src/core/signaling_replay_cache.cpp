@@ -69,20 +69,11 @@ class SignalingReplayCache::Impl {
 
   Result<SignalingReplayDecision> admit(const ReplayKey& key,
                                         std::chrono::steady_clock::time_point now) {
-    // The full-table sweep is throttled: admission runs per signed message and
-    // must not scan the whole cache. Expired keys are still handled inline, so
-    // correctness never depends on the sweep.
-    if (now >= next_sweep_) {
-      expire(now);
-      next_sweep_ = now + std::chrono::seconds{1};
-    }
+    expire(now);
     const auto ttl = std::chrono::milliseconds{policy_.ttl_milliseconds};
     if (auto it = entries_.find(key); it != entries_.end()) {
-      if (now < it->second) {
-        ++diagnostics_.duplicates_rejected;
-        return Result<SignalingReplayDecision>::success(SignalingReplayDecision::duplicate);
-      }
-      evict_entry(it);
+      ++diagnostics_.duplicates_rejected;
+      return Result<SignalingReplayDecision>::success(SignalingReplayDecision::duplicate);
     }
     auto& peer_count = per_peer_[key.signer];
     if (peer_count >= policy_.per_peer_capacity) {
@@ -109,7 +100,16 @@ class SignalingReplayCache::Impl {
   void expire(std::chrono::steady_clock::time_point now) {
     for (auto it = entries_.begin(); it != entries_.end();) {
       if (now >= it->second) {
-        it = evict_entry(it);
+        const auto signer = it->first.signer;
+        auto peer = per_peer_.find(signer);
+        if (peer != per_peer_.end() && peer->second > 0U) {
+          --peer->second;
+          if (peer->second == 0U) {
+            per_peer_.erase(peer);
+          }
+        }
+        it = entries_.erase(it);
+        ++diagnostics_.expired_evicted;
       } else {
         ++it;
       }
@@ -120,27 +120,9 @@ class SignalingReplayCache::Impl {
   SignalingReplayDiagnostics diagnostics() const noexcept { return diagnostics_; }
 
  private:
-  using EntryIterator =
-      std::map<ReplayKey, std::chrono::steady_clock::time_point>::iterator;
-
-  EntryIterator evict_entry(EntryIterator it) {
-    const auto signer = it->first.signer;
-    auto peer = per_peer_.find(signer);
-    if (peer != per_peer_.end() && peer->second > 0U) {
-      --peer->second;
-      if (peer->second == 0U) {
-        per_peer_.erase(peer);
-      }
-    }
-    const auto next = entries_.erase(it);
-    ++diagnostics_.expired_evicted;
-    return next;
-  }
-
   ReplayCachePolicy policy_;
   std::map<ReplayKey, std::chrono::steady_clock::time_point> entries_;
   std::map<DeviceId, std::size_t> per_peer_;
-  std::chrono::steady_clock::time_point next_sweep_{};
   SignalingReplayDiagnostics diagnostics_;
 };
 

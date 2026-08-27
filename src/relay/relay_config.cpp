@@ -108,9 +108,6 @@ Result<void> validate_relay_server_config(const RelayServerConfig& config) {
       config.max_connections > 65536U ||
       config.handshake_timeout.count() < 100 || config.handshake_timeout.count() > 60000 ||
       config.shutdown_timeout.count() < 100 || config.shutdown_timeout.count() > 60000 ||
-      config.control_write_queue_frames == 0U ||
-      config.control_write_queue_bytes < max_relay_wss_control_frame_bytes ||
-      config.control_write_queue_bytes > 64U * 1024U * 1024U ||
       config.lease.capacity == 0U || config.lease.capacity > 65536U ||
       config.lease.per_device_endpoint_capacity == 0U ||
       config.lease.per_tenant_device_capacity == 0U ||
