@@ -71,12 +71,18 @@ Result<LocalProfileInitialization> read_local_profile_initialization(
       return Result<LocalProfileInitialization>::failure(*verifier.error_if());
     }
 
+    // Default pairing template (DEC-04): read-only baseline without shell or
+    // gateway; the pairing view shows and can narrow the requested scopes.
+    PairingPolicy policy;
+    policy.default_scopes = {"message.send", "rpc.device.read",
+                             "event.telemetry.subscribe", "file.push:inbox",
+                             "stream.open"};
     return Result<LocalProfileInitialization>::success(
         LocalProfileInitialization{
             .application_id = std::string{application_id},
             .password_verifier = std::move(*verifier.value_if()),
             .password_generation = 1U,
-            .pairing_policy = PairingPolicy{},
+            .pairing_policy = std::move(policy),
             .lan = LanConfiguration{}});
   }
 }

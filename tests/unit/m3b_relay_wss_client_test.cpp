@@ -18,6 +18,8 @@
 
 #include <gtest/gtest.h>
 
+#include "m5_support.hpp"
+
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/rand.h>
@@ -1492,6 +1494,9 @@ TEST(M3BRelayWssClientTest, NodesAssembleAuthenticatedSessionOverRelayOnlyRoute)
   auto first_profile = create_profile("first-profile", "com.example.relay.first");
   auto second_profile = create_profile("second-profile", "com.example.relay.second");
   ASSERT_TRUE(first_profile && second_profile);
+  ASSERT_TRUE(heyaki::test::seed_mutual_trust(*first_profile.value_if(),
+                                              *second_profile.value_if(),
+                                              {"m4.test"}));
   auto first_identity = first_profile.value_if()->load_identity();
   auto second_identity = second_profile.value_if()->load_identity();
   ASSERT_TRUE(first_identity && second_identity);
@@ -1619,6 +1624,9 @@ TEST(M3BRelayWssClientTest, DualRouteNodesDedupEndpointsAndPreferLanByPolicy) {
   auto first_profile = create_profile("dual-first", "com.example.dual.first");
   auto second_profile = create_profile("dual-second", "com.example.dual.second");
   ASSERT_TRUE(first_profile && second_profile);
+  ASSERT_TRUE(heyaki::test::seed_mutual_trust(*first_profile.value_if(),
+                                              *second_profile.value_if(),
+                                              {"m4.test"}));
   auto first_identity = first_profile.value_if()->load_identity();
   auto second_identity = second_profile.value_if()->load_identity();
   ASSERT_TRUE(first_identity && second_identity);
@@ -1783,6 +1791,9 @@ TEST(M3BRelayWssClientTest, AutomaticFallsBackToRelayWhenLanHintAbsent) {
   auto first_profile = create_profile("pref-first", "com.example.pref.first");
   auto second_profile = create_profile("pref-second", "com.example.pref.second");
   ASSERT_TRUE(first_profile && second_profile);
+  ASSERT_TRUE(heyaki::test::seed_mutual_trust(*first_profile.value_if(),
+                                              *second_profile.value_if(),
+                                              {"m4.test"}));
   auto first_identity = first_profile.value_if()->load_identity();
   auto second_identity = second_profile.value_if()->load_identity();
   ASSERT_TRUE(first_identity && second_identity);

@@ -6,6 +6,9 @@
 namespace heyaki::fuzz {
 
 void frame_parser(std::span<const std::byte> input);
+void frame_stream_decoder(std::span<const std::byte> input);
+void pairing_request_parser(std::span<const std::byte> input);
+void trust_grant_parser(std::span<const std::byte> input);
 void lan_datagram_parser(std::span<const std::byte> input);
 void lan_hello_parser(std::span<const std::byte> input);
 void lan_presence_parser(std::span<const std::byte> input);

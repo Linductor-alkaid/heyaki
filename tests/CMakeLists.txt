@@ -187,6 +187,7 @@ endfunction()
 
 add_executable(heyaki_unit_tests
   unit/contracts_test.cpp
+  unit/m5_framing_test.cpp
   unit/golden_vectors_test.cpp
   unit/lan_protocol_test.cpp
   unit/signing_test.cpp
@@ -379,6 +380,38 @@ heyaki_add_runtime_test(
 set_tests_properties(heyaki_m4_session_restart_e2e PROPERTIES
   RESOURCE_LOCK heyaki_m3a_profile_state
   TIMEOUT 300)
+
+add_executable(heyaki_m5_session_tests
+  unit/m5_channels_test.cpp
+  unit/m5_session_test.cpp)
+target_link_libraries(heyaki_m5_session_tests PRIVATE
+  heyaki::client
+  heyaki::core
+  GTest::gtest_main)
+target_include_directories(heyaki_m5_session_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/client"
+  "${CMAKE_CURRENT_SOURCE_DIR}/unit")
+heyaki_configure_target(heyaki_m5_session_tests)
+heyaki_enable_executor_exception_adapter_source(unit/m5_session_test.cpp)
+heyaki_add_runtime_test(
+  heyaki_m5_session heyaki_m5_session_tests
+  "unit;session;security;protocol;concurrency")
+
+add_executable(heyaki_m5_pairing_service_tests unit/m5_pairing_service_test.cpp)
+target_link_libraries(heyaki_m5_pairing_service_tests PRIVATE
+  heyaki::client
+  heyaki::profile
+  heyaki::sqlite
+  GTest::gtest_main)
+target_include_directories(heyaki_m5_pairing_service_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/client"
+  "${CMAKE_CURRENT_SOURCE_DIR}/unit")
+heyaki_configure_target(heyaki_m5_pairing_service_tests)
+heyaki_add_runtime_test(
+  heyaki_m5_pairing heyaki_m5_pairing_service_tests
+  "unit;security;profile;session")
 
 add_executable(heyaki_m4_peer_session_tests unit/m4_peer_session_test.cpp)
 target_link_libraries(heyaki_m4_peer_session_tests PRIVATE
@@ -652,6 +685,15 @@ heyaki_add_runtime_test(
 add_executable(heyaki_performance_smoke performance/build_info_benchmark.cpp)
 target_link_libraries(heyaki_performance_smoke PRIVATE heyaki::core)
 heyaki_configure_target(heyaki_performance_smoke)
+
+add_executable(heyaki_m5_scheduler_benchmark performance/m5_scheduler_benchmark.cpp)
+target_link_libraries(heyaki_m5_scheduler_benchmark PRIVATE heyaki::client)
+target_include_directories(heyaki_m5_scheduler_benchmark PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/client")
+heyaki_configure_target(heyaki_m5_scheduler_benchmark)
+heyaki_add_runtime_test(
+  heyaki_m5_scheduler heyaki_m5_scheduler_benchmark "performance;session;concurrency")
 heyaki_add_runtime_test(
   heyaki_performance_smoke heyaki_performance_smoke "performance")
 

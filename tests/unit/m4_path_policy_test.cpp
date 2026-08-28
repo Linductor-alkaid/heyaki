@@ -6,6 +6,8 @@
 
 #include <gtest/gtest.h>
 
+#include "m5_support.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -357,6 +359,9 @@ TEST_F(M4PathPolicyNodeTest, HostOnlyOverrideStillAssemblesAuthenticatedSession)
   auto second_profile =
       initialized_profile("host-second", "com.example.host.second", fast_lan_only());
   ASSERT_TRUE(first_profile && second_profile);
+  ASSERT_TRUE(heyaki::test::seed_mutual_trust(*first_profile.value_if(),
+                                              *second_profile.value_if(),
+                                              {"m4.test"}));
 
   PeerPathPolicy host_only =
       *default_peer_path_policy(ConnectivityMode::lan_only).value_if();
@@ -421,6 +426,9 @@ TEST_F(M4PathPolicyNodeTest, ForcedTurnWithoutReachableServerTerminatesExplicitl
   auto second_profile =
       initialized_profile("turn-second", "com.example.turn.second", fast_automatic());
   ASSERT_TRUE(first_profile && second_profile);
+  ASSERT_TRUE(heyaki::test::seed_mutual_trust(*first_profile.value_if(),
+                                              *second_profile.value_if(),
+                                              {"m4.test"}));
 
   PeerPathPolicy forced_turn = PeerPathPolicy{};
   forced_turn.force_turn_data_path = true;

@@ -7,6 +7,13 @@
 #include <executor/comm.hpp>
 
 #include "device_view.hpp"
+
+#include <heyaki/byte_stream.hpp>
+#include <heyaki/trust_grant.hpp>
+
+#include <atomic>
+#include <iomanip>
+#include <sstream>
 #include "local_setup.hpp"
 
 #include <algorithm>
@@ -65,6 +72,12 @@ struct UiState {
   std::deque<heyaki::LanSignalingMessage> signaling_events;
   std::optional<heyaki::Error> command_error;
   std::string command_status;
+  // Latest terminal pairing outcome (M5-19); written from the node strand,
+  // read by the render loop.
+  std::mutex pairing_mutex;
+  std::string pairing_peer;
+  std::optional<heyaki::Error> pairing_error;
+  std::string pairing_scopes;
 };
 
 void wipe_string(std::string& value) noexcept {
@@ -328,8 +341,127 @@ void set_command_result(UiState& state, heyaki::Result<void> result,
   }
 }
 
-void run_command(std::string line, heyaki::Node& node, UiState& state,
-                 bool& running) {
+// Default requested scopes for the TUI pairing flow: the read-only template
+// (DEC-04), matching what local initialization installs as policy.
+std::vector<std::string> default_pairing_scopes() {
+  return {"message.send", "rpc.device.read", "event.telemetry.subscribe",
+          "file.push:inbox", "stream.open"};
+}
+
+void render_pairing_status(UiState& state) {
+  std::scoped_lock lock{state.pairing_mutex};
+  if (state.pairing_peer.empty()) return;
+  std::cout << "pairing " << state.pairing_peer << ": ";
+  if (state.pairing_error) {
+    std::cout << "denied (" << state.pairing_error->safe_detail() << ")\n";
+    return;
+  }
+  std::cout << "granted scopes=" << state.pairing_scopes << "\n";
+}
+
+std::string format_stream_bytes(const std::byte* data, std::size_t size,
+                                bool hex) {
+  std::ostringstream output;
+  if (hex) {
+    for (std::size_t index = 0U; index < size; ++index) {
+      output << std::hex << std::setw(2) << std::setfill('0')
+             << static_cast<unsigned>(std::to_integer<std::uint8_t>(data[index]));
+    }
+    return output.str();
+  }
+  output.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
+  return output.str();
+}
+
+// M5-20 stream view: text/hex send, half-close, reset, and live window state.
+void run_stream_view(heyaki::Node& node, const heyaki::DeviceEndpointKey& peer,
+                     heyaki::ByteStream stream) {
+  std::cout << "\nSTREAM device=" << heyaki::to_string(peer.device_id)
+            << "\ncommands [send <text>|sendhex <hex>|read|readhex|window|fin|reset|exit]\n";
+  bool in_stream = true;
+  while (in_stream) {
+    const auto window = stream.window();
+    std::cout << "stream state=" << heyaki::byte_stream_state_name(stream.state())
+              << " send_credit=" << window.send_credit_bytes
+              << " buffered=" << window.receive_buffered_bytes << "\n";
+    std::cout << "stream> " << std::flush;
+    std::string line;
+    if (!std::getline(std::cin, line)) return;
+    std::istringstream input{line};
+    std::string command;
+    input >> command;
+    if (command == "exit") {
+      in_stream = false;
+    } else if (command == "send" || command == "sendhex") {
+      std::string payload_text;
+      std::getline(input, payload_text);
+      if (!payload_text.empty() && payload_text.front() == ' ') {
+        payload_text.erase(payload_text.begin());
+      }
+      std::vector<std::byte> payload;
+      if (command == "sendhex") {
+        payload.reserve(payload_text.size() / 2U);
+        for (std::size_t index = 0U; index + 1U < payload_text.size(); index += 2U) {
+          const auto byte = static_cast<unsigned>(
+              std::strtoul(payload_text.substr(index, 2U).c_str(), nullptr, 16));
+          payload.push_back(static_cast<std::byte>(byte & 0xFFU));
+        }
+      } else {
+        payload.assign(reinterpret_cast<const std::byte*>(payload_text.data()),
+                       reinterpret_cast<const std::byte*>(payload_text.data()) +
+                           payload_text.size());
+      }
+      // Completion means the bytes entered the controlled send window
+      // (M5-18), not that the peer read them.
+      stream.async_write(payload, [](heyaki::ByteStreamIoResult result) {
+        if (result.error) {
+          std::cout << "stream write failed: " << result.error->safe_detail()
+                    << " bytes=" << result.bytes << "\n";
+        }
+      });
+    } else if (command == "read" || command == "readhex") {
+      auto buffer = std::make_unique<std::byte[]>(4096U);
+      stream.async_read_some(
+          std::span<std::byte>{buffer.get(), 4096U},
+          [&, buffer = buffer.release()](heyaki::ByteStreamIoResult result) {
+            if (result.error) {
+              std::cout << "stream read failed: " << result.error->safe_detail()
+                        << "\n";
+              delete[] buffer;
+              return;
+            }
+            if (result.bytes == 0U) {
+              std::cout << "stream end-of-stream\n";
+            } else {
+              std::cout << (command == "readhex" ? "hex: " : "text: ")
+                        << format_stream_bytes(buffer, result.bytes,
+                                               command == "readhex")
+                        << "\n";
+            }
+            delete[] buffer;
+          });
+    } else if (command == "window") {
+      std::cout << "next_send_offset=" << window.next_send_offset
+                << " send_credit_bytes=" << window.send_credit_bytes
+                << " send_credit_frames=" << window.send_credit_frames
+                << " receive_window_bytes=" << window.receive_window_bytes
+                << " receive_buffered=" << window.receive_buffered_bytes
+                << " consumed_through=" << window.consumed_through_offset << "\n";
+    } else if (command == "fin") {
+      const auto closed = stream.shutdown_write();
+      std::cout << (closed ? "stream half-closed\n"
+                           : "stream fin failed\n");
+    } else if (command == "reset") {
+      stream.reset(heyaki::StableStatus::cancelled);
+      std::cout << "stream reset\n";
+    } else {
+      std::cout << "stream command unknown\n";
+    }
+  }
+}
+
+void run_command(std::string line, heyaki::Node& node, heyaki::ProfileStore& profile,
+                 UiState& state, bool& running) {
   std::istringstream input(std::move(line));
   std::string command;
   input >> command;
@@ -366,6 +498,128 @@ void run_command(std::string line, heyaki::Node& node, UiState& state,
   }
   if (command == "close") {
     set_command_result(state, node.close_lan(*peer), "lan-signaling-closed");
+    return;
+  }
+  if (command == "pair") {
+    // M5-19: password pairing against this peer's restricted session. The
+    // password is read hidden, used once, and never stored or logged.
+    const auto peer_index = index;
+    auto password = read_secret("target authorization password: ");
+    if (!password) {
+      state.command_status.clear();
+      state.command_error = *password.error_if();
+      return;
+    }
+    {
+      std::scoped_lock lock{state.pairing_mutex};
+      state.pairing_peer = "endpoint-" + std::to_string(peer_index);
+      state.pairing_error.reset();
+      state.pairing_scopes.clear();
+    }
+    auto paired = node.pair_peer(*peer, *password.value_if(),
+                                 default_pairing_scopes());
+    wipe_string(*password.value_if());
+    if (!paired) {
+      state.command_status.clear();
+      state.command_error = *paired.error_if();
+      return;
+    }
+    set_command_result(state, heyaki::Result<void>::success(),
+                       "pairing-submitted");
+    return;
+  }
+  if (command == "trust") {
+    // M5-19: grants of the relationship with this peer.
+    auto grants = node.trust_grants_for(*peer);
+    if (!grants) {
+      state.command_status.clear();
+      state.command_error = *grants.error_if();
+      return;
+    }
+    std::cout << "\nTRUST device=" << heyaki::to_string(peer->device_id) << "\n";
+    if (grants.value_if()->empty()) {
+      std::cout << "  none\n";
+    }
+    for (std::size_t grant_index = 0U; grant_index < grants.value_if()->size();
+         ++grant_index) {
+      const auto& grant = (*grants.value_if())[grant_index];
+      std::cout << "  [" << grant_index + 1U << "] "
+                << (grant.direction == heyaki::TrustGrantDirection::issued
+                        ? "issued"
+                        : "received")
+                << " grant=" << heyaki::to_string(grant.grant_id)
+                << " generation=" << grant.password_generation
+                << (grant.revoked ? " revoked" : "") << "\n      scopes=";
+      for (const auto& scope : grant.scopes) std::cout << scope << " ";
+      std::cout << "\n";
+    }
+    state.command_status = "trust-listed";
+    state.command_error.reset();
+    return;
+  }
+  if (command == "revoke") {
+    std::size_t grant_index = 0U;
+    input >> grant_index;
+    if (!input || grant_index == 0U) {
+      state.command_status.clear();
+      state.command_error = heyaki::Error{heyaki::ErrorCode::configuration, "tui",
+                                          "grant_index_invalid"};
+      return;
+    }
+    auto grants = node.trust_grants_for(*peer);
+    if (!grants || grant_index > grants.value_if()->size()) {
+      state.command_status.clear();
+      state.command_error = heyaki::Error{heyaki::ErrorCode::not_registered, "tui",
+                                          "grant_index_not_found"};
+      return;
+    }
+    const auto& grant = (*grants.value_if())[grant_index - 1U];
+    set_command_result(state, node.revoke_trust_grant(grant.grant_id),
+                       "grant-revoked");
+    return;
+  }
+  if (command == "rotate-password" || command == "rotate-password-revoke") {
+    auto password = read_secret("new authorization password: ");
+    if (!password) {
+      state.command_status.clear();
+      state.command_error = *password.error_if();
+      return;
+    }
+    auto confirmation = read_secret("confirm password: ");
+    if (!confirmation || *confirmation.value_if() != *password.value_if()) {
+      wipe_string(*password.value_if());
+      state.command_status.clear();
+      state.command_error = heyaki::Error{heyaki::ErrorCode::authentication, "tui",
+                                          "password_confirmation_mismatch"};
+      return;
+    }
+    auto rotated = command == "rotate-password"
+                       ? node.rotate_authorization_password(*password.value_if())
+                       : node.rotate_authorization_password_and_revoke(
+                           *password.value_if());
+    wipe_string(*password.value_if());
+    wipe_string(*confirmation.value_if());
+    if (!rotated) {
+      state.command_status.clear();
+      state.command_error = *rotated.error_if();
+      return;
+    }
+    state.command_status = "password-rotated generation=" +
+                           std::to_string(*rotated.value_if());
+    state.command_error.reset();
+    return;
+  }
+  if (command == "stream") {
+    // M5-20: open the generic ByteStream view on this peer's session.
+    auto stream = node.open_byte_stream(*peer);
+    if (!stream) {
+      state.command_status.clear();
+      state.command_error = *stream.error_if();
+      return;
+    }
+    run_stream_view(node, *peer, std::move(*stream.value_if()));
+    state.command_status = "stream-closed";
+    state.command_error.reset();
     return;
   }
   state.command_status.clear();
@@ -632,12 +886,32 @@ int run_tui(const Options& options) {
     return 0;
   }
 
+  // M5-19: pairing outcomes surface in the command loop; secrets never do.
+  node->set_pairing_observer([&state](const heyaki::DeviceEndpointKey& peer,
+                                      const heyaki::NodePairingOutcome& outcome) {
+    std::scoped_lock lock{state.pairing_mutex};
+    state.pairing_peer = heyaki::to_string(peer.device_id);
+    state.pairing_error.reset();
+    state.pairing_scopes.clear();
+    if (outcome) {
+      for (const auto& scope : *outcome.value_if()) {
+        state.pairing_scopes += scope;
+        state.pairing_scopes += " ";
+      }
+    } else {
+      state.pairing_error = *outcome.error_if();
+    }
+  });
+
   bool running = true;
   while (running) {
     std::cout << "\x1b[2J\x1b[H";
     render_node(options.profile_name, *node, *bridge, state,
                 lan.value_if()->pending_signaling_capacity);
-    std::cout << "\ncommand [refresh|relay|connect N|close N|quit]> "
+    render_pairing_status(state);
+    std::cout << "\ncommand [refresh|relay|connect N|close N|pair N|trust N|"
+                 "revoke N M|rotate-password|rotate-password-revoke|stream N|"
+                 "quit]> "
               << std::flush;
     std::string line;
     if (!std::getline(std::cin, line)) {
@@ -675,7 +949,7 @@ int run_tui(const Options& options) {
       state.command_error.reset();
       continue;
     }
-    run_command(std::move(line), *node, state, running);
+    run_command(std::move(line), *node, *profile, state, running);
   }
   bridge->events.close();
   const auto shutdown = node->shutdown();

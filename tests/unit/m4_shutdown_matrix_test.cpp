@@ -26,6 +26,8 @@
 
 #include <gtest/gtest.h>
 
+#include "m5_support.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -180,6 +182,15 @@ class M4ShutdownMatrixTest : public ::testing::Test {
   }
 
   std::filesystem::path root_;
+  void seed_trust(const std::string& first, const std::string& second) {
+    auto first_profile = profiles_.find(first);
+    auto second_profile = profiles_.find(second);
+    ASSERT_NE(first_profile, profiles_.end()) << first;
+    ASSERT_NE(second_profile, profiles_.end()) << second;
+    ASSERT_TRUE(heyaki::test::seed_mutual_trust(first_profile->second,
+                                                second_profile->second, {"m4.test"}));
+  }
+
   std::map<std::string, ProfileStore> profiles_;
   std::deque<Node> nodes_;
 };
@@ -193,6 +204,7 @@ TEST_P(M4ShutdownPhaseMatrix, ShutdownAtPhaseStopsAndDrains) {
   const auto phase_delay = GetParam();
   auto first = make_node("matrix-first");
   auto second = make_node("matrix-second");
+  seed_trust("matrix-first", "matrix-second");
   ASSERT_TRUE(first && second);
   if (lan_interfaces_unavailable(**first.value_if(), **second.value_if())) {
     GTEST_SKIP() << "No multicast-capable non-loopback interface";
@@ -225,6 +237,7 @@ INSTANTIATE_TEST_SUITE_P(ShutdownPhases, M4ShutdownPhaseMatrix,
 TEST_F(M4ShutdownMatrixTest, ShutdownDuringAuthenticatedSessionDrains) {
   auto first = make_node("auth-drain-first");
   auto second = make_node("auth-drain-second");
+  seed_trust("auth-drain-first", "auth-drain-second");
   ASSERT_TRUE(first && second);
   if (lan_interfaces_unavailable(**first.value_if(), **second.value_if())) {
     GTEST_SKIP() << "No multicast-capable non-loopback interface";
@@ -252,6 +265,7 @@ TEST_F(M4ShutdownMatrixTest, ShutdownDuringAuthenticatedSessionDrains) {
 TEST_F(M4ShutdownMatrixTest, ShutdownDuringInFlightRestartDrains) {
   auto first = make_node("restart-drain-first");
   auto second = make_node("restart-drain-second");
+  seed_trust("restart-drain-first", "restart-drain-second");
   ASSERT_TRUE(first && second);
   if (lan_interfaces_unavailable(**first.value_if(), **second.value_if())) {
     GTEST_SKIP() << "No multicast-capable non-loopback interface";
@@ -288,6 +302,7 @@ TEST_F(M4ShutdownMatrixTest, ShutdownDuringInFlightRestartDrains) {
 TEST_F(M4ShutdownMatrixTest, AssociationLossReachesTerminalAndDrains) {
   auto first = make_node("loss-first");
   auto second = make_node("loss-second");
+  seed_trust("loss-first", "loss-second");
   ASSERT_TRUE(first && second);
   if (lan_interfaces_unavailable(**first.value_if(), **second.value_if())) {
     GTEST_SKIP() << "No multicast-capable non-loopback interface";
@@ -359,6 +374,7 @@ TEST_F(M4ShutdownMatrixTest, ConnectToUnknownEndpointRejectsAndKeepsCapacity) {
 TEST_F(M4ShutdownMatrixTest, CloseLanDuringSignalingCancelsAndDrains) {
   auto first = make_node("cancel-first");
   auto second = make_node("cancel-second");
+  seed_trust("cancel-first", "cancel-second");
   ASSERT_TRUE(first && second);
   if (lan_interfaces_unavailable(**first.value_if(), **second.value_if())) {
     GTEST_SKIP() << "No multicast-capable non-loopback interface";

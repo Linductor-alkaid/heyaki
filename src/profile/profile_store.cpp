@@ -2240,32 +2240,144 @@ Result<void> ProfileStore::revoke_trust_grant(const GrantId& grant_id,
   return Result<void>::success();
 }
 
+Result<std::size_t> ProfileStore::revoke_issued_trust_grants_below_generation(
+    std::uint64_t minimum_generation, std::uint64_t revoked_unix_milliseconds) {
+  auto statement = prepare(impl_->database,
+                           "UPDATE trust_grants SET revoked=1, revoked_unix_milliseconds=? "
+                           "WHERE direction=1 AND issuer_device_id=? AND revoked=0 "
+                           "AND password_generation<?");
+  if (!statement) {
+    return Result<std::size_t>::failure(*statement.error_if());
+  }
+  sqlite3_bind_int64(statement.value_if()->get(), 1,
+                     static_cast<sqlite3_int64>(revoked_unix_milliseconds));
+  bind_id(statement.value_if()->get(), 2, impl_->device_id);
+  sqlite3_bind_int64(statement.value_if()->get(), 3,
+                     static_cast<sqlite3_int64>(minimum_generation));
+  const int result = sqlite3_step(statement.value_if()->get());
+  if (result != SQLITE_DONE) {
+    return Result<std::size_t>::failure(
+        sqlite_error(impl_->database, "trust_grant_revocation_failed"));
+  }
+  return Result<std::size_t>::success(
+      static_cast<std::size_t>(sqlite3_changes(impl_->database)));
+}
+
+Result<std::vector<TrustGrantRecord>> ProfileStore::trust_grants_for_peer(
+    const DeviceId& peer, std::uint64_t now_unix_milliseconds) const {
+  if (peer.is_zero() || peer == impl_->device_id) {
+    return Result<std::vector<TrustGrantRecord>>::failure(
+        Error{ErrorCode::configuration, "profile", "invalid_trust_peer"});
+  }
+  // Valid grants of the relationship in both directions: grants this device
+  // issued to the peer (peer may act on us) and grants received from the peer
+  // (we may act on the peer). Revocation, not password rotation, is the trust
+  // basis; rotation only revokes when explicitly asked to.
+  auto statement = prepare(
+      impl_->database,
+      "SELECT grant_id, direction, issuer_device_id, subject_device_id, "
+      "password_generation, issued_unix_milliseconds, expires_unix_milliseconds, "
+      "signature, revoked FROM trust_grants WHERE revoked=0 "
+      "AND (expires_unix_milliseconds IS NULL OR expires_unix_milliseconds>?) "
+      "AND ((direction=1 AND issuer_device_id=? AND subject_device_id=?) "
+      "OR (direction=2 AND issuer_device_id=? AND subject_device_id=?))");
+  if (!statement) {
+    return Result<std::vector<TrustGrantRecord>>::failure(*statement.error_if());
+  }
+  sqlite3_bind_int64(statement.value_if()->get(), 1,
+                     static_cast<sqlite3_int64>(now_unix_milliseconds));
+  bind_id(statement.value_if()->get(), 2, impl_->device_id);
+  bind_id(statement.value_if()->get(), 3, peer);
+  bind_id(statement.value_if()->get(), 4, peer);
+  bind_id(statement.value_if()->get(), 5, impl_->device_id);
+  std::vector<TrustGrantRecord> output;
+  while (true) {
+    const int result = sqlite3_step(statement.value_if()->get());
+    if (result == SQLITE_DONE) break;
+    if (result != SQLITE_ROW) {
+      return Result<std::vector<TrustGrantRecord>>::failure(
+          sqlite_error(impl_->database, "trust_grants_for_peer_query_failed"));
+    }
+    auto grant_id = column_id<GrantId>(statement.value_if()->get(), 0,
+                                       "trust_grant_id_invalid");
+    auto issuer = column_id<DeviceId>(statement.value_if()->get(), 2,
+                                      "trust_issuer_invalid");
+    auto subject = column_id<DeviceId>(statement.value_if()->get(), 3,
+                                       "trust_subject_invalid");
+    if (!grant_id || !issuer || !subject) {
+      return Result<std::vector<TrustGrantRecord>>::failure(
+          !grant_id ? *grant_id.error_if()
+                    : (!issuer ? *issuer.error_if() : *subject.error_if()));
+    }
+    TrustGrantRecord grant;
+    grant.grant_id = *grant_id.value_if();
+    grant.direction = static_cast<TrustGrantDirection>(
+        sqlite3_column_int(statement.value_if()->get(), 1));
+    grant.issuer = *issuer.value_if();
+    grant.subject = *subject.value_if();
+    grant.password_generation = static_cast<std::uint64_t>(
+        sqlite3_column_int64(statement.value_if()->get(), 4));
+    grant.issued_unix_milliseconds = static_cast<std::uint64_t>(
+        sqlite3_column_int64(statement.value_if()->get(), 5));
+    if (sqlite3_column_type(statement.value_if()->get(), 6) != SQLITE_NULL) {
+      grant.expires_unix_milliseconds = static_cast<std::uint64_t>(
+          sqlite3_column_int64(statement.value_if()->get(), 6));
+    }
+    const auto* signature = static_cast<const std::byte*>(
+        sqlite3_column_blob(statement.value_if()->get(), 7));
+    const int signature_size = sqlite3_column_bytes(statement.value_if()->get(), 7);
+    if (signature == nullptr || signature_size <= 0) {
+      return Result<std::vector<TrustGrantRecord>>::failure(
+          Error{ErrorCode::profile_corrupt, "profile", "trust_signature_invalid"});
+    }
+    grant.signature.assign(signature, signature + signature_size);
+    auto scopes = prepare(impl_->database,
+                          "SELECT scope FROM trust_grant_scopes WHERE grant_id=? "
+                          "ORDER BY scope");
+    if (!scopes) {
+      return Result<std::vector<TrustGrantRecord>>::failure(*scopes.error_if());
+    }
+    bind_id(scopes.value_if()->get(), 1, grant.grant_id);
+    while (true) {
+      const int scope_result = sqlite3_step(scopes.value_if()->get());
+      if (scope_result == SQLITE_DONE) break;
+      if (scope_result != SQLITE_ROW) {
+        return Result<std::vector<TrustGrantRecord>>::failure(
+            sqlite_error(impl_->database, "trust_scope_query_failed"));
+      }
+      const auto* scope = reinterpret_cast<const char*>(
+          sqlite3_column_text(scopes.value_if()->get(), 0));
+      if (scope == nullptr || !valid_scope(scope)) {
+        return Result<std::vector<TrustGrantRecord>>::failure(
+            Error{ErrorCode::profile_corrupt, "profile", "trust_scope_invalid"});
+      }
+      grant.scopes.emplace_back(scope);
+    }
+    output.push_back(std::move(grant));
+  }
+  return Result<std::vector<TrustGrantRecord>>::success(std::move(output));
+}
+
 Result<bool> ProfileStore::is_scope_authorized(const DeviceId& peer, std::string_view scope,
                                                std::uint64_t now_unix_milliseconds) const {
   if (!valid_scope(scope)) {
     return Result<bool>::failure(
         Error{ErrorCode::configuration, "profile", "invalid_trust_scope"});
   }
-  auto generation = password_generation();
-  if (!generation) {
-    return Result<bool>::failure(*generation.error_if());
-  }
   auto statement = prepare(
       impl_->database,
       "SELECT 1 FROM trust_grants g JOIN trust_grant_scopes s ON s.grant_id=g.grant_id "
       "WHERE g.direction=1 AND g.issuer_device_id=? AND g.subject_device_id=? "
-      "AND g.revoked=0 AND g.password_generation=? AND s.scope=? "
+      "AND g.revoked=0 AND s.scope=? "
       "AND (g.expires_unix_milliseconds IS NULL OR g.expires_unix_milliseconds>?) LIMIT 1");
   if (!statement) {
     return Result<bool>::failure(*statement.error_if());
   }
   bind_id(statement.value_if()->get(), 1, impl_->device_id);
   bind_id(statement.value_if()->get(), 2, peer);
-  sqlite3_bind_int64(statement.value_if()->get(), 3,
-                     static_cast<sqlite3_int64>(*generation.value_if()));
-  sqlite3_bind_text(statement.value_if()->get(), 4, scope.data(),
+  sqlite3_bind_text(statement.value_if()->get(), 3, scope.data(),
                     static_cast<int>(scope.size()), SQLITE_TRANSIENT);
-  sqlite3_bind_int64(statement.value_if()->get(), 5,
+  sqlite3_bind_int64(statement.value_if()->get(), 4,
                      static_cast<sqlite3_int64>(now_unix_milliseconds));
   const int result = sqlite3_step(statement.value_if()->get());
   if (result == SQLITE_ROW) {
@@ -2283,14 +2395,10 @@ Result<bool> ProfileStore::is_device_trusted(const DeviceId& peer,
     return Result<bool>::failure(
         Error{ErrorCode::configuration, "profile", "invalid_trusted_peer"});
   }
-  auto generation = password_generation();
-  if (!generation) {
-    return Result<bool>::failure(*generation.error_if());
-  }
   auto statement = prepare(
       impl_->database,
       "SELECT 1 FROM trust_grants WHERE direction=1 AND issuer_device_id=? "
-      "AND subject_device_id=? AND revoked=0 AND password_generation=? "
+      "AND subject_device_id=? AND revoked=0 "
       "AND (expires_unix_milliseconds IS NULL OR expires_unix_milliseconds>?) LIMIT 1");
   if (!statement) {
     return Result<bool>::failure(*statement.error_if());
@@ -2298,8 +2406,6 @@ Result<bool> ProfileStore::is_device_trusted(const DeviceId& peer,
   bind_id(statement.value_if()->get(), 1, impl_->device_id);
   bind_id(statement.value_if()->get(), 2, peer);
   sqlite3_bind_int64(statement.value_if()->get(), 3,
-                     static_cast<sqlite3_int64>(*generation.value_if()));
-  sqlite3_bind_int64(statement.value_if()->get(), 4,
                      static_cast<sqlite3_int64>(now_unix_milliseconds));
   const int result = sqlite3_step(statement.value_if()->get());
   if (result == SQLITE_ROW) {
@@ -2313,14 +2419,10 @@ Result<bool> ProfileStore::is_device_trusted(const DeviceId& peer,
 
 Result<std::vector<DeviceId>> ProfileStore::trusted_devices(
     std::uint64_t now_unix_milliseconds) const {
-  auto generation = password_generation();
-  if (!generation) {
-    return Result<std::vector<DeviceId>>::failure(*generation.error_if());
-  }
   auto statement = prepare(
       impl_->database,
       "SELECT DISTINCT subject_device_id FROM trust_grants WHERE direction=1 "
-      "AND issuer_device_id=? AND revoked=0 AND password_generation=? "
+      "AND issuer_device_id=? AND revoked=0 "
       "AND (expires_unix_milliseconds IS NULL OR expires_unix_milliseconds>?) "
       "ORDER BY subject_device_id");
   if (!statement) {
@@ -2328,8 +2430,6 @@ Result<std::vector<DeviceId>> ProfileStore::trusted_devices(
   }
   bind_id(statement.value_if()->get(), 1, impl_->device_id);
   sqlite3_bind_int64(statement.value_if()->get(), 2,
-                     static_cast<sqlite3_int64>(*generation.value_if()));
-  sqlite3_bind_int64(statement.value_if()->get(), 3,
                      static_cast<sqlite3_int64>(now_unix_milliseconds));
   std::vector<DeviceId> output;
   while (true) {

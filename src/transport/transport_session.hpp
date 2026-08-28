@@ -55,6 +55,7 @@ enum class ChannelKind : std::uint8_t {
   event,
   file,
   shell,
+  stream,
 };
 
 enum class Reliability : std::uint8_t {

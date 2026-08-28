@@ -2,10 +2,13 @@
 
 > - 状态：M3B 已关闭；M4 已关闭（17/17 任务与全部退出条件完成：第 23 轮修复
 >   executor/relay 时序变化放大的三个既有竞态后，CI 网络矩阵以 MATRIX_OK 收官，
->   2026-08-27）；
+>   2026-08-27）；M5 已关闭（20/20 任务与全部退出条件完成：默认拒绝授权、密码
+>   配对/TrustGrant、加权通道调度与 ByteStream 交付，M3A/M3B/M4 Node 级测试按新
+>   语义补种互信，TUI 配对/信任/Stream 视图落地，两轮实施记录见
+>   [M5 阶段文件](m5-authorization-bytestream.md)，2026-08-28）；
 >   2026-08-27 计划修订：新增 M10 Gateway 代理服务里程碑（设计见
 >   [Gateway 代理服务设计](../design/gateway-service.md)）
-> - 日期：2026-08-27
+> - 日期：2026-08-28
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)、[局域网无服务器连接设计](../design/lan-serverless-connectivity.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
 
@@ -120,7 +123,7 @@ scope，可与 M7/M8 并行实施，但 gateway 不进入 v1.0 发布门禁，�
 | M3A | [m3a-lan-serverless.md](m3a-lan-serverless.md) | 已完成 | LAN multicast discovery、TLS 本地信令与 local-only onboarding；2026-08-16 最终退出验收通过。 |
 | M3B | [m3b-relay-control-plane.md](m3b-relay-control-plane.md) | 已完成 | relay 登记/登录/租约/信令转发、TURN credential 与 TUI onboarding；15 轮记录，2026-08-16 关闭。 |
 | M4 | [m4-connectivity-mvp.md](m4-connectivity-mvp.md) | 已完成 | 公共签名信令、WebRTC/ICE/TURN 与最小认证会话；17/17 任务完成、退出条件全部达成；第 23 轮修复三个被时序变化放大的既有竞态后，CI run 33094431955 全绿、`heyaki_m4_network_matrix` MATRIX_OK（turn_fallback P95 2203ms），2026-08-27 关闭。 |
-| M5 | [m5-authorization-bytestream.md](m5-authorization-bytestream.md) | 未开始 | 会话授权（pairing/TrustGrant）、通道调度与 ByteStream。 |
+| M5 | [m5-authorization-bytestream.md](m5-authorization-bytestream.md) | 已完成 | 会话授权（pairing/TrustGrant）、通道调度与 ByteStream；20/20 任务与全部退出条件完成，两轮实施记录见阶段文件，2026-08-28 关闭。 |
 | M6 | [m6-message-rpc.md](m6-message-rpc.md) | 未开始 | 消息、unary RPC 与对应 TUI。 |
 | M7 | [m7-event-file-transfer.md](m7-event-file-transfer.md) | 未开始 | 远程事件与文件传输。 |
 | M8 | [m8-remote-shell.md](m8-remote-shell.md) | 未开始 | Remote Shell 与安全终端 UI（独立安全里程碑，默认关闭）。 |

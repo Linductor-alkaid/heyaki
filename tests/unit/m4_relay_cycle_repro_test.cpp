@@ -19,6 +19,8 @@
 
 #include <gtest/gtest.h>
 
+#include "m5_support.hpp"
+
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -173,6 +175,9 @@ TEST(M4RelayCycleRepro, SequentialFreshPairsAuthenticateAcrossSixCycles) {
     auto first_profile = make_profile("first");
     auto second_profile = make_profile("second");
     ASSERT_TRUE(first_profile && second_profile);
+  ASSERT_TRUE(heyaki::test::seed_mutual_trust(*first_profile.value_if(),
+                                              *second_profile.value_if(),
+                                              {"m4.test"}));
     auto first_identity = first_profile.value_if()->load_identity();
     auto second_identity = second_profile.value_if()->load_identity();
     ASSERT_TRUE(first_identity && second_identity);

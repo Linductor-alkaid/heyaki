@@ -2,6 +2,8 @@
 #include <heyaki/lan_directory.hpp>
 #include <heyaki/lan_protocol.hpp>
 #include <heyaki/node.hpp>
+
+#include "m5_support.hpp"
 #include <heyaki/password.hpp>
 #include <heyaki/profile_store.hpp>
 
@@ -859,6 +861,9 @@ TEST_F(M3aNodeTest, ThreeEndpointsIncludeTwoFromTheSameDevice) {
   auto remote_profile = initialized_profile(
       "remote-device", "com.example.remote", configuration);
   ASSERT_TRUE(shared_profile && remote_profile);
+  ASSERT_TRUE(heyaki::test::seed_mutual_trust(*shared_profile.value_if(),
+                                              *remote_profile.value_if(),
+                                              {"m4.test"}));
   auto second_endpoint =
       shared_profile.value_if()->endpoint_for("com.example.shared.second");
   ASSERT_TRUE(second_endpoint) << second_endpoint.error_if()->safe_detail();
@@ -919,6 +924,9 @@ TEST_F(M3aNodeTest, BlockedMulticastFailsPeerLookupAndShutdowns) {
   auto second_profile = initialized_profile("blocked-second", "com.example.blocked.second",
                                             configuration);
   ASSERT_TRUE(first_profile && second_profile);
+  ASSERT_TRUE(heyaki::test::seed_mutual_trust(*first_profile.value_if(),
+                                              *second_profile.value_if(),
+                                              {"m4.test"}));
   auto first = Node::create(node_config(*first_profile.value_if(),
                                         "com.example.blocked.first"));
   auto second = Node::create(node_config(*second_profile.value_if(),
@@ -1001,6 +1009,9 @@ TEST_F(M3aNodeTest, ApIsolationFailsDiscoveryWithinBudget) {
   auto second_profile = initialized_profile("isolated-second", "com.example.isolated.second",
                                             second_configuration);
   ASSERT_TRUE(first_profile && second_profile);
+  ASSERT_TRUE(heyaki::test::seed_mutual_trust(*first_profile.value_if(),
+                                              *second_profile.value_if(),
+                                              {"m4.test"}));
   auto first = Node::create(node_config(*first_profile.value_if(),
                                         "com.example.isolated.first"));
   auto second = Node::create(node_config(*second_profile.value_if(),
@@ -1126,6 +1137,9 @@ TEST_F(M3aNodeTest, RejectsRelayedHelloAndCertificateSubstitution) {
   auto peer_profile = initialized_profile("mitm-peer", "com.example.peer",
                                           configuration);
   ASSERT_TRUE(victim_profile && peer_profile);
+  ASSERT_TRUE(heyaki::test::seed_mutual_trust(*victim_profile.value_if(),
+                                              *peer_profile.value_if(),
+                                              {"m4.test"}));
   auto victim = Node::create(node_config(*victim_profile.value_if(),
                                          "com.example.victim"));
   auto peer = Node::create(node_config(*peer_profile.value_if(),
@@ -1206,6 +1220,9 @@ TEST_F(M3aNodeTest, AuthenticatesLanTlsAndForwardsBoundedControlMessages) {
   auto second_profile = initialized_profile("signal-second", "com.example.second",
                                             configuration);
   ASSERT_TRUE(first_profile && second_profile);
+  ASSERT_TRUE(heyaki::test::seed_mutual_trust(*first_profile.value_if(),
+                                              *second_profile.value_if(),
+                                              {"m4.test"}));
 
   std::atomic<std::uint64_t> accepted{0U};
   std::atomic<std::uint64_t> requested{0U};
@@ -1384,6 +1401,9 @@ TEST_F(M3aNodeTest, NodeAutomaticallyAssemblesAuthenticatedWebRtcPeerSession) {
   auto second_profile = initialized_profile("m4-node-second", "com.example.m4.second",
                                             configuration);
   ASSERT_TRUE(first_profile && second_profile);
+  ASSERT_TRUE(heyaki::test::seed_mutual_trust(*first_profile.value_if(),
+                                              *second_profile.value_if(),
+                                              {"m4.test"}));
 
   auto first = Node::create(
       node_config(*first_profile.value_if(), "com.example.m4.first"));
@@ -1477,6 +1497,9 @@ TEST_F(M3aNodeTest, AuthenticatedSessionReestablishesNewPhysicalSessionAfterLoss
       initialized_profile("reconnect-second", "com.example.reconnect.second",
                           configuration);
   ASSERT_TRUE(first_profile && second_profile);
+  ASSERT_TRUE(heyaki::test::seed_mutual_trust(*first_profile.value_if(),
+                                              *second_profile.value_if(),
+                                              {"m4.test"}));
   ASSERT_TRUE(trust_peer(*first_profile.value_if(),
                          second_profile.value_if()->device_id(), 1U));
   ASSERT_TRUE(trust_peer(*second_profile.value_if(),
@@ -1634,6 +1657,15 @@ TEST_F(M3aNodeTest, ThreeLanNodesEstablishAuthenticatedHostDataChannels) {
   auto third_profile =
       initialized_profile("mesh-third", "com.example.mesh.third", configuration);
   ASSERT_TRUE(first_profile && second_profile && third_profile);
+  ASSERT_TRUE(heyaki::test::seed_mutual_trust(*first_profile.value_if(),
+                                              *second_profile.value_if(),
+                                              {"m4.test"}));
+  ASSERT_TRUE(heyaki::test::seed_mutual_trust(*first_profile.value_if(),
+                                              *third_profile.value_if(),
+                                              {"m4.test"}));
+  ASSERT_TRUE(heyaki::test::seed_mutual_trust(*second_profile.value_if(),
+                                              *third_profile.value_if(),
+                                              {"m4.test"}));
 
   auto first = Node::create(node_config(*first_profile.value_if(),
                                         "com.example.mesh.first"));
@@ -1769,6 +1801,9 @@ TEST_F(M3aNodeTest, RepeatedAssociationLossCyclesStayBounded) {
   auto second_profile = initialized_profile("cycle-second", "com.example.cycle.second",
                                             configuration);
   ASSERT_TRUE(first_profile && second_profile);
+  ASSERT_TRUE(heyaki::test::seed_mutual_trust(*first_profile.value_if(),
+                                              *second_profile.value_if(),
+                                              {"m4.test"}));
   ASSERT_TRUE(trust_peer(*first_profile.value_if(),
                          second_profile.value_if()->device_id(), 1U));
   ASSERT_TRUE(trust_peer(*second_profile.value_if(),
@@ -1915,6 +1950,9 @@ TEST_F(M3aNodeTest, TrustedAutoConnectUsesOnlyTheTupleOfferOwner) {
   auto second_profile = initialized_profile("auto-second", "com.example.second",
                                             configuration);
   ASSERT_TRUE(first_profile && second_profile);
+  ASSERT_TRUE(heyaki::test::seed_mutual_trust(*first_profile.value_if(),
+                                              *second_profile.value_if(),
+                                              {"m4.test"}));
   ASSERT_TRUE(trust_peer(*first_profile.value_if(),
                          second_profile.value_if()->device_id(), 1U));
   ASSERT_TRUE(trust_peer(*second_profile.value_if(),
@@ -2003,6 +2041,9 @@ TEST_F(M3aNodeTest, RepeatedConnectCloseRemainsBounded) {
   auto second_profile = initialized_profile("stress-second", "com.example.stress.second",
                                             configuration);
   ASSERT_TRUE(first_profile && second_profile);
+  ASSERT_TRUE(heyaki::test::seed_mutual_trust(*first_profile.value_if(),
+                                              *second_profile.value_if(),
+                                              {"m4.test"}));
   auto signaling_handler = [](const LanSignalingMessage&) {
     return Result<void>::success();
   };
@@ -2101,6 +2142,9 @@ TEST_F(M3aNodeTest, LanLifecyclePressureRemainsBounded) {
                                             "com.example.lifecycle.second",
                                             configuration);
   ASSERT_TRUE(first_profile && second_profile);
+  ASSERT_TRUE(heyaki::test::seed_mutual_trust(*first_profile.value_if(),
+                                              *second_profile.value_if(),
+                                              {"m4.test"}));
 
   RuntimeConfig runtime_configuration;
   runtime_configuration.shutdown_hook_capacity = 32U;
@@ -2355,6 +2399,9 @@ TEST_F(M3aNodeTest, ShutdownDrainsPendingSignalingHandlerWithinBudget) {
   auto second_profile = initialized_profile("shutdown-second", "com.example.second",
                                             configuration);
   ASSERT_TRUE(first_profile && second_profile);
+  ASSERT_TRUE(heyaki::test::seed_mutual_trust(*first_profile.value_if(),
+                                              *second_profile.value_if(),
+                                              {"m4.test"}));
 
   executor::comm::PhaseGate handler_entered{"m3a-handler-entered"};
   executor::comm::PhaseGate handler_release{"m3a-handler-release"};

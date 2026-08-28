@@ -50,5 +50,6 @@ using SignalingTranscriptSha256 = std::array<std::byte, signaling_transcript_sha
 [[nodiscard]] std::vector<std::byte> canonical_bytes(const SessionId& value);
 [[nodiscard]] std::vector<std::byte> canonical_bytes(const RequestId& value);
 [[nodiscard]] std::vector<std::byte> canonical_bytes(const TransferId& value);
+[[nodiscard]] std::vector<std::byte> canonical_bytes(const GrantId& value);
 
 }  // namespace heyaki

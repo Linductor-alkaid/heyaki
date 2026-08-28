@@ -86,6 +86,12 @@ struct FrameParseResult {
 
 [[nodiscard]] bool is_known_frame_type(std::uint8_t type) noexcept;
 [[nodiscard]] UnknownFrameAction unknown_frame_action(const FrameView& frame) noexcept;
+// Returns the domain-limit violation for a known frame type's payload size, or
+// nullptr when within limits. Shared by the one-shot and incremental parsers
+// so both accept identical bytes.
+[[nodiscard]] const char* frame_payload_limit_error(std::uint8_t type,
+                                                    std::size_t payload_size,
+                                                    const Limits& limits) noexcept;
 [[nodiscard]] Result<std::vector<std::byte>> encode_frame(const Frame& frame,
                                                          const Limits& limits = {});
 [[nodiscard]] FrameParseResult parse_frame(std::span<const std::byte> input,

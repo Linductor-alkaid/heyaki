@@ -177,6 +177,22 @@ def main():
 
     local.send("connect %s\n" % endpoint_index)
 
+    # M5 default-deny: the fresh identity-verified session lands in
+    # pairing_restricted. Drive the M5-19 pairing view with the PEER's
+    # authorization password before expecting an authenticated session.
+    if not local.wait_rendered("pairing_restricted", deadline):
+        shutdown()
+        fail("local TUI session never reached pairing_restricted")
+
+    local.send("pair %s\n" % endpoint_index)
+    if not local.wait_for("target authorization password:", deadline):
+        shutdown()
+        fail("local TUI pairing prompt missing")
+    local.send(password)
+    if not local.wait_rendered("granted scopes=", deadline):
+        shutdown()
+        fail("pairing never granted the read-only scopes")
+
     def session_authenticated(process):
         text = process.output.decode("utf-8", "replace").replace("\r\n", "\n")
         return re.search(

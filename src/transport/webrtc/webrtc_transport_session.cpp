@@ -76,6 +76,8 @@ std::string label_for(ChannelKind kind) {
       return "heyaki.file.v1";
     case ChannelKind::shell:
       return "heyaki.shell.v1";
+    case ChannelKind::stream:
+      return "heyaki.stream.v1";
   }
   return "heyaki.unknown.v1";
 }
@@ -83,7 +85,8 @@ std::string label_for(ChannelKind kind) {
 std::optional<ChannelKind> kind_for(std::string_view label) {
   for (const auto kind : {ChannelKind::control, ChannelKind::pairing,
                           ChannelKind::message, ChannelKind::rpc, ChannelKind::event,
-                          ChannelKind::file, ChannelKind::shell}) {
+                          ChannelKind::file, ChannelKind::shell,
+                          ChannelKind::stream}) {
     if (label_for(kind) == label) {
       return kind;
     }

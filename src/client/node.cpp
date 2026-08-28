@@ -1,6 +1,9 @@
 #include <heyaki/node.hpp>
 
 #include "runtime_access.hpp"
+
+#include "byte_stream.hpp"
+#include "pairing_service.hpp"
 #include "connection_attempt.hpp"
 #include "peer_session.hpp"
 #include "relay_signaling_route.hpp"
@@ -2936,6 +2939,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     iterator->second.snapshot.state = NodePeerSessionState::authenticating;
     const auto expires = unix_milliseconds_now() + 60'000U;
     auto weak = weak_from_this();
+    const auto peer_key = iterator->second.snapshot.peer;
+    const auto peer_device = peer_key.device_id;
+    const auto peer_public_key = iterator->second.peer_public_key;
     auto session = PeerSession::create_verified(
         {.transport = iterator->second.transport,
          .binding = *binding.value_if(),
@@ -2952,7 +2958,45 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
            }
          },
          .timeline = iterator->second.timeline,
-         .clock = {}});
+         .clock = {},
+         .trust_authorizer =
+             [weak, peer_device](std::uint64_t now_unix_milliseconds)
+                 -> Result<SessionAuthorization> {
+               auto self = weak.lock();
+               if (!self || !self->pairing_service) {
+                 return Result<SessionAuthorization>::failure(
+                     node_error(ErrorCode::configuration, "pairing_service_missing"));
+               }
+               return self->pairing_service->authorize(peer_device, now_unix_milliseconds);
+             },
+         .pairing_evaluator =
+             [weak, peer_device, peer_public_key](
+                 const PairingRequestBody& request) -> Result<PairingResultBody> {
+               auto self = weak.lock();
+               if (!self || !self->pairing_service) {
+                 return Result<PairingResultBody>::failure(
+                     node_error(ErrorCode::configuration, "pairing_service_missing"));
+               }
+               return self->pairing_service->evaluate(
+                   request, peer_device,
+                   std::span<const std::byte>{peer_public_key.data(),
+                                              peer_public_key.size()});
+             },
+         .pairing_result_sink =
+             [weak, peer_key, peer_device, peer_public_key](
+                 const PairingResultBody& result, const RequestId& pending_request_id,
+                 const PairingNonce& pending_nonce,
+                 const std::vector<std::string>& requested_scopes) -> Result<void> {
+               auto self = weak.lock();
+               if (!self || !self->pairing_service) {
+                 return Result<void>::failure(
+                     node_error(ErrorCode::configuration, "pairing_service_missing"));
+               }
+               return self->pairing_service->accept_grant(
+                   result, pending_request_id, pending_nonce, peer_device,
+                   peer_public_key, requested_scopes);
+             },
+         .wall_clock = unix_milliseconds_now});
     if (!session) return Result<void>::failure(*session.error_if());
     iterator->second.session = *session.value_if();
     attach_restart_handler(request_id);
@@ -2977,9 +3021,12 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         iterator->second.snapshot.state = NodePeerSessionState::authenticating;
         break;
       case PeerSessionState::authenticated:
+      case PeerSessionState::active: {
         iterator->second.snapshot.state = NodePeerSessionState::authenticated;
         iterator->second.negotiated_capabilities =
             diagnostics.negotiated_capabilities;
+        iterator->second.snapshot.pairing_restricted = false;
+        iterator->second.snapshot.authorized_scopes = diagnostics.authorized_scopes;
         if (iterator->second.session) {
           iterator->second.snapshot.session_epoch =
               iterator->second.session->local_hello().session_epoch;
@@ -2989,9 +3036,31 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
                                             std::chrono::steady_clock::now());
         }
         close_peer(iterator->second.snapshot.peer);
+        const auto peer_device = iterator->second.snapshot.peer.device_id;
+        auto pending = pending_pairings.find(peer_device);
+        if (pending != pending_pairings.end() &&
+            diagnostics.pairing_results_received > 0U) {
+          // Password pairing completed end to end: report the effective
+          // scopes of the fresh grant.
+          if (pairing_observer) {
+            pairing_observer(iterator->second.snapshot.peer,
+                             NodePairingOutcome::success(diagnostics.authorized_scopes));
+          }
+          pending_pairings.erase(pending);
+        }
         break;
+      }
       case PeerSessionState::pairing_restricted:
-        iterator->second.snapshot.state = NodePeerSessionState::authenticating;
+        // Identity verified, trust absent: the session stays restricted and
+        // only pairing frames flow (RULE-03).
+        iterator->second.snapshot.state = NodePeerSessionState::pairing_restricted;
+        iterator->second.snapshot.pairing_restricted = true;
+        iterator->second.snapshot.authorized_scopes.clear();
+        if (coordinator) {
+          (void)coordinator->cancel_attempt(request_id,
+                                            std::chrono::steady_clock::now());
+        }
+        close_peer(iterator->second.snapshot.peer);
         break;
       case PeerSessionState::closed: {
         const bool was_authenticated =
@@ -3022,8 +3091,10 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
               node_error(ErrorCode::transport, "peer_session_closed"));
           fail_peer_attempt(request_id, error);
           maybe_reestablish_peer_session(peer, was_authenticated);
+          notify_pairing_failure(peer, diagnostics.last_error);
           return;
         }
+        notify_pairing_failure(peer, diagnostics.last_error);
         break;
       }
     }
@@ -3086,6 +3157,75 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return nullptr;
     }
     return &iterator->second;
+  }
+
+  void notify_pairing_failure(const DeviceEndpointKey& peer,
+                               const std::optional<Error>& error) {
+    auto pending = pending_pairings.find(peer.device_id);
+    if (pending == pending_pairings.end()) return;
+    if (pairing_observer) {
+      pairing_observer(peer, NodePairingOutcome::failure(error.value_or(
+                                        node_error(ErrorCode::pairing_denied,
+                                                   "pairing_denied"))));
+    }
+    pending_pairings.erase(pending);
+  }
+
+  // ---- M5 pairing, trust, and stream API (strand context) ----
+
+  Result<void> pair_peer_strand(DeviceEndpointKey peer, std::string_view password,
+                                std::vector<std::string> requested_scopes) {
+    const auto index = peer_attempt_by_endpoint.find(peer);
+    if (index == peer_attempt_by_endpoint.end()) {
+      return Result<void>::failure(node_error(ErrorCode::peer_offline,
+                                              "peer_session_missing"));
+    }
+    const auto iterator = peer_attempts.find(index->second);
+    if (iterator == peer_attempts.end() || !iterator->second.session) {
+      return Result<void>::failure(node_error(ErrorCode::peer_offline,
+                                              "peer_session_missing"));
+    }
+    if (!iterator->second.session->pairing_restricted()) {
+      return Result<void>::failure(
+          node_error(ErrorCode::pairing_required, "session_not_pairing_restricted"));
+    }
+    if (pending_pairings.contains(peer.device_id)) {
+      return Result<void>::failure(
+          node_error(ErrorCode::pairing_required, "pairing_already_pending"));
+    }
+    auto submitted =
+        iterator->second.session->submit_pairing_request(password, requested_scopes);
+    if (!submitted) return submitted;
+    pending_pairings.emplace(peer.device_id,
+                             PendingPairing{peer, std::move(requested_scopes)});
+    publish_peer_sessions();
+    return Result<void>::success();
+  }
+
+  Result<std::shared_ptr<ByteStreamHandle>> open_stream_strand(
+      DeviceEndpointKey peer, std::uint64_t receive_window_bytes,
+      std::uint32_t receive_window_frames) {
+    auto* attempt = authenticated_attempt(peer);
+    if (attempt == nullptr || attempt->session == nullptr) {
+      return Result<std::shared_ptr<ByteStreamHandle>>::failure(
+          node_error(ErrorCode::pairing_required, "session_not_authorized"));
+    }
+    auto& service = stream_services[peer];
+    if (!service) {
+      service = std::make_unique<ByteStreamService>(*attempt->session);
+      auto attached = service->attach();
+      if (!attached) {
+        stream_services.erase(peer);
+        return Result<std::shared_ptr<ByteStreamHandle>>::failure(*attached.error_if());
+      }
+      service->set_inbound_handler(
+          [weak = weak_from_this(), peer](const std::shared_ptr<ByteStreamHandle>& stream) {
+            auto self = weak.lock();
+            if (!self || !self->stream_inbound_handler) return;
+            self->stream_inbound_handler(peer, make_public_byte_stream(stream));
+          });
+    }
+    return service->open_stream(receive_window_bytes, receive_window_frames);
   }
 
   void publish_restart_diagnostics() {
@@ -3654,6 +3794,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     binding.initiator = restart.initiator;
     auto weak = weak_from_this();
     const auto peer = restart.peer;
+    const auto peer_device = peer.device_id;
+    const auto peer_public_key = restart.context.peer_public_key;
     auto session = PeerSession::create_verified(
         {.transport = restart.transport,
          .binding = binding,
@@ -3670,7 +3812,34 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
            }
          },
          .timeline = restart.timeline,
-         .clock = {}});
+         .clock = {},
+         // The successor session re-runs the same trust adjudication: a
+         // grant revoked during the old session does not carry over.
+         .trust_authorizer =
+             [weak, peer_device](std::uint64_t now_unix_milliseconds)
+                 -> Result<SessionAuthorization> {
+               auto self = weak.lock();
+               if (!self || !self->pairing_service) {
+                 return Result<SessionAuthorization>::failure(
+                     node_error(ErrorCode::configuration, "pairing_service_missing"));
+               }
+               return self->pairing_service->authorize(peer_device, now_unix_milliseconds);
+             },
+         .pairing_result_sink =
+             [weak, peer_device, peer_public_key](
+                 const PairingResultBody& result, const RequestId& pending_request_id,
+                 const PairingNonce& pending_nonce,
+                 const std::vector<std::string>& requested_scopes) -> Result<void> {
+               auto self = weak.lock();
+               if (!self || !self->pairing_service) {
+                 return Result<void>::failure(
+                     node_error(ErrorCode::configuration, "pairing_service_missing"));
+               }
+               return self->pairing_service->accept_grant(
+                   result, pending_request_id, pending_nonce, peer_device,
+                   peer_public_key, requested_scopes);
+             },
+         .wall_clock = unix_milliseconds_now});
     if (!session) return Result<void>::failure(*session.error_if());
     restart.session = *session.value_if();
     attach_restart_handler_to_session(**session.value_if(), peer);
@@ -4876,6 +5045,16 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   executor::comm::DoubleBuffer<std::vector<NodePeerSessionSnapshot>> peer_session_snapshots;
   executor::comm::PhaseGate stopped;
   std::set<DeviceId> trusted_devices;
+  // ---- M5 pairing, trust, and streams ----
+  std::unique_ptr<PairingService> pairing_service;
+  NodePairingObserver pairing_observer;
+  struct PendingPairing {
+    DeviceEndpointKey peer;
+    std::vector<std::string> requested_scopes;
+  };
+  std::map<DeviceId, PendingPairing> pending_pairings;
+  std::map<DeviceEndpointKey, std::unique_ptr<ByteStreamService>> stream_services;
+  std::function<void(const DeviceEndpointKey&, ByteStream)> stream_inbound_handler;
   LanSignalingValidator signaling_validator;
   LanSignalingHandler signaling_handler;
   std::shared_ptr<SignalingDelegate> coordinator_delegate;
@@ -4966,6 +5145,12 @@ Result<Node> Node::create(NodeConfig config) {
   if (!identity) {
     return Result<Node>::failure(*identity.error_if());
   }
+  // The pairing service signs grants with its own loaded copy of the device
+  // identity (IdentityKeyPair is move-only and Node::Impl keeps one).
+  auto pairing_identity = config.profile->load_identity();
+  if (!pairing_identity) {
+    return Result<Node>::failure(*pairing_identity.error_if());
+  }
   auto endpoint = config.profile->endpoint_for(config.application_id);
   if (!endpoint) {
     return Result<Node>::failure(*endpoint.error_if());
@@ -5006,6 +5191,23 @@ Result<Node> Node::create(NodeConfig config) {
       std::move(trusted_set), std::move(config.signaling_validator),
       std::move(config.signaling_handler), std::move(config.relay_override));
   impl->path_policy = std::move(*path_policy.value_if());
+  {
+    PairingServiceConfig pairing_config{.profile = config.profile,
+                                        .identity =
+                                            std::move(*pairing_identity.value_if())};
+    if (config.pairing_failure_threshold > 0U) {
+      pairing_config.failure_threshold = config.pairing_failure_threshold;
+    }
+    if (config.pairing_backoff_base > std::chrono::milliseconds::zero()) {
+      pairing_config.backoff_base = config.pairing_backoff_base;
+    }
+    if (config.pairing_backoff_max > std::chrono::milliseconds::zero()) {
+      pairing_config.backoff_max = config.pairing_backoff_max;
+    }
+    pairing_config.grant_ttl_milliseconds = config.pairing_grant_ttl_milliseconds;
+    pairing_config.wall_clock = unix_milliseconds_now;
+    impl->pairing_service = std::make_unique<PairingService>(std::move(pairing_config));
+  }
   auto initialized = impl->initialize();
   if (!initialized) {
     if (impl->owned_runtime) {
@@ -5141,6 +5343,125 @@ Result<void> Node::connect(DeviceEndpointKey peer) {
       Impl::ConnectCommand{peer, *route.value_if()});
 }
 
+Result<void> Node::pair_peer(DeviceEndpointKey peer, std::string_view password,
+                              std::vector<std::string> requested_scopes) {
+  if (!impl_) {
+    return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  if (peer.device_id.is_zero() || peer.endpoint_id.is_zero()) {
+    return Result<void>::failure(
+        node_error(ErrorCode::configuration, "pairing_peer_invalid"));
+  }
+  if (password.empty()) {
+    return Result<void>::failure(
+        node_error(ErrorCode::configuration, "pairing_password_empty"));
+  }
+  auto normalized = normalize_trust_scopes(std::move(requested_scopes));
+  if (!normalized) {
+    return Result<void>::failure(*normalized.error_if());
+  }
+  if (normalized.value_if()->empty()) {
+    return Result<void>::failure(
+        node_error(ErrorCode::configuration, "pairing_scopes_empty"));
+  }
+  auto weak = std::weak_ptr<Impl>{impl_};
+  auto scopes = std::make_shared<std::vector<std::string>>(
+      std::move(*normalized.value_if()));
+  auto password_copy = std::make_shared<std::string>(password);
+  try {
+    boost::asio::post(impl_->strand, [weak, peer, scopes, password_copy] {
+      if (auto self = weak.lock()) {
+        (void)self->pair_peer_strand(peer, *password_copy, *scopes);
+        // The password copy lives only for this dispatch and is zeroized by
+        // destruction; it is never logged or persisted.
+      }
+    });
+  } catch (...) {
+    return Result<void>::failure(
+        node_error(ErrorCode::internal, "pairing_schedule_failed"));
+  }
+  return Result<void>::success();
+}
+
+void Node::set_pairing_observer(NodePairingObserver observer) {
+  if (!impl_) return;
+  impl_->pairing_observer = std::move(observer);
+}
+
+Result<std::vector<TrustGrantRecord>> Node::trust_grants_for(
+    const DeviceEndpointKey& peer) const {
+  if (!impl_ || !impl_->pairing_service) {
+    return Result<std::vector<TrustGrantRecord>>::failure(
+        node_error(ErrorCode::configuration, "pairing_service_missing"));
+  }
+  return impl_->pairing_service->grants_for_peer(peer.device_id,
+                                                 unix_milliseconds_now());
+}
+
+Result<void> Node::revoke_trust_grant(const GrantId& grant_id) {
+  if (!impl_ || !impl_->pairing_service) {
+    return Result<void>::failure(
+        node_error(ErrorCode::configuration, "pairing_service_missing"));
+  }
+  return impl_->pairing_service->revoke_grant(grant_id);
+}
+
+Result<std::uint64_t> Node::rotate_authorization_password(std::string_view new_password) {
+  if (!impl_ || !impl_->pairing_service) {
+    return Result<std::uint64_t>::failure(
+        node_error(ErrorCode::configuration, "pairing_service_missing"));
+  }
+  auto verifier = create_password_verifier(new_password, PasswordHashParameters{});
+  if (!verifier) {
+    return Result<std::uint64_t>::failure(*verifier.error_if());
+  }
+  return impl_->pairing_service->rotate_password(*verifier.value_if());
+}
+
+Result<std::uint64_t> Node::rotate_authorization_password_and_revoke(
+    std::string_view new_password) {
+  if (!impl_ || !impl_->pairing_service) {
+    return Result<std::uint64_t>::failure(
+        node_error(ErrorCode::configuration, "pairing_service_missing"));
+  }
+  auto verifier = create_password_verifier(new_password, PasswordHashParameters{});
+  if (!verifier) {
+    return Result<std::uint64_t>::failure(*verifier.error_if());
+  }
+  return impl_->pairing_service->rotate_password_and_revoke_grants(
+      *verifier.value_if());
+}
+
+Result<ByteStream> Node::open_byte_stream(const DeviceEndpointKey& peer,
+                                          const NodeByteStreamOptions& options) {
+  if (!impl_) {
+    return Result<ByteStream>::failure(
+        node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  if (peer.device_id.is_zero() || peer.endpoint_id.is_zero()) {
+    return Result<ByteStream>::failure(
+        node_error(ErrorCode::configuration, "stream_peer_invalid"));
+  }
+  if (options.receive_window_bytes == 0U || options.receive_window_frames == 0U) {
+    return Result<ByteStream>::failure(
+        node_error(ErrorCode::configuration, "stream_window_invalid"));
+  }
+  // The stream must be created on the session's strand context; the handle
+  // itself is then safe for the caller to use through its queued handlers.
+  auto opened = impl_->open_stream_strand(peer, options.receive_window_bytes,
+                                          options.receive_window_frames);
+  if (!opened) {
+    return Result<ByteStream>::failure(*opened.error_if());
+  }
+  return Result<ByteStream>::success(make_public_byte_stream(*opened.value_if()));
+}
+
+void Node::set_byte_stream_inbound_handler(
+    std::function<void(const DeviceEndpointKey&, ByteStream)> handler) {
+  if (!impl_) return;
+  impl_->stream_inbound_handler = std::move(handler);
+}
+
 Result<void> Node::send_lan_signaling(LanSignalingMessage message) {
   if (!impl_) {
     return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
@@ -5240,6 +5561,8 @@ std::string_view node_peer_session_state_name(NodePeerSessionState state) noexce
       return "transport_connecting";
     case NodePeerSessionState::authenticating:
       return "authenticating";
+    case NodePeerSessionState::pairing_restricted:
+      return "pairing_restricted";
     case NodePeerSessionState::authenticated:
       return "authenticated";
     case NodePeerSessionState::closed:

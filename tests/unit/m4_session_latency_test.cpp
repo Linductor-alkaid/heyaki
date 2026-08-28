@@ -6,6 +6,8 @@
 
 #include <gtest/gtest.h>
 
+#include "m5_support.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -103,6 +105,9 @@ TEST_F(M4SessionLatencyTest, DirectHostSessionEstablishmentP95UnderThreeSeconds)
         initialized_profile("latency-second-" + std::to_string(cycle),
                             "com.example.latency.second");
     ASSERT_TRUE(first_profile && second_profile);
+  ASSERT_TRUE(heyaki::test::seed_mutual_trust(*first_profile.value_if(),
+                                              *second_profile.value_if(),
+                                              {"m4.test"}));
 
     const auto node_config_for = [&](ProfileStore& profile,
                                      const char* application_id) {

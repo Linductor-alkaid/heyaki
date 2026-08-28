@@ -440,5 +440,6 @@ std::vector<std::byte> canonical_bytes(const EndpointId& value) { return id_byte
 std::vector<std::byte> canonical_bytes(const SessionId& value) { return id_bytes(value); }
 std::vector<std::byte> canonical_bytes(const RequestId& value) { return id_bytes(value); }
 std::vector<std::byte> canonical_bytes(const TransferId& value) { return id_bytes(value); }
+std::vector<std::byte> canonical_bytes(const GrantId& value) { return id_bytes(value); }
 
 }  // namespace heyaki

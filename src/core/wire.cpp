@@ -103,8 +103,7 @@ const char* channel_error(std::uint8_t type, std::uint32_t channel_id) noexcept 
 }
 
 const char* payload_limit_error(std::uint8_t type, std::size_t payload_size,
-                                const Limits& limits) noexcept {
-  if ((type == static_cast<std::uint8_t>(FrameType::message) ||
+                                const Limits& limits) noexcept {  if ((type == static_cast<std::uint8_t>(FrameType::message) ||
        type == static_cast<std::uint8_t>(FrameType::message_ack)) &&
       payload_size > limits.max_message_bytes) {
     return "message_payload_limit";
@@ -129,6 +128,11 @@ const char* payload_limit_error(std::uint8_t type, std::size_t payload_size,
 }
 
 }  // namespace
+
+const char* frame_payload_limit_error(std::uint8_t type, std::size_t payload_size,
+                                      const Limits& limits) noexcept {
+  return payload_limit_error(type, payload_size, limits);
+}
 
 bool is_known_frame_type(std::uint8_t type) noexcept {
   switch (static_cast<FrameType>(type)) {

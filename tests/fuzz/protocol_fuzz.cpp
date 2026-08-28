@@ -5,6 +5,9 @@
 #include <heyaki/protocol.hpp>
 #include <heyaki/session_protocol.hpp>
 #include <heyaki/signaling_protocol.hpp>
+#include <heyaki/frame_stream.hpp>
+#include <heyaki/pairing_protocol.hpp>
+#include <heyaki/trust_grant.hpp>
 #include <heyaki/wire.hpp>
 
 #include "heyaki/common/v1/common.pb.h"
@@ -329,6 +332,35 @@ void frame_parser(std::span<const std::byte> input) {
       !std::equal(encoded.value_if()->begin(), encoded.value_if()->end(), input.begin())) {
     std::abort();
   }
+}
+
+// M5: the incremental decoder must accept exactly what the one-shot parser
+// accepts, delivered at arbitrary chunk boundaries, and never crash.
+void frame_stream_decoder(std::span<const std::byte> input) {
+  FrameStreamDecoder decoder;
+  if (!decoder.append(input)) return;
+  while (true) {
+    auto step = decoder.next_view();
+    if (step.status == FrameStreamStatus::invalid) return;
+    if (step.status == FrameStreamStatus::need_more) return;
+    if (!decoder.consume_view()) return;
+  }
+}
+
+void pairing_request_parser(std::span<const std::byte> input) {
+  const auto parsed = parse_pairing_request(input);
+  if (!parsed) return;
+  const auto encoded = encode_pairing_request(*parsed.value_if());
+  if (!encoded) std::abort();
+  const auto reparsed = parse_pairing_request(*encoded.value_if());
+  if (!reparsed) std::abort();
+}
+
+void trust_grant_parser(std::span<const std::byte> input) {
+  const auto parsed = parse_signed_trust_grant(input);
+  if (!parsed) return;
+  const auto encoded = encode_signed_trust_grant(*parsed.value_if());
+  if (!encoded) std::abort();
 }
 
 void lan_datagram_parser(std::span<const std::byte> input) {

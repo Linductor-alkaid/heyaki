@@ -131,11 +131,13 @@ configure_file(
 
 add_library(heyaki_core
   src/core/error.cpp
+  src/core/frame_stream.cpp
   src/core/identity.cpp
   src/core/ids.cpp
   src/core/lan_protocol.cpp
   src/core/limits.cpp
   src/core/operation.cpp
+  src/core/pairing_protocol.cpp
   src/core/protocol.cpp
   src/core/security.cpp
   src/core/session_protocol.cpp
@@ -143,6 +145,7 @@ add_library(heyaki_core
   src/core/signaling_protocol.cpp
   src/core/signaling_replay_cache.cpp
   src/core/signing.cpp
+  src/core/trust_grant.cpp
   src/core/version.cpp
   src/core/wire.cpp)
 add_library(heyaki::core ALIAS heyaki_core)
@@ -176,15 +179,19 @@ endif()
 heyaki_configure_target(heyaki_profile)
 
 add_library(heyaki_client
+  src/client/byte_stream.cpp
+  src/client/byte_stream_facade.cpp
   src/client/connection_attempt.cpp
   src/client/peer_session.cpp
   src/client/lan_directory.cpp
   src/client/module.cpp
   src/client/node.cpp
+  src/client/pairing_service.cpp
   src/client/relay_enrollment_client.cpp
   src/client/relay_wss_client.cpp
   src/client/relay_wss_control.cpp
   src/client/runtime.cpp
+  src/client/session_channels.cpp
   src/client/signaling_coordinator.cpp
   src/relay/relay_endpoint.cpp
   src/relay/relay_enrollment.cpp

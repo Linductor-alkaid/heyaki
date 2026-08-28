@@ -9,6 +9,8 @@
 
 #include <gtest/gtest.h>
 
+#include "m5_support.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -167,6 +169,15 @@ TEST_F(M4TopologyMatrixTest, SameDeviceIdServesTwoEndpointsIndependently) {
       << (app_a ? std::string{} : std::string{app_a.error_if()->safe_detail()})
       << (app_b ? std::string{} : std::string{app_b.error_if()->safe_detail()})
       << (observer ? std::string{} : std::string{observer.error_if()->safe_detail()});
+  {
+    // Device-level trust covers both endpoints of the shared DeviceId.
+    auto shared = profiles_.find(shared_db.string());
+    auto observer_profile = profiles_.find((root_ / "observer" / "profile.sqlite").string());
+    ASSERT_NE(shared, profiles_.end());
+    ASSERT_NE(observer_profile, profiles_.end());
+    ASSERT_TRUE(heyaki::test::seed_mutual_trust(shared->second,
+                                                observer_profile->second, {"m4.test"}));
+  }
   if (lan_interfaces_unavailable()) {
     GTEST_SKIP() << "No multicast-capable non-loopback interface";
   }
@@ -225,6 +236,14 @@ TEST_F(M4TopologyMatrixTest, SimultaneousCrossConnectionsYieldSingleWinner) {
   auto second = make_node(root_ / "cross-second" / "profile.sqlite",
                           "org.example.cross.second");
   ASSERT_TRUE(first && second);
+  {
+    auto first_profile = profiles_.find((root_ / "cross-first" / "profile.sqlite").string());
+    auto second_profile = profiles_.find((root_ / "cross-second" / "profile.sqlite").string());
+    ASSERT_NE(first_profile, profiles_.end());
+    ASSERT_NE(second_profile, profiles_.end());
+    ASSERT_TRUE(heyaki::test::seed_mutual_trust(first_profile->second,
+                                                second_profile->second, {"m4.test"}));
+  }
   if (lan_interfaces_unavailable()) {
     GTEST_SKIP() << "No multicast-capable non-loopback interface";
   }

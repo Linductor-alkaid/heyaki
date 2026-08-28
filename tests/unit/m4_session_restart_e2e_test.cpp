@@ -10,6 +10,8 @@
 
 #include <gtest/gtest.h>
 
+#include "m5_support.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -156,6 +158,9 @@ TEST_F(M4SessionRestartE2ETest, RestartSwapsTransportAndBumpsEpoch) {
   auto second_profile =
       initialized_profile("restart-second", "com.example.restart.second");
   ASSERT_TRUE(first_profile && second_profile);
+  ASSERT_TRUE(heyaki::test::seed_mutual_trust(*first_profile.value_if(),
+                                              *second_profile.value_if(),
+                                              {"m4.test"}));
 
   auto first =
       Node::create(restart_node_config(*first_profile.value_if(),
@@ -303,6 +308,9 @@ TEST_F(M4SessionRestartE2ETest, RefreshWithoutChangeDoesNotRestart) {
   auto second_profile =
       initialized_profile("refresh-second", "com.example.refresh.second");
   ASSERT_TRUE(first_profile && second_profile);
+  ASSERT_TRUE(heyaki::test::seed_mutual_trust(*first_profile.value_if(),
+                                              *second_profile.value_if(),
+                                              {"m4.test"}));
   auto first =
       Node::create(restart_node_config(*first_profile.value_if(),
                                        "com.example.refresh.first"));

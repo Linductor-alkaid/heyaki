@@ -1,5 +1,6 @@
 #pragma once
 
+#include <heyaki/byte_stream.hpp>
 #include <heyaki/lan_directory.hpp>
 #include <heyaki/profile_store.hpp>
 #include <heyaki/runtime.hpp>
@@ -64,6 +65,9 @@ enum class NodePeerSessionState : std::uint8_t {
   signaling,
   transport_connecting,
   authenticating,
+  // Identity verified but untrusted: only pairing frames flow; business
+  // channels cannot exist (RULE-03).
+  pairing_restricted,
   authenticated,
   closed,
 };
@@ -146,6 +150,10 @@ struct NodePeerSessionSnapshot {
   std::size_t buffered_amount{};
   bool initiator{false};
   bool restart_in_flight{false};
+  // Trust state of the session (M5): restricted sessions wait for pairing;
+  // authorized sessions carry the effective grant scopes.
+  bool pairing_restricted{false};
+  std::vector<std::string> authorized_scopes;
   std::optional<Error> error;
 };
 
@@ -297,6 +305,25 @@ struct NodeConfig {
   LanSignalingHandler signaling_handler;
   std::optional<RelayNodeConfig> relay_override;
   std::optional<PeerPathPolicy> path_policy_override;
+  // M5 pairing hardening: pairing policy/failure backoff knobs forwarded to
+  // the Node's PairingService. Zero values keep the service defaults.
+  std::size_t pairing_failure_threshold{0U};
+  std::chrono::milliseconds pairing_backoff_base{0};
+  std::chrono::milliseconds pairing_backoff_max{0};
+  // Optional grant TTL; 0 disables expiry.
+  std::uint64_t pairing_grant_ttl_milliseconds{0U};
+};
+
+// Terminal outcome of one password pairing attempt; `value` holds the
+// effective scopes on success.
+using NodePairingOutcome = Result<std::vector<std::string>>;
+using NodePairingObserver =
+    std::function<void(const DeviceEndpointKey& peer, const NodePairingOutcome& outcome)>;
+
+// Options for Node::open_byte_stream.
+struct NodeByteStreamOptions {
+  std::uint64_t receive_window_bytes{256U * 1024U};
+  std::uint32_t receive_window_frames{64U};
 };
 
 struct NodeShutdownReport {
@@ -332,6 +359,32 @@ class Node {
   [[nodiscard]] Result<void> restart_session(DeviceEndpointKey peer);
   [[nodiscard]] Result<void> send_lan_signaling(LanSignalingMessage message);
   [[nodiscard]] Result<void> close_lan(DeviceEndpointKey peer);
+
+  // ---- M5 pairing, trust, and streams ----
+  // Submits one password pairing attempt on the peer's pairing-restricted
+  // session. The one-time observer (or session snapshot) reports the terminal
+  // outcome; the password is never stored or logged.
+  [[nodiscard]] Result<void> pair_peer(DeviceEndpointKey peer, std::string_view password,
+                                       std::vector<std::string> requested_scopes);
+  void set_pairing_observer(NodePairingObserver observer);
+  // Trust view data for the pairing & trust UI.
+  [[nodiscard]] Result<std::vector<TrustGrantRecord>> trust_grants_for(
+      const DeviceEndpointKey& peer) const;
+  [[nodiscard]] Result<void> revoke_trust_grant(const GrantId& grant_id);
+  // "Rotate only": keeps existing grants valid.
+  [[nodiscard]] Result<std::uint64_t> rotate_authorization_password(
+      std::string_view new_password);
+  // "Rotate and revoke": also revokes grants issued under older generations.
+  [[nodiscard]] Result<std::uint64_t> rotate_authorization_password_and_revoke(
+      std::string_view new_password);
+  // Opens a stream on the peer's authorized session; inbound peer streams
+  // are surfaced through the inbound handler set below.
+  [[nodiscard]] Result<ByteStream> open_byte_stream(
+      const DeviceEndpointKey& peer,
+      const NodeByteStreamOptions& options = {});
+  void set_byte_stream_inbound_handler(
+      std::function<void(const DeviceEndpointKey&, ByteStream)> handler);
+
   [[nodiscard]] NodeShutdownReport shutdown();
 
  private:

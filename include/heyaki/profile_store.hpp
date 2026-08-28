@@ -184,8 +184,17 @@ class ProfileStore {
   [[nodiscard]] Result<void> put_trust_grant(const TrustGrantRecord& grant);
   [[nodiscard]] Result<std::optional<TrustGrantRecord>> trust_grant(
       const GrantId& grant_id) const;
+  // Valid (non-revoked, non-expired) grants of the relationship with `peer`
+  // in both directions. Password rotation alone never invalidates a grant;
+  // only explicit revocation does.
+  [[nodiscard]] Result<std::vector<TrustGrantRecord>> trust_grants_for_peer(
+      const DeviceId& peer, std::uint64_t now_unix_milliseconds) const;
   [[nodiscard]] Result<void> revoke_trust_grant(const GrantId& grant_id,
                                                 std::uint64_t revoked_unix_milliseconds);
+  // Revokes every still-valid grant this device issued with a password
+  // generation below `minimum_generation` (M5-13 "rotate and revoke").
+  [[nodiscard]] Result<std::size_t> revoke_issued_trust_grants_below_generation(
+      std::uint64_t minimum_generation, std::uint64_t revoked_unix_milliseconds);
   [[nodiscard]] Result<bool> is_scope_authorized(
       const DeviceId& peer, std::string_view scope, std::uint64_t now_unix_milliseconds) const;
   [[nodiscard]] Result<bool> is_device_trusted(
