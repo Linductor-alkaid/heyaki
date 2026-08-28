@@ -121,7 +121,7 @@ struct TrustGrantRecord {
   std::vector<std::string> scopes;
   std::uint64_t password_generation{1U};
   std::uint64_t issued_unix_milliseconds{};
-  std::optional<std::uint64_t> expires_unix_milliseconds;
+  std::optional<std::uint64_t> expires_unix_milliseconds{};
   std::vector<std::byte> signature;
   bool revoked{false};
 };

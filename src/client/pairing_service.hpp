@@ -51,6 +51,8 @@ struct PairingAuditEvent {
 };
 
 struct PairingServiceConfig {
+  static constexpr std::size_t kDefaultFailureThreshold = 3U;
+
   ProfileStore* profile{nullptr};
   IdentityKeyPair identity;
   // 0 = grants without expiry.
@@ -61,8 +63,8 @@ struct PairingServiceConfig {
   std::chrono::milliseconds backoff_max{60000};
   // Bounded per-source failure table size.
   std::size_t failure_table_capacity{256U};
-  std::function<std::uint64_t()> wall_clock;
-  std::function<void(const PairingAuditEvent&)> audit_sink;
+  std::function<std::uint64_t()> wall_clock{};
+  std::function<void(const PairingAuditEvent&)> audit_sink{};
 };
 
 class PairingService {

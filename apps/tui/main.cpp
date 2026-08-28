@@ -374,7 +374,7 @@ std::string format_stream_bytes(const std::byte* data, std::size_t size,
 }
 
 // M5-20 stream view: text/hex send, half-close, reset, and live window state.
-void run_stream_view(heyaki::Node& node, const heyaki::DeviceEndpointKey& peer,
+void run_stream_view(const heyaki::DeviceEndpointKey& peer,
                      heyaki::ByteStream stream) {
   std::cout << "\nSTREAM device=" << heyaki::to_string(peer.device_id)
             << "\ncommands [send <text>|sendhex <hex>|read|readhex|window|fin|reset|exit]\n";
@@ -460,8 +460,8 @@ void run_stream_view(heyaki::Node& node, const heyaki::DeviceEndpointKey& peer,
   }
 }
 
-void run_command(std::string line, heyaki::Node& node, heyaki::ProfileStore& profile,
-                 UiState& state, bool& running) {
+void run_command(std::string line, heyaki::Node& node, UiState& state,
+                 bool& running) {
   std::istringstream input(std::move(line));
   std::string command;
   input >> command;
@@ -617,7 +617,7 @@ void run_command(std::string line, heyaki::Node& node, heyaki::ProfileStore& pro
       state.command_error = *stream.error_if();
       return;
     }
-    run_stream_view(node, *peer, std::move(*stream.value_if()));
+    run_stream_view(*peer, std::move(*stream.value_if()));
     state.command_status = "stream-closed";
     state.command_error.reset();
     return;
@@ -949,7 +949,7 @@ int run_tui(const Options& options) {
       state.command_error.reset();
       continue;
     }
-    run_command(std::move(line), *node, *profile, state, running);
+    run_command(std::move(line), *node, state, running);
   }
   bridge->events.close();
   const auto shutdown = node->shutdown();

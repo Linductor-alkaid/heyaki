@@ -34,10 +34,14 @@ struct PairingServiceTest : public ::testing::Test {
     // ProfileStore enforces owner-only directory permissions.
     std::filesystem::permissions(root, std::filesystem::perms::owner_all,
                                  std::filesystem::perm_options::replace);
-    auto target = ProfileStore::create(root / "target.sqlite");
+    // Disable the OS secret backend like every other profile test: its
+    // glib-internal allocator trips ThreadSanitizer and adds nothing here.
+    ProfileOpenOptions open_options;
+    open_options.secret_backend.prefer_os_backend = false;
+    auto target = ProfileStore::create(root / "target.sqlite", open_options);
     ASSERT_TRUE(target);
     target_store.emplace(std::move(*target.value_if()));
-    auto initiator = ProfileStore::create(root / "initiator.sqlite");
+    auto initiator = ProfileStore::create(root / "initiator.sqlite", open_options);
     ASSERT_TRUE(initiator);
     initiator_store.emplace(std::move(*initiator.value_if()));
 

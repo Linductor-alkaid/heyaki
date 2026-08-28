@@ -90,16 +90,16 @@ struct PeerSessionConfig {
   // When set, a verified hello leads to pairing_restricted unless the
   // authorizer trusts the peer. When absent the session keeps the M4 test
   // semantics: hello-verified equals authorized with unrestricted scopes.
-  SessionTrustAuthorizer trust_authorizer;
+  SessionTrustAuthorizer trust_authorizer{};
   // Required to answer PAIRING_REQUEST on a restricted session.
-  PairingEvaluator pairing_evaluator;
+  PairingEvaluator pairing_evaluator{};
   // Required to accept PAIRING_RESULT grants as the pairing initiator.
-  PairingResultSink pairing_result_sink;
+  PairingResultSink pairing_result_sink{};
   Limits limits{};
   session::ChannelBudgetConfig channel_budgets{};
   // Lifetime cap of a pairing-restricted session (M5-07).
   std::chrono::milliseconds pairing_deadline{60000};
-  std::function<std::uint64_t()> wall_clock;
+  std::function<std::uint64_t()> wall_clock{};
 };
 
 struct VerifiedPeerSessionConfig {
@@ -114,13 +114,13 @@ struct VerifiedPeerSessionConfig {
   std::shared_ptr<ConnectionAttemptTimeline> timeline;
   std::function<std::chrono::steady_clock::time_point()> clock;
   // ---- M5 extensions, same meaning as in PeerSessionConfig ----
-  SessionTrustAuthorizer trust_authorizer;
-  PairingEvaluator pairing_evaluator;
-  PairingResultSink pairing_result_sink;
+  SessionTrustAuthorizer trust_authorizer{};
+  PairingEvaluator pairing_evaluator{};
+  PairingResultSink pairing_result_sink{};
   Limits limits{};
   session::ChannelBudgetConfig channel_budgets{};
   std::chrono::milliseconds pairing_deadline{60000};
-  std::function<std::uint64_t()> wall_clock;
+  std::function<std::uint64_t()> wall_clock{};
 };
 
 struct PeerSessionDiagnostics {

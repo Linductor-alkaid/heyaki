@@ -151,6 +151,7 @@ struct M5SessionPair {
              [this](const PairingResultBody& result, const RequestId& pending_id,
                     const PairingNonce& pending_nonce,
                     const std::vector<std::string>& requested_scopes) {
+               (void)pending_id;  // nonce is the binding checked below
                if (!result.grant.has_value()) {
                  return Result<void>::failure(
                      Error{ErrorCode::authentication, "m5_test", "result_without_grant"});

@@ -481,7 +481,10 @@ Result<void> ByteStreamService::send_stream_frame(std::uint32_t channel_id,
                                                   std::uint8_t type,
                                                   std::vector<std::byte> payload,
                                                   session::FrameClass klass) {
-  Frame frame{.type = type, .channel_id = channel_id, .payload = std::move(payload)};
+  Frame frame;
+  frame.type = type;
+  frame.channel_id = channel_id;
+  frame.payload = std::move(payload);
   return session_.send_frame(channel_id, klass, std::move(frame));
 }
 
@@ -610,9 +613,11 @@ void ByteStreamService::handle_open(const FrameView& frame, std::uint32_t channe
 }
 
 void ByteStreamService::handle_data(const FrameView& frame) {
-  if (frame.payload.size() < stream_data_header_bytes) return;
-  StreamId id{};
-  std::copy_n(frame.payload.begin(), 16U, id.begin());
+  // RAW layout: the stream id sits at offset zero (unlike the Protobuf
+  // frames, where it is field 1).
+  auto parsed_id = parse_stream_id(frame.payload);
+  if (!parsed_id) return;
+  const StreamId& id = *parsed_id.value_if();
   auto found = streams_.find(id);
   if (found == streams_.end()) return;
   auto& stream = *found->second;

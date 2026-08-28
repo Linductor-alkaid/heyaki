@@ -111,7 +111,7 @@ Result<PairingResultBody> PairingService::evaluate(
 
   PairingResultBody result;
   result.request_id = request.request_id;
-  auto deny = [&](ErrorCode code, StableStatus status, PairingAuditKind kind,
+  auto deny = [&](StableStatus status, PairingAuditKind kind,
                   const char* audit_detail) -> Result<PairingResultBody> {
     audit(kind, peer_device, audit_detail);
     result.status = status;
@@ -123,14 +123,14 @@ Result<PairingResultBody> PairingService::evaluate(
     return Result<PairingResultBody>::failure(*policy.error_if());
   }
   if (!policy.value_if()->password_pairing_enabled) {
-    return deny(ErrorCode::pairing_denied, StableStatus::permission_denied,
-                PairingAuditKind::denied_policy, "pairing_disabled");
+    return deny(StableStatus::permission_denied, PairingAuditKind::denied_policy,
+                "pairing_disabled");
   }
 
   // M5-10: per-source backoff gate before any expensive verification.
   if (backoff_blocks(peer_device, now_value)) {
-    return deny(ErrorCode::pairing_rate_limited, StableStatus::resource_exhausted,
-                PairingAuditKind::denied_backoff, "pairing_backoff");
+    return deny(StableStatus::resource_exhausted, PairingAuditKind::denied_backoff,
+                "pairing_backoff");
   }
   audit(PairingAuditKind::attempt, peer_device, "pairing_attempt");
 
@@ -139,8 +139,8 @@ Result<PairingResultBody> PairingService::evaluate(
     return Result<PairingResultBody>::failure(*verifier.error_if());
   }
   if (!verifier.value_if()->has_value()) {
-    return deny(ErrorCode::pairing_denied, StableStatus::permission_denied,
-                PairingAuditKind::denied_policy, "verifier_missing");
+    return deny(StableStatus::permission_denied, PairingAuditKind::denied_policy,
+                "verifier_missing");
   }
   auto verified = verify_password(request.password_utf8, **verifier.value_if());
   if (!verified) {
@@ -148,8 +148,8 @@ Result<PairingResultBody> PairingService::evaluate(
   }
   if (!*verified.value_if()) {
     record_failure(peer_device, now_value);
-    return deny(ErrorCode::authentication, StableStatus::unauthenticated,
-                PairingAuditKind::denied_password, "password_mismatch");
+    return deny(StableStatus::unauthenticated, PairingAuditKind::denied_password,
+                "password_mismatch");
   }
   clear_failures(peer_device);
 
@@ -162,8 +162,8 @@ Result<PairingResultBody> PairingService::evaluate(
   auto adjudication = adjudicate_trust_scopes(
       request.requested_scopes, *policy_scopes.value_if(), std::nullopt);
   if (!adjudication.authorized) {
-    return deny(ErrorCode::permission, StableStatus::permission_denied,
-                PairingAuditKind::denied_policy, "scope_intersection_empty");
+    return deny(StableStatus::permission_denied, PairingAuditKind::denied_policy,
+                "scope_intersection_empty");
   }
 
   // M5-11: issue the directional grant bound to both identities, the pairing

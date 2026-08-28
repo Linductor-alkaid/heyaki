@@ -75,7 +75,7 @@ int main() {
       if (!next.has_value()) break;
       if (next->frame_class == FrameClass::control) {
         control_sent += 1U;
-        control_position_sum += slot;
+        control_position_sum += static_cast<std::size_t>(slot);
         control_observations += 1U;
         max_control_deficit = std::max(max_control_deficit, bulk_sent - bulk_before);
         bulk_before = bulk_sent;

@@ -44,14 +44,6 @@ PairingNonce random_pairing_nonce() {
   return nonce;
 }
 
-GrantId random_grant_id() {
-  GrantId::Storage bytes{};
-  do {
-    randombytes_buf(bytes.data(), bytes.size());
-  } while (GrantId{bytes}.is_zero());
-  return GrantId{bytes};
-}
-
 std::vector<std::byte> encode_ping_payload(std::uint64_t value) {
   std::vector<std::byte> payload(8U);
   for (std::size_t index = 0U; index < payload.size(); ++index) {
@@ -115,12 +107,6 @@ transport::ChannelKind physical_kind_for_domain(session::ChannelDomain domain) {
       return transport::ChannelKind::stream;
   }
   return transport::ChannelKind::message;
-}
-
-std::optional<transport::ChannelKind> physical_kind_for_frame(std::uint8_t type) {
-  const auto domain = session::frame_type_domain(type);
-  if (!domain.has_value()) return std::nullopt;
-  return physical_kind_for_domain(*domain);
 }
 
 // The negotiated capability bit a business domain requires before its frames
@@ -383,7 +369,14 @@ Result<void> PeerSession::enqueue_control_frame(std::uint8_t type, std::uint8_t 
   return Result<void>::success();
 }
 
-Result<void> PeerSession::send_ping(std::uint64_t ping_id) {
+Result<void> PeerSession::send_ping(std::uint64_t ping_id) {  // Observer reentrancy guard: a send can fail the session synchronously,
+  // and the Node observer may drop the last external reference (retiring the
+  // attempt) while this call is still on the stack. Holding a strong
+  // reference for the duration of every public entry point keeps the object
+  // alive until the call returns. These methods are never invoked from the
+  // destructor.
+  const auto self_guard = shared_from_this();
+
   if (!authenticated() || control_ == nullptr || pending_ping_.has_value()) {
     return Result<void>::failure(
         session_error(ErrorCode::permission, "control_ping_not_available"));
@@ -406,7 +399,14 @@ const SignedSessionHello& PeerSession::local_hello() const noexcept {
 }
 
 Result<void> PeerSession::send_restart_frame(FrameType type,
-                                             std::span<const std::byte> payload) {
+                                             std::span<const std::byte> payload) {  // Observer reentrancy guard: a send can fail the session synchronously,
+  // and the Node observer may drop the last external reference (retiring the
+  // attempt) while this call is still on the stack. Holding a strong
+  // reference for the duration of every public entry point keeps the object
+  // alive until the call returns. These methods are never invoked from the
+  // destructor.
+  const auto self_guard = shared_from_this();
+
   if (type != FrameType::session_restart_offer &&
       type != FrameType::session_restart_answer &&
       type != FrameType::session_restart_candidate) {
@@ -475,7 +475,14 @@ void PeerSession::upgrade_to_authorized(std::vector<std::string> scopes,
 }
 
 void PeerSession::handle_message(transport::TransportChannel& channel,
-                                 std::vector<std::byte> payload) {
+                                 std::vector<std::byte> payload) {  // Observer reentrancy guard: a send can fail the session synchronously,
+  // and the Node observer may drop the last external reference (retiring the
+  // attempt) while this call is still on the stack. Holding a strong
+  // reference for the duration of every public entry point keeps the object
+  // alive until the call returns. These methods are never invoked from the
+  // destructor.
+  const auto self_guard = shared_from_this();
+
   auto parsed = parse_frame(payload, config_.limits);
   if (parsed.status != FrameParseStatus::parsed || !parsed.frame ||
       parsed.consumed != payload.size()) {
@@ -824,7 +831,14 @@ StableStatus PeerSession::status_for_error(const Error& error) const noexcept {
 }
 
 Result<void> PeerSession::submit_pairing_request(
-    std::string_view password_utf8, std::vector<std::string> requested_scopes) {
+    std::string_view password_utf8, std::vector<std::string> requested_scopes) {  // Observer reentrancy guard: a send can fail the session synchronously,
+  // and the Node observer may drop the last external reference (retiring the
+  // attempt) while this call is still on the stack. Holding a strong
+  // reference for the duration of every public entry point keeps the object
+  // alive until the call returns. These methods are never invoked from the
+  // destructor.
+  const auto self_guard = shared_from_this();
+
   if (diagnostics_.state != PeerSessionState::pairing_restricted) {
     return Result<void>::failure(
         session_error(ErrorCode::pairing_required, "session_not_pairing_restricted"));
@@ -927,7 +941,14 @@ bool PeerSession::has_business_channel(std::uint32_t channel_id) const noexcept 
 }
 
 Result<void> PeerSession::send_frame(std::uint32_t channel_id,
-                                     session::FrameClass klass, Frame frame) {
+                                     session::FrameClass klass, Frame frame) {  // Observer reentrancy guard: a send can fail the session synchronously,
+  // and the Node observer may drop the last external reference (retiring the
+  // attempt) while this call is still on the stack. Holding a strong
+  // reference for the duration of every public entry point keeps the object
+  // alive until the call returns. These methods are never invoked from the
+  // destructor.
+  const auto self_guard = shared_from_this();
+
   if (!authenticated()) {
     return Result<void>::failure(
         session_error(ErrorCode::pairing_required, "session_not_authorized"));
@@ -1046,7 +1067,14 @@ void PeerSession::handle_business_frame(transport::TransportChannel& channel,
   notify();
 }
 
-void PeerSession::pump() {
+void PeerSession::pump() {  // Observer reentrancy guard: a send can fail the session synchronously,
+  // and the Node observer may drop the last external reference (retiring the
+  // attempt) while this call is still on the stack. Holding a strong
+  // reference for the duration of every public entry point keeps the object
+  // alive until the call returns. These methods are never invoked from the
+  // destructor.
+  const auto self_guard = shared_from_this();
+
   while (channels_->has_sendable_frames()) {
     auto next = channels_->next_to_send();
     if (!next.has_value()) return;

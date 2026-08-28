@@ -2996,6 +2996,11 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
                    result, pending_request_id, pending_nonce, peer_device,
                    peer_public_key, requested_scopes);
              },
+         .limits = Limits{},
+         .channel_budgets = session::ChannelBudgetConfig{},
+         .pairing_deadline = std::chrono::milliseconds{60000},
+         // The successor session re-runs the same trust adjudication: a
+         // grant revoked during the old session does not carry over.
          .wall_clock = unix_milliseconds_now});
     if (!session) return Result<void>::failure(*session.error_if());
     iterator->second.session = *session.value_if();
@@ -3530,7 +3535,11 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       restart.admission.set_local_restart(restart.request_id, restart.local_nonce,
                                           *canonical.value_if());
       restart.local_restart_registered = true;
-      auto sent = attempt->session->send_restart_frame(
+      // The send can fail the superseded session synchronously, whose close
+      // observer retires (and erases) this attempt; take the strong reference
+      // and stop touching `attempt` before sending.
+      auto superseded_session = attempt->session;
+      auto sent = superseded_session->send_restart_frame(
           FrameType::session_restart_offer, *payload.value_if());
       if (!sent) {
         abort_session_restart(restart.peer, *sent.error_if());
@@ -3563,7 +3572,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         abort_session_restart(restart.peer, *registered.error_if());
         return;
       }
-      auto sent = attempt->session->send_restart_frame(
+      auto superseded_session = attempt->session;
+      auto sent = superseded_session->send_restart_frame(
           FrameType::session_restart_answer, *payload.value_if());
       if (!sent) {
         abort_session_restart(restart.peer, *sent.error_if());
@@ -3611,7 +3621,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         restart.admission.transcript().value_or(SignalingTranscriptSha256{}),
         restart.local_ufrag, restart.local_fingerprint, unix_milliseconds_now());
     if (!payload) return Result<void>::failure(*payload.error_if());
-    auto sent = attempt->session->send_restart_frame(
+    auto superseded_session = attempt->session;
+    auto sent = superseded_session->send_restart_frame(
         FrameType::session_restart_candidate, *payload.value_if());
     if (!sent) return Result<void>::failure(*sent.error_if());
     ++restart.local_candidate_sequence;
@@ -3813,8 +3824,6 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
          },
          .timeline = restart.timeline,
          .clock = {},
-         // The successor session re-runs the same trust adjudication: a
-         // grant revoked during the old session does not carry over.
          .trust_authorizer =
              [weak, peer_device](std::uint64_t now_unix_milliseconds)
                  -> Result<SessionAuthorization> {
@@ -3825,6 +3834,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
                }
                return self->pairing_service->authorize(peer_device, now_unix_milliseconds);
              },
+         .pairing_evaluator = PairingEvaluator{},
          .pairing_result_sink =
              [weak, peer_device, peer_public_key](
                  const PairingResultBody& result, const RequestId& pending_request_id,
@@ -5192,20 +5202,24 @@ Result<Node> Node::create(NodeConfig config) {
       std::move(config.signaling_handler), std::move(config.relay_override));
   impl->path_policy = std::move(*path_policy.value_if());
   {
-    PairingServiceConfig pairing_config{.profile = config.profile,
-                                        .identity =
-                                            std::move(*pairing_identity.value_if())};
-    if (config.pairing_failure_threshold > 0U) {
-      pairing_config.failure_threshold = config.pairing_failure_threshold;
-    }
-    if (config.pairing_backoff_base > std::chrono::milliseconds::zero()) {
-      pairing_config.backoff_base = config.pairing_backoff_base;
-    }
-    if (config.pairing_backoff_max > std::chrono::milliseconds::zero()) {
-      pairing_config.backoff_max = config.pairing_backoff_max;
-    }
-    pairing_config.grant_ttl_milliseconds = config.pairing_grant_ttl_milliseconds;
-    pairing_config.wall_clock = unix_milliseconds_now;
+    // Every member is listed: the pinned release build treats a shorter
+    // designated initializer as an error.
+    PairingServiceConfig pairing_config{
+        .profile = config.profile,
+        .identity = std::move(*pairing_identity.value_if()),
+        .grant_ttl_milliseconds = config.pairing_grant_ttl_milliseconds,
+        .failure_threshold = config.pairing_failure_threshold > 0U
+                                 ? config.pairing_failure_threshold
+                                 : PairingServiceConfig::kDefaultFailureThreshold,
+        .backoff_base = config.pairing_backoff_base > std::chrono::milliseconds::zero()
+                            ? config.pairing_backoff_base
+                            : std::chrono::milliseconds{1000},
+        .backoff_max = config.pairing_backoff_max > std::chrono::milliseconds::zero()
+                           ? config.pairing_backoff_max
+                           : std::chrono::milliseconds{60000},
+        .failure_table_capacity = 256U,
+        .wall_clock = unix_milliseconds_now,
+        .audit_sink = nullptr};
     impl->pairing_service = std::make_unique<PairingService>(std::move(pairing_config));
   }
   auto initialized = impl->initialize();
