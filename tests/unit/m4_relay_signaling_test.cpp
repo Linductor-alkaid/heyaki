@@ -601,6 +601,17 @@ TEST(M4RelaySignaling, TenantIsolationAndRateLimit) {
   auto rate_error = parse_relay_wss_control_error(limited.value_if()->payload);
   ASSERT_TRUE(rate_error);
   EXPECT_EQ(rate_error.value_if()->code, ErrorCode::resource_exhausted);
+  // The server coalesces snapshot publication to handler exit: the error
+  // frame can reach this client before the counter flush lands, so poll the
+  // bounded window instead of racing one read.
+  const auto counter_deadline = std::chrono::steady_clock::now() + 2s;
+  while ((*relay.server).value_if()->snapshot().signaling_rejected < 2U ||
+         (*relay.server).value_if()->snapshot().signaling_forwarded < 1U) {
+    if (std::chrono::steady_clock::now() > counter_deadline) {
+      break;
+    }
+    std::this_thread::sleep_for(2ms);
+  }
   EXPECT_GE((*relay.server).value_if()->snapshot().signaling_rejected, 2U);
   EXPECT_GE((*relay.server).value_if()->snapshot().signaling_forwarded, 1U);
 
