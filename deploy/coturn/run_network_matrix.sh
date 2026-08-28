@@ -300,6 +300,10 @@ prepare_participants() {
   local tag=$1
   run_in "${ns0}" init-profile "${work_dir}/${tag}-first.sqlite" matrix.first
   run_in "${ns1}" init-profile "${work_dir}/${tag}-second.sqlite" matrix.second
+  # M5: sessions are default-deny; connectivity scenarios pre-seed mutual
+  # device trust (password pairing itself is covered by the unit suites).
+  run_in "${ns0}" seed-trust "${work_dir}/${tag}-first.sqlite" \
+    "${work_dir}/${tag}-second.sqlite"
   run_in "${ns0}" enroll "${work_dir}/${tag}-first.sqlite" matrix.first \
     "wss://${host0}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" "${token}"
   run_in "${ns1}" enroll "${work_dir}/${tag}-second.sqlite" matrix.second \

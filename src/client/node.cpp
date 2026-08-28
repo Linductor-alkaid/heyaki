@@ -2983,7 +2983,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
                                               peer_public_key.size()});
              },
          .pairing_result_sink =
-             [weak, peer_key, peer_device, peer_public_key](
+             [weak, peer_device, peer_public_key](
                  const PairingResultBody& result, const RequestId& pending_request_id,
                  const PairingNonce& pending_nonce,
                  const std::vector<std::string>& requested_scopes) -> Result<void> {

@@ -6,6 +6,7 @@
 #include <heyaki/node.hpp>
 #include <heyaki/password.hpp>
 #include <heyaki/profile_store.hpp>
+#include <heyaki/trust_grant.hpp>
 #include <heyaki/relay_enrollment_client.hpp>
 #include <heyaki/runtime.hpp>
 
@@ -369,12 +370,68 @@ int run_node(const std::filesystem::path& database, std::string_view application
 int usage() {
   std::cerr << "usage:\n"
             << "  heyaki-m4-matrix-node init-profile DB APP_ID\n"
+            << "  heyaki-m4-matrix-node seed-trust FIRST_DB SECOND_DB\n"
             << "  heyaki-m4-matrix-node enroll DB APP_ID RELAY_URL CA TENANT TOKEN\n"
             << "  heyaki-m4-matrix-node run DB APP_ID RELAY_URL CA TENANT BUDGET_MS\n"
             << "      [--role initiator|responder] [--stun HOST:PORT]\n"
             << "      [--turn HOST:PORT] [--turn-secret SECRET] [--force-turn]\n"
             << "      [--hold-ms N] [--authenticate-budget-ms N] [--connect-retries N]\n";
   return 2;
+}
+
+
+// M5 default-deny: connectivity scenarios need pre-seeded mutual trust.
+// Signs one directional grant with the issuer's device identity and stores
+// it as issued in the issuer's TrustStore and received in the subject's.
+heyaki::Result<void> seed_one_way_trust(heyaki::ProfileStore& issuer_store,
+                                        heyaki::ProfileStore& subject_store,
+                                        const std::vector<std::string>& scopes,
+                                        std::uint8_t id_seed) {
+  auto issuer_identity = issuer_store.load_identity();
+  if (!issuer_identity) {
+    return heyaki::Result<void>::failure(*issuer_identity.error_if());
+  }
+  heyaki::SignedTrustGrant grant;
+  heyaki::GrantId::Storage grant_bytes{};
+  grant_bytes[0] = static_cast<std::byte>(id_seed);
+  for (std::size_t index = 1U; index < grant_bytes.size(); ++index) {
+    grant_bytes[index] = static_cast<std::byte>((index * 31U + id_seed) & 0xFFU);
+  }
+  grant.grant_id = heyaki::GrantId{grant_bytes};
+  grant.issuer = issuer_store.device_id();
+  grant.subject = subject_store.device_id();
+  grant.granted_scopes = scopes;
+  grant.password_generation = 1U;
+  grant.issued_unix_milliseconds = 1'700'000'000'000U;
+  heyaki::PairingNonce nonce{};
+  for (std::size_t index = 0U; index < nonce.size(); ++index) {
+    nonce[index] = static_cast<std::byte>((index * 17U + id_seed) & 0xFFU);
+  }
+  grant.nonce = nonce;
+  auto signed_grant =
+      heyaki::sign_signed_trust_grant(grant, *issuer_identity.value_if());
+  if (!signed_grant) {
+    return heyaki::Result<void>::failure(*signed_grant.error_if());
+  }
+  auto as_record = [](const heyaki::SignedTrustGrant& value,
+                      heyaki::TrustGrantDirection direction) {
+    heyaki::TrustGrantRecord record;
+    record.grant_id = value.grant_id;
+    record.direction = direction;
+    record.issuer = value.issuer;
+    record.subject = value.subject;
+    record.scopes = value.granted_scopes;
+    record.password_generation = value.password_generation;
+    record.issued_unix_milliseconds = value.issued_unix_milliseconds;
+    record.signature.assign(value.signature.begin(), value.signature.end());
+    record.revoked = false;
+    return record;
+  };
+  auto issued =
+      issuer_store.put_trust_grant(as_record(grant, heyaki::TrustGrantDirection::issued));
+  if (!issued) return issued;
+  return subject_store.put_trust_grant(
+      as_record(grant, heyaki::TrustGrantDirection::received));
 }
 
 }  // namespace
@@ -391,6 +448,33 @@ int main(int argc, char** argv) {
     auto profile = initialized_profile(argv[2], argv[3]);
     if (!profile) {
       std::cerr << profile.error_if()->safe_detail() << '\n';
+      return 1;
+    }
+    return 0;
+  }
+  if (command == "seed-trust") {
+    if (argc != 4) {
+      return usage();
+    }
+    auto first = heyaki::ProfileStore::open(argv[2]);
+    if (!first) {
+      std::cerr << first.error_if()->safe_detail() << '\n';
+      return 1;
+    }
+    auto second = heyaki::ProfileStore::open(argv[3]);
+    if (!second) {
+      std::cerr << second.error_if()->safe_detail() << '\n';
+      return 1;
+    }
+    const std::vector<std::string> scopes = {"matrix.connect"};
+    auto forward = seed_one_way_trust(*first.value_if(), *second.value_if(), scopes, 1U);
+    if (!forward) {
+      std::cerr << forward.error_if()->safe_detail() << '\n';
+      return 1;
+    }
+    auto backward = seed_one_way_trust(*second.value_if(), *first.value_if(), scopes, 2U);
+    if (!backward) {
+      std::cerr << backward.error_if()->safe_detail() << '\n';
       return 1;
     }
     return 0;
