@@ -393,8 +393,6 @@ TEST(M5PeerSession, DuplicatePairingResultClosesAsProtocolViolation) {
   frame.channel_id = 0U;
   frame.message_id = filled<MessageId>(0x2U);
   frame.payload = std::move(*encoded.value_if());
-  // Deliver directly through the transport's control channel.
-  transport::ChannelOptions options;
   pair_loopback_control_send(harness, frame);
   const auto state = harness.right->diagnostics();
   EXPECT_EQ(state.state, PeerSessionState::closed);
