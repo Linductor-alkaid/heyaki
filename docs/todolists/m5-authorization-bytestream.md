@@ -1,7 +1,7 @@
 # M5：会话授权、调度与 ByteStream
 
-> - 状态：已完成（第 1 轮实施 + 第 2 轮收尾：TUI 配对流程验收 harness 修订，
->   2026-08-28）
+> - 状态：已完成（第 1 轮实施 + 第 2 轮收尾 + 第 3 轮 CI 修复：默认拒绝、
+>   配对/TrustGrant、调度与 ByteStream 交付，CI 全绿收官，2026-08-28）
 > - 所属计划：[Heyaki MVP 至 v1 实施 TODO 计划](heyaki-implementation-plan.md)
 > - 前置：M4 | 建议发布点：会话安全 beta
 
@@ -174,6 +174,28 @@
 - M3A/M3B/M4 既有 Node 级测试按"默认拒绝"新语义补种互信（`m5_support.hpp`：
   以冻结域签名的真实 grant 预置双端 TrustStore；仅验证连通性的场景不再要求配对，
   "发现不等于信任"断言保留未种子化的对照）。
+
+### 第 3 轮（2026-08-28）：CI 修复（commit 2367322/054e28b/9f330ea/dbd86ab）
+
+- 重启发送路径 UAF（asan+tsan，shutdown 矩阵）：`send_restart_frame` 同步
+  fail 被取代会话时，close 观察者 retire 并 erase 持有 attempt 的记录，
+  调用路径仍在解引用。PeerSession 公共入口在调用期间自持强引用；Node 的
+  三个重启发送点先拷贝会话指针、发送后不再触碰 attempt。修复后 shutdown
+  矩阵在 asan 与 tsan（setarch -R）反复运行零告警，restart e2e/M5 会话
+  套件 tsan 干净。
+- Release/clang -Werror 编译失败：`Frame` 指定初始化补全字段、
+  `parse_stream_id` 复用于 RAW DATA 帧的 id 校验、M5 追加到
+  `VerifiedPeerSessionConfig`/`PairingServiceConfig`/`TrustGrantRecord` 的
+  函数与 optional 成员补默认成员初始化器（既有位置初始化调用点无需改动）、
+  删除未用 lambda 捕获/参数/辅助函数、benchmark 符号转换；M5 pairing
+  测试禁用 OS secret backend（glib 分配器在 tsan 下误报）并收紧目录权限。
+- coturn 网络矩阵（M4 退出条件复验）：默认拒绝下两台矩阵节点停在
+  pairing_restricted。`heyaki-m4-matrix-node` 新增 `seed-trust` 子命令
+  （以双方设备身份签名方向性 grant 并写入两侧 TrustStore），矩阵脚本在
+  init-profile 后预置互信；密码配对本身仍由单测覆盖。
+- `M4RelaySignaling.TenantIsolationAndRateLimit` 计数竞态：relay 将快照
+  发布合并到 handler 退出，错误帧可能先于计数刷出到达客户端。测试改为
+  2 秒有界轮询后断言（既有 suite 模式）。
 
 ### 第 2 轮（2026-08-28）：收尾与验收
 
