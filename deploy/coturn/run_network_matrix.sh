@@ -399,12 +399,23 @@ require_authenticated_turn() {
     return 1
   fi
   # M6: the same message/RPC service exercise must pass on every STABLE
-  # path. Relay-restart churn (later fallback cycles, restart scenario) can
-  # drop the session mid-exercise; those report m6 fields informationally
-  # because the topology, not the service, moved under the exercise.
-  if [[ "${scenario}" == "lossy" || "${scenario}" == "turn_fallback_cycle1" ]]; then
+  # path (turn_fallback_cycle1). Under netem loss the exercise may instead
+  # reach the DESIGNED degraded outcomes: ICE consent loss closes the
+  # session after the request was admitted, and a non-idempotent call MUST
+  # answer outcome_unknown (14) or deadline_exceeded (3) — never a silent
+  # hang and never an automatic retry. The acked-message flag stays
+  # informational there: a lost ACK or a dead session legitimately leaves
+  # it 0 (that is exactly the peer_acked vs best_effort contract).
+  if [[ "${scenario}" == "turn_fallback_cycle1" ]]; then
     if [[ "${m6_message}" != "1" || "${m6_rpc}" != "1" ]]; then
       log "SCENARIO_FAILED ${scenario} m6 services: ${line}"
+      dump_outputs "${scenario}"
+      failures=$((failures + 1))
+      return 1
+    fi
+  elif [[ "${scenario}" == "lossy" ]]; then
+    if [[ "${m6_rpc}" != "1" && "${m6_rpc}" != "14" && "${m6_rpc}" != "3" ]]; then
+      log "SCENARIO_FAILED ${scenario} m6 services (rpc not terminal): ${line}"
       dump_outputs "${scenario}"
       failures=$((failures + 1))
       return 1

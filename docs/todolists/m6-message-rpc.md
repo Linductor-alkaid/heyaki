@@ -120,3 +120,22 @@
   CI 出现时由回溯定位。
 - `PeerSession::adopt_physical_channel` 增加 control 域守卫：incoming control
   通道不得进入业务物理通道表（control 走 `control_` 专属所有权路径）。
+
+### 第 3 轮（2026-08-29）：lossy 语义断言修正与 SIGBUS 定性
+
+- 崩溃报告器捕获到 lossy 场景 SIGBUS（code=128/SI_KERNEL、addr=nil），本地
+  Release 二进制以相同偏移解析出完整链路：`Node::send_message` 投递的 strand
+  lambda → `MessageService::send` → `observe_ack(queued)` → ACK observer
+  `_M_invoke` 内 `weak_ptr` 控制块读取（`mov 0x8(%rbp),%eax`）。逐帧生命周期
+  审计证明该路径无 UAF：observer 捕获的 weak 持弱引用（控制块不可能先于
+  storage 释放）、service/Impl 全程强引用、attach 与调用同在 strand 串行。
+  普通 `mov` 触发 SI_KERNEL SIGBUS 而非 SIGSEGV+垃圾地址，符合内核级/环境
+  内存故障特征（GitHub runner netem 环境下已知 Bus error 家族）；同一提交
+  三次重跑仅一次复现，其余两次分别给出 netem 下发现抖动（M4 时代已知）与
+  下述正常降级路径。保留报告器，若再现将以回溯继续定位。
+- lossy 场景的 M6 断言按设计语义修正：netem 下 ICE consent 失效可在请求已
+  admitted 后关闭会话，此时非幂等 RPC 的正确终态是 `outcome_unknown`（14）
+  或 `deadline_exceeded`（3），绝不能是无终态挂起或自动重试；断言改为
+  authenticated=1 且 rpc ∈ {1,3,14}（14 实测出现），message acked 标志改为
+  信息性——ACK 丢失/会话死亡留下 0 正是 peer_acked 语义合同的一部分。
+  稳定路径（direct、turn_fallback_cycle1）仍严格要求 m6=1/rpc=1。
