@@ -264,6 +264,7 @@ struct RuntimeCoreState {
 
 struct TrackedTask {
   std::shared_ptr<RuntimeOperationState> operation;
+  executor::TaskHandle handle;
   std::future<void> future;
 };
 
@@ -738,9 +739,12 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
     auto handler = std::move(event.user_handler);
     auto diagnostics = diagnostics_;
     try {
-      auto submission = executor_->submit_with_handle(
+      // submit_cancellable keeps the handler task inside the executor's
+      // cancellation registry so shutdown-time drain can stop queued work
+      // and cooperatively request running work to stop (EXEC-07).
+      auto submission = executor_->submit_cancellable(
           [operation, security = std::move(security), handler = std::move(handler),
-           diagnostics]() mutable {
+           diagnostics](executor::StopToken) mutable {
             try {
               auto result = handler(security);
               if (result) {
@@ -758,8 +762,9 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
               throw;
             }
           });
-      auto task = std::make_shared<TrackedTask>(
-          TrackedTask{.operation = operation, .future = std::move(submission.future)});
+      auto task = std::make_shared<TrackedTask>(TrackedTask{
+          .operation = operation, .handle = std::move(submission.handle),
+          .future = std::move(submission.future)});
       tracked_tasks_.push_back(task);
       schedule_task_sweep();
     } catch (...) {
@@ -782,6 +787,11 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
       task->operation->complete(
           OperationState::error,
           Error{ErrorCode::timeout, "runtime", "executor_task_timeout", std::nullopt,
+                std::nullopt, task->operation->id()});
+    } catch (const executor::TaskCancelled&) {
+      task->operation->complete(
+          OperationState::cancelled,
+          Error{ErrorCode::cancelled, "runtime", "operation_cancelled", std::nullopt,
                 std::nullopt, task->operation->id()});
     } catch (...) {
       task->operation->complete(
@@ -902,6 +912,9 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
         continue;
       }
       report.operation_drain_timed_out = true;
+      // The drain window expired: stop queued work outright and ask running
+      // work to stop instead of leaving it invisible in the executor pool.
+      (void)executor_->request_task_cancel(task->handle);
       if (task->operation->complete(
               OperationState::cancelled,
               Error{ErrorCode::timeout, "runtime", "operation_drain_timeout", std::nullopt,
