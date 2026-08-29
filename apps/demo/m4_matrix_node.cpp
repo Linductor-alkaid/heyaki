@@ -19,25 +19,31 @@
 
 #include <algorithm>
 #include <chrono>
-#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <execinfo.h>
 #include <filesystem>
 #include <iostream>
 #include <map>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <unistd.h>
 #include <vector>
+
+#ifndef _WIN32
+// Crash-reporter plumbing: POSIX signals plus glibc backtraces. The coturn
+// harness runs on Linux only; Windows keeps a no-op installer below.
+#include <csignal>
+#include <execinfo.h>
+#include <unistd.h>
+#endif
 
 namespace {
 
 using heyaki::Error;
 using heyaki::ErrorCode;
 
+#ifndef _WIN32
 // Crash reporter for the topology harness: SIGBUS/SIGSEGV/SIGABRT/SIGFPE in
 // the CI namespaces previously surfaced only as "Bus error" with no context.
 // This handler writes the signal, fault address, and a best-effort backtrace
@@ -53,7 +59,11 @@ void crash_report(int signal_number, siginfo_t* info, void*) {
       std::snprintf(prefix, sizeof(prefix), "\nMATRIX_CRASH %s code=%d addr=%p backtrace:\n",
                     name, info ? info->si_code : -1, info ? info->si_addr : nullptr);
   if (written > 0) {
-    (void)write(STDERR_FILENO, prefix, static_cast<std::size_t>(written));
+    // glibc marks write() warn_unused_result: a failed diagnostic write must
+    // not crash the crash reporter; consume the result instead of (void).
+    const auto ignored = write(STDERR_FILENO, prefix,
+                               static_cast<std::size_t>(written));
+    (void)ignored;
   }
   void* frames[64];
   const int depth = backtrace(frames, 64);
@@ -62,8 +72,10 @@ void crash_report(int signal_number, siginfo_t* info, void*) {
   }
   _exit(128 + signal_number);
 }
+#endif  // !_WIN32
 
 void install_crash_reporter() {
+#ifndef _WIN32
   struct sigaction action {};
   action.sa_sigaction = crash_report;
   // SA_RESETHAND is an unsigned constant (0x80000000) that does not fit int;
@@ -73,6 +85,7 @@ void install_crash_reporter() {
   sigaction(SIGSEGV, &action, nullptr);
   sigaction(SIGABRT, &action, nullptr);
   sigaction(SIGFPE, &action, nullptr);
+#endif  // !_WIN32
 }
 
 std::uint64_t unix_milliseconds_now() {
