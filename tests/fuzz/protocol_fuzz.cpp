@@ -6,6 +6,8 @@
 #include <heyaki/session_protocol.hpp>
 #include <heyaki/signaling_protocol.hpp>
 #include <heyaki/frame_stream.hpp>
+#include <heyaki/message.hpp>
+#include <heyaki/rpc.hpp>
 #include <heyaki/pairing_protocol.hpp>
 #include <heyaki/trust_grant.hpp>
 #include <heyaki/wire.hpp>
@@ -465,6 +467,41 @@ void lan_signaling_frame_parser(std::span<const std::byte> input) {
       !std::equal(encoded.value_if()->begin(), encoded.value_if()->end(),
                   input.begin())) {
     std::abort();
+  }
+}
+
+void m6_service_payload_parser(std::span<const std::byte> input) {
+  // M6 message/RPC payload parsers: every accepted body must re-encode and
+  // re-parse successfully (round-trip property).
+  const auto envelope = parse_message_envelope(input);
+  if (envelope) {
+    const auto encoded = encode_message_envelope(*envelope.value_if());
+    if (!encoded) std::abort();
+    if (!parse_message_envelope(*encoded.value_if())) std::abort();
+  }
+  const auto ack = parse_message_ack(input);
+  if (ack) {
+    const auto encoded = encode_message_ack(*ack.value_if());
+    if (!encoded) std::abort();
+    if (!parse_message_ack(*encoded.value_if())) std::abort();
+  }
+  const auto request = parse_rpc_request(input);
+  if (request) {
+    const auto encoded = encode_rpc_request(*request.value_if());
+    if (!encoded) std::abort();
+    if (!parse_rpc_request(*encoded.value_if())) std::abort();
+  }
+  const auto response = parse_rpc_response(input);
+  if (response) {
+    const auto encoded = encode_rpc_response(*response.value_if());
+    if (!encoded) std::abort();
+    if (!parse_rpc_response(*encoded.value_if())) std::abort();
+  }
+  const auto cancel = parse_rpc_cancel(input);
+  if (cancel) {
+    const auto encoded = encode_rpc_cancel(*cancel.value_if());
+    if (!encoded) std::abort();
+    if (!parse_rpc_cancel(*encoded.value_if())) std::abort();
   }
 }
 

@@ -109,6 +109,28 @@ transport::ChannelKind physical_kind_for_domain(session::ChannelDomain domain) {
   return transport::ChannelKind::message;
 }
 
+std::optional<session::ChannelDomain> physical_domain_for_kind(
+    transport::ChannelKind kind) {
+  switch (kind) {
+    case transport::ChannelKind::control:
+      return session::ChannelDomain::control;
+    case transport::ChannelKind::message:
+      return session::ChannelDomain::message;
+    case transport::ChannelKind::rpc:
+      return session::ChannelDomain::rpc;
+    case transport::ChannelKind::event:
+      return session::ChannelDomain::event;
+    case transport::ChannelKind::file:
+      return session::ChannelDomain::file;
+    case transport::ChannelKind::shell:
+      return session::ChannelDomain::shell;
+    case transport::ChannelKind::stream:
+      return session::ChannelDomain::stream;
+    default:
+      return std::nullopt;
+  }
+}
+
 // The negotiated capability bit a business domain requires before its frames
 // may flow (M5-06): a parseable schema alone never enables behavior.
 std::optional<Capability> capability_for_domain(session::ChannelDomain domain) {
@@ -221,7 +243,8 @@ Result<std::shared_ptr<PeerSession>> PeerSession::create_verified(
                  .limits = config.limits,
                  .channel_budgets = config.channel_budgets,
                  .pairing_deadline = config.pairing_deadline,
-                 .wall_clock = std::move(config.wall_clock)});
+                 .wall_clock = std::move(config.wall_clock),
+                 .initiator_owned_domains = std::move(config.initiator_owned_domains)});
 }
 
 Result<void> PeerSession::start() {
@@ -235,6 +258,12 @@ Result<void> PeerSession::start() {
   config_.transport->set_message_handler(
       [weak](transport::TransportChannel& channel, std::vector<std::byte> payload) {
         if (auto self = weak.lock()) self->handle_message(channel, std::move(payload));
+      });
+  config_.transport->set_channel_handler(
+      [weak](transport::ChannelKind kind, transport::TransportChannel& channel) {
+        auto self = weak.lock();
+        if (!self) return;
+        self->adopt_physical_channel(kind, channel);
       });
   config_.transport->set_state_handler(
       [weak](const transport::TransportSessionSnapshot& snapshot) {
@@ -909,6 +938,22 @@ void PeerSession::close_business_channel(std::uint32_t channel_id) {
   channel_handlers_.erase(channel_id);
 }
 
+void PeerSession::fail_business_channel(std::uint32_t channel_id,
+                                        transport::CloseReason reason) {
+  ++diagnostics_.business_frames_rejected;
+  const auto domain = channels_->channel_domain(channel_id);
+  channels_->close_channel(channel_id);
+  channel_handlers_.erase(channel_id);
+  if (domain.has_value()) {
+    const auto physical = physical_channels_.find(*domain);
+    if (physical != physical_channels_.end()) {
+      physical->second->close(reason);
+      physical_channels_.erase(physical);
+    }
+  }
+  notify();
+}
+
 Result<std::uint32_t> PeerSession::adopt_business_channel(
     std::uint32_t channel_id, session::ChannelDomain domain,
     session::QueueFullPolicy policy, std::size_t queued_frame_capacity,
@@ -970,8 +1015,31 @@ transport::TransportChannel* PeerSession::physical_channel_for_domain(
   return found->second;
 }
 
+void PeerSession::adopt_physical_channel(transport::ChannelKind kind,
+                                         transport::TransportChannel& channel) {
+  const auto domain = physical_domain_for_kind(kind);
+  if (!domain.has_value() || physical_channels_.contains(*domain)) {
+    return;
+  }
+  if (!channel.writable()) {
+    // Not usable yet; the writable handler below adopts on the next turn.
+  }
+  physical_channels_[*domain] = &channel;
+  auto weak = weak_from_this();
+  channel.set_writable_handler([weak] {
+    if (auto self = weak.lock()) self->pump();
+  });
+  pump();
+}
+
 void PeerSession::ensure_physical_channel(session::ChannelDomain domain) {
   if (domain == session::ChannelDomain::control || physical_channels_.contains(domain)) {
+    return;
+  }
+  if (!config_.initiator && config_.initiator_owned_domains.contains(domain)) {
+    // The initiator owns this domain's physical channel; the responder
+    // adopts the peer's channel when the transport reports it open. Frames
+    // enqueued before adoption drain in the pump triggered by adoption.
     return;
   }
   transport::ChannelOptions options;

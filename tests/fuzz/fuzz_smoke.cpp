@@ -1,4 +1,7 @@
 #include "fuzz_targets.hpp"
+
+#include <heyaki/message.hpp>
+#include <heyaki/rpc.hpp>
 #include "m1_golden_vectors.hpp"
 
 #include <heyaki/lan_protocol.hpp>
@@ -327,6 +330,70 @@ int main(int argc, char** argv) {
     if (!write_seed(corpus_root / "protobuf-parser", name, seed)) {
       std::cerr << "cannot write protobuf seed " << name << '\n';
       return 1;
+    }
+  }
+
+  // M6 message/RPC payload seeds: valid bodies built through the public
+  // codecs plus malformed/truncated variants.
+  {
+    heyaki::MessageEnvelope envelope;
+    heyaki::MessageId::Storage id{};
+    id[0] = std::byte{0x01U};
+    envelope.message_id = heyaki::MessageId{id};
+    envelope.type = "seed.tick";
+    envelope.schema_version = 1U;
+    envelope.ttl_milliseconds = 5'000U;
+    envelope.delivery_mode = heyaki::MessageDeliveryMode::peer_acked;
+    envelope.headers.push_back({"unit", {std::byte{9U}}});
+    envelope.payload = {std::byte{0xDEU}, std::byte{0xADU}};
+    const auto encoded_envelope = heyaki::encode_message_envelope(envelope);
+    heyaki::RpcRequestBody request;
+    heyaki::RequestId::Storage request_id{};
+    request_id[1] = std::byte{0x02U};
+    request.request_id = heyaki::RequestId{request_id};
+    request.service = "seed";
+    request.method = "echo";
+    request.deadline_remaining_milliseconds = 2'500U;
+    request.payload = {std::byte{0x01U}};
+    const auto encoded_request = heyaki::encode_rpc_request(request);
+    heyaki::RpcResponseBody response;
+    response.request_id = request.request_id;
+    response.status = heyaki::StableStatus::ok;
+    response.safe_detail = "ok";
+    response.payload = {std::byte{0x02U}};
+    const auto encoded_response = heyaki::encode_rpc_response(response);
+    const auto encoded_cancel =
+        heyaki::encode_rpc_cancel(heyaki::RpcCancelBody{request.request_id});
+    heyaki::MessageId::Storage ack_id{};
+    ack_id[2] = std::byte{0x03U};
+    const auto encoded_ack = heyaki::encode_message_ack(
+        heyaki::MessageAckBody{heyaki::MessageId{ack_id}, true});
+    std::vector<std::pair<std::string_view, std::vector<std::byte>>> m6_seeds;
+    if (encoded_envelope) {
+      auto truncated = *encoded_envelope.value_if();
+      truncated.pop_back();
+      m6_seeds.emplace_back("message-envelope", *encoded_envelope.value_if());
+      m6_seeds.emplace_back("message-envelope-truncated", std::move(truncated));
+    }
+    if (encoded_request) {
+      m6_seeds.emplace_back("rpc-request", *encoded_request.value_if());
+    }
+    if (encoded_response) {
+      m6_seeds.emplace_back("rpc-response", *encoded_response.value_if());
+    }
+    if (encoded_cancel) {
+      m6_seeds.emplace_back("rpc-cancel", *encoded_cancel.value_if());
+    }
+    if (encoded_ack) {
+      m6_seeds.emplace_back("message-ack", *encoded_ack.value_if());
+    }
+    m6_seeds.emplace_back("garbage", std::vector<std::byte>(24U, std::byte{0xFFU}));
+    for (const auto& [name, seed] : m6_seeds) {
+      heyaki::fuzz::m6_service_payload_parser(seed);
+      if (!write_seed(corpus_root / "m6-service-payload", name, seed)) {
+        std::cerr << "cannot write M6 seed " << name << '\n';
+        return 1;
+      }
     }
   }
 

@@ -136,9 +136,11 @@ add_library(heyaki_core
   src/core/ids.cpp
   src/core/lan_protocol.cpp
   src/core/limits.cpp
+  src/core/message_protocol.cpp
   src/core/operation.cpp
   src/core/pairing_protocol.cpp
   src/core/protocol.cpp
+  src/core/rpc_protocol.cpp
   src/core/security.cpp
   src/core/session_protocol.cpp
   src/core/session_restart.cpp
@@ -182,7 +184,9 @@ add_library(heyaki_client
   src/client/byte_stream.cpp
   src/client/byte_stream_facade.cpp
   src/client/connection_attempt.cpp
+  src/client/message_service.cpp
   src/client/peer_session.cpp
+  src/client/rpc_service.cpp
   src/client/lan_directory.cpp
   src/client/module.cpp
   src/client/node.cpp
@@ -325,6 +329,11 @@ if(HEYAKI_BUILD_APPS)
   target_link_libraries(heyaki-m3b-relay-demo PRIVATE heyaki::relay executor::executor)
   heyaki_configure_target(heyaki-m3b-relay-demo)
   heyaki_enable_executor_exception_adapter_source(apps/demo/m3b_relay_demo.cpp)
+
+  add_executable(heyaki-m6-message-rpc-demo apps/demo/m6_message_rpc_demo.cpp)
+  target_link_libraries(heyaki-m6-message-rpc-demo PRIVATE heyaki::client executor::executor)
+  heyaki_configure_target(heyaki-m6-message-rpc-demo)
+  heyaki_enable_executor_exception_adapter_source(apps/demo/m6_message_rpc_demo.cpp)
 
   add_executable(heyaki-m4-matrix-node apps/demo/m4_matrix_node.cpp)
   target_link_libraries(heyaki-m4-matrix-node

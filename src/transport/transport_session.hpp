@@ -140,6 +140,11 @@ class TransportSession {
   using OpenCompletion = std::function<void(Result<TransportChannel*>)>;
   using MessageHandler = std::function<void(TransportChannel&, std::vector<std::byte>)>;
   using StateHandler = std::function<void(const TransportSessionSnapshot&)>;
+  // Fired whenever a channel of `kind` becomes open on this transport —
+  // including channels the PEER created (incoming). Lets the session adopt
+  // peer-created domain channels instead of creating duplicate SCTP streams
+  // with the same label (one channel per kind per association).
+  using ChannelHandler = std::function<void(ChannelKind, TransportChannel&)>;
 
   virtual ~TransportSession() = default;
 
@@ -147,6 +152,7 @@ class TransportSession {
                                   OpenCompletion completion) = 0;
   virtual void set_message_handler(MessageHandler handler) = 0;
   virtual void set_state_handler(StateHandler handler) = 0;
+  virtual void set_channel_handler(ChannelHandler handler) = 0;
   [[nodiscard]] virtual TransportSessionSnapshot snapshot() const noexcept = 0;
   virtual void close(CloseReason reason) = 0;
 };

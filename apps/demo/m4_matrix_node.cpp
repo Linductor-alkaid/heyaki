@@ -3,7 +3,9 @@
 // enrollment, then runs one bounded session attempt against the peer and
 // prints a machine-readable MATRIX_RESULT line describing the outcome. The
 // binary never talks to coturn itself; the driver script owns the topology.
+#include <heyaki/message.hpp>
 #include <heyaki/node.hpp>
+#include <heyaki/rpc.hpp>
 #include <heyaki/password.hpp>
 #include <heyaki/profile_store.hpp>
 #include <heyaki/trust_grant.hpp>
@@ -237,6 +239,32 @@ int run_node(const std::filesystem::path& database, std::string_view application
   const auto local_key = heyaki::DeviceEndpointKey{
       node.value_if()->snapshot().device_id,
       node.value_if()->snapshot().endpoint_id};
+  // M6: the same message/RPC exercise runs on every topology (direct and
+  // forced-TURN) because it rides the session, never the path (RULE-09).
+  std::atomic<bool> m6_message_acked{false};
+  std::atomic<int> m6_rpc_status{-1};
+  {
+    heyaki::RpcMethodDescriptor echo;
+    echo.service = "heyaki.matrix";
+    echo.method = "echo";
+    echo.schema_version = 1U;
+    echo.required_scope = "rpc.device.read";
+    (void)node.value_if()->register_rpc_method(
+        echo, [](const heyaki::RpcCallContext& context) {
+          return heyaki::RpcHandlerResult{
+              heyaki::StableStatus::ok,
+              std::vector<std::byte>(context.payload().begin(), context.payload().end()),
+              "ok"};
+        });
+  }
+  node.value_if()->set_message_ack_observer(
+      [&m6_message_acked](const heyaki::DeviceEndpointKey&, const heyaki::MessageId&,
+                          heyaki::MessageDeliveryEvent event,
+                          std::optional<Error>) {
+        if (event == heyaki::MessageDeliveryEvent::acked) {
+          m6_message_acked.store(true);
+        }
+      });
   const auto begin = std::chrono::steady_clock::now();
   bool attempted = false;
   if (options.role == "initiator") {
@@ -330,6 +358,42 @@ int run_node(const std::filesystem::path& database, std::string_view application
     }
   }
   if (authenticated) {
+    // M6 exercise (initiator side): one peer_acked message and one unary RPC
+    // through the public API on whatever data path the session negotiated.
+    if (options.role == "initiator") {
+      heyaki::DeviceEndpointKey peer_key{};
+      for (const auto& session : node.value_if()->peer_sessions()) {
+        if (session.state == heyaki::NodePeerSessionState::authenticated) {
+          peer_key = session.peer;
+          break;
+        }
+      }
+      if (!peer_key.device_id.is_zero()) {
+        heyaki::MessageEnvelope envelope;
+        envelope.type = "matrix.m6";
+        envelope.delivery_mode = heyaki::MessageDeliveryMode::peer_acked;
+        envelope.ttl_milliseconds = 20'000U;
+        envelope.payload = {std::byte{0x6D}, std::byte{0x36}};
+        (void)node.value_if()->send_message(peer_key, std::move(envelope));
+        (void)node.value_if()->call_rpc(
+            peer_key, "heyaki.matrix", "echo", {std::byte{0x2A}},
+            heyaki::RpcCallOptions{},
+            [&m6_rpc_status](const heyaki::DeviceEndpointKey&,
+                             heyaki::Result<heyaki::RpcCallOutcome> outcome) {
+              if (outcome) {
+                m6_rpc_status.store(
+                    static_cast<int>((*outcome.value_if()).status));
+              } else {
+                m6_rpc_status.store(-2);
+              }
+            });
+        (void)wait_until(
+            [&] {
+              return m6_message_acked.load() && m6_rpc_status.load() >= 0;
+            },
+            std::chrono::milliseconds{8000});
+      }
+    }
     executor::comm::PhaseGate hold{"heyaki-m4-matrix-hold"};
     (void)hold.wait_for(1U, options.hold);
     // A relay restart mid-hold races this exit against the bounded-backoff
@@ -352,6 +416,8 @@ int run_node(const std::filesystem::path& database, std::string_view application
             << " state=" << heyaki::node_peer_session_state_name(final_state)
             << " stage=" << stage
             << " session_error=" << session_error
+            << " m6_message_acked=" << (m6_message_acked.load() ? 1 : 0)
+            << " m6_rpc_status=" << m6_rpc_status.load()
             << " relay_state=" << heyaki::relay_node_state_name(snapshot.relay.state)
             << " coordinator_attempts="
             << snapshot.session_coordinator.current_attempts
@@ -466,7 +532,7 @@ int main(int argc, char** argv) {
       std::cerr << second.error_if()->safe_detail() << '\n';
       return 1;
     }
-    const std::vector<std::string> scopes = {"matrix.connect"};
+    const std::vector<std::string> scopes = {"matrix.connect", "message.send", "rpc.device.read"};
     auto forward = seed_one_way_trust(*first.value_if(), *second.value_if(), scopes, 1U);
     if (!forward) {
       std::cerr << forward.error_if()->safe_detail() << '\n';

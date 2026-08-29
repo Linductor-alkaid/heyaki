@@ -533,6 +533,10 @@ class WebRtcTransportSession::Impl
       auto completion = std::move(pending->second);
       pending_opens_.erase(pending);
       completion(Result<TransportChannel*>::success(event.channel.get()));
+    } else if (channel_handler_) {
+      // An incoming (peer-created) channel opened: surface it so the session
+      // can adopt it instead of creating a duplicate stream for the kind.
+      channel_handler_(event.channel->kind(), *event.channel);
     }
   }
   void handle(MessageEvent& event) {
@@ -755,6 +759,7 @@ class WebRtcTransportSession::Impl
   std::map<ChannelKind, OpenCompletion> pending_opens_;
   MessageHandler message_handler_;
   StateHandler state_handler_;
+  ChannelHandler channel_handler_;
   PathInfo path_;
   std::atomic<bool> drain_scheduled_{false};
   std::atomic<bool> callback_overflowed_{false};
@@ -927,6 +932,10 @@ void WebRtcTransportSession::set_message_handler(MessageHandler handler) {
 
 void WebRtcTransportSession::set_state_handler(StateHandler handler) {
   if (impl_) impl_->state_handler_ = std::move(handler);
+}
+
+void WebRtcTransportSession::set_channel_handler(ChannelHandler handler) {
+  if (impl_) impl_->channel_handler_ = std::move(handler);
 }
 
 TransportSessionSnapshot WebRtcTransportSession::snapshot() const noexcept {

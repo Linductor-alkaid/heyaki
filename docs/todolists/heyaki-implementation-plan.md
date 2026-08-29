@@ -6,6 +6,12 @@
 >   配对/TrustGrant、加权通道调度与 ByteStream 交付，M3A/M3B/M4 Node 级测试按新
 >   语义补种互信，TUI 配对/信任/Stream 视图落地，两轮实施记录见
 >   [M5 阶段文件](m5-authorization-bytestream.md)，2026-08-28）；
+>   M6 已关闭（21/21 任务与全部退出条件完成：MessageEnvelope 消息服务
+>   （best_effort/peer_acked、有界 TTL 去重、message.send scope）、unary RPC
+>   （registry/deadline/协作取消/at-most-once 结果缓存/outcome_unknown/
+>   streaming→unimplemented）、Node 公共 API、TUI 消息与 RPC 视图、语义示例、
+>   35 项服务单测 + TUI/矩阵端到端，实施记录见
+>   [M6 阶段文件](m6-message-rpc.md)，2026-08-29）；
 >   2026-08-27 计划修订：新增 M10 Gateway 代理服务里程碑（设计见
 >   [Gateway 代理服务设计](../design/gateway-service.md)）；
 >   2026-08-29 计划修订：依赖可移植性分析完成后新增 M11 Android（NDK）适配里程碑
@@ -128,7 +134,7 @@ scope，可与 M7/M8 并行实施，但 gateway 不进入 v1.0 发布门禁，�
 | M3B | [m3b-relay-control-plane.md](m3b-relay-control-plane.md) | 已完成 | relay 登记/登录/租约/信令转发、TURN credential 与 TUI onboarding；15 轮记录，2026-08-16 关闭。 |
 | M4 | [m4-connectivity-mvp.md](m4-connectivity-mvp.md) | 已完成 | 公共签名信令、WebRTC/ICE/TURN 与最小认证会话；17/17 任务完成、退出条件全部达成；第 23 轮修复三个被时序变化放大的既有竞态后，CI run 33094431955 全绿、`heyaki_m4_network_matrix` MATRIX_OK（turn_fallback P95 2203ms），2026-08-27 关闭。 |
 | M5 | [m5-authorization-bytestream.md](m5-authorization-bytestream.md) | 已完成 | 会话授权（pairing/TrustGrant）、通道调度与 ByteStream；20/20 任务与全部退出条件完成，两轮实施记录见阶段文件，2026-08-28 关闭。 |
-| M6 | [m6-message-rpc.md](m6-message-rpc.md) | 未开始 | 消息、unary RPC 与对应 TUI。 |
+| M6 | [m6-message-rpc.md](m6-message-rpc.md) | 已完成 | 消息（best_effort/peer_acked、TTL 去重、scope）、unary RPC（deadline/取消/at-most-once/outcome_unknown）与 TUI/示例；21/21 任务与退出条件于 2026-08-29 完成。 |
 | M7 | [m7-event-file-transfer.md](m7-event-file-transfer.md) | 未开始 | 远程事件与文件传输。 |
 | M8 | [m8-remote-shell.md](m8-remote-shell.md) | 未开始 | Remote Shell 与安全终端 UI（独立安全里程碑，默认关闭）。 |
 | M9 | [m9-production-hardening.md](m9-production-hardening.md) | 未开始 | 生产加固、跨平台、兼容性与 v1 发布。 |

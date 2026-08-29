@@ -383,15 +383,24 @@ dump_outputs() {
 }
 require_authenticated_turn() {
   local line=$1 scenario=$2
-  local authenticated data_path
+  local authenticated data_path m6_message m6_rpc
   authenticated=$(result_field "${line}" authenticated)
   data_path=$(result_field "${line}" data_path)
+  m6_message=$(result_field "${line}" m6_message_acked)
+  m6_rpc=$(result_field "${line}" m6_rpc_status)
   # Under a blocked inter-client FORWARD, a "direct_host" local label can only
   # pair with the peer's RELAYED remote candidate, so it still proves coturn
   # mediation; accept it alongside a locally relayed path.
   if [[ "${authenticated}" != "1" ||
         "${data_path}" != turn_udp && "${data_path}" != direct_host ]]; then
     log "SCENARIO_FAILED ${scenario}: ${line}"
+    dump_outputs "${scenario}"
+    failures=$((failures + 1))
+    return 1
+  fi
+  # M6: the same message/RPC service exercise must pass on every path.
+  if [[ "${m6_message}" != "1" || "${m6_rpc}" != "1" ]]; then
+    log "SCENARIO_FAILED ${scenario} m6 services: ${line}"
     dump_outputs "${scenario}"
     failures=$((failures + 1))
     return 1
@@ -409,8 +418,11 @@ for scenario in "${scenarios[@]}"; do
       line=$(first_result)
       authenticated=$(result_field "${line}" authenticated)
       data_path=$(result_field "${line}" data_path)
+      m6_message=$(result_field "${line}" m6_message_acked)
+      m6_rpc=$(result_field "${line}" m6_rpc_status)
       if [[ "${authenticated}" != "1" ||
-            "${data_path}" != direct_host && "${data_path}" != direct_srflx ]]; then
+            "${data_path}" != direct_host && "${data_path}" != direct_srflx ||
+            "${m6_message}" != "1" || "${m6_rpc}" != "1" ]]; then
         log "SCENARIO_FAILED direct: ${line}"
         dump_outputs direct
         failures=$((failures + 1))

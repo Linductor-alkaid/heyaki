@@ -75,16 +75,23 @@ heyaki pin 于 2026-08-29 从 `077d854` 升至 `4e8e8eb`，PR #176/#177）：
 - **建议能力**：可取消、可与执行上下文绑定的 delayed/periodic 句柄（类似 asio timer 的
   cancel/expires_at 语义），并纳入监控。
 
-## P1-3 运行中任务的 deadline / 协作取消
+## P1-3 运行中任务的 deadline / 协作取消（上游已落地 C1，heyaki 迁移待办）
 
 - **现象**：EXEC-07（`docs/todolists/heyaki-implementation-plan.md:61`）正式记录：不把 executor 的
   queued soft timeout 当作运行中任务的取消；每个 operation 用 asio `steady_timer` deadline
   自建取消（`node.cpp:537, 5046`）。
-- **executor 缺口**：取消语义只覆盖排队超时，没有面向"已开始运行的任务"的协作取消令牌
-  （cancellation token / stop callback）机制。
+- **executor 缺口**：~~取消语义只覆盖排队超时，没有面向"已开始运行的任务"的协作取消令牌
+  （cancellation token / stop callback）机制。~~ 上游 C1 已提供 `submit_cancellable` +
+  `StopToken`/`StopSource`（pin 4e8e8eb）；缺口转为 heyaki 侧未迁移。
 - **影响**：所有长时操作（连接、配对、中继登录）的取消逻辑是 heyaki 私有实现，executor 无法
   观测"任务被取消"这一生命周期事件。
 - **建议能力**：任务级协作取消令牌，提交时可选传入，取消事件进入 failure/status 体系。
+- **M6 追加（2026-08-29）**：M6-10 的 RPC handler 协作取消在
+  `src/client/rpc_service.cpp`（`ServerCallState::cancel_requested`，atomic bool 经
+  `RpcCallContext::cancelled()` 观察）又落了一份私有 token——wire 层 RPC_CANCEL/deadline 需要
+  在任务仍在排队时即可置位，且测试注入同步 dispatcher，故先以私有标志实现。迁移
+  `submit_cancellable` 时应把 `RuntimeAccess::dispatch_general` 与 M6 handler 派发一并纳入，
+  使取消事件进入 executor 生命周期视图。
 
 ## P2-1 裸 std::function 回调替代 executor::comm
 
@@ -147,3 +154,6 @@ heyaki pin 于 2026-08-29 从 `077d854` 升至 `4e8e8eb`，PR #176/#177）：
   上线；heyaki pin 升至 `4e8e8eb`（dependencies.lock 同步），新增"上游收敛状态"一节。
   heyaki 侧迁移待办：EXEC-07 deadline 取消改用 `submit_cancellable`；非 strand 定时器改用
   `TimerHandle`。
+- 2026-08-29：M6 开发在 P1-3 追加 rpc_service 私有取消 token 的实例（迁移待办扩围至
+  dispatch_general + M6 handler 派发）；M6 的 strand 回投（StrandPoster）与 ServiceDispatch/
+  ScopeCheck 回调分别归入既有 P1-1、P2-1 条目形态，不另立新条。

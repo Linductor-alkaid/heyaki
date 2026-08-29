@@ -9,6 +9,8 @@
 #include "device_view.hpp"
 
 #include <heyaki/byte_stream.hpp>
+#include <heyaki/message.hpp>
+#include <heyaki/rpc.hpp>
 #include <heyaki/trust_grant.hpp>
 
 #include <atomic>
@@ -21,6 +23,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <deque>
 #include <iostream>
 #include <memory>
@@ -29,6 +32,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -78,6 +82,25 @@ struct UiState {
   std::string pairing_peer;
   std::optional<heyaki::Error> pairing_error;
   std::string pairing_scopes;
+  // ---- M6 message & RPC view state (written from the node strand) ----
+  struct InboundMessage {
+    heyaki::DeviceEndpointKey peer;
+    heyaki::MessageEnvelope envelope;
+  };
+  struct AckEvent {
+    heyaki::DeviceEndpointKey peer;
+    heyaki::MessageId message_id;
+    heyaki::MessageDeliveryEvent event;
+    std::optional<heyaki::Error> error;
+  };
+  struct RpcResult {
+    heyaki::DeviceEndpointKey peer;
+    heyaki::Result<heyaki::RpcCallOutcome> outcome;
+  };
+  std::mutex service_mutex;
+  std::deque<InboundMessage> inbound_messages;
+  std::deque<AckEvent> ack_events;
+  std::deque<RpcResult> rpc_results;
 };
 
 void wipe_string(std::string& value) noexcept {
@@ -252,7 +275,24 @@ void render_uninitialized(std::string_view profile_name,
   }
 }
 
-void render_node(std::string_view profile_name, const heyaki::Node& node,
+std::string preview_bytes(const std::vector<std::byte>& payload, std::size_t limit) {
+  std::ostringstream output;
+  for (std::size_t index = 0U; index < payload.size() && index < limit; ++index) {
+    const auto value = std::to_integer<unsigned char>(payload[index]);
+    if (value >= 0x20U && value < 0x7FU) {
+      output << static_cast<char>(value);
+    } else {
+      output << "\\x" << std::hex << std::setw(2) << std::setfill('0') << value
+             << std::dec;
+    }
+  }
+  if (payload.size() > limit) {
+    output << "...(" << payload.size() << " bytes)";
+  }
+  return output.str();
+}
+
+void render_node(std::string_view profile_name, heyaki::Node& node,
                  UiBridge& bridge, UiState& state, std::size_t event_capacity) {
   drain_ui_events(bridge, state, event_capacity);
   const auto snapshot = node.snapshot();
@@ -298,6 +338,42 @@ void render_node(std::string_view profile_name, const heyaki::Node& node,
   }
 
   heyaki::tui::render_device_view(std::cout, endpoints, sessions);
+
+  // M6: recent inbound messages with their typed payload metadata.
+  std::cout << "\nMESSAGES\n";
+  {
+    std::scoped_lock lock{state.service_mutex};
+    if (state.inbound_messages.empty()) {
+      std::cout << "  none\n";
+    }
+    for (const auto& item : state.inbound_messages) {
+      std::cout << "  " << item.envelope.type << " schema="
+                << item.envelope.schema_version << " ttl="
+                << item.envelope.ttl_milliseconds << " mode="
+                << heyaki::message_delivery_mode_name(item.envelope.delivery_mode)
+                << " payload=" << preview_bytes(item.envelope.payload, 32U) << "\n";
+    }
+  }
+
+  // M6: aggregate service diagnostics (executor facilities remain the task
+  // health source; these cover protocol state).
+  const auto services = node.service_diagnostics();
+  std::cout << "\nSERVICES\n";
+  std::cout << "  message sent_best=" << services.message.sent_best_effort
+            << " sent_acked=" << services.message.sent_peer_acked
+            << " acked=" << services.message.acked
+            << " timeouts=" << services.message.ack_timed_out
+            << " recv=" << services.message.received
+            << " dup=" << services.message.duplicates
+            << " scope_rej=" << services.message.scope_rejected << "\n";
+  std::cout << "  rpc calls=" << services.rpc.calls_started
+            << " matched=" << services.rpc.responses_matched
+            << " unknown=" << services.rpc.responses_unknown
+            << " outcome_unknown=" << services.rpc.outcome_unknown_calls
+            << " reqs=" << services.rpc.requests_received
+            << " replay=" << services.rpc.replayed_responses
+            << " late_drop=" << services.rpc.late_results_dropped
+            << " retries=" << services.rpc_retry_queue << "\n";
 
   std::cout << "\nPAIRING\n";
   std::size_t request_index = 0U;
@@ -456,6 +532,321 @@ void run_stream_view(const heyaki::DeviceEndpointKey& peer,
       std::cout << "stream reset\n";
     } else {
       std::cout << "stream command unknown\n";
+    }
+  }
+}
+
+// M6: registers the TUI's built-in acceptance service so two TUI instances
+// can exercise message and RPC end to end through the public API. Echo is a
+// plain unary round trip; slow-echo deliberately outlives short deadlines
+// and cancels so the views can show those outcomes.
+heyaki::Result<void> register_tui_services(heyaki::Node& node) {
+  heyaki::RpcMethodDescriptor echo;
+  echo.service = "heyaki.tui";
+  echo.method = "echo";
+  echo.schema_version = 1U;
+  echo.required_scope = "rpc.device.read";
+  auto registered = node.register_rpc_method(
+      echo, [](const heyaki::RpcCallContext& context) {
+        return heyaki::RpcHandlerResult{
+            heyaki::StableStatus::ok,
+            std::vector<std::byte>(context.payload().begin(), context.payload().end()),
+            "ok"};
+      });
+  if (!registered) return registered;
+
+  heyaki::RpcMethodDescriptor info;
+  info.service = "heyaki.tui";
+  info.method = "info";
+  info.schema_version = 1U;
+  info.required_scope = "rpc.device.read";
+  registered = node.register_rpc_method(
+      info, [](const heyaki::RpcCallContext& context) {
+        if (context.cancelled()) {
+          return heyaki::RpcHandlerResult{heyaki::StableStatus::cancelled, {},
+                                          "cancelled_before_reply"};
+        }
+        const std::string text = "heyaki-tui unary rpc v1";
+        return heyaki::RpcHandlerResult{
+            heyaki::StableStatus::ok,
+            std::vector<std::byte>(reinterpret_cast<const std::byte*>(text.data()),
+                                   reinterpret_cast<const std::byte*>(text.data()) +
+                                       text.size()),
+            "ok"};
+      });
+  if (!registered) return registered;
+
+  heyaki::RpcMethodDescriptor slow;
+  slow.service = "heyaki.tui";
+  slow.method = "slow-echo";
+  slow.schema_version = 1U;
+  slow.required_scope = "rpc.device.read";
+  registered = node.register_rpc_method(
+      slow, [](const heyaki::RpcCallContext& context) {
+        // Busy-wait is deliberate: it models a handler that keeps running
+        // past its deadline while cooperating with cancellation.
+        while (!context.cancelled() &&
+               context.deadline_unix_milliseconds() + 60'000U >
+                   static_cast<std::uint64_t>(
+                       std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::system_clock::now().time_since_epoch())
+                           .count())) {
+          std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        }
+        if (context.cancelled()) {
+          return heyaki::RpcHandlerResult{heyaki::StableStatus::cancelled, {},
+                                          "observed_cancel"};
+        }
+        return heyaki::RpcHandlerResult{heyaki::StableStatus::ok, {}, "slow_ok"};
+      });
+  return registered;
+}
+
+std::string_view delivery_event_name(heyaki::MessageDeliveryEvent event) noexcept {
+  return heyaki::message_delivery_event_name(event);
+}
+
+void push_service_event(UiState& state, heyaki::DeviceEndpointKey peer,
+                        const heyaki::MessageEnvelope& envelope) {
+  std::scoped_lock lock{state.service_mutex};
+  state.inbound_messages.push_back(UiState::InboundMessage{peer, envelope});
+  while (state.inbound_messages.size() > 32U) {
+    state.inbound_messages.pop_front();
+  }
+}
+
+void push_ack_event(UiState& state, const heyaki::DeviceEndpointKey& peer,
+                    const heyaki::MessageId& id, heyaki::MessageDeliveryEvent event,
+                    std::optional<heyaki::Error> error) {
+  std::scoped_lock lock{state.service_mutex};
+  state.ack_events.push_back(UiState::AckEvent{peer, id, event, std::move(error)});
+  while (state.ack_events.size() > 64U) {
+    state.ack_events.pop_front();
+  }
+}
+
+void push_rpc_result(UiState& state, const heyaki::DeviceEndpointKey& peer,
+                     heyaki::Result<heyaki::RpcCallOutcome> outcome) {
+  std::scoped_lock lock{state.service_mutex};
+  state.rpc_results.push_back(UiState::RpcResult{peer, std::move(outcome)});
+  while (state.rpc_results.size() > 32U) {
+    state.rpc_results.pop_front();
+  }
+}
+
+// M6-14: message view with typed payload, TTL, delivery mode, ACK state, and
+// structured failures.
+void run_message_view(const heyaki::DeviceEndpointKey& peer, heyaki::Node& node,
+                      UiState& state) {
+  std::string type = "tui.note";
+  std::uint32_t ttl_milliseconds = 30'000U;
+  heyaki::MessageDeliveryMode mode = heyaki::MessageDeliveryMode::peer_acked;
+  std::cout << "\nMESSAGE device=" << heyaki::to_string(peer.device_id)
+            << "\ncommands [type NAME|ttl MS|mode best|acked|send <text>|sendhex "
+               "<hex>|inbox|acks|exit]\n";
+  bool in_view = true;
+  while (in_view) {
+    std::cout << "message type=" << type << " ttl=" << ttl_milliseconds
+              << " mode=" << heyaki::message_delivery_mode_name(mode) << "> "
+              << std::flush;
+    std::string line;
+    if (!std::getline(std::cin, line)) return;
+    std::istringstream input{line};
+    std::string command;
+    input >> command;
+    if (command == "exit") {
+      in_view = false;
+    } else if (command == "type") {
+      input >> type;
+    } else if (command == "ttl") {
+      std::uint32_t ttl = 0U;
+      input >> ttl;
+      if (ttl > 0U) ttl_milliseconds = ttl;
+    } else if (command == "mode") {
+      std::string which;
+      input >> which;
+      if (which == "best") {
+        mode = heyaki::MessageDeliveryMode::best_effort;
+      } else if (which == "acked") {
+        mode = heyaki::MessageDeliveryMode::peer_acked;
+      }
+    } else if (command == "send" || command == "sendhex") {
+      std::string payload_text;
+      std::getline(input, payload_text);
+      if (!payload_text.empty() && payload_text.front() == ' ') {
+        payload_text.erase(payload_text.begin());
+      }
+      std::vector<std::byte> payload;
+      if (command == "sendhex") {
+        payload.reserve(payload_text.size() / 2U);
+        for (std::size_t index = 0U; index + 1U < payload_text.size(); index += 2U) {
+          const auto byte = static_cast<unsigned>(
+              std::strtoul(payload_text.substr(index, 2U).c_str(), nullptr, 16));
+          payload.push_back(static_cast<std::byte>(byte & 0xFFU));
+        }
+      } else {
+        payload.assign(reinterpret_cast<const std::byte*>(payload_text.data()),
+                       reinterpret_cast<const std::byte*>(payload_text.data()) +
+                           payload_text.size());
+      }
+      heyaki::MessageEnvelope envelope;
+      envelope.type = type;
+      envelope.ttl_milliseconds = ttl_milliseconds;
+      envelope.delivery_mode = mode;
+      envelope.payload = std::move(payload);
+      auto sent = node.send_message(peer, std::move(envelope));
+      if (!sent) {
+        std::cout << "send failed: " << sent.error_if()->safe_detail() << " ("
+                  << heyaki::error_code_name(sent.error_if()->code()) << ")\n";
+      } else {
+        std::cout << "sent id=" << heyaki::to_string(*sent.value_if()) << "\n";
+      }
+    } else if (command == "inbox") {
+      std::scoped_lock lock{state.service_mutex};
+      if (state.inbound_messages.empty()) {
+        std::cout << "inbox empty\n";
+      }
+      for (const auto& item : state.inbound_messages) {
+        std::cout << "msg type=" << item.envelope.type
+                  << " schema=" << item.envelope.schema_version
+                  << " ttl=" << item.envelope.ttl_milliseconds
+                  << " mode="
+                  << heyaki::message_delivery_mode_name(item.envelope.delivery_mode)
+                  << " payload=" << preview_bytes(item.envelope.payload, 48U) << "\n";
+      }
+    } else if (command == "acks") {
+      std::scoped_lock lock{state.service_mutex};
+      if (state.ack_events.empty()) {
+        std::cout << "no delivery events\n";
+      }
+      for (const auto& event : state.ack_events) {
+        std::cout << "delivery id=" << heyaki::to_string(event.message_id) << " "
+                  << delivery_event_name(event.event);
+        if (event.error) {
+          std::cout << " error=" << event.error->safe_detail();
+        }
+        std::cout << "\n";
+      }
+    } else {
+      std::cout << "message command unknown\n";
+    }
+  }
+}
+
+heyaki::Result<heyaki::RpcCallOutcome> wait_rpc_result(UiState& state,
+                                                       std::uint32_t deadline_ms) {
+  const auto limit = std::chrono::steady_clock::now() +
+                     std::chrono::milliseconds{deadline_ms + 2000U};
+  executor::comm::PhaseGate poll{"heyaki-tui-rpc-wait"};
+  while (std::chrono::steady_clock::now() < limit) {
+    {
+      std::scoped_lock lock{state.service_mutex};
+      if (!state.rpc_results.empty()) {
+        auto outcome = std::move(state.rpc_results.front());
+        state.rpc_results.pop_front();
+        return std::move(outcome.outcome);
+      }
+    }
+    (void)poll.wait_for(1U, std::chrono::milliseconds{20});
+  }
+  return heyaki::Result<heyaki::RpcCallOutcome>::failure(
+      heyaki::Error{heyaki::ErrorCode::timeout, "tui", "rpc_view_wait_timeout"});
+}
+
+// M6-15: RPC view with local descriptors, raw text/hex payloads, deadline,
+// cancellation, and structured status; no JSON assumption about payloads.
+void run_rpc_view(const heyaki::DeviceEndpointKey& peer, heyaki::Node& node,
+                  UiState& state) {
+  std::uint32_t deadline = 10'000U;
+  std::optional<heyaki::RequestId> pending;
+  std::cout << "\nRPC device=" << heyaki::to_string(peer.device_id)
+            << "\ncommands [list|deadline MS|call <svc> <m> <text>|callhex <svc> "
+               "<m> <hex>|cancel|exit]\n";
+  bool in_view = true;
+  while (in_view) {
+    std::cout << "rpc deadline=" << deadline << "ms"
+              << (pending.has_value() ? " pending-cancelable" : "") << "> "
+              << std::flush;
+    std::string line;
+    if (!std::getline(std::cin, line)) return;
+    std::istringstream input{line};
+    std::string command;
+    input >> command;
+    if (command == "exit") {
+      in_view = false;
+    } else if (command == "list") {
+      for (const auto& method : node.rpc_methods()) {
+        std::cout << "method " << method.service << "." << method.method
+                  << " schema=" << method.schema_version
+                  << " scope=" << method.required_scope
+                  << (method.streaming ? " streaming(unimplemented)" : "") << "\n";
+      }
+    } else if (command == "deadline") {
+      std::uint32_t value = 0U;
+      input >> value;
+      if (value > 0U) deadline = value;
+    } else if (command == "cancel") {
+      if (pending.has_value()) {
+        const auto cancelled = node.cancel_rpc(peer, *pending);
+        std::cout << (cancelled ? "cancel sent\n"
+                                : "cancel failed (call not pending)\n");
+      } else {
+        std::cout << "no pending request\n";
+      }
+    } else if (command == "call" || command == "callhex") {
+      std::string service;
+      std::string method;
+      input >> service >> method;
+      std::string payload_text;
+      std::getline(input, payload_text);
+      if (!payload_text.empty() && payload_text.front() == ' ') {
+        payload_text.erase(payload_text.begin());
+      }
+      std::vector<std::byte> payload;
+      if (command == "callhex") {
+        payload.reserve(payload_text.size() / 2U);
+        for (std::size_t index = 0U; index + 1U < payload_text.size(); index += 2U) {
+          const auto byte = static_cast<unsigned>(
+              std::strtoul(payload_text.substr(index, 2U).c_str(), nullptr, 16));
+          payload.push_back(static_cast<std::byte>(byte & 0xFFU));
+        }
+      } else {
+        payload.assign(reinterpret_cast<const std::byte*>(payload_text.data()),
+                       reinterpret_cast<const std::byte*>(payload_text.data()) +
+                           payload_text.size());
+      }
+      {
+        std::scoped_lock lock{state.service_mutex};
+        state.rpc_results.clear();
+      }
+      heyaki::RpcCallOptions options;
+      options.deadline_remaining_milliseconds = deadline;
+      auto started = node.call_rpc(
+          peer, service, method, std::move(payload), std::move(options),
+          [&state](const heyaki::DeviceEndpointKey& call_peer,
+                   heyaki::Result<heyaki::RpcCallOutcome> outcome) {
+            push_rpc_result(state, call_peer, std::move(outcome));
+          });
+      if (!started) {
+        std::cout << "call rejected: " << started.error_if()->safe_detail() << " ("
+                  << heyaki::error_code_name(started.error_if()->code()) << ")\n";
+        continue;
+      }
+      pending = *started.value_if();
+      auto outcome = wait_rpc_result(state, deadline);
+      pending.reset();
+      if (!outcome) {
+        std::cout << "call failed locally: " << outcome.error_if()->safe_detail()
+                  << " (" << heyaki::error_code_name(outcome.error_if()->code())
+                  << ")\n";
+        continue;
+      }
+      std::cout << "status=" << static_cast<int>((*outcome.value_if()).status)
+                << " detail=" << (*outcome.value_if()).safe_detail
+                << " payload=" << preview_bytes((*outcome.value_if()).payload, 64U)
+                << "\n";
+    } else {
+      std::cout << "rpc command unknown\n";
     }
   }
 }
@@ -619,6 +1010,20 @@ void run_command(std::string line, heyaki::Node& node, UiState& state,
     }
     run_stream_view(*peer, std::move(*stream.value_if()));
     state.command_status = "stream-closed";
+    state.command_error.reset();
+    return;
+  }
+  if (command == "msg") {
+    // M6-14: message view (typed payload, TTL, delivery mode, ACK state).
+    run_message_view(*peer, node, state);
+    state.command_status = "message-view-closed";
+    state.command_error.reset();
+    return;
+  }
+  if (command == "rpc") {
+    // M6-15: unary RPC view (descriptors, raw payloads, deadline, cancel).
+    run_rpc_view(*peer, node, state);
+    state.command_status = "rpc-view-closed";
     state.command_error.reset();
     return;
   }
@@ -903,6 +1308,23 @@ int run_tui(const Options& options) {
     }
   });
 
+  // M6: inbound messages and delivery outcomes surface in the views; the
+  // built-in acceptance service answers unary RPCs from other TUIs.
+  node->set_message_inbound_handler([&state](const heyaki::DeviceEndpointKey& peer,
+                                             const heyaki::MessageEnvelope& envelope) {
+    push_service_event(state, peer, envelope);
+  });
+  node->set_message_ack_observer(
+      [&state](const heyaki::DeviceEndpointKey& peer, const heyaki::MessageId& id,
+               heyaki::MessageDeliveryEvent event, std::optional<heyaki::Error> error) {
+        push_ack_event(state, peer, id, event, std::move(error));
+      });
+  if (auto registered = register_tui_services(*node); !registered) {
+    render_uninitialized(options.profile_name, *registered.error_if());
+    (void)node->shutdown();
+    return 1;
+  }
+
   bool running = true;
   while (running) {
     std::cout << "\x1b[2J\x1b[H";
@@ -911,7 +1333,7 @@ int run_tui(const Options& options) {
     render_pairing_status(state);
     std::cout << "\ncommand [refresh|relay|connect N|close N|pair N|trust N|"
                  "revoke N M|rotate-password|rotate-password-revoke|stream N|"
-                 "quit]> "
+                 "msg N|rpc N|quit]> "
               << std::flush;
     std::string line;
     if (!std::getline(std::cin, line)) {
@@ -945,6 +1367,20 @@ int run_tui(const Options& options) {
         return 1;
       }
       node.emplace(std::move(*recreated.value_if()));
+      // M6: the recreated node needs its service handlers and the built-in
+      // acceptance service again.
+      node->set_message_inbound_handler([&state](
+                                            const heyaki::DeviceEndpointKey& peer,
+                                            const heyaki::MessageEnvelope& envelope) {
+        push_service_event(state, peer, envelope);
+      });
+      node->set_message_ack_observer(
+          [&state](const heyaki::DeviceEndpointKey& peer, const heyaki::MessageId& id,
+                   heyaki::MessageDeliveryEvent event,
+                   std::optional<heyaki::Error> error) {
+            push_ack_event(state, peer, id, event, std::move(error));
+          });
+      (void)register_tui_services(*node);
       state.command_status = "relay-enrolled";
       state.command_error.reset();
       continue;

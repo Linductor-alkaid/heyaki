@@ -398,6 +398,22 @@ heyaki_add_runtime_test(
   heyaki_m5_session heyaki_m5_session_tests
   "unit;session;security;protocol;concurrency")
 
+add_executable(heyaki_m6_service_tests
+  unit/m6_message_test.cpp
+  unit/m6_rpc_test.cpp)
+target_link_libraries(heyaki_m6_service_tests PRIVATE
+  heyaki::client
+  heyaki::core
+  GTest::gtest_main)
+target_include_directories(heyaki_m6_service_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/client"
+  "${CMAKE_CURRENT_SOURCE_DIR}/unit")
+heyaki_configure_target(heyaki_m6_service_tests)
+heyaki_add_runtime_test(
+  heyaki_m6_service heyaki_m6_service_tests
+  "unit;session;security;protocol;concurrency;m6")
+
 add_executable(heyaki_m5_pairing_service_tests unit/m5_pairing_service_test.cpp)
 target_link_libraries(heyaki_m5_pairing_service_tests PRIVATE
   heyaki::client
@@ -761,6 +777,25 @@ if(HEYAKI_BUILD_APPS)
     RESOURCE_LOCK heyaki_m3a_profile_state
     SKIP_RETURN_CODE 77
     TIMEOUT 180)
+
+  add_test(
+    NAME heyaki_m6_tui_service_harness
+    COMMAND "${HEYAKI_BASH_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/network/run_m6_tui_service_harness.sh"
+      --tui-bin "$<TARGET_FILE:heyaki-tui>"
+      --work-dir "${HEYAKI_TEST_STATE_DIR}/m6-tui-service")
+  set_tests_properties(heyaki_m6_tui_service_harness PROPERTIES
+    LABELS "network;tui;lan;security;m6"
+    RESOURCE_LOCK heyaki_m3a_profile_state
+    SKIP_RETURN_CODE 77
+    TIMEOUT 240)
+
+  add_test(
+    NAME heyaki_m6_semantics_smoke
+    COMMAND "$<TARGET_FILE:heyaki-m6-message-rpc-demo>" semantics)
+  set_tests_properties(heyaki_m6_semantics_smoke PROPERTIES
+    LABELS "m6;docs"
+    PASS_REGULAR_EXPRESSION "outcome_unknown;admission;unimplemented \\(12\\)")
 endif()
 
 if(WIN32)

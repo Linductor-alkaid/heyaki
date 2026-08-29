@@ -3,9 +3,11 @@
 #include "runtime_access.hpp"
 
 #include "byte_stream.hpp"
+#include "message_service.hpp"
 #include "pairing_service.hpp"
 #include "connection_attempt.hpp"
 #include "peer_session.hpp"
+#include "rpc_service.hpp"
 #include "relay_signaling_route.hpp"
 #include "relay_wss_client.hpp"
 #include "signaling_coordinator.hpp"
@@ -2217,6 +2219,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
           self->check_peer_transport_failures();
           self->release_stashed_relay_requests();
           self->publish_directory();
+          // M6: message TTL/dedup expiry and RPC deadline maintenance ride
+          // the existing periodic tick.
+          self->prune_peer_services();
           self->schedule_expiry();
         }
       } else if (auto self = weak.lock(); self && !self->producers_stopped) {
@@ -3001,7 +3006,11 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
          .pairing_deadline = std::chrono::milliseconds{60000},
          // The successor session re-runs the same trust adjudication: a
          // grant revoked during the old session does not carry over.
-         .wall_clock = unix_milliseconds_now});
+         .wall_clock = unix_milliseconds_now,
+         // M6: message/rpc physical channels are created by the session
+         // initiator only; the responder adopts the peer's channel.
+         .initiator_owned_domains = {session::ChannelDomain::message,
+                                     session::ChannelDomain::rpc}});
     if (!session) return Result<void>::failure(*session.error_if());
     iterator->second.session = *session.value_if();
     attach_restart_handler(request_id);
@@ -3035,6 +3044,19 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         if (iterator->second.session) {
           iterator->second.snapshot.session_epoch =
               iterator->second.session->local_hello().session_epoch;
+        }
+        // M6: message/RPC services attach to the authorized session so
+        // peer-initiated channels are admitted before the first frame.
+        // Posted rather than run inline: opening channels from inside the
+        // session observer would reenter PeerSession mid-notification.
+        {
+          auto weak = weak_from_this();
+          const auto service_peer = iterator->second.snapshot.peer;
+          boost::asio::post(strand, [weak, service_peer] {
+            if (auto self = weak.lock()) {
+              self->ensure_peer_services(service_peer);
+            }
+          });
         }
         if (coordinator) {
           (void)coordinator->cancel_attempt(request_id,
@@ -3072,6 +3094,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
             iterator->second.snapshot.state == NodePeerSessionState::authenticated;
         iterator->second.snapshot.state = NodePeerSessionState::closed;
         const auto peer = iterator->second.snapshot.peer;
+        // M6: every closed-session path finalizes the peer's message/RPC
+        // services exactly once (pending outcomes follow the M6-12 rules).
+        teardown_peer_services(peer);
         const auto restart = session_restarts.find(peer);
         if (restart != session_restarts.end() &&
             restart->second->superseded_attempt == request_id) {
@@ -3231,6 +3256,313 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
           });
     }
     return service->open_stream(receive_window_bytes, receive_window_frames);
+  }
+
+  // ---- M6 message & unary RPC (strand context) ----
+
+  ServiceDispatch service_dispatch() {
+    auto* runtime_ptr = runtime;
+    return [runtime_ptr](std::string_view task_name, std::function<void()> task) {
+      return detail::RuntimeAccess::dispatch_general(*runtime_ptr,
+                                                     std::string{task_name},
+                                                     std::move(task));
+    };
+  }
+
+  RpcService::StrandPoster service_strand_poster() {
+    auto weak = weak_from_this();
+    return [weak](std::function<void()> task) {
+      if (auto self = weak.lock()) {
+        boost::asio::post(self->strand, std::move(task));
+      }
+      // A dead node drops the completion: its sessions and channels are gone.
+    };
+  }
+
+  static bool session_scope_covers(const PeerSession& session, std::string_view scope) {
+    // Default deny (RULE-03/M5-12): the Node always runs real trust
+    // adjudication, so an empty effective scope set grants nothing.
+    for (const auto& granted : session.authorized_scopes()) {
+      if (trust_scope_covers(granted, scope)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Attaches the message and RPC services to an authorized session. The
+  // scope check consults the session's effective scopes live, so a grant
+  // adjudicated at upgrade time governs every later frame.
+  void ensure_peer_services(const DeviceEndpointKey& peer) {
+    if (peers_closed || producers_stopped) {
+      return;
+    }
+    auto* attempt = authenticated_attempt(peer);
+    if (attempt == nullptr || attempt->session == nullptr) {
+      return;
+    }
+    const auto session = attempt->session;
+    if (!message_services.contains(peer)) {
+      auto service = std::make_shared<MessageService>(
+          *session, message_service_config, service_dispatch(),
+          [session](std::string_view scope) {
+            return session_scope_covers(*session, scope);
+          },
+          unix_milliseconds_now);
+      auto attached = service->attach();
+      if (!attached) {
+        update_snapshot([&](NodeSnapshot& snapshot) {
+          snapshot.last_error = *attached.error_if();
+        });
+        return;
+      }
+      auto weak = weak_from_this();
+      service->set_inbound_handler([weak, peer](const MessageEnvelope& envelope) {
+        auto self = weak.lock();
+        if (!self || !self->message_inbound_handler) return;
+        self->message_inbound_handler(peer, envelope);
+      });
+      service->set_ack_observer(
+          [weak, peer](const MessageId& id, MessageDeliveryEvent event,
+                       std::optional<Error> error) {
+            auto self = weak.lock();
+            if (!self || !self->message_ack_observer) return;
+            self->message_ack_observer(peer, id, event, std::move(error));
+          });
+      message_services.emplace(peer, std::move(service));
+    }
+    if (!rpc_services.contains(peer)) {
+      auto service = std::make_shared<RpcService>(
+          *session, rpc_service_config, service_registry, service_dispatch(),
+          [session](std::string_view scope) {
+            return session_scope_covers(*session, scope);
+          },
+          service_strand_poster(), unix_milliseconds_now);
+      auto attached = service->attach();
+      if (!attached) {
+        update_snapshot([&](NodeSnapshot& snapshot) {
+          snapshot.last_error = *attached.error_if();
+        });
+        return;
+      }
+      rpc_services.emplace(peer, std::move(service));
+      // Policy-driven retry (M6-12): idempotent calls that opted in while
+      // the previous session died are resubmitted with the SAME request id
+      // (the peer's result cache keeps execution at-most-once).
+      auto pending = rpc_retry_queue.find(peer);
+      if (pending != rpc_retry_queue.end()) {
+        auto retryables = std::move(pending->second);
+        rpc_retry_queue.erase(pending);
+        auto& service_ref = rpc_services[peer];
+        for (auto& retryable : retryables) {
+          (void)service_ref->resubmit(std::move(retryable));
+        }
+      }
+    }
+  }
+
+  // Finalizes the services of one peer session: pending messages become
+  // session_closed, pending RPCs follow the M6-12 outcome rules, and
+  // idempotent retryables move into the bounded node-level retry queue.
+  // ByteStream services die with their session (M5-18) and are released
+  // here as well.
+  void teardown_peer_services(const DeviceEndpointKey& peer) {
+    stream_services.erase(peer);
+    const auto message = message_services.find(peer);
+    if (message != message_services.end()) {
+      auto service = message->second;
+      message_services.erase(message);
+      service->handle_session_closed();
+    }
+    const auto rpc = rpc_services.find(peer);
+    if (rpc != rpc_services.end()) {
+      auto service = rpc->second;
+      rpc_services.erase(rpc);
+      service->handle_session_closed();
+      auto retryables = service->take_retryable_calls();
+      if (!retryables.empty()) {
+        if (!peers_closed && !producers_stopped) {
+          auto& queue = rpc_retry_queue[peer];
+          for (auto& retryable : retryables) {
+            if (queue.size() >= rpc_retry_capacity) {
+              auto evicted = std::move(queue.front());
+              queue.pop_front();
+              if (evicted.completion) {
+                evicted.completion(Result<RpcCallOutcome>::success(RpcCallOutcome{
+                    StableStatus::outcome_unknown, "retry_queue_capacity", {}}));
+              }
+            }
+            queue.push_back(std::move(retryable));
+          }
+        } else {
+          for (auto& retryable : retryables) {
+            if (retryable.completion) {
+              retryable.completion(Result<RpcCallOutcome>::success(RpcCallOutcome{
+                  StableStatus::outcome_unknown, "retry_aborted_shutdown", {}}));
+            }
+          }
+        }
+      }
+    }
+  }
+
+  Result<MessageId> send_message_strand(DeviceEndpointKey peer, MessageEnvelope envelope) {
+    auto* attempt = authenticated_attempt(peer);
+    if (attempt == nullptr || attempt->session == nullptr) {
+      // No authorized session: immediate peer_offline, never an offline
+      // queue (M6-06).
+      return Result<MessageId>::failure(
+          node_error(ErrorCode::peer_offline, "peer_session_missing"));
+    }
+    ensure_peer_services(peer);
+    const auto service = message_services.find(peer);
+    if (service == message_services.end()) {
+      return Result<MessageId>::failure(
+          node_error(ErrorCode::internal, "message_service_unavailable"));
+    }
+    return service->second->send(std::move(envelope));
+  }
+
+  Result<RequestId> call_rpc_strand(DeviceEndpointKey peer, std::string service_name,
+                                    std::string method, std::vector<std::byte> payload,
+                                    RpcCallOptions options, NodeRpcCompletion completion,
+                                    RequestId request_id) {
+    auto* attempt = authenticated_attempt(peer);
+    if (attempt == nullptr || attempt->session == nullptr) {
+      if (completion) {
+        completion(peer, Result<RpcCallOutcome>::failure(
+                            node_error(ErrorCode::peer_offline, "peer_session_missing")));
+      }
+      return Result<RequestId>::failure(
+          node_error(ErrorCode::peer_offline, "peer_session_missing"));
+    }
+    ensure_peer_services(peer);
+    const auto service = rpc_services.find(peer);
+    if (service == rpc_services.end()) {
+      if (completion) {
+        completion(peer, Result<RpcCallOutcome>::failure(
+                            node_error(ErrorCode::internal, "rpc_service_unavailable")));
+      }
+      return Result<RequestId>::failure(
+          node_error(ErrorCode::internal, "rpc_service_unavailable"));
+    }
+    auto wrapped = [peer, completion = std::move(completion)](
+                       Result<RpcCallOutcome> outcome) {
+      if (completion) {
+        completion(peer, std::move(outcome));
+      }
+    };
+    return service->second->call(std::move(service_name), std::move(method),
+                                 std::move(payload), std::move(options),
+                                 std::move(wrapped), request_id);
+  }
+
+  Result<void> cancel_rpc_strand(DeviceEndpointKey peer, const RequestId& request_id) {
+    const auto service = rpc_services.find(peer);
+    if (service == rpc_services.end()) {
+      return Result<void>::failure(
+          node_error(ErrorCode::peer_offline, "rpc_service_missing"));
+    }
+    return service->second->cancel(request_id);
+  }
+
+  NodeServiceDiagnostics service_diagnostics_strand() {
+    NodeServiceDiagnostics diagnostics;
+    diagnostics.message_sessions = message_services.size();
+    diagnostics.rpc_sessions = rpc_services.size();
+    for (const auto& [peer, service] : message_services) {
+      const auto stats = service->stats();
+      diagnostics.message.sent_best_effort += stats.sent_best_effort;
+      diagnostics.message.sent_peer_acked += stats.sent_peer_acked;
+      diagnostics.message.send_rejected += stats.send_rejected;
+      diagnostics.message.acked += stats.acked;
+      diagnostics.message.ack_rejected += stats.ack_rejected;
+      diagnostics.message.ack_timed_out += stats.ack_timed_out;
+      diagnostics.message.unknown_acks += stats.unknown_acks;
+      diagnostics.message.acks_on_closed += stats.acks_on_closed;
+      diagnostics.message.received += stats.received;
+      diagnostics.message.invalid_envelopes += stats.invalid_envelopes;
+      diagnostics.message.duplicates += stats.duplicates;
+      diagnostics.message.dedup_expired += stats.dedup_expired;
+      diagnostics.message.dedup_evictions += stats.dedup_evictions;
+      diagnostics.message.scope_rejected += stats.scope_rejected;
+      diagnostics.message.acks_sent += stats.acks_sent;
+      diagnostics.message.ack_send_failures += stats.ack_send_failures;
+      diagnostics.message.dispatched += stats.dispatched;
+      diagnostics.message.dispatch_rejected += stats.dispatch_rejected;
+      diagnostics.message.handler_completed += stats.handler_completed;
+      diagnostics.message.handler_exceptions += stats.handler_exceptions;
+      diagnostics.message_pending_acks += service->pending_acks();
+    }
+    for (const auto& [peer, service] : rpc_services) {
+      const auto& stats = service->stats();
+      diagnostics.rpc.calls_started += stats.calls_started;
+      diagnostics.rpc.calls_admission_rejected += stats.calls_admission_rejected;
+      diagnostics.rpc.responses_matched += stats.responses_matched;
+      diagnostics.rpc.responses_unknown += stats.responses_unknown;
+      diagnostics.rpc.cancels_sent += stats.cancels_sent;
+      diagnostics.rpc.local_deadline_exceeded += stats.local_deadline_exceeded;
+      diagnostics.rpc.outcome_unknown_calls += stats.outcome_unknown_calls;
+      diagnostics.rpc.retryable_handled += stats.retryable_handled;
+      diagnostics.rpc.requests_received += stats.requests_received;
+      diagnostics.rpc.invalid_requests += stats.invalid_requests;
+      diagnostics.rpc.duplicate_requests += stats.duplicate_requests;
+      diagnostics.rpc.conflicting_requests += stats.conflicting_requests;
+      diagnostics.rpc.replayed_responses += stats.replayed_responses;
+      diagnostics.rpc.scope_rejected += stats.scope_rejected;
+      diagnostics.rpc.unimplemented_answers += stats.unimplemented_answers;
+      diagnostics.rpc.schema_rejected += stats.schema_rejected;
+      diagnostics.rpc.oversized_rejected += stats.oversized_rejected;
+      diagnostics.rpc.concurrency_rejected += stats.concurrency_rejected;
+      diagnostics.rpc.deadline_rejected += stats.deadline_rejected;
+      diagnostics.rpc.dispatch_rejected += stats.dispatch_rejected;
+      diagnostics.rpc.handlers_executed += stats.handlers_executed;
+      diagnostics.rpc.handler_exceptions += stats.handler_exceptions;
+      diagnostics.rpc.handler_cancelled += stats.handler_cancelled;
+      diagnostics.rpc.handler_deadline_exceeded += stats.handler_deadline_exceeded;
+      diagnostics.rpc.late_results_dropped += stats.late_results_dropped;
+      diagnostics.rpc.responses_sent += stats.responses_sent;
+      diagnostics.rpc.response_send_failures += stats.response_send_failures;
+      diagnostics.rpc_pending_calls += service->pending_calls();
+    }
+    for (const auto& [peer, queue] : rpc_retry_queue) {
+      diagnostics.rpc_retry_queue += queue.size();
+    }
+    return diagnostics;
+  }
+
+  // Periodic maintenance on the expiry tick: TTL pruning for messages and
+  // deadline pruning for RPC, then a fresh diagnostics snapshot.
+  void prune_peer_services() {
+    for (auto& [peer, service] : message_services) {
+      service->prune();
+    }
+    for (auto& [peer, service] : rpc_services) {
+      service->prune();
+    }
+    // Retries whose deadline passed while no session existed finalize now.
+    for (auto queue_entry = rpc_retry_queue.begin();
+         queue_entry != rpc_retry_queue.end();) {
+      auto& queue = queue_entry->second;
+      const auto current = unix_milliseconds_now();
+      for (auto entry = queue.begin(); entry != queue.end();) {
+        if (entry->deadline_unix_milliseconds <= current) {
+          if (entry->completion) {
+            entry->completion(Result<RpcCallOutcome>::success(RpcCallOutcome{
+                StableStatus::outcome_unknown, "retry_deadline_expired", {}}));
+          }
+          entry = queue.erase(entry);
+        } else {
+          ++entry;
+        }
+      }
+      if (queue.empty()) {
+        queue_entry = rpc_retry_queue.erase(queue_entry);
+      } else {
+        ++queue_entry;
+      }
+    }
+    (void)service_diagnostics_snapshots.try_publish(service_diagnostics_strand());
   }
 
   void publish_restart_diagnostics() {
@@ -3849,7 +4181,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
                    result, pending_request_id, pending_nonce, peer_device,
                    peer_public_key, requested_scopes);
              },
-         .wall_clock = unix_milliseconds_now});
+         .wall_clock = unix_milliseconds_now,
+         .initiator_owned_domains = {session::ChannelDomain::message,
+                                     session::ChannelDomain::rpc}});
     if (!session) return Result<void>::failure(*session.error_if());
     restart.session = *session.value_if();
     attach_restart_handler_to_session(**session.value_if(), peer);
@@ -3885,6 +4219,17 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     switch (diagnostics.state) {
       case PeerSessionState::authenticated:
         complete_session_restart(peer);
+        // The successor session re-runs trust adjudication; M6 services
+        // attach to it (idempotent retries resubmit here). Posted to avoid
+        // reentering PeerSession from its own observer.
+        {
+          auto weak = weak_from_this();
+          boost::asio::post(strand, [weak, peer] {
+            if (auto self = weak.lock()) {
+              self->ensure_peer_services(peer);
+            }
+          });
+        }
         return;
       case PeerSessionState::closed: {
         const auto error = diagnostics.last_error.value_or(
@@ -4898,6 +5243,35 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return;
     }
     peers_closed = true;
+    // M6: finalize peer services first so session close observers (which
+    // also tear down services) find consistent state, and every pending
+    // message/RPC reaches an observable terminal outcome.
+    for (const auto& [peer, service] : message_services) {
+      (void)peer;
+      service->handle_session_closed();
+    }
+    message_services.clear();
+    for (const auto& [peer, service] : rpc_services) {
+      (void)peer;
+      service->handle_session_closed();
+      for (auto& retryable : service->take_retryable_calls()) {
+        if (retryable.completion) {
+          retryable.completion(Result<RpcCallOutcome>::success(
+              RpcCallOutcome{StableStatus::outcome_unknown, "retry_aborted_shutdown", {}}));
+        }
+      }
+    }
+    rpc_services.clear();
+    for (auto& [peer, queue] : rpc_retry_queue) {
+      (void)peer;
+      for (auto& retryable : queue) {
+        if (retryable.completion) {
+          retryable.completion(Result<RpcCallOutcome>::success(
+              RpcCallOutcome{StableStatus::outcome_unknown, "retry_aborted_shutdown", {}}));
+        }
+      }
+    }
+    rpc_retry_queue.clear();
     // Move the restart records out before closing them: the session's close
     // observer reenters through restart_session_changed -> abort_session_
     // restart, which erases from session_restarts and would invalidate the
@@ -5048,6 +5422,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   std::map<DeviceEndpointKey, StashedRelayRequest> stashed_relay_requests;
   executor::comm::MpscChannel<InterfaceScanResult> scan_results;
   executor::comm::DoubleBuffer<NodeSnapshot> snapshots;
+  executor::comm::DoubleBuffer<NodeServiceDiagnostics> service_diagnostics_snapshots;
   executor::comm::DoubleBuffer<std::vector<EndpointDirectoryEntrySnapshot>> endpoint_snapshots;
   executor::comm::MpscChannel<SignalingCommand> signaling_commands;
   executor::comm::MpscChannel<SignalingCallbackResult> signaling_results;
@@ -5065,6 +5440,16 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   std::map<DeviceId, PendingPairing> pending_pairings;
   std::map<DeviceEndpointKey, std::unique_ptr<ByteStreamService>> stream_services;
   std::function<void(const DeviceEndpointKey&, ByteStream)> stream_inbound_handler;
+  // ---- M6 message & unary RPC ----
+  std::shared_ptr<ServiceRegistry> service_registry{std::make_shared<ServiceRegistry>()};
+  std::map<DeviceEndpointKey, std::shared_ptr<MessageService>> message_services;
+  std::map<DeviceEndpointKey, std::shared_ptr<RpcService>> rpc_services;
+  std::map<DeviceEndpointKey, std::deque<RpcService::RetryableCall>> rpc_retry_queue;
+  NodeMessageInboundHandler message_inbound_handler;
+  NodeMessageAckObserver message_ack_observer;
+  MessageServiceConfig message_service_config{};
+  RpcServiceConfig rpc_service_config{};
+  std::size_t rpc_retry_capacity{64U};
   LanSignalingValidator signaling_validator;
   LanSignalingHandler signaling_handler;
   std::shared_ptr<SignalingDelegate> coordinator_delegate;
@@ -5474,6 +5859,195 @@ void Node::set_byte_stream_inbound_handler(
     std::function<void(const DeviceEndpointKey&, ByteStream)> handler) {
   if (!impl_) return;
   impl_->stream_inbound_handler = std::move(handler);
+}
+
+Result<MessageId> Node::send_message(const DeviceEndpointKey& peer,
+                                     MessageEnvelope envelope) {
+  if (!impl_) {
+    return Result<MessageId>::failure(
+        node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  if (peer.device_id.is_zero() || peer.endpoint_id.is_zero()) {
+    return Result<MessageId>::failure(
+        node_error(ErrorCode::configuration, "message_peer_invalid"));
+  }
+  // Synchronous feedback for obvious envelope errors; deeper validation and
+  // queue admission happen on the strand, with failures surfaced through the
+  // ack observer as send_failed.
+  if (envelope.type.empty() || envelope.type.size() > max_message_type_bytes) {
+    return Result<MessageId>::failure(
+        node_error(ErrorCode::configuration, "message_type_invalid"));
+  }
+  if (envelope.payload.size() > Limits{}.max_message_bytes) {
+    return Result<MessageId>::failure(
+        node_error(ErrorCode::configuration, "payload_oversized"));
+  }
+  if (envelope.message_id.is_zero()) {
+    MessageId::Storage bytes{};
+    do {
+      randombytes_buf(bytes.data(), bytes.size());
+    } while (MessageId{bytes}.is_zero());
+    envelope.message_id = MessageId{bytes};
+  }
+  const auto id = envelope.message_id;
+  // M6-06: no authorized session means an immediate peer_offline — the
+  // library never queues messages for an offline peer.
+  const auto sessions = impl_->peer_session_snapshots.load().value;
+  const auto authorized =
+      std::any_of(sessions.begin(), sessions.end(), [&](const auto& session) {
+        return session.peer == peer &&
+               session.state == NodePeerSessionState::authenticated;
+      });
+  if (!authorized) {
+    return Result<MessageId>::failure(node_error(ErrorCode::peer_offline,
+                                                 "peer_session_missing"));
+  }
+  auto weak = std::weak_ptr<Impl>{impl_};
+  try {
+    boost::asio::post(impl_->strand, [weak, peer, envelope = std::move(envelope)]() {
+      if (auto self = weak.lock()) {
+        (void)self->send_message_strand(peer, std::move(envelope));
+      }
+    });
+  } catch (...) {
+    return Result<MessageId>::failure(
+        node_error(ErrorCode::internal, "message_send_schedule_failed"));
+  }
+  return Result<MessageId>::success(id);
+}
+
+void Node::set_message_inbound_handler(NodeMessageInboundHandler handler) {
+  if (!impl_) return;
+  impl_->message_inbound_handler = std::move(handler);
+}
+
+void Node::set_message_ack_observer(NodeMessageAckObserver observer) {
+  if (!impl_) return;
+  impl_->message_ack_observer = std::move(observer);
+}
+
+Result<void> Node::register_rpc_method(RpcMethodDescriptor descriptor,
+                                       RpcMethodHandler handler) {
+  if (!impl_ || !impl_->service_registry) {
+    return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  return impl_->service_registry->register_method(std::move(descriptor),
+                                                  std::move(handler));
+}
+
+Result<void> Node::unregister_rpc_method(std::string_view service,
+                                         std::string_view method) {
+  if (!impl_ || !impl_->service_registry) {
+    return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  return impl_->service_registry->unregister_method(service, method);
+}
+
+std::vector<RpcMethodSummary> Node::rpc_methods() const {
+  if (!impl_ || !impl_->service_registry) {
+    return {};
+  }
+  return impl_->service_registry->methods();
+}
+
+Result<RequestId> Node::call_rpc(const DeviceEndpointKey& peer, std::string service,
+                                 std::string method, std::vector<std::byte> payload,
+                                 RpcCallOptions options, NodeRpcCompletion completion) {
+  if (!impl_) {
+    return Result<RequestId>::failure(
+        node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  if (peer.device_id.is_zero() || peer.endpoint_id.is_zero()) {
+    return Result<RequestId>::failure(
+        node_error(ErrorCode::configuration, "rpc_peer_invalid"));
+  }
+  if (service.empty() || service.size() > max_rpc_service_name_bytes ||
+      method.empty() || method.size() > max_rpc_method_name_bytes) {
+    return Result<RequestId>::failure(
+        node_error(ErrorCode::configuration, "rpc_method_name_invalid"));
+  }
+  if (payload.size() > Limits{}.max_rpc_payload_bytes) {
+    return Result<RequestId>::failure(
+        node_error(ErrorCode::configuration, "payload_oversized"));
+  }
+  if (options.deadline_remaining_milliseconds < min_rpc_deadline_milliseconds ||
+      options.deadline_remaining_milliseconds > max_rpc_deadline_milliseconds) {
+    return Result<RequestId>::failure(
+        node_error(ErrorCode::configuration, "rpc_deadline_invalid"));
+  }
+  if (options.retry_on_reconnect && !options.idempotent) {
+    return Result<RequestId>::failure(
+        node_error(ErrorCode::configuration, "retry_requires_idempotent"));
+  }
+  if (!completion) {
+    return Result<RequestId>::failure(
+        node_error(ErrorCode::configuration, "completion_missing"));
+  }
+  // Synchronous peer_offline when no authorized session exists; the call
+  // never starts and its outcome is deterministic.
+  const auto sessions = impl_->peer_session_snapshots.load().value;
+  const auto authorized =
+      std::any_of(sessions.begin(), sessions.end(), [&](const auto& session) {
+        return session.peer == peer &&
+               session.state == NodePeerSessionState::authenticated;
+      });
+  if (!authorized) {
+    return Result<RequestId>::failure(node_error(ErrorCode::peer_offline,
+                                                 "peer_session_missing"));
+  }
+  // The request id is assigned here so callers can cancel immediately; the
+  // call itself is admitted on the strand.
+  RequestId::Storage request_bytes{};
+  do {
+    randombytes_buf(request_bytes.data(), request_bytes.size());
+  } while (RequestId{request_bytes}.is_zero());
+  const RequestId request_id{request_bytes};
+  auto weak = std::weak_ptr<Impl>{impl_};
+  try {
+    boost::asio::post(
+        impl_->strand,
+        [weak, peer, service = std::move(service), method = std::move(method),
+         payload = std::move(payload), options = std::move(options),
+         completion = std::move(completion), request_id]() mutable {
+          if (auto self = weak.lock()) {
+            (void)self->call_rpc_strand(peer, std::move(service), std::move(method),
+                                        std::move(payload), std::move(options),
+                                        std::move(completion), request_id);
+          }
+        });
+  } catch (...) {
+    return Result<RequestId>::failure(
+        node_error(ErrorCode::internal, "rpc_call_schedule_failed"));
+  }
+  return Result<RequestId>::success(request_id);
+}
+
+Result<void> Node::cancel_rpc(const DeviceEndpointKey& peer,
+                              const RequestId& request_id) {
+  if (!impl_) {
+    return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  auto weak = std::weak_ptr<Impl>{impl_};
+  try {
+    boost::asio::post(impl_->strand, [weak, peer, request_id] {
+      if (auto self = weak.lock()) {
+        (void)self->cancel_rpc_strand(peer, request_id);
+      }
+    });
+  } catch (...) {
+    return Result<void>::failure(node_error(ErrorCode::internal,
+                                            "rpc_cancel_schedule_failed"));
+  }
+  return Result<void>::success();
+}
+
+NodeServiceDiagnostics Node::service_diagnostics() {
+  if (!impl_) {
+    return {};
+  }
+  // Latest published snapshot (refreshed on the periodic tick); reading the
+  // live maps would race the strand.
+  return impl_->service_diagnostics_snapshots.load().value;
 }
 
 Result<void> Node::send_lan_signaling(LanSignalingMessage message) {

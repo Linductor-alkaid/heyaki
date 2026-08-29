@@ -164,6 +164,9 @@ class LoopbackSession : public transport::TransportSession {
     message_handler_ = std::move(handler);
   }
   void set_state_handler(StateHandler handler) override { state_handler_ = std::move(handler); }
+  void set_channel_handler(ChannelHandler handler) override {
+    channel_handler_ = std::move(handler);
+  }
 
   [[nodiscard]] transport::TransportSessionSnapshot snapshot() const noexcept override {
     transport::TransportSessionSnapshot snapshot;
@@ -234,6 +237,7 @@ class LoopbackSession : public transport::TransportSession {
   std::optional<transport::CloseReason> last_close_reason_;
   MessageHandler message_handler_;
   StateHandler state_handler_;
+  ChannelHandler channel_handler_;
   std::deque<LoopbackChannel::PendingMessage> inbound_;
   std::vector<std::unique_ptr<LoopbackChannel>> channels_;
 };

@@ -109,6 +109,7 @@ class WebRtcTransportSession final
                           OpenCompletion completion) override;
   void set_message_handler(MessageHandler handler) override;
   void set_state_handler(StateHandler handler) override;
+  void set_channel_handler(ChannelHandler handler) override;
   [[nodiscard]] TransportSessionSnapshot snapshot() const noexcept override;
   void close(CloseReason reason) override;
 

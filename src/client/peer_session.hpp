@@ -18,6 +18,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <vector>
@@ -100,6 +101,12 @@ struct PeerSessionConfig {
   // Lifetime cap of a pairing-restricted session (M5-07).
   std::chrono::milliseconds pairing_deadline{60000};
   std::function<std::uint64_t()> wall_clock{};
+  // M6: business domains whose PHYSICAL transport channels are created only
+  // by the session initiator; the responder adopts the peer's channel (via
+  // the transport channel handler) instead of creating a duplicate SCTP
+  // stream with the same label. Both sides auto-attach these domains'
+  // services, so a symmetric create would collide at the transport.
+  std::set<session::ChannelDomain> initiator_owned_domains{};
 };
 
 struct VerifiedPeerSessionConfig {
@@ -121,6 +128,7 @@ struct VerifiedPeerSessionConfig {
   session::ChannelBudgetConfig channel_budgets{};
   std::chrono::milliseconds pairing_deadline{60000};
   std::function<std::uint64_t()> wall_clock{};
+  std::set<session::ChannelDomain> initiator_owned_domains{};
 };
 
 struct PeerSessionDiagnostics {
@@ -195,6 +203,11 @@ class PeerSession final : public std::enable_shared_from_this<PeerSession> {
       BusinessFrameHandler handler);
   // Local close of one logical channel; the session keeps running.
   void close_business_channel(std::uint32_t channel_id);
+  // Closes one logical business channel AND its domain's physical transport
+  // channel after a domain protocol violation (wire protocol 6.2/6.3: a
+  // malformed service frame closes only its logical channel). Other domains
+  // and the session itself are unaffected.
+  void fail_business_channel(std::uint32_t channel_id, transport::CloseReason reason);
   [[nodiscard]] bool has_business_channel(std::uint32_t channel_id) const noexcept;
   // Registers (or replaces) the inbound dispatcher for a whole domain. Frames
   // on channel ids without a per-channel handler go to the domain handler,
@@ -236,6 +249,10 @@ class PeerSession final : public std::enable_shared_from_this<PeerSession> {
   [[nodiscard]] transport::TransportChannel* physical_channel_for_domain(
       session::ChannelDomain domain);
   void ensure_physical_channel(session::ChannelDomain domain);
+  // Adopts an already-open transport channel of `kind` (typically one the
+  // PEER created) as this domain's physical channel when none exists yet.
+  void adopt_physical_channel(transport::ChannelKind kind,
+                              transport::TransportChannel& channel);
   [[nodiscard]] std::uint64_t wall_clock_now() const;
   void note_business_violation(transport::TransportChannel& channel);
   void fail(Error error);

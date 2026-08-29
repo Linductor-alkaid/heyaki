@@ -2,7 +2,9 @@
 
 #include <heyaki/byte_stream.hpp>
 #include <heyaki/lan_directory.hpp>
+#include <heyaki/message.hpp>
 #include <heyaki/profile_store.hpp>
+#include <heyaki/rpc.hpp>
 #include <heyaki/runtime.hpp>
 
 #include <chrono>
@@ -326,6 +328,33 @@ struct NodeByteStreamOptions {
   std::uint32_t receive_window_frames{64U};
 };
 
+// ---- M6 message & unary RPC ----
+// Aggregate service diagnostics across every authorized peer session; executor
+// facilities remain the source of truth for task health (EXEC-08).
+struct NodeServiceDiagnostics {
+  MessageServiceStats message;
+  RpcServiceStats rpc;
+  std::size_t message_pending_acks{};
+  std::size_t rpc_pending_calls{};
+  std::size_t rpc_retry_queue{};
+  std::size_t message_sessions{};
+  std::size_t rpc_sessions{};
+};
+
+// Inbound message delivery (already deduplicated, scope-checked, and
+// ACK-answered at protocol level before this fires).
+using NodeMessageInboundHandler =
+    std::function<void(const DeviceEndpointKey&, const MessageEnvelope&)>;
+// Delivery lifecycle of sent messages (queued/send_failed/acked/
+// peer_rejected/ack_timeout/session_closed).
+using NodeMessageAckObserver = std::function<void(
+    const DeviceEndpointKey&, const MessageId&, MessageDeliveryEvent,
+    std::optional<Error>)>;
+// Terminal RPC outcome; peer statuses (including outcome_unknown) arrive as
+// successful Results carrying RpcCallOutcome::status.
+using NodeRpcCompletion = std::function<void(const DeviceEndpointKey&,
+                                             Result<RpcCallOutcome>)>;
+
 struct NodeShutdownReport {
   bool stopped{false};
   bool timed_out{false};
@@ -384,6 +413,33 @@ class Node {
       const NodeByteStreamOptions& options = {});
   void set_byte_stream_inbound_handler(
       std::function<void(const DeviceEndpointKey&, ByteStream)> handler);
+
+  // ---- M6 message & unary RPC (public API) ----
+  // Sends one typed message to an authorized peer. Fails immediately with
+  // peer_offline when no authorized session exists (v1 has no offline
+  // queue, M6-06); delivery outcomes surface through the ack observer.
+  [[nodiscard]] Result<MessageId> send_message(const DeviceEndpointKey& peer,
+                                               MessageEnvelope envelope);
+  void set_message_inbound_handler(NodeMessageInboundHandler handler);
+  void set_message_ack_observer(NodeMessageAckObserver observer);
+  // Registers one server-side unary method for every peer session; the
+  // descriptor's required scope is checked before any handler runs.
+  [[nodiscard]] Result<void> register_rpc_method(RpcMethodDescriptor descriptor,
+                                                 RpcMethodHandler handler);
+  [[nodiscard]] Result<void> unregister_rpc_method(std::string_view service,
+                                                   std::string_view method);
+  [[nodiscard]] std::vector<RpcMethodSummary> rpc_methods() const;
+  // Starts one unary call. The completion fires exactly once with the
+  // terminal outcome (from the node's strand context).
+  [[nodiscard]] Result<RequestId> call_rpc(const DeviceEndpointKey& peer,
+                                           std::string service, std::string method,
+                                           std::vector<std::byte> payload,
+                                           RpcCallOptions options,
+                                           NodeRpcCompletion completion);
+  // Cooperatively cancels one pending call (M6-10).
+  [[nodiscard]] Result<void> cancel_rpc(const DeviceEndpointKey& peer,
+                                        const RequestId& request_id);
+  [[nodiscard]] NodeServiceDiagnostics service_diagnostics();
 
   [[nodiscard]] NodeShutdownReport shutdown();
 
