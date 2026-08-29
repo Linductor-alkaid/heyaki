@@ -35,6 +35,8 @@
 // harness runs on Linux only; Windows keeps a no-op installer below.
 #include <csignal>
 #include <execinfo.h>
+#include <fcntl.h>
+#include <ucontext.h>
 #include <unistd.h>
 #endif
 
@@ -46,25 +48,51 @@ using heyaki::ErrorCode;
 #ifndef _WIN32
 // Crash reporter for the topology harness: SIGBUS/SIGSEGV/SIGABRT/SIGFPE in
 // the CI namespaces previously surfaced only as "Bus error" with no context.
-// This handler writes the signal, fault address, and a best-effort backtrace
-// with async-signal-safe calls (write/backtrace_symbols_fd) so the dumped
-// output file pinpoints the faulting frame.
-void crash_report(int signal_number, siginfo_t* info, void*) {
-  char prefix[160];
+// This handler writes the signal, fault address, the ucontext registers at
+// the fault (needed to classify SIGBUS/SI_KERNEL events whose si_addr is
+// null), the surrounding /proc/self/maps entries, and a best-effort
+// backtrace — all through async-signal-safe-enough syscalls so the dumped
+// output file pinpoints the faulting frame and mapping.
+void crash_report(int signal_number, siginfo_t* info, void* context) {
+  char prefix[512];
   const char* name = signal_number == SIGBUS    ? "SIGBUS"
                      : signal_number == SIGSEGV ? "SIGSEGV"
                      : signal_number == SIGABRT ? "SIGABRT"
                                                 : "SIGFPE";
-  const int written =
-      std::snprintf(prefix, sizeof(prefix), "\nMATRIX_CRASH %s code=%d addr=%p backtrace:\n",
-                    name, info ? info->si_code : -1, info ? info->si_addr : nullptr);
-  if (written > 0) {
-    // glibc marks write() warn_unused_result: a failed diagnostic write must
-    // not crash the crash reporter; consume the result instead of (void).
-    const auto ignored = write(STDERR_FILENO, prefix,
-                               static_cast<std::size_t>(written));
+  std::size_t total = 0;
+  const auto emit = [&total](const char* text, std::size_t length) {
+    if (length == 0U) return;
+    const auto ignored = write(STDERR_FILENO, text, length);
     (void)ignored;
+    total += length;
+  };
+  (void)total;
+  {
+    ucontext_t* uc = static_cast<ucontext_t*>(context);
+    const int written = std::snprintf(
+        prefix, sizeof(prefix),
+        "\nMATRIX_CRASH %s code=%d addr=%p rip=%llx rbp=%llx rbx=%llx rdi=%llx "
+        "rsp=%llx\n",
+        name, info ? info->si_code : -1, info ? info->si_addr : nullptr,
+        uc ? static_cast<unsigned long long>(uc->uc_mcontext.gregs[REG_RIP]) : 0ULL,
+        uc ? static_cast<unsigned long long>(uc->uc_mcontext.gregs[REG_RBP]) : 0ULL,
+        uc ? static_cast<unsigned long long>(uc->uc_mcontext.gregs[REG_RBX]) : 0ULL,
+        uc ? static_cast<unsigned long long>(uc->uc_mcontext.gregs[REG_RDI]) : 0ULL,
+        uc ? static_cast<unsigned long long>(uc->uc_mcontext.gregs[REG_RSP]) : 0ULL);
+    if (written > 0) emit(prefix, static_cast<std::size_t>(written));
   }
+  emit("MATRIX_CRASH maps:\n", sizeof("MATRIX_CRASH maps:\n") - 1U);
+  const int maps = open("/proc/self/maps", O_RDONLY);
+  if (maps >= 0) {
+    char chunk[4096];
+    for (int rounds = 0; rounds < 64; ++rounds) {
+      const auto read_bytes = read(maps, chunk, sizeof(chunk));
+      if (read_bytes <= 0) break;
+      emit(chunk, static_cast<std::size_t>(read_bytes));
+    }
+    close(maps);
+  }
+  emit("MATRIX_CRASH backtrace:\n", sizeof("MATRIX_CRASH backtrace:\n") - 1U);
   void* frames[64];
   const int depth = backtrace(frames, 64);
   if (depth > 0) {
