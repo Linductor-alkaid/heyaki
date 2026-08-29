@@ -66,7 +66,9 @@ void crash_report(int signal_number, siginfo_t* info, void*) {
 void install_crash_reporter() {
   struct sigaction action {};
   action.sa_sigaction = crash_report;
-  action.sa_flags = SA_SIGINFO | SA_RESETHAND;
+  // SA_RESETHAND is an unsigned constant (0x80000000) that does not fit int;
+  // the explicit cast keeps -Wsign-conversion quiet.
+  action.sa_flags = static_cast<int>(SA_SIGINFO | SA_RESETHAND);
   sigaction(SIGBUS, &action, nullptr);
   sigaction(SIGSEGV, &action, nullptr);
   sigaction(SIGABRT, &action, nullptr);

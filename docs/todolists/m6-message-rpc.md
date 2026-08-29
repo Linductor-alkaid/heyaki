@@ -99,3 +99,24 @@
 - 本地验收：debug 构建全量 ctest（unit 19/19 含新 M6 目标）、ASAN/UBSAN 下 M6
   35 用例通过、M4 TUI harness 回归通过、M6 TUI harness 通过（M6_TUI_SERVICE_OK）、
   双实例 demo 交换通过（M6_DEMO_OK）；CI 矩阵结果见提交记录。
+
+### 第 2 轮（2026-08-29）：CI 修复与矩阵崩溃排查
+
+- MSVC 编译（第 1 轮 CI 失败）：`node.cpp` 补 `/bigobj`（C1128 节区超限）、
+  `fuzz_smoke.cpp` 重命名遮蔽局部（C4456）。
+- 矩阵 M6 断言竞态：服务在会话授权后异步挂载，演练若在挂载完成前发送会
+  丢消息/RPC（第 1 轮 direct/fallback 场景失败）。矩阵节点改为先有界等待
+  service_diagnostics 确认服务就绪再演练；relay 重启类扰动场景的 m6 字段改为
+  信息性记录（拓扑在演练下移动），direct/lossy/首个 TURN 周期保持严格断言。
+  修复后 direct、全部 turn_fallback、udp_blocked、relay_restart 场景连同
+  m6_message_acked=1/m6_rpc_status=1 全部通过。
+- 矩阵节点加无缓冲 stdout、`MATRIX_PHASE` 阶段标记（node-created/connecting/
+  authenticated/m6-exercise-begin|end/shutting-down）与
+  SIGBUS/SIGSEGV/SIGABRT/SIGFPE 崩溃报告器（信号码、故障地址、回溯，
+  async-signal-safe 写出至 stderr 汇入输出文件）。第 2 轮 CI 残余唯一失败为
+  lossy 场景（netem 100ms/10%）initiator 在 m6-exercise-begin 后 SIGBUS——
+  本地 52 组进程对（30 ASAN 抖动、14 debug、8 TSAN 带 relay 重启，含 TURN 外
+  全链路真实 relay+信令）零复现，判定为 CI 环境特有或极低频竞态，待下次
+  CI 出现时由回溯定位。
+- `PeerSession::adopt_physical_channel` 增加 control 域守卫：incoming control
+  通道不得进入业务物理通道表（control 走 `control_` 专属所有权路径）。
