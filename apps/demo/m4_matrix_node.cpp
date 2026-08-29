@@ -19,20 +19,59 @@
 
 #include <algorithm>
 #include <chrono>
+#include <csignal>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <execinfo.h>
 #include <filesystem>
 #include <iostream>
 #include <map>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unistd.h>
 #include <vector>
 
 namespace {
 
 using heyaki::Error;
 using heyaki::ErrorCode;
+
+// Crash reporter for the topology harness: SIGBUS/SIGSEGV/SIGABRT/SIGFPE in
+// the CI namespaces previously surfaced only as "Bus error" with no context.
+// This handler writes the signal, fault address, and a best-effort backtrace
+// with async-signal-safe calls (write/backtrace_symbols_fd) so the dumped
+// output file pinpoints the faulting frame.
+void crash_report(int signal_number, siginfo_t* info, void*) {
+  char prefix[160];
+  const char* name = signal_number == SIGBUS    ? "SIGBUS"
+                     : signal_number == SIGSEGV ? "SIGSEGV"
+                     : signal_number == SIGABRT ? "SIGABRT"
+                                                : "SIGFPE";
+  const int written =
+      std::snprintf(prefix, sizeof(prefix), "\nMATRIX_CRASH %s code=%d addr=%p backtrace:\n",
+                    name, info ? info->si_code : -1, info ? info->si_addr : nullptr);
+  if (written > 0) {
+    (void)write(STDERR_FILENO, prefix, static_cast<std::size_t>(written));
+  }
+  void* frames[64];
+  const int depth = backtrace(frames, 64);
+  if (depth > 0) {
+    backtrace_symbols_fd(frames, depth, STDERR_FILENO);
+  }
+  _exit(128 + signal_number);
+}
+
+void install_crash_reporter() {
+  struct sigaction action {};
+  action.sa_sigaction = crash_report;
+  action.sa_flags = SA_SIGINFO | SA_RESETHAND;
+  sigaction(SIGBUS, &action, nullptr);
+  sigaction(SIGSEGV, &action, nullptr);
+  sigaction(SIGABRT, &action, nullptr);
+  sigaction(SIGFPE, &action, nullptr);
+}
 
 std::uint64_t unix_milliseconds_now() {
   return static_cast<std::uint64_t>(
@@ -163,6 +202,7 @@ int run_node(const std::filesystem::path& database, std::string_view application
   // Unbuffered stdout: a crash mid-scenario must still leave its progress
   // markers in the output file the matrix script dumps on failure.
   std::cout << std::unitbuf;
+  install_crash_reporter();
   auto profile = heyaki::ProfileStore::open(database);
   if (!profile) {
     std::cerr << "profile open failed: "

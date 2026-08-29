@@ -1018,7 +1018,10 @@ transport::TransportChannel* PeerSession::physical_channel_for_domain(
 void PeerSession::adopt_physical_channel(transport::ChannelKind kind,
                                          transport::TransportChannel& channel) {
   const auto domain = physical_domain_for_kind(kind);
-  if (!domain.has_value() || physical_channels_.contains(*domain)) {
+  // The control channel has its own ownership path (`control_`); only
+  // business domains are adoptable here.
+  if (!domain.has_value() || *domain == session::ChannelDomain::control ||
+      physical_channels_.contains(*domain)) {
     return;
   }
   if (!channel.writable()) {
