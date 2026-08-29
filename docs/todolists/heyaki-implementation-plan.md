@@ -7,8 +7,10 @@
 >   语义补种互信，TUI 配对/信任/Stream 视图落地，两轮实施记录见
 >   [M5 阶段文件](m5-authorization-bytestream.md)，2026-08-28）；
 >   2026-08-27 计划修订：新增 M10 Gateway 代理服务里程碑（设计见
->   [Gateway 代理服务设计](../design/gateway-service.md)）
-> - 日期：2026-08-28
+>   [Gateway 代理服务设计](../design/gateway-service.md)）；
+>   2026-08-29 计划修订：依赖可移植性分析完成后新增 M11 Android（NDK）适配里程碑
+>   （见 [M11 阶段文件](m11-android-port.md)）
+> - 日期：2026-08-29
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md)、[局域网无服务器连接设计](../design/lan-serverless-connectivity.md)
 > - 计划范围：设备端 C++20 库、`heyaki-relay`、coturn 集成、`heyaki-tui`、测试与生产交付
 
@@ -82,6 +84,7 @@
 | M8 | Remote Shell 与安全终端 UI | M7 | v0.4 Shell beta |
 | M9 | 生产加固、跨平台、兼容性与发布 | M8 | v1.0 |
 | M10 | Gateway 代理服务（受限 L4 网关） | M5 | v1.1 Gateway beta |
+| M11 | Android（NDK）库适配与 CI | M9 | v1.2 Android alpha |
 
 Serverless 关键路径为 `M0 -> M1 -> M2 -> M3A -> M4 -> M5 -> M6 -> M7 -> M8 -> M9`；
 relay 路径 `M2 -> M3B -> M4` 可与 M3A 并行，但 M4 完整退出要求 LAN 与 relay/TURN 两组门禁
@@ -106,6 +109,7 @@ scope，可与 M7/M8 并行实施，但 gateway 不进入 v1.0 发布门禁，�
 - [ ] `DEC-11` 发现协议（默认有界 Heyaki UDP multicast；mDNS/DNS-SD 延后）。
 - [ ] `DEC-12` LAN 可见性与自动连接（启用时暴露完整 DeviceId/EndpointId、不广播名称/manifest；仅自动连接已信任 peer）。
 - [ ] `DEC-13` Gateway 代理默认值（默认关闭、不入标准 pairing 模板；首版仅 TCP；默认 profile 仅允许 B 直连网段，公网出口显式开启；TURN 数据路径上 gateway 流量默认允许但独立计量，可配置限速或禁止；gateway 与 shell 同时授权要求显式确认）。
+- [ ] `DEC-14` Android 产品形态（v1.x 只交付 C++20 核心库的 NDK 交叉编译与 JNI 集成边界，不包含完整 Android 应用/UI；TUI、fuzzer、coturn 部署组件不移植；Android 上的 profile 存储位置与 secret backend 等价物须在 M11 立项时单独确认）。
 
 ---
 
@@ -129,6 +133,7 @@ scope，可与 M7/M8 并行实施，但 gateway 不进入 v1.0 发布门禁，�
 | M8 | [m8-remote-shell.md](m8-remote-shell.md) | 未开始 | Remote Shell 与安全终端 UI（独立安全里程碑，默认关闭）。 |
 | M9 | [m9-production-hardening.md](m9-production-hardening.md) | 未开始 | 生产加固、跨平台、兼容性与 v1 发布。 |
 | M10 | [m10-gateway-proxy.md](m10-gateway-proxy.md) | 未开始 | 受限 L4 Gateway 代理：protocol 1.3 变更单、授权/profile、B 侧网关服务、A 侧 API 与可选 SOCKS5 前端。 |
+| M11 | [m11-android-port.md](m11-android-port.md) | 未开始 | Android（NDK）适配：依赖交叉编译、平台层验证、JNI 集成边界与 NDK CI；v1.x 交付，不阻塞 v1.0。 |
 
 ---
 
@@ -166,6 +171,7 @@ scope，可与 M7/M8 并行实施，但 gateway 不进入 v1.0 发布门禁，�
 10. M8 的 OS Shell backend、协议、VT UI 和安全评审分别提交；安全门禁未通过不启用生产配置。
 11. M9 只做加固、兼容、测量和交付，不在发布冲刺中加入 QUIC、跨 region、mDNS provider 或业务 Broker。
 12. M10 先冻结 protocol 1.3 变更单与 golden vectors（不新增帧类型），再实现 B 侧网关服务与授权准入，最后交付 A 侧流 API、SOCKS5 前端与 TUI Gateway 视图；v1.0 发布不被 M10 阻塞。
+13. M11 先完成 NDK 依赖交叉编译基线与 CI job，再验证平台层（文件锁、接口枚举、组播、dlopen backend），最后交付 JNI 集成层与最小 Android 集成示例；不移植 TUI、fuzzer 与 coturn 拓扑。
 
 每个里程碑建议以可回滚提交序列合入。若某阶段需要修改已冻结的身份、签名或 wire major，
 应暂停下游功能开发，先完成兼容性影响评审和 golden vector 更新。
