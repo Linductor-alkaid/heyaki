@@ -160,6 +160,9 @@ int run_node(const std::filesystem::path& database, std::string_view application
              const std::string& relay_url, const std::filesystem::path& ca_file,
              const std::string& tenant, std::chrono::milliseconds total_budget,
              const RunOptions& options) {
+  // Unbuffered stdout: a crash mid-scenario must still leave its progress
+  // markers in the output file the matrix script dumps on failure.
+  std::cout << std::unitbuf;
   auto profile = heyaki::ProfileStore::open(database);
   if (!profile) {
     std::cerr << "profile open failed: "
@@ -221,6 +224,7 @@ int run_node(const std::filesystem::path& database, std::string_view application
     return 1;
   }
 
+  std::cout << "MATRIX_PHASE node-created\n";
   const auto relay_ready = wait_until(
       [&] {
         return node.value_if()->snapshot().relay.state ==
@@ -301,6 +305,7 @@ int run_node(const std::filesystem::path& database, std::string_view application
   }
 
   unsigned connect_retries = options.retries;
+  std::cout << "MATRIX_PHASE connecting\n";
   const auto authenticated = wait_until(
       [&] {
         const auto sessions = node.value_if()->peer_sessions();
@@ -358,8 +363,13 @@ int run_node(const std::filesystem::path& database, std::string_view application
     }
   }
   if (authenticated) {
+    std::cout << "MATRIX_PHASE authenticated\n";
     // M6 exercise (initiator side): one peer_acked message and one unary RPC
     // through the public API on whatever data path the session negotiated.
+    // The services attach asynchronously after authorization, so wait for the
+    // service diagnostics to confirm them before exercising; a relay-restart
+    // churn scenario may drop the session mid-exercise, which reports as
+    // m6=0/-1 rather than a topology failure.
     if (options.role == "initiator") {
       heyaki::DeviceEndpointKey peer_key{};
       for (const auto& session : node.value_if()->peer_sessions()) {
@@ -368,7 +378,14 @@ int run_node(const std::filesystem::path& database, std::string_view application
           break;
         }
       }
-      if (!peer_key.device_id.is_zero()) {
+      if (!peer_key.device_id.is_zero() &&
+          wait_until(
+              [&] {
+                const auto services = node.value_if()->service_diagnostics();
+                return services.message_sessions > 0U && services.rpc_sessions > 0U;
+              },
+              std::chrono::milliseconds{5000})) {
+        std::cout << "MATRIX_PHASE m6-exercise-begin\n";
         heyaki::MessageEnvelope envelope;
         envelope.type = "matrix.m6";
         envelope.delivery_mode = heyaki::MessageDeliveryMode::peer_acked;
@@ -392,6 +409,9 @@ int run_node(const std::filesystem::path& database, std::string_view application
               return m6_message_acked.load() && m6_rpc_status.load() >= 0;
             },
             std::chrono::milliseconds{8000});
+        std::cout << "MATRIX_PHASE m6-exercise-end message="
+                  << (m6_message_acked.load() ? 1 : 0)
+                  << " rpc=" << m6_rpc_status.load() << "\n";
       }
     }
     executor::comm::PhaseGate hold{"heyaki-m4-matrix-hold"};
@@ -425,6 +445,7 @@ int run_node(const std::filesystem::path& database, std::string_view application
             << " heartbeats_missed=" << snapshot.relay.heartbeats_missed
             << " endpoints_seen=" << node.value_if()->endpoints().size()
             << '\n';
+  std::cout << "MATRIX_PHASE shutting-down\n";
   const auto shutdown = node.value_if()->shutdown();
   if (!shutdown.stopped) {
     std::cerr << "node shutdown did not drain\n";

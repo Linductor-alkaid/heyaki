@@ -370,10 +370,10 @@ int main(int argc, char** argv) {
         heyaki::MessageAckBody{heyaki::MessageId{ack_id}, true});
     std::vector<std::pair<std::string_view, std::vector<std::byte>>> m6_seeds;
     if (encoded_envelope) {
-      auto truncated = *encoded_envelope.value_if();
-      truncated.pop_back();
+      auto truncated_m6 = *encoded_envelope.value_if();
+      truncated_m6.pop_back();
       m6_seeds.emplace_back("message-envelope", *encoded_envelope.value_if());
-      m6_seeds.emplace_back("message-envelope-truncated", std::move(truncated));
+      m6_seeds.emplace_back("message-envelope-truncated", std::move(truncated_m6));
     }
     if (encoded_request) {
       m6_seeds.emplace_back("rpc-request", *encoded_request.value_if());
