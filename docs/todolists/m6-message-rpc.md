@@ -139,3 +139,12 @@
   authenticated=1 且 rpc ∈ {1,3,14}（14 实测出现），message acked 标志改为
   信息性——ACK 丢失/会话死亡留下 0 正是 peer_acked 语义合同的一部分。
   稳定路径（direct、turn_fallback_cycle1）仍严格要求 m6=1/rpc=1。
+- 第 4 轮 CI（13619a7，run 33261524292）**全绿收官**：coturn 矩阵
+  **MATRIX_OK**——direct/forced_turn/turn_fallback×6/udp_blocked/lossy/
+  relay_restart 全部通过，lossy 完整成功（authenticated + m6=1/rpc=1），
+  TURN 各周期 m6=1/rpc=1；Linux 双编译器、ASAN/UBSAN/TSAN、Windows
+  Debug/Release（49/49）全部通过（Windows 首跑遇运行器无组播接口与
+  latency 抖动，重跑即过；本地 p95≈1090ms/预算 3000ms，非回归）。
+  SIGBUS 在该轮未出现（历史出现率约 1/3）；崩溃报告器已升级为寄存器+
+  /proc/self/maps 转储，若再现即可定位故障地址归属——作为低频追踪项
+  留守，不阻塞 M6 关闭。
