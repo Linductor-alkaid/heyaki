@@ -174,3 +174,17 @@
   路径连败两次仍失败。API 回退提交曾将矩阵脚本写为 100644 丢失可执行位
   （sudo 报 command not found），已恢复 100755。最终 run 33306592707
   全部 10 job 通过。
+
+### 第 6 轮（2026-08-30）：收尾后的两处 CI 时序修正（e535a90、ae8b5db）
+
+- e535a90：clang Debug job 在 M6 TUI harness 超时——ack 检查只做两次固定
+  轮询，重负载 runner 上 init/discovery/pairing 阶段耗尽预算后，ACK（真实
+  P2P 往返 + executor 派发）落后发送数秒。改为每 2 秒轮询 acks 视图直至
+  deadline，驱动预算提到 150s、ctest 超时 330s；断言仍要求 acked 终态。
+  该轮 run 33309680877 中 asan job 暴露另一处计数器竞态：
+  M4RelaySignaling.OfflineTargetReturnsEndpointOffline 在 control_error
+  帧先于 signaling_rejected 计数器快照合落地时单次读观察到 0——与 M5
+  收尾时 TenantIsolationAndRateLimit 命中的合并快照发布竞态同族。
+- ae8b5db：对该断言前施加同样的 2 秒有界轮询（本地 6 次 ASAN 运行两种
+  结果均过；修复移除的是竞态而非断言强度）。最终 run 33311072606 全部
+  10 job 通过，M6 保持全绿。
