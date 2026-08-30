@@ -483,6 +483,16 @@ TEST(M4RelaySignaling, OfflineTargetReturnsEndpointOffline) {
   auto error = parse_relay_wss_control_error(error_frame.value_if()->payload);
   ASSERT_TRUE(error);
   EXPECT_EQ(error.value_if()->code, ErrorCode::endpoint_offline);
+  // Same coalesced-snapshot race as TenantIsolationAndRateLimit: the error
+  // frame can reach this client before the rejection counter flush lands, so
+  // poll the bounded window instead of racing one read.
+  const auto counter_deadline = std::chrono::steady_clock::now() + 2s;
+  while ((*relay.server).value_if()->snapshot().signaling_rejected < 1U) {
+    if (std::chrono::steady_clock::now() > counter_deadline) {
+      break;
+    }
+    std::this_thread::sleep_for(2ms);
+  }
   EXPECT_GE((*relay.server).value_if()->snapshot().signaling_rejected, 1U);
   ASSERT_TRUE(client_a.value_if()->close(3s));
 }
