@@ -73,16 +73,15 @@ struct UiBridge {
 };
 
 struct UiState {
-  std::deque<heyaki::LanSignalingMessage> signaling_events;
-  std::optional<heyaki::Error> command_error;
-  std::string command_status;
-  // Latest terminal pairing outcome (M5-19); written from the node strand,
-  // read by the render loop.
-  std::mutex pairing_mutex;
-  std::string pairing_peer;
-  std::optional<heyaki::Error> pairing_error;
-  std::string pairing_scopes;
-  // ---- M6 message & RPC view state (written from the node strand) ----
+  // Latest terminal pairing outcome (M5-19): published from the node strand,
+  // loaded by the render loop — latest-value semantics via executor comm.
+  struct PairingStatus {
+    std::string peer;
+    std::optional<heyaki::Error> error;
+    std::string scopes;
+  };
+
+  // ---- M6 message & RPC view state ----
   struct InboundMessage {
     heyaki::DeviceEndpointKey peer;
     heyaki::MessageEnvelope envelope;
@@ -95,12 +94,73 @@ struct UiState {
   };
   struct RpcResult {
     heyaki::DeviceEndpointKey peer;
-    heyaki::Result<heyaki::RpcCallOutcome> outcome;
+    // Default placeholder so the struct is default-constructible for channel
+    // receives; every real entry carries the task's terminal outcome.
+    heyaki::Result<heyaki::RpcCallOutcome> outcome =
+        heyaki::Result<heyaki::RpcCallOutcome>::failure(
+            heyaki::Error{heyaki::ErrorCode::internal, "tui", "rpc_result_unset"});
   };
-  std::mutex service_mutex;
+
+  // Cross-thread transfer from the node callbacks to the render loop: bounded
+  // executor channels with drop-oldest, so admission stays observable through
+  // comm stats instead of a mutex-protected deque.
+  UiState()
+      : inbound_channel(event_channel_options<InboundMessage>(
+            32U, "heyaki-tui-inbound-messages")),
+        ack_channel(event_channel_options<AckEvent>(64U, "heyaki-tui-ack-events")),
+        rpc_channel(event_channel_options<RpcResult>(32U, "heyaki-tui-rpc-results")),
+        pairing("heyaki-tui-pairing") {}
+
+  executor::comm::MpscChannel<InboundMessage> inbound_channel;
+  executor::comm::MpscChannel<AckEvent> ack_channel;
+  executor::comm::MpscChannel<RpcResult> rpc_channel;
+  executor::comm::LatestMailbox<PairingStatus> pairing;
+
+  // Render-loop-owned display buffers; single-threaded after the drain.
   std::deque<InboundMessage> inbound_messages;
   std::deque<AckEvent> ack_events;
   std::deque<RpcResult> rpc_results;
+
+  std::deque<heyaki::LanSignalingMessage> signaling_events;
+  std::optional<heyaki::Error> command_error;
+  std::string command_status;
+
+  // Moves every queued cross-thread event into the display buffers.
+  void drain_service_events() {
+    InboundMessage inbound;
+    while (inbound_channel.try_receive(inbound)) {
+      inbound_messages.push_back(std::move(inbound));
+      while (inbound_messages.size() > 32U) {
+        inbound_messages.pop_front();
+      }
+    }
+    AckEvent ack;
+    while (ack_channel.try_receive(ack)) {
+      ack_events.push_back(std::move(ack));
+      while (ack_events.size() > 64U) {
+        ack_events.pop_front();
+      }
+    }
+    RpcResult rpc;
+    while (rpc_channel.try_receive(rpc)) {
+      rpc_results.push_back(std::move(rpc));
+      while (rpc_results.size() > 32U) {
+        rpc_results.pop_front();
+      }
+    }
+  }
+
+ private:
+  template <typename Event>
+  static executor::comm::ChannelOptions event_channel_options(std::size_t capacity,
+                                                              std::string_view name) {
+    executor::comm::ChannelOptions options;
+    options.capacity = capacity;
+    options.drop_policy = executor::comm::DropPolicy::DropOldest;
+    options.enable_stats = true;
+    options.name = std::string{name};
+    return options;
+  }
 };
 
 void wipe_string(std::string& value) noexcept {
@@ -340,9 +400,9 @@ void render_node(std::string_view profile_name, heyaki::Node& node,
   heyaki::tui::render_device_view(std::cout, endpoints, sessions);
 
   // M6: recent inbound messages with their typed payload metadata.
+  state.drain_service_events();
   std::cout << "\nMESSAGES\n";
   {
-    std::scoped_lock lock{state.service_mutex};
     if (state.inbound_messages.empty()) {
       std::cout << "  none\n";
     }
@@ -425,14 +485,14 @@ std::vector<std::string> default_pairing_scopes() {
 }
 
 void render_pairing_status(UiState& state) {
-  std::scoped_lock lock{state.pairing_mutex};
-  if (state.pairing_peer.empty()) return;
-  std::cout << "pairing " << state.pairing_peer << ": ";
-  if (state.pairing_error) {
-    std::cout << "denied (" << state.pairing_error->safe_detail() << ")\n";
+  UiState::PairingStatus status;
+  if (!state.pairing.try_load(status) || status.peer.empty()) return;
+  std::cout << "pairing " << status.peer << ": ";
+  if (status.error) {
+    std::cout << "denied (" << status.error->safe_detail() << ")\n";
     return;
   }
-  std::cout << "granted scopes=" << state.pairing_scopes << "\n";
+  std::cout << "granted scopes=" << status.scopes << "\n";
 }
 
 std::string format_stream_bytes(const std::byte* data, std::size_t size,
@@ -608,30 +668,19 @@ std::string_view delivery_event_name(heyaki::MessageDeliveryEvent event) noexcep
 
 void push_service_event(UiState& state, heyaki::DeviceEndpointKey peer,
                         const heyaki::MessageEnvelope& envelope) {
-  std::scoped_lock lock{state.service_mutex};
-  state.inbound_messages.push_back(UiState::InboundMessage{peer, envelope});
-  while (state.inbound_messages.size() > 32U) {
-    state.inbound_messages.pop_front();
-  }
+  (void)state.inbound_channel.try_send(UiState::InboundMessage{std::move(peer), envelope});
 }
 
 void push_ack_event(UiState& state, const heyaki::DeviceEndpointKey& peer,
                     const heyaki::MessageId& id, heyaki::MessageDeliveryEvent event,
                     std::optional<heyaki::Error> error) {
-  std::scoped_lock lock{state.service_mutex};
-  state.ack_events.push_back(UiState::AckEvent{peer, id, event, std::move(error)});
-  while (state.ack_events.size() > 64U) {
-    state.ack_events.pop_front();
-  }
+  (void)state.ack_channel.try_send(
+      UiState::AckEvent{peer, id, event, std::move(error)});
 }
 
 void push_rpc_result(UiState& state, const heyaki::DeviceEndpointKey& peer,
                      heyaki::Result<heyaki::RpcCallOutcome> outcome) {
-  std::scoped_lock lock{state.service_mutex};
-  state.rpc_results.push_back(UiState::RpcResult{peer, std::move(outcome)});
-  while (state.rpc_results.size() > 32U) {
-    state.rpc_results.pop_front();
-  }
+  (void)state.rpc_channel.try_send(UiState::RpcResult{peer, std::move(outcome)});
 }
 
 // M6-14: message view with typed payload, TTL, delivery mode, ACK state, and
@@ -702,7 +751,7 @@ void run_message_view(const heyaki::DeviceEndpointKey& peer, heyaki::Node& node,
         std::cout << "sent id=" << heyaki::to_string(*sent.value_if()) << "\n";
       }
     } else if (command == "inbox") {
-      std::scoped_lock lock{state.service_mutex};
+      state.drain_service_events();
       if (state.inbound_messages.empty()) {
         std::cout << "inbox empty\n";
       }
@@ -715,7 +764,7 @@ void run_message_view(const heyaki::DeviceEndpointKey& peer, heyaki::Node& node,
                   << " payload=" << preview_bytes(item.envelope.payload, 48U) << "\n";
       }
     } else if (command == "acks") {
-      std::scoped_lock lock{state.service_mutex};
+      state.drain_service_events();
       if (state.ack_events.empty()) {
         std::cout << "no delivery events\n";
       }
@@ -739,13 +788,11 @@ heyaki::Result<heyaki::RpcCallOutcome> wait_rpc_result(UiState& state,
                      std::chrono::milliseconds{deadline_ms + 2000U};
   executor::comm::PhaseGate poll{"heyaki-tui-rpc-wait"};
   while (std::chrono::steady_clock::now() < limit) {
-    {
-      std::scoped_lock lock{state.service_mutex};
-      if (!state.rpc_results.empty()) {
-        auto outcome = std::move(state.rpc_results.front());
-        state.rpc_results.pop_front();
-        return std::move(outcome.outcome);
-      }
+    state.drain_service_events();
+    if (!state.rpc_results.empty()) {
+      auto outcome = std::move(state.rpc_results.front());
+      state.rpc_results.pop_front();
+      return std::move(outcome.outcome);
     }
     (void)poll.wait_for(1U, std::chrono::milliseconds{20});
   }
@@ -816,7 +863,8 @@ void run_rpc_view(const heyaki::DeviceEndpointKey& peer, heyaki::Node& node,
                            payload_text.size());
       }
       {
-        std::scoped_lock lock{state.service_mutex};
+        // Fresh view for the new call: drop stale queued results (bounded by
+        // the channel capacity) and clear the display buffer.
         state.rpc_results.clear();
       }
       heyaki::RpcCallOptions options;
@@ -902,10 +950,8 @@ void run_command(std::string line, heyaki::Node& node, UiState& state,
       return;
     }
     {
-      std::scoped_lock lock{state.pairing_mutex};
-      state.pairing_peer = "endpoint-" + std::to_string(peer_index);
-      state.pairing_error.reset();
-      state.pairing_scopes.clear();
+      (void)state.pairing.try_publish(UiState::PairingStatus{
+          "endpoint-" + std::to_string(peer_index), std::nullopt, {}});
     }
     auto paired = node.pair_peer(*peer, *password.value_if(),
                                  default_pairing_scopes());
@@ -1294,18 +1340,17 @@ int run_tui(const Options& options) {
   // M5-19: pairing outcomes surface in the command loop; secrets never do.
   node->set_pairing_observer([&state](const heyaki::DeviceEndpointKey& peer,
                                       const heyaki::NodePairingOutcome& outcome) {
-    std::scoped_lock lock{state.pairing_mutex};
-    state.pairing_peer = heyaki::to_string(peer.device_id);
-    state.pairing_error.reset();
-    state.pairing_scopes.clear();
+    UiState::PairingStatus status;
+    status.peer = heyaki::to_string(peer.device_id);
     if (outcome) {
       for (const auto& scope : *outcome.value_if()) {
-        state.pairing_scopes += scope;
-        state.pairing_scopes += " ";
+        status.scopes += scope;
+        status.scopes += " ";
       }
     } else {
-      state.pairing_error = *outcome.error_if();
+      status.error = *outcome.error_if();
     }
+    (void)state.pairing.try_publish(std::move(status));
   });
 
   // M6: inbound messages and delivery outcomes surface in the views; the

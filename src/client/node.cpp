@@ -3269,6 +3269,17 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     };
   }
 
+  // RPC handler tasks ride the cancellable dispatch so wire-level
+  // RPC_CANCEL/deadline expiry reaches the executor task lifecycle (queued
+  // removal or cooperative stop request) instead of a private token only.
+  CancellableServiceDispatch cancellable_service_dispatch() {
+    auto* runtime_ptr = runtime;
+    return [runtime_ptr](std::string_view task_name, CancellableTask task) {
+      return detail::RuntimeAccess::dispatch_general_cancellable(
+          *runtime_ptr, std::string{task_name}, std::move(task));
+    };
+  }
+
   RpcService::StrandPoster service_strand_poster() {
     auto weak = weak_from_this();
     return [weak](std::function<void()> task) {
@@ -3344,7 +3355,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     }
     if (!rpc_services.contains(peer)) {
       auto service = std::make_shared<RpcService>(
-          *session, peer, rpc_service_config, service_registry, service_dispatch(),
+          *session, peer, rpc_service_config, service_registry,
+          cancellable_service_dispatch(),
           [session](std::string_view scope) {
             return session_scope_covers(*session, scope);
           },

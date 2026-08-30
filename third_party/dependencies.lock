@@ -7,7 +7,7 @@
 # a moved tag cannot silently change the source used by the build.
 
 FTXUI|https://github.com/ArthurSonzogni/FTXUI.git|989917eba88b7b67bf2b7e40fbdbe5bba66c23d5|989917eba88b7b67bf2b7e40fbdbe5bba66c23d5|false|runtime
-executor|https://github.com/Linductor-alkaid/executor.git|4e8e8ebbba01d182536fa7c3f2f941136e141731|4e8e8ebbba01d182536fa7c3f2f941136e141731|false|runtime
+executor|https://github.com/Linductor-alkaid/executor.git|4fd8e6097879a56c7c3ad33b10f803cfe2e2e4d9|4fd8e6097879a56c7c3ad33b10f803cfe2e2e4d9|false|runtime
 boost-asio|https://github.com/boostorg/asio.git|boost-1.88.0|8ce699c7d8c10a7d3e6187bc98244d1d2f2958c8|false|runtime
 boost-system|https://github.com/boostorg/system.git|boost-1.88.0|7a49a5d80d08a2a0176067ba6dbf496d579ab491|false|runtime
 boost-config|https://github.com/boostorg/config.git|boost-1.88.0|4e9d5a3a95418d9ca623d38f5c772d485c2c2baf|false|runtime

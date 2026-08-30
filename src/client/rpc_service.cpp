@@ -44,7 +44,7 @@ std::string sanitize_detail(std::string detail) {
 RpcService::RpcService(PeerSession& session, DeviceEndpointKey peer,
                        RpcServiceConfig config,
                        const std::shared_ptr<ServiceRegistry>& registry,
-                       ServiceDispatch dispatch, ScopeCheck scope_check,
+                       CancellableServiceDispatch dispatch, ScopeCheck scope_check,
                        StrandPoster poster, std::function<std::uint64_t()> wall_clock)
     : session_(session),
       peer_(std::move(peer)),
@@ -244,6 +244,11 @@ void RpcService::handle_session_closed() {
   // handler results are dropped when they post back to a dead service.
   for (auto& [id, call] : executing_) {
     call->phase.store(1U, std::memory_order_release);
+    // Queued handler tasks terminate at the executor instead of running into
+    // the dead-session check; running ones receive the cooperative request.
+    if (call->cancel_request) {
+      (void)call->cancel_request();
+    }
   }
   executing_.clear();
   // Client side (M6-12): non-idempotent calls become outcome_unknown and the
@@ -454,9 +459,20 @@ void RpcService::start_server_call(const FrameView& frame, const RpcRequestBody&
   auto weak = weak_from_this();
   const auto dispatched = dispatch_(
       "heyaki-rpc-handler",
-      [weak, call, task_handler = std::move(task_handler)]() mutable {
+      [weak, call, task_handler = std::move(task_handler)](executor::StopToken token) mutable {
         if (call->phase.load(std::memory_order_acquire) != 0U) {
           return;  // Session died before the task started.
+        }
+        if (token.stop_requested()) {
+          // The executor accepted the cancel after the task began executing:
+          // answer cancelled here; the phase CAS keeps exactly one response.
+          if (auto self = weak.lock()) {
+            self->post_finish(
+                call, RpcHandlerResult{StableStatus::cancelled, {},
+                                       "cancelled_after_start"},
+                true);
+          }
+          return;
         }
         if (auto self = weak.lock()) {
           // Deadline from the received relative value: a queued task that
@@ -491,6 +507,7 @@ void RpcService::start_server_call(const FrameView& frame, const RpcRequestBody&
                    StableStatus::resource_exhausted, "dispatch_rejected");
     return;
   }
+  call->cancel_request = std::move(*dispatched.value_if());
   ++stats_.handlers_executed;
 }
 
@@ -523,7 +540,7 @@ void RpcService::finish_server_call(std::shared_ptr<ServerCallState> call,
   if (response.status == StableStatus::cancelled) {
     ++stats_.handler_cancelled;
   }
-  if (!handler_ran) {
+  if (!handler_ran && response.status == StableStatus::deadline_exceeded) {
     ++stats_.handler_deadline_exceeded;
   }
   if (call->handler_exception) {
@@ -613,7 +630,24 @@ void RpcService::handle_cancel(const FrameView& frame) {
   if (running == executing_.end()) {
     return;  // Cancel for an unknown/terminal request: ignore (wire 6.2).
   }
-  running->second->cancel_requested->store(true, std::memory_order_release);
+  auto& call = *running->second;
+  // Handler-facing cooperative stop flag (public RpcCallContext polling).
+  call.cancel_requested->store(true, std::memory_order_release);
+  if (!call.cancel_request) {
+    return;  // Injected dispatch double without an executor handle.
+  }
+  const auto response = call.cancel_request();
+  if (response.result == executor::TaskCancellationResult::RequestedBeforeStart) {
+    // The executor terminated the still-queued task: it never runs, so this
+    // side emits the terminal cancelled response itself (M6-10 exactly-once).
+    finish_server_call(running->second,
+                       RpcHandlerResult{StableStatus::cancelled, {},
+                                        "cancelled_before_start"},
+                       true);
+  }
+  // RequestedRunning/AlreadyRequested: the running handler observes the flag
+  // and answers cancelled itself; AlreadyCompleted keeps the wire "ignore"
+  // rule (any in-flight late result drops on the phase CAS).
 }
 
 void RpcService::complete_pending(const RequestId& id, Result<RpcCallOutcome> outcome) {
@@ -650,7 +684,13 @@ void RpcService::prune_executing_deadlines() {
         call->phase.compare_exchange_strong(expected, 1U)) {
       // The deadline fired while the handler still runs: answer now without
       // pretending the code was killed (M6-10); the late result is dropped
-      // by finish_server_call.
+      // by finish_server_call. The executor cancel still reaches the task
+      // lifecycle (queued tasks terminate; running ones may observe the
+      // token) while the handler-facing flag stays untouched, preserving
+      // the "keeps running cooperatively" wire semantics.
+      if (call->cancel_request) {
+        (void)call->cancel_request();
+      }
       ++stats_.handler_deadline_exceeded;
       RpcResponseBody response;
       response.request_id = id;

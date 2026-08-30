@@ -17,21 +17,71 @@
 
 ---
 
+## 上游收敛状态（2026-08-31 第二轮回写）
+
+executor 上游 master 再次前进，heyaki pin 于 2026-08-31 从 `4e8e8eb` 升至
+`4fd8e60`（S2 串行派发 + 总量有界准入）：
+
+- **P1-1 第一步闭环（上游 S2）**：`SerialExecutionContext` + `Executor::submit_on`
+  把"不依赖第三方事件循环的自建 FIFO 派发"纳入 admission/统计/失败事件/句柄取消。
+  它**不适配 asio strand**（自带私线程，官方 interop 指南 §6 明示），heyaki 的
+  `asio::post(strand, ...)` 延续派发按 §2"合法但不可见"纪律维持，等 T2 的外部
+  context adapter。heyaki 当前无非事件循环的自建串行队列，暂无 `submit_on` 落点。
+- **新能力：总量有界 admission**（`ExecutorConfig::max_in_flight_tasks` /
+  `set_max_in_flight_tasks` + `CapacityExhaustedException` / `FailureKind::
+  CapacityExhausted`）：facade 级已接纳未结算上限。heyaki 未启用——启用与否属
+  背压设计决策（M9 压测后与 P2-2 一并评估），dispatch_general 的拒绝路径
+  （`executor_dispatch_rejected` → resource_exhausted 应答）已可承接该异常。
+- **2026-08-31 heyaki 侧迁移（已落地，全量测试绿）**：
+  - **P1-3 的 rpc_service 私有取消 token 迁移完成**：新增
+    `CancellableServiceDispatch`（`src/client/service_dispatch.hpp`）与
+    `RuntimeAccess::dispatch_general_cancellable`（内部走 `submit_cancellable`，
+    返回 `request_task_cancel` 闭包）；`RpcService` 的 handler 派发全部改走该路径
+    （`node.cpp` 注入）。排队期 RPC_CANCEL 由 executor 直接终止任务（不空跑
+    handler），服务侧自行应答 cancelled；运行期取消的协作停止令牌进入 executor
+    取消生命周期视图。公有 `RpcCallContext::cancelled()` 的轮询标志保留为冻结
+    API 的观察面（Android fallback StopToken 无回调注册，不能桥接进公有上下文），
+    由 strand 在 `RequestedRunning` 后置位——两个写入方同属一次逻辑取消。
+    deadline prune 与 session 关闭同样请求 executor 取消。
+  - **V-1 整改完成**：TUI `pairing_mutex` → `LatestMailbox<PairingStatus>`；
+    `service_mutex` + 3 个 deque → 3 个 `MpscChannel`（DropOldest，容量 32/64/32）
+    + 渲染循环自有的展示 deque（跨线程只走通道，展示状态单线程）。
+  - demo 同型整改：`apps/demo/m6_message_rpc_demo.cpp` 的 `events_mutex` + 3 vector
+    → 3 个 `MpscChannel` + 局部 view；`apps/demo/m4_matrix_node.cpp` 的两个状态
+    原子 → 2 个 `LatestMailbox`。
+  - relay `Impl::stop_requested` 原子镜像删除：`RelayServer::stop_requested()`
+    改读已发布的 `DoubleBuffer<RelayServerSnapshot>` 快照（同一状态不再有第二条
+    共享通道）。
+- **本轮审计后接受的形态（不迁移，理由如下）**：
+  - `ServiceRegistry::mutex_`（`include/heyaki/rpc.hpp`）：配置面方法注册表
+    （embedder 线程 register、strand/executor 线程 lookup），不是任务/消息通信的
+    替代；executor::comm 无并发 map 原语。若上游提供带统计的只读快照型注册表可
+    重评。
+  - webrtc `Channel` 的 `paused_/closed_/queued_messages_` 原子（`webrtc_transport_
+    session.cpp`）：rtc 回调线程 ↔ 发送线程的逐通道流控标志，comm 无对应原语；
+    事件流已走 `MpscChannel`，计数走 `DoubleBuffer` 诊断。属背压状态机而非队列。
+  - `runtime.cpp` 的生命周期原子（`admission_open_`、`phase_`、
+    `pending_context_callbacks_`、`RuntimeOperationState::terminal_`）：runtime 是
+    executor 集成层自身，这些是其状态机（与 executor 内部 `TaskCancellationState`
+    同型），非绕开通信的共享数据通道。
+
 ## 上游收敛状态（2026-08-29 回写）
 
 executor 上游已按本台账实施一轮收敛（executor 侧
 `third_party/executor/docs/todolists/client_feedback_update_plan.md`，
 heyaki pin 于 2026-08-29 从 `077d854` 升至 `4e8e8eb`，PR #176/#177）：
 
-- **P1-3 已闭环（上游 C1）**：`task_cancellation.hpp` + `submit_cancellable*`（StopToken 注入
-  callable 首参）+ `request_task_cancel`，排队/运行中两类取消语义，取消计数进独立
-  `CancellationStatus`（不进 failure 体系）。heyaki 侧迁移待办：EXEC-07 的自建 deadline 取消。
+- **P1-3 已闭环（上游 C1 + 2026-08-31 heyaki 全量迁移）**：`task_cancellation.hpp` +
+  `submit_cancellable*`（StopToken 注入 callable 首参）+ `request_task_cancel`，
+  排队/运行中两类取消语义，取消计数进独立 `CancellationStatus`（不进 failure
+  体系）。runtime handler 任务与 M6 RPC handler 派发均已迁移（见 2026-08-31 回写）。
+  node 级 operation 的 asio deadline timer 因绑定 strand 仍按 T2 门控维持。
 - **P1-2 部分闭环（上游 T1）**：`timer.hpp` 的 `TimerHandle`/`ScopedTimerHandle` 提供取消/
   重排/状态查询（`submit_delayed_with_handle` 等）。一期**不绑定 asio strand / 外部序列化
   上下文**（上游 T2/S2 门控），因此与 IO 对象同 strand 销毁的 `steady_timer` 仍不可替换；
   仅不依赖 strand 所有权的定时工作可迁移。
-- **P1-1 仅文档（上游 S1）**：`third_party/executor/docs/external_event_loop_interop.md`
-  互操作指南与示例已落地；`submit_on` 类 API 属 S2，未实现。
+- **P1-1 第一步已闭环（上游 S2，2026-08-31）**：`SerialExecutionContext`/`submit_on`
+  覆盖非事件循环 FIFO 派发；asio strand 适配仍属 T2，见 2026-08-31 回写。
 - **P2-1 有官方指引（上游 G1）**：中英文"如何选择通信组件"指南新增"什么时候允许裸回调"
   一节，heyaki 侧可据此引用豁免。
 - **P2-2 维持延后**：按台账结论待 M6/M7 真实压测后重估。
@@ -123,21 +173,29 @@ heyaki pin 于 2026-08-29 从 `077d854` 升至 `4e8e8eb`，PR #176/#177）：
 
 - `executor::monitor::ExecutorMonitor` 快照聚合（近期失败列表、in-flight 诊断）：零引用；
   runtime 仅 `set_failure_callback` 计数（`src/client/runtime.cpp:328-333, 129-160`）。
-- `Topic`、`LatestMailbox`、`RealtimeChannel`、`SnapshotStore`：零使用（WebRTC 事件用了
-  `MpscChannel`+`DoubleBuffer`，`src/transport/webrtc/webrtc_transport_session.cpp:31-34, 752-753`，合规）。
+- `Topic`、`RealtimeChannel`、`SnapshotStore`：零使用（WebRTC 事件用了
+  `MpscChannel`+`DoubleBuffer`，`src/transport/webrtc/webrtc_transport_session.cpp:31-34, 752-753`，合规）；
+  `LatestMailbox` 自 2026-08-31 起 TUI pairing、m4 demo、runtime 指标三处使用。
+- `submit_on`/`SerialExecutionContext`（S2，2026-08-31 可用）：heyaki 无非事件循环的
+  自建串行队列，暂无落点；若 TUI/工具层未来需要独立串行执行面可优先采用。
+- `max_in_flight_tasks` 总量有界 admission（2026-08-31 可用）：未启用，M9 与 P2-2
+  一并评估。
 - `submit_priority`、依赖图 `submit_after`/`when_all`、realtime task 路径：零使用。
 - M9-01（`docs/todolists/m9-production-hardening.md:9`）要求业务指标与 executor
   failure/status 关联——已列入 M9 待办，届时再评估上述组件是否满足。
 - 应用层自建健康计数（TUI `UiBridge::rejected` 原子计数 `apps/tui/main.cpp:68`、
   relay_login/turn 自维护 stats）属 EXEC-08 允许范围，但缺少与 executor 事实源的字段级关联。
+  备注（2026-08-31 审计）：`UiBridge.events` 通道与其 `rejected` 计数当前无生产者
+  （Node 自动组装签名会话），属遗留死代码，可在后续清理。
 
 ## 违规（heyaki 自行整改，不依赖 executor 变更）
 
-- **V-1 TUI pairing 共享状态**：`apps/tui/main.cpp:77` `std::mutex pairing_mutex` 保护的
-  `pairing_peer/pairing_error/pairing_scopes` 由 node strand 写、渲染循环读（514-520、351-352），
-  违反 AGENTS.md"不得以共享可变状态 + mutex 替代 executor 通信"。同文件 67 行已用
-  `executor::comm::MpscChannel` 处理 signaling events，pairing 状态应改走
-  `LatestMailbox`/`DoubleBuffer`。规模小（UI 层），列入近期整改。
+- ~~**V-1 TUI pairing 共享状态**~~ **已整改（2026-08-31）**：`pairing_mutex` 改
+  `LatestMailbox`，`service_mutex` + 3 个 deque 改 3 个 `MpscChannel`（DropOldest）
+  + 渲染循环自有展示缓冲（`apps/tui/main.cpp`）。保留原记录备查：
+  `std::mutex pairing_mutex` 保护的 `pairing_peer/pairing_error/pairing_scopes`
+  由 node strand 写、渲染循环读，违反 AGENTS.md"不得以共享可变状态 + mutex 替代
+  executor 通信"。
 
 ---
 
@@ -158,3 +216,8 @@ heyaki pin 于 2026-08-29 从 `077d854` 升至 `4e8e8eb`，PR #176/#177）：
 - 2026-08-29：M6 开发在 P1-3 追加 rpc_service 私有取消 token 的实例（迁移待办扩围至
   dispatch_general + M6 handler 派发）；M6 的 strand 回投（StrandPoster）与 ServiceDispatch/
   ScopeCheck 回调分别归入既有 P1-1、P2-1 条目形态，不另立新条。
+- 2026-08-31：全仓线程/通信审计后第二轮迁移——pin 升至 `4fd8e60`（S2 + 有界准入）；
+  rpc_service 取消 token 迁移 `submit_cancellable`；V-1 与 demo 同型 mutex/atomic 整改
+  （LatestMailbox/MpscChannel）；relay stop 原子镜像删除；ServiceRegistry mutex、webrtc
+  流控原子、runtime 生命周期原子记录为接受形态。全量测试 48/48 绿（3 项网络矩阵
+  测试按环境跳过）。

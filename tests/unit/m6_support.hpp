@@ -17,6 +17,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <deque>
@@ -57,6 +58,64 @@ struct ManualDispatch {
   }
 
   [[nodiscard]] bool has_pending() const noexcept { return !tasks.empty(); }
+};
+
+// Manual cancellable dispatch double mirroring the pinned executor's
+// cancellation arbitration: a cancel request for a still-queued task removes
+// it (the task never runs) and reports RequestedBeforeStart; after the task
+// ran it reports AlreadyCompleted. With emulate_running_cancel the request
+// reports RequestedRunning and leaves the task queued, standing in for a
+// task that already began executing (the cooperative flag drives it).
+struct ManualCancellableDispatch {
+  struct Entry {
+    std::function<void(executor::StopToken)> task;
+    bool done{false};
+  };
+  std::deque<std::shared_ptr<Entry>> tasks;
+  bool admit{true};
+  bool emulate_running_cancel{false};
+
+  CancellableServiceDispatch dispatcher() {
+    return [this](std::string_view, CancellableTask task) {
+      if (!admit) {
+        return Result<TaskCancelRequest>::failure(
+            Error{ErrorCode::resource_exhausted, "test", "dispatch_rejected"});
+      }
+      auto entry = std::make_shared<Entry>();
+      entry->task = std::move(task);
+      tasks.push_back(entry);
+      return Result<TaskCancelRequest>::success([this,
+                                                 entry]() -> executor::TaskCancellationResponse {
+        if (entry->done) {
+          return {executor::TaskCancellationResult::AlreadyCompleted};
+        }
+        if (emulate_running_cancel) {
+          return {executor::TaskCancellationResult::RequestedRunning};
+        }
+        entry->done = true;  // Removed without running: queued cancellation.
+        return {executor::TaskCancellationResult::RequestedBeforeStart};
+      });
+    };
+  }
+
+  void run_all() {
+    std::size_t guard = 0U;
+    while (!tasks.empty() && guard++ < 1000U) {
+      auto entry = std::move(tasks.front());
+      tasks.pop_front();
+      if (entry->done) {
+        continue;
+      }
+      entry->done = true;
+      executor::StopSource source;
+      entry->task(source.get_token());
+    }
+  }
+
+  [[nodiscard]] bool has_pending() const noexcept {
+    return std::any_of(tasks.begin(), tasks.end(),
+                       [](const auto& entry) { return !entry->done; });
+  }
 };
 
 // Manual strand poster double mirroring the Node's strand.
@@ -123,6 +182,8 @@ struct M6ServicePair {
 
   ManualDispatch left_dispatch;
   ManualDispatch right_dispatch;
+  ManualCancellableDispatch left_rpc_dispatch;
+  ManualCancellableDispatch right_rpc_dispatch;
   ManualPoster left_poster;
   ManualPoster right_poster;
 
@@ -285,12 +346,12 @@ struct M6ServicePair {
     if (options.attach_rpc) {
       left_rpc = std::make_shared<RpcService>(
           *left, left_key(), options.left_rpc, left_registry,
-          left_dispatch.dispatcher(), scope_check(left), left_poster.poster(),
+          left_rpc_dispatch.dispatcher(), scope_check(left), left_poster.poster(),
           [this] { return left_clock; });
       ASSERT_TRUE(left_rpc->attach());
       right_rpc = std::make_shared<RpcService>(
           *right, right_key(), options.right_rpc, right_registry,
-          right_dispatch.dispatcher(), scope_check(right), right_poster.poster(),
+          right_rpc_dispatch.dispatcher(), scope_check(right), right_poster.poster(),
           [this] { return right_clock; });
       ASSERT_TRUE(right_rpc->attach());
     }
@@ -310,6 +371,8 @@ struct M6ServicePair {
     for (int round = 0; round < 8; ++round) {
       left_dispatch.run_all();
       right_dispatch.run_all();
+      left_rpc_dispatch.run_all();
+      right_rpc_dispatch.run_all();
       left_poster.run_all();
       right_poster.run_all();
       pump();

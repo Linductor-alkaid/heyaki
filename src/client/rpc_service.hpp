@@ -17,9 +17,11 @@
 //     resubmission on a future session (M6-12).
 //
 // Threading: public methods run on the owning Node's strand. Handler tasks
-// run on executor threads and communicate back through ServerCallState
-// (self-contained shared state) plus a strand poster; late results are
-// dropped after the request reached a terminal state (M6-10).
+// run on executor threads through the cancellable dispatch (submit_cancellable
+// + request_task_cancel: queued removal, cooperative stop token) and
+// communicate back through ServerCallState (self-contained shared state) plus
+// a strand poster; late results are dropped after the request reached a
+// terminal state (M6-10).
 
 #include "peer_session.hpp"
 #include "service_dispatch.hpp"
@@ -75,7 +77,7 @@ class RpcService : public std::enable_shared_from_this<RpcService> {
 
   RpcService(PeerSession& session, DeviceEndpointKey peer, RpcServiceConfig config,
              const std::shared_ptr<ServiceRegistry>& registry,
-             ServiceDispatch dispatch, ScopeCheck scope_check, StrandPoster poster,
+             CancellableServiceDispatch dispatch, ScopeCheck scope_check, StrandPoster poster,
              std::function<std::uint64_t()> wall_clock = {});
   ~RpcService();
 
@@ -129,8 +131,14 @@ class RpcService : public std::enable_shared_from_this<RpcService> {
     RpcRequestBody request;
     std::uint64_t deadline_unix_milliseconds{};
     std::vector<std::byte> request_digest;
+    // Handler-facing cooperative stop flag (the frozen RpcCallContext polls
+    // it); the strand sets it while the executor token carries the same
+    // cancel through the task lifecycle.
     std::shared_ptr<std::atomic<bool>> cancel_requested =
         std::make_shared<std::atomic<bool>>(false);
+    // Routes a cancel into the executor (queued removal or cooperative stop
+    // request); empty when the injected dispatch double provides no handle.
+    TaskCancelRequest cancel_request;
     bool handler_exception{false};
     // phase: 0 = executing, 1 = terminal (exactly one terminal response).
     std::atomic<std::uint8_t> phase{0U};
@@ -182,7 +190,7 @@ class RpcService : public std::enable_shared_from_this<RpcService> {
   DeviceEndpointKey peer_;
   RpcServiceConfig config_;
   std::shared_ptr<ServiceRegistry> registry_;
-  ServiceDispatch dispatch_;
+  CancellableServiceDispatch dispatch_;
   ScopeCheck scope_check_;
   StrandPoster poster_;
   std::function<std::uint64_t()> wall_clock_;

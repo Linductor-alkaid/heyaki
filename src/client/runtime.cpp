@@ -579,6 +579,39 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
     }
   }
 
+  Result<TaskCancelRequest> dispatch_general_cancellable(std::string name,
+                                                         CancellableTask task) {
+    if (!admission_open_.load(std::memory_order_acquire) || !task) {
+      return Result<TaskCancelRequest>::failure(
+          Error{ErrorCode::cancelled, "runtime", "runtime_admission_closed"});
+    }
+    try {
+      auto submission = executor_->submit_cancellable(std::move(task));
+      auto handle = submission.handle;
+      if (submission.future.wait_for(std::chrono::milliseconds{0}) ==
+          std::future_status::ready) {
+        submission.future.get();
+      } else {
+        prune_internal_tasks();
+        auto tracked = std::make_shared<InternalTask>(
+            InternalTask{.name = std::move(name), .future = std::move(submission.future)});
+        internal_tasks_.push_back(tracked);
+        schedule_task_sweep();
+      }
+      // The handle stays usable after any terminal state: repeated or late
+      // requests arbitrate inside the executor registry (AlreadyCompleted).
+      auto* executor_ptr = executor_;
+      TaskCancelRequest cancel = [executor_ptr, handle]() {
+        return executor_ptr->request_task_cancel(handle);
+      };
+      return Result<TaskCancelRequest>::success(std::move(cancel));
+    } catch (...) {
+      diagnostics_->record_executor_event();
+      return Result<TaskCancelRequest>::failure(
+          Error{ErrorCode::resource_exhausted, "runtime", "executor_dispatch_rejected"});
+    }
+  }
+
  private:
   struct StartedShutdownHook {
     std::size_t report_index{};
@@ -846,6 +879,9 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
     }
     try {
       task->future.get();
+    } catch (const executor::TaskCancelled&) {
+      // Queued cancellation is a normal lifecycle outcome (wire-level
+      // RPC_CANCEL on a still-queued handler), not an executor failure event.
     } catch (...) {
       diagnostics_->record_executor_event();
     }
@@ -1081,6 +1117,15 @@ Result<void> detail::RuntimeAccess::dispatch_general(Runtime& runtime, std::stri
         Error{ErrorCode::cancelled, "runtime", "runtime_not_running"});
   }
   return runtime.state_->dispatch_general(std::move(name), std::move(task));
+}
+
+Result<TaskCancelRequest> detail::RuntimeAccess::dispatch_general_cancellable(
+    Runtime& runtime, std::string name, CancellableTask task) {
+  if (!runtime.state_) {
+    return Result<TaskCancelRequest>::failure(
+        Error{ErrorCode::cancelled, "runtime", "runtime_not_running"});
+  }
+  return runtime.state_->dispatch_general_cancellable(std::move(name), std::move(task));
 }
 
 Result<Runtime> Runtime::create_borrowed(executor::Executor& executor,

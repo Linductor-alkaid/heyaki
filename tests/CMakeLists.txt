@@ -404,6 +404,7 @@ add_executable(heyaki_m6_service_tests
 target_link_libraries(heyaki_m6_service_tests PRIVATE
   heyaki::client
   heyaki::core
+  executor::executor
   GTest::gtest_main)
 target_include_directories(heyaki_m6_service_tests PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../src"

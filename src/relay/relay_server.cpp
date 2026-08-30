@@ -176,7 +176,6 @@ struct RelayServer::Impl : std::enable_shared_from_this<RelayServer::Impl> {
   std::shared_future<Result<void>> shutdown_completion;
   bool shutdown_posted{false};
   bool shutdown_finished{false};
-  std::atomic<bool> stop_requested{false};
   RelayServerState published_state{RelayServerState::stopped};
   bool published_stop_requested{false};
   bool publish_deferred{false};
@@ -1651,7 +1650,6 @@ void RelayServer::Impl::finish_shutdown() {
 }
 
 void RelayServer::Impl::request_stop() {
-  stop_requested.store(true, std::memory_order_release);
   current.stop_requested = true;
   publish();
 }
@@ -1794,8 +1792,10 @@ RelayServerSnapshot RelayServer::snapshot() const {
   return impl_ ? impl_->snapshots.load().value : RelayServerSnapshot{};
 }
 
-bool RelayServer::stop_requested() const noexcept {
-  return impl_ ? impl_->stop_requested.load(std::memory_order_acquire) : true;
+bool RelayServer::stop_requested() const {
+  // The authoritative stop publication rides the snapshot DoubleBuffer (the
+  // signal handler path publishes it on the strand); no second shared flag.
+  return impl_ ? impl_->snapshots.load().value.stop_requested : true;
 }
 
 RelayServerShutdownReport RelayServer::shutdown() {

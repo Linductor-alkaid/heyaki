@@ -82,7 +82,9 @@ class RelayServer {
   [[nodiscard]] static Result<RelayServer> create(RelayServerConfig config,
                                                   Runtime* runtime = nullptr);
   [[nodiscard]] RelayServerSnapshot snapshot() const;
-  [[nodiscard]] bool stop_requested() const noexcept;
+  // Reads the already-published snapshot (the stop publication rides the
+  // DoubleBuffer) instead of a second atomic mirror of the same state.
+  [[nodiscard]] bool stop_requested() const;
   [[nodiscard]] RelayServerShutdownReport shutdown();
 
  private:

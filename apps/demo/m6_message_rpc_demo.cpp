@@ -28,7 +28,6 @@
 #include <filesystem>
 #include <functional>
 #include <iostream>
-#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -204,29 +203,50 @@ int run_demo(const std::filesystem::path& database, std::string_view application
   heyaki::Node node = std::move(*created.value_if());
   register_demo_service(node);
 
-  std::mutex events_mutex;
-  std::vector<std::string> delivery_events;
-  std::vector<std::string> inbound;
-  std::vector<std::string> rpc_results;
-  std::atomic<std::uint64_t> rpc_index{0U};
+  // Cross-thread event transfer from the node callbacks to the demo loop via
+  // bounded executor comm channels (drop-oldest); the caller drains them into
+  // local vectors instead of sharing mutex-protected state.
+  executor::comm::ChannelOptions event_options;
+  event_options.capacity = 64U;
+  event_options.drop_policy = executor::comm::DropPolicy::DropOldest;
+  event_options.enable_stats = true;
+  executor::comm::MpscChannel<std::string> delivery_events{
+      [&event_options] {
+        auto options = event_options;
+        options.name = "heyaki-m6-demo-delivery-events";
+        return options;
+      }()};
+  executor::comm::MpscChannel<std::string> inbound{
+      [&event_options] {
+        auto options = event_options;
+        options.name = "heyaki-m6-demo-inbound";
+        return options;
+      }()};
+  executor::comm::MpscChannel<std::string> rpc_results{
+      [&event_options] {
+        auto options = event_options;
+        options.name = "heyaki-m6-demo-rpc-results";
+        return options;
+      }()};
+  std::vector<std::string> delivery_view;
+  std::vector<std::string> rpc_view;
+  std::uint64_t rpc_index = 0U;
 
   node.set_message_inbound_handler(
-      [&events_mutex, &inbound](const heyaki::DeviceEndpointKey&,
-                                const heyaki::MessageEnvelope& envelope) {
-        std::scoped_lock lock{events_mutex};
-        inbound.push_back(envelope.type);
+      [&inbound](const heyaki::DeviceEndpointKey&,
+                 const heyaki::MessageEnvelope& envelope) {
+        (void)inbound.try_send(envelope.type);
         std::cout << "MESSAGE_RECEIVED type=" << envelope.type << " ttl="
                   << envelope.ttl_milliseconds << " mode="
                   << heyaki::message_delivery_mode_name(envelope.delivery_mode)
                   << "\n";
       });
   node.set_message_ack_observer(
-      [&events_mutex, &delivery_events](const heyaki::DeviceEndpointKey&,
-                                        const heyaki::MessageId&,
-                                        heyaki::MessageDeliveryEvent event,
-                                        std::optional<Error> error) {
-        std::scoped_lock lock{events_mutex};
-        delivery_events.push_back(
+      [&delivery_events](const heyaki::DeviceEndpointKey&,
+                         const heyaki::MessageId&,
+                         heyaki::MessageDeliveryEvent event,
+                         std::optional<Error> error) {
+        (void)delivery_events.try_send(
             std::string{heyaki::message_delivery_event_name(event)});
         std::cout << "DELIVERY event=" << heyaki::message_delivery_event_name(event)
                   << (error ? std::string{" detail="} +
@@ -296,10 +316,13 @@ int run_demo(const std::filesystem::path& database, std::string_view application
   std::cout << "SEMANTIC admission peer_acked="
             << (sent ? "admitted" : sent.error_if()->safe_detail()) << "\n";
   const auto ack_arrived = wait_until(
-      [&events_mutex, &delivery_events] {
-        std::scoped_lock lock{events_mutex};
-        for (const auto& event : delivery_events) {
-          if (event == "acked") return true;
+      [&delivery_events, &delivery_view] {
+        std::string event;
+        while (delivery_events.try_receive(event)) {
+          delivery_view.push_back(std::move(event));
+        }
+        for (const auto& arrived : delivery_view) {
+          if (arrived == "acked") return true;
         }
         return false;
       },
@@ -313,32 +336,32 @@ int run_demo(const std::filesystem::path& database, std::string_view application
   auto started = node.call_rpc(
       peer, "heyaki.demo", "echo", {std::byte{0x70}, std::byte{0x6F}},
       heyaki::RpcCallOptions{},
-      [&events_mutex, &rpc_results, echo_index](
+      [&rpc_results, echo_index](
           const heyaki::DeviceEndpointKey&,
           heyaki::Result<heyaki::RpcCallOutcome> outcome) {
-        std::scoped_lock lock{events_mutex};
+        std::string entry = "index=" + std::to_string(echo_index);
         if (outcome) {
-          rpc_results.push_back("index=" + std::to_string(echo_index) +
-                                " status=" +
-                                std::to_string(static_cast<int>((*outcome.value_if()).status)) +
-                                " detail=" + std::string{(*outcome.value_if()).safe_detail});
+          entry += " status=" +
+                   std::to_string(static_cast<int>((*outcome.value_if()).status)) +
+                   " detail=" + std::string{(*outcome.value_if()).safe_detail};
         } else {
-          rpc_results.push_back("index=" + std::to_string(echo_index) +
-                                " local_error=" +
-                                std::string{outcome.error_if()->safe_detail()});
+          entry += " local_error=" + std::string{outcome.error_if()->safe_detail()};
         }
+        (void)rpc_results.try_send(std::move(entry));
       });
   std::cout << "SEMANTIC rpc admission="
             << (started ? "admitted" : started.error_if()->safe_detail()) << "\n";
   const auto echo_done = wait_until(
-      [&events_mutex, &rpc_results] {
-        std::scoped_lock lock{events_mutex};
-        return !rpc_results.empty();
+      [&rpc_results, &rpc_view] {
+        std::string result;
+        while (rpc_results.try_receive(result)) {
+          rpc_view.push_back(std::move(result));
+        }
+        return !rpc_view.empty();
       },
       std::chrono::milliseconds{10'000});
   {
-    std::scoped_lock lock{events_mutex};
-    for (const auto& result : rpc_results) {
+    for (const auto& result : rpc_view) {
       std::cout << "SEMANTIC rpc completion " << result << "\n";
     }
   }
@@ -353,25 +376,27 @@ int run_demo(const std::filesystem::path& database, std::string_view application
   (void)node.call_rpc(
       peer, "heyaki.demo", "does-not-exist", {},
       heyaki::RpcCallOptions{},
-      [&events_mutex, &rpc_results, missing_index](
+      [&rpc_results, missing_index](
           const heyaki::DeviceEndpointKey&,
           heyaki::Result<heyaki::RpcCallOutcome> outcome) {
-        std::scoped_lock lock{events_mutex};
-        rpc_results.push_back(
+        const std::string entry =
             "index=" + std::to_string(missing_index) + " status=" +
             std::to_string(outcome ? static_cast<int>((*outcome.value_if()).status)
-                                   : -1));
+                                   : -1);
+        (void)rpc_results.try_send(entry);
       });
   wait_until(
-      [&events_mutex, &rpc_results] {
-        std::scoped_lock lock{events_mutex};
-        return rpc_results.size() >= 2U;
+      [&rpc_results, &rpc_view] {
+        std::string result;
+        while (rpc_results.try_receive(result)) {
+          rpc_view.push_back(std::move(result));
+        }
+        return rpc_view.size() >= 2U;
       },
       std::chrono::milliseconds{10'000});
   {
-    std::scoped_lock lock{events_mutex};
-    if (rpc_results.size() >= 2U) {
-      std::cout << "SEMANTIC unknown method -> " << rpc_results[1]
+    if (rpc_view.size() >= 2U) {
+      std::cout << "SEMANTIC unknown method -> " << rpc_view[1]
                 << " (12 = unimplemented)\n";
     }
   }

@@ -345,8 +345,12 @@ int run_node(const std::filesystem::path& database, std::string_view application
       node.value_if()->snapshot().endpoint_id};
   // M6: the same message/RPC exercise runs on every topology (direct and
   // forced-TURN) because it rides the session, never the path (RULE-09).
-  std::atomic<bool> m6_message_acked{false};
-  std::atomic<int> m6_rpc_status{-1};
+  // Latest outcomes cross from the node callbacks into this loop through
+  // executor comm mailboxes (latest-value semantics, observable stats).
+  executor::comm::LatestMailbox<bool> m6_message_acked{"heyaki-m4-matrix-acked"};
+  executor::comm::LatestMailbox<int> m6_rpc_status{"heyaki-m4-matrix-rpc-status"};
+  (void)m6_message_acked.try_publish(false);
+  (void)m6_rpc_status.try_publish(-1);
   {
     heyaki::RpcMethodDescriptor echo;
     echo.service = "heyaki.matrix";
@@ -366,7 +370,7 @@ int run_node(const std::filesystem::path& database, std::string_view application
                           heyaki::MessageDeliveryEvent event,
                           std::optional<Error>) {
         if (event == heyaki::MessageDeliveryEvent::acked) {
-          m6_message_acked.store(true);
+          (void)m6_message_acked.try_publish(true);
         }
       });
   const auto begin = std::chrono::steady_clock::now();
@@ -498,27 +502,31 @@ int run_node(const std::filesystem::path& database, std::string_view application
             [&m6_rpc_status](const heyaki::DeviceEndpointKey&,
                              heyaki::Result<heyaki::RpcCallOutcome> outcome) {
               if (outcome) {
-                m6_rpc_status.store(
+                (void)m6_rpc_status.try_publish(
                     static_cast<int>((*outcome.value_if()).status));
               } else if (outcome.error_if()->code() == heyaki::ErrorCode::peer_offline) {
                 // Session churn under netem: the call was rejected before it
                 // left the device — a deterministic, never-executed outcome.
-                m6_rpc_status.store(-2);
+                (void)m6_rpc_status.try_publish(-2);
               } else {
                 // Any other local admission failure: encode the error code so
                 // the matrix result line names it (e.g. -124 = internal).
-                m6_rpc_status.store(-100 - static_cast<int>(
-                                               outcome.error_if()->code()));
+                (void)m6_rpc_status.try_publish(
+                    -100 - static_cast<int>(outcome.error_if()->code()));
               }
             });
+        bool message_acked = false;
+        int rpc_status = -1;
         (void)wait_until(
             [&] {
-              return m6_message_acked.load() && m6_rpc_status.load() >= 0;
+              (void)m6_message_acked.try_load(message_acked);
+              (void)m6_rpc_status.try_load(rpc_status);
+              return message_acked && rpc_status >= 0;
             },
             std::chrono::milliseconds{8000});
         std::cout << "MATRIX_PHASE m6-exercise-end message="
-                  << (m6_message_acked.load() ? 1 : 0)
-                  << " rpc=" << m6_rpc_status.load() << "\n";
+                  << (message_acked ? 1 : 0)
+                  << " rpc=" << rpc_status << "\n";
       }
     }
     executor::comm::PhaseGate hold{"heyaki-m4-matrix-hold"};
@@ -537,14 +545,18 @@ int run_node(const std::filesystem::path& database, std::string_view application
     }
   }
   const auto snapshot = node.value_if()->snapshot();
+  bool final_message_acked = false;
+  int final_rpc_status = -1;
+  (void)m6_message_acked.try_load(final_message_acked);
+  (void)m6_rpc_status.try_load(final_rpc_status);
   std::cout << "MATRIX_RESULT authenticated=" << (authenticated ? 1 : 0)
             << " data_path=" << data_path << " duration_ms=" << elapsed
             << " attempted=" << (attempted ? 1 : 0)
             << " state=" << heyaki::node_peer_session_state_name(final_state)
             << " stage=" << stage
             << " session_error=" << session_error
-            << " m6_message_acked=" << (m6_message_acked.load() ? 1 : 0)
-            << " m6_rpc_status=" << m6_rpc_status.load()
+            << " m6_message_acked=" << (final_message_acked ? 1 : 0)
+            << " m6_rpc_status=" << final_rpc_status
             << " relay_state=" << heyaki::relay_node_state_name(snapshot.relay.state)
             << " coordinator_attempts="
             << snapshot.session_coordinator.current_attempts

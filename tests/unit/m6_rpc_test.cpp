@@ -270,7 +270,7 @@ TEST(M6RpcServiceTest, ConcurrencyLimitAnswersResourceExhausted) {
       }));
   harness.pump();
   ASSERT_EQ(harness.right_rpc->executing_calls(), 1U);
-  ASSERT_TRUE(harness.right_dispatch.has_pending());
+  ASSERT_TRUE(harness.right_rpc_dispatch.has_pending());
 
   std::vector<Result<RpcCallOutcome>> second_results;
   ASSERT_TRUE(harness.left_rpc->call(
@@ -298,7 +298,7 @@ TEST(M6RpcServiceTest, DispatchRejectionAnswersResourceExhausted) {
   ASSERT_TRUE(harness.right_registry->register_method(
       RpcMethodDescriptor{"device", "echo", 1U, "rpc.device.read", false},
       [](const RpcCallContext&) { return echo_result({}); }));
-  harness.right_dispatch.admit = false;
+  harness.right_rpc_dispatch.admit = false;
 
   std::vector<Result<RpcCallOutcome>> results;
   ASSERT_TRUE(harness.left_rpc->call(
@@ -333,7 +333,7 @@ TEST(M6RpcServiceTest, HandlerExceptionMapsToSafeInternal) {
   EXPECT_EQ(harness.right_rpc->stats().handler_exceptions, 1U);
 }
 
-TEST(M6RpcServiceTest, CooperativeCancelReachesHandler) {
+TEST(M6RpcServiceTest, QueuedCancelTerminatesTaskBeforeStart) {
   test::M6ServicePair harness;
   std::atomic<bool> observed_cancel{false};
   ASSERT_TRUE(harness.right_registry->register_method(
@@ -351,13 +351,55 @@ TEST(M6RpcServiceTest, CooperativeCancelReachesHandler) {
   ASSERT_TRUE(started);
   request_id = *started.value_if();
   harness.pump();
-  ASSERT_TRUE(harness.right_dispatch.has_pending());
+  ASSERT_TRUE(harness.right_rpc_dispatch.has_pending());
 
-  // Cancel before the queued task runs: the RPC_CANCEL flag is already set
-  // when the handler starts (cooperative, not preemptive).
+  // Cancel while the task is still queued: the executor terminates it before
+  // it runs (queued cancellation, no wasted handler execution) and the
+  // service emits the terminal cancelled response itself (M6-10).
   ASSERT_TRUE(harness.left_rpc->cancel(request_id));
   harness.pump();
-  harness.right_dispatch.run_all();
+  EXPECT_FALSE(harness.right_rpc_dispatch.has_pending());
+  harness.right_rpc_dispatch.run_all();
+  harness.right_poster.run_all();
+  harness.pump();
+
+  ASSERT_EQ(results.size(), 1U);
+  ASSERT_TRUE(results.front());
+  EXPECT_EQ(results.front().value_if()->status, StableStatus::cancelled);
+  EXPECT_FALSE(observed_cancel.load());
+  EXPECT_EQ(harness.left_rpc->stats().cancels_sent, 1U);
+  EXPECT_EQ(harness.right_rpc->stats().handler_cancelled, 1U);
+  EXPECT_EQ(harness.right_rpc->stats().handler_deadline_exceeded, 0U);
+}
+
+TEST(M6RpcServiceTest, RunningCancelReachesHandlerCooperatively) {
+  test::M6ServicePair harness;
+  harness.right_rpc_dispatch.emulate_running_cancel = true;
+  std::atomic<bool> observed_cancel{false};
+  ASSERT_TRUE(harness.right_registry->register_method(
+      RpcMethodDescriptor{"device", "wait", 1U, "rpc.device.read", false},
+      [&observed_cancel](const RpcCallContext& context) {
+        observed_cancel.store(context.cancelled());
+        return RpcHandlerResult{StableStatus::cancelled, {}, "observed_cancel"};
+      }));
+
+  std::vector<Result<RpcCallOutcome>> results;
+  RequestId request_id;
+  auto started = harness.left_rpc->call(
+      "device", "wait", {}, RpcCallOptions{},
+      [&results](const heyaki::DeviceEndpointKey&, Result<RpcCallOutcome> outcome) { results.push_back(std::move(outcome)); });
+  ASSERT_TRUE(started);
+  request_id = *started.value_if();
+  harness.pump();
+  ASSERT_TRUE(harness.right_rpc_dispatch.has_pending());
+
+  // Cancel reported as RequestedRunning (the task already began executing):
+  // the cooperative flag is set before the handler starts, the handler polls
+  // it through the public RpcCallContext, and the response stays cancelled.
+  ASSERT_TRUE(harness.left_rpc->cancel(request_id));
+  harness.pump();
+  EXPECT_TRUE(harness.right_rpc_dispatch.has_pending());
+  harness.right_rpc_dispatch.run_all();
   harness.right_poster.run_all();
   harness.pump();
 
@@ -366,6 +408,7 @@ TEST(M6RpcServiceTest, CooperativeCancelReachesHandler) {
   EXPECT_EQ(results.front().value_if()->status, StableStatus::cancelled);
   EXPECT_TRUE(observed_cancel.load());
   EXPECT_EQ(harness.left_rpc->stats().cancels_sent, 1U);
+  EXPECT_EQ(harness.right_rpc->stats().handler_cancelled, 1U);
 }
 
 TEST(M6RpcServiceTest, DeadlineWhileExecutingAnswersAndDropsLateResult) {
@@ -387,13 +430,13 @@ TEST(M6RpcServiceTest, DeadlineWhileExecutingAnswersAndDropsLateResult) {
       "device", "slow", {}, options,
       [&results](const heyaki::DeviceEndpointKey&, Result<RpcCallOutcome> outcome) { results.push_back(std::move(outcome)); }));
   harness.pump();
-  ASSERT_TRUE(harness.right_dispatch.has_pending());
+  ASSERT_TRUE(harness.right_rpc_dispatch.has_pending());
 
   // The handler RUNS to completion inside the deadline (the executor task
   // finishes and posts its result), but the deadline expires before the
   // posted completion reaches the service: prune answers deadline_exceeded
   // and the late handler result is dropped (M6-10 race).
-  harness.right_dispatch.run_all();
+  harness.right_rpc_dispatch.run_all();
   ASSERT_TRUE(handler_finished.load());
   ASSERT_TRUE(harness.right_poster.has_pending());
 
@@ -473,7 +516,7 @@ TEST(M6RpcServiceTest, DuplicateWhileExecutingDoesNotStartTwice) {
   // Second identical frame arrived while the first is queued (executing):
   // counted as duplicate, exactly one execution when the task runs.
   EXPECT_EQ(harness.right_rpc->stats().duplicate_requests, 1U);
-  harness.right_dispatch.run_all();
+  harness.right_rpc_dispatch.run_all();
   harness.right_poster.run_all();
   harness.pump();
   EXPECT_EQ(executions.load(), 1);
