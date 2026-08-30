@@ -68,6 +68,12 @@ including:
 Wait for explicit direction before implementing the exception or changing the
 executor dependency itself.
 
+Every such report, and every accepted workaround that works around an executor
+limitation without rising to that threshold, must be recorded in
+`docs/executor-feedback-ledger.md`. Append an entry with the workaround
+location, the executor gap, the smallest proposed capability, and the impact;
+do not leave executor limitations undocumented in code comments alone.
+
 ## GitHub Commit And Push
 
 Agents may create scoped commits and push the current working branch to the

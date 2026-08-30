@@ -19,7 +19,8 @@
 
 ## 上游收敛状态（2026-08-29 回写）
 
-executor 上游已按本台账实施一轮收敛（`docs/todolists/client_feedback_update_plan.md`，
+executor 上游已按本台账实施一轮收敛（executor 侧
+`third_party/executor/docs/todolists/client_feedback_update_plan.md`，
 heyaki pin 于 2026-08-29 从 `077d854` 升至 `4e8e8eb`，PR #176/#177）：
 
 - **P1-3 已闭环（上游 C1）**：`task_cancellation.hpp` + `submit_cancellable*`（StopToken 注入

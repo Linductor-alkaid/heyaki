@@ -2,7 +2,13 @@
 
 Status: provisional until the named freeze milestone. These defaults prevent engineering work from
 stalling; they are not a substitute for product approval. DEC-01 through DEC-09 were established in
-M0; DEC-10 through DEC-12 record the LAN serverless design delta.
+M0; DEC-10 through DEC-12 record the LAN serverless design delta; DEC-13 records the M10 Gateway
+design delta (2026-08-27) and DEC-14 records the M11 Android port scope (2026-08-29). The freeze
+points for DEC-01 through DEC-05 and DEC-07 through DEC-12 have since passed (the last was the
+M5 entry gate, reached after the M4 close on 2026-08-27) with these defaults applied unchanged
+and no override recorded, so they remain the
+governing defaults pending explicit product confirmation; DEC-03 final values and DEC-06 freeze at
+M9/M8 entry respectively.
 
 | ID | Provisional default | Owner | Freeze no later than |
 | --- | --- | --- | --- |
@@ -18,6 +24,8 @@ M0; DEC-10 through DEC-12 record the LAN serverless design delta.
 | DEC-10 | v1 serverless discovery covers only the same layer-2 multicast domain; cross-VLAN discovery requires relay or explicit endpoint hints. | Networking + Product | M3A entry |
 | DEC-11 | v1 uses a bounded Heyaki UDP multicast discovery protocol over the executor-managed Asio runtime; mDNS/DNS-SD interoperability is deferred. | Networking + Architecture | M3A entry |
 | DEC-12 | Enabling LAN mode exposes full DeviceId/EndpointId but no display name or service manifest; automatic connection is limited to trusted peers and configured capacity. | Security + Product | M3A entry |
+| DEC-13 | The Gateway proxy is disabled by default and not part of the standard pairing template; the first version is TCP-only; the default profile allows only B-side directly reachable ranges with public egress requiring explicit opt-in; gateway traffic on the TURN data path is allowed by default but metered independently (configurable rate limit or deny); simultaneous gateway and shell authorization requires explicit confirmation. | Security + Product | M10 entry |
+| DEC-14 | The v1.x Android deliverable is the C++20 core library cross-compiled with the NDK plus a JNI integration boundary — not a full Android app/UI; the TUI, fuzzers, and coturn deployment pieces are not ported; the Android profile storage location and secret-backend equivalent must be confirmed at M11 kickoff. | Product + Platform | M11 entry |
 
 Any override must update the architecture, implementation plan, relevant protocol/security tests,
 and this decision record in the same change.

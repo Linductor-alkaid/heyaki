@@ -1,7 +1,8 @@
 # Heyaki 局域网无服务器连接设计
 
-> 状态：v1 设计基线，wire protocol 1.1 扩展已由 M3A 首批变更冻结
-> 日期：2026-08-15
+> 状态：v1 设计基线，wire protocol 1.1 扩展由 M3A 首批变更冻结；会话层其后演进至协议 1.2
+> （M4 session restart，2026-08-27 关闭），本文门禁已随 M4/M5 验收
+> 日期：2026-08-15（状态行同步至 2026-08-29）
 > 适用范围：Linux/Windows 设备端、`heyaki-tui`、局域网发现、本地信令与 WebRTC 直连
 > 上位设计：[Heyaki 设备通信基础设施设计](heyaki-architecture.md)
 
@@ -70,7 +71,7 @@ Node
 
 ### 4.1 Presence 公告
 
-计划新增 `proto/heyaki/discovery/v1/discovery.proto`。`LanPresence` 至少包含：
+`LanPresence` 冻结于 `proto/heyaki/discovery/v1/discovery.proto`（M3A 随协议 1.1 变更提交），至少包含：
 
 ```text
 protocol major/minor, supported/required capabilities,
@@ -83,7 +84,8 @@ TLS signaling port, relative lease, signature
 wire size，检查与常见 discovery 协议/端口的冲突，并为防火墙和抓包诊断提供稳定配置说明。
 普通 profile 不得改成不同 group 后仍声称具备默认互操作性；测试可使用显式隔离配置。
 
-签名使用计划中的 `heyaki.lan-presence.v1` domain。接收方必须先检查 datagram、字段和
+签名使用已冻结的 `heyaki.lan-presence.v1` domain（规范来源见
+[Heyaki Wire Protocol v1](heyaki-wire-protocol.md)）。接收方必须先检查 datagram、字段和
 Protobuf 上限，再验证公钥派生的 `DeviceId`、签名、版本、lease、boot nonce 和 sequence。
 UDP 源地址作为本次可达地址 hint，不进入设备身份，也不覆盖签名对象中的 endpoint。
 
@@ -248,7 +250,8 @@ wire protocol 1.1 已把 LAN 能力冻结为可选扩展，协议 1.0 保持 N-1
 - CMake 版本、build info、协议文档、schemas 和 golden vectors 同一变更提交。
 
 上述协议 change-control 门禁由 M3A-01 至 M3A-04 完成；
-[Heyaki Wire Protocol v1](heyaki-wire-protocol.md) 是协议 1.1 的规范来源。后续 discovery、TLS
+[Heyaki Wire Protocol v1](heyaki-wire-protocol.md) 是协议的规范来源（M3A 冻结 1.1，M4 增补 1.2
+session restart）。后续 discovery、TLS
 route 和 replay/capacity 状态机仍须通过本节以下安全与网络门禁，不能因 wire 已冻结而视为完成。
 
 ## 11. 安全与测试门禁
@@ -272,4 +275,5 @@ pairing 猜测和目录/replay cache 满载。局域网中的被动观察者能�
 LAN Connectivity MVP（M4）的退出条件是：三台设备在没有 relay/STUN/TURN 的同一测试网段中
 可发现正确 endpoint、建立通过签名与 transcript 认证的 DataChannel，并只开放内部 control
 ping；任何伪造、重放、满载、取消或关闭路径都必须进入可观测终态。未知/已信任 peer 分别
-进入 `PairingRestricted` 与 `Authorized` 的完整门禁在 M5 pairing/TrustGrant 实现后验收。
+进入 `PairingRestricted` 与 `Authorized` 的完整门禁已随 M5 pairing/TrustGrant 关闭验收
+（2026-08-28）。

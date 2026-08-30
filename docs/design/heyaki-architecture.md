@@ -1,7 +1,7 @@
 # Heyaki 设备通信基础设施设计
 
-> 状态：架构设计修订版（授权密码、自动登录、LAN 无服务器连接、`heyaki-tui` 与 Gateway 代理服务）
-> 日期：2026-08-27
+> 状态：架构设计修订版（授权密码、自动登录、LAN 无服务器连接、`heyaki-tui`、Gateway 代理服务与 Android（NDK）适配）
+> 日期：2026-08-27（2026-08-29 增补 M11 Android 适配范围，见 §2.1）
 > 目标版本：MVP 至 v1
 > 适用范围：设备端 C++20 库、`heyaki-tui`、注册/信令服务、NAT 穿透与中继服务
 
@@ -538,7 +538,7 @@ payload       : bytes
 - major version 不兼容时拒绝会话，minor version 通过 capability bits 协商；
 - 未识别的可选 frame 可跳过，未识别的必需 frame 关闭对应通道；
 - 每个业务协议单独版本化，不能只依赖整个库的版本号；
-- 在实现前补充独立 wire protocol 文档和 golden vectors。
+- 独立 wire protocol 文档与 golden vectors 已随 M1/M3A 交付（[Heyaki Wire Protocol v1](heyaki-wire-protocol.md)、`tests/vectors/`），新业务域沿用同一 change-control 流程。
 
 建议的默认上限是控制帧 64 KiB、普通消息 1 MiB。文件传输根据协商的 DataChannel 最大消息大小动态选择块大小，不硬编码一个在所有平台都成立的值。
 
@@ -998,7 +998,7 @@ resource_exhausted, remote_error, outcome_unknown, internal
 18. Remote Shell 默认关闭，使用受限 profile、低权限账户和资源上限。
 19. relay 与 TURN 实施认证、速率限制、带宽配额、连接上限和反射放大防护。
 20. 吊销设备后拒绝新登录与新会话；现有会话是否立即断开由安全策略明确配置。
-21. 发布前形成 threat model，至少覆盖恶意 LAN 设备、被控制的 relay、信令 MITM、授权密码猜测、ProfileStore 窃取、重放、资源耗尽、协议降级和供应链风险。
+21. threat model 已建立（[Heyaki Threat Model](../security/threat-model.md)）并随里程碑演进更新，至少覆盖恶意 LAN 设备、被控制的 relay、信令 MITM、授权密码猜测、ProfileStore 窃取、重放、资源耗尽、协议降级和供应链风险。
 22. Gateway 代理默认关闭；授权绑定最小范围 profile（CIDR/端口/公网开关/配额），B 侧对环回、链路本地、自身管理网段与隧道端点实施 SSRF 防护并在 DNS 解析后逐地址校验；错误映射粗粒度化；审计不记录未通过校验的目标 host 自由文本。
 
 ## 15. 测试与验收

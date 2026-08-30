@@ -23,14 +23,15 @@ command required to repair the build.
 
 ## System and deployed dependencies
 
-Boost, the TLS backend, and coturn are not linked by the M0 empty targets. Their reproducible release
-strategy is fixed now, while exact package artifacts freeze before first use:
+Boost, the TLS backend, and coturn follow the reproducible release strategy below. They were not
+linked by the M0 empty targets; since then Boost/Beast and OpenSSL are linked by the shipped
+milestones (M3A/M3B onward) and coturn runs as an external, digest-pinned deployment artifact:
 
-| Component | Strategy | Current M0 evidence | Freeze gate |
+| Component | Strategy | Evidence (updated through M4) | Freeze gate |
 | --- | --- | --- | --- |
 | Boost | Pin the exact modular Asio/System header closure used by M2; freeze Asio SSL integration before M3A and add Beast plus its reviewed closure before M3B WSS work. | Boost 1.88.0 Asio/System/Config/Assert/ThrowException/Predef/WinAPI commits are source-locked; Beast 1.88.0 and the 18 additional reviewed module commits were frozen at M3B entry. | Asio complete for M2; SSL at M3A entry; Beast frozen at M3B entry |
 | TLS backend | Use the OpenSSL 3.x ABI line for Asio LAN TLS, Boost.Beast, and libdatachannel on Linux/Windows; CMake rejects other major lines, while release provenance records the exact headers/runtime package version and digest. | M3A development baseline links OpenSSL 3.0.13 on Linux; the host CLI may differ and is not treated as link evidence. | OpenSSL 3.x line frozen at M3A entry; exact package artifacts remain a release-provenance gate |
-| coturn | Run an external image/package referenced by immutable version and digest; keep its config and image provenance in the deployment tree. | Not deployed in M0. | M3B entry |
+| coturn | Run an external image/package referenced by immutable version and digest; keep its config and image provenance in the deployment tree. | Pinned deployment baseline since M3B (`deploy/coturn`: image `coturn/coturn:4.10.0-debian` by digest, Ubuntu 24.04 `coturn=4.6.1-1build4` fallback); exercised by the M4 CI network matrix topologies. | M3B entry |
 
 This table deliberately does not claim the developer machine's packages are reproducible. A
 milestone cannot consume one of these components until its exact artifact or package baseline has
@@ -46,10 +47,10 @@ checks all expected packages and parent/submodule relationships.
 
 The inventory covers 35 direct pins and the 5 recursive libdatachannel submodules. The Boost.Beast WSS closure was added and frozen at M3B entry as Beast 1.88.0 plus its reviewed Asio/System/Config/Assert/ThrowException/Predef/WinAPI/Bind/ContainerHash/Core/Describe/Endian/Intrusive/IO/Move/Mp11/Optional/Preprocessor/SmartPtr/StaticAssert/StaticString/TypeIndex/TypeTraits/Utility module closure. Abseil is pinned
 as the build/runtime dependency required by the pinned Protobuf 31.1 Lite toolchain. The
-[M0 linkage and license audit](m0-linkage-license-audit.md) confirms that current installed Heyaki
-artifacts do not yet link or redistribute pinned third-party code. Before any milestone first links a
-pin, that milestone must freeze the selected build artifact and review its actual static/dynamic
-closure. M3A/M3B/M4 additionally inventory Boost, OpenSSL, coturn and the selected ICE backend artifacts;
+[M0 linkage and license audit](m0-linkage-license-audit.md) is the point-in-time record from before
+the first pins were linked; since M1/M2, built artifacts link and redistribute the pinned runtime
+dependencies and ship the generated license manifest (`THIRD_PARTY_LICENSES.md` in the build tree).
+M3A/M3B/M4 additionally inventory Boost, OpenSSL, coturn and the selected ICE backend artifacts;
 M9 repeats the audit against the final release package.
 
 ## Upgrade workflow

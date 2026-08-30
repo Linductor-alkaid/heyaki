@@ -1,6 +1,8 @@
 # Heyaki Wire Protocol v1
 
-> Status: M4 protocol 1.2 baseline
+> Status: protocol 1.2 baseline, implemented through M6 — pairing/ByteStream frames delivered by
+> M5 (2026-08-28), message/unary-RPC frames by M6 (2026-08-29); the event/file/shell frame
+> families below remain reserved for M7/M8
 >
 > Protocol version: 1.2
 >

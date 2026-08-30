@@ -19,14 +19,17 @@ data stays peer-to-peer. All concurrency is centralized through the pinned
 ## Status
 
 The engineering baseline (M0), protocol and crypto layer (M1), runtime and identity (M2),
-LAN serverless connectivity (M3A), and relay control plane (M3B) milestones are complete.
-M4 (Connectivity MVP) is closed (2026-08-27): authenticated WebRTC sessions, LAN/relay
-dual-route arbitration, path diagnostics, the TUI selection flow, and protocol-1.2 session
-restart (a signed renegotiation of a replacement transport over the authenticated control
-channel) are in place. All 17 milestone tasks and exit criteria are complete, and the CI
-network matrix — leak enumeration plus coturn topologies (direct / forced TURN /
-TURN-fallback P95 / UDP-blocked / lossy / relay restart) — finished with MATRIX_OK. See the [implementation plan](docs/todolists/heyaki-implementation-plan.md)
-for details.
+LAN serverless connectivity (M3A), relay control plane (M3B), and connectivity MVP (M4)
+milestones are complete; the CI network matrix — leak enumeration plus coturn topologies
+(direct / forced TURN / TURN-fallback P95 / UDP-blocked / lossy / relay restart) — finished
+with MATRIX_OK. M5 (Authorization & ByteStream) is closed (2026-08-28): default-deny
+session authorization, password pairing with signed TrustGrants, weighted channel
+scheduling, and ByteStream delivery. M6 (Message & unary RPC) is closed (2026-08-29):
+a message service (`best_effort`/`peer_acked` with bounded TTL dedup), unary RPC
+(registry, deadlines, cooperative cancellation, at-most-once result caching,
+`outcome_unknown` semantics), Node public APIs, TUI message/RPC views, and a semantics
+demo (`apps/demo/m6_message_rpc_demo.cpp`). See the
+[implementation plan](docs/todolists/heyaki-implementation-plan.md) for details.
 
 | Milestone | Scope | State |
 | --- | --- | --- |
@@ -36,8 +39,11 @@ for details.
 | M3A | LAN serverless discovery and connectivity | Done |
 | M3B | Relay control plane, coturn integration | Done |
 | M4 | Connectivity MVP (WebRTC sessions, dual routing, session restart, TUI) | Done |
-| M5–M9 | Authorization/byte-stream, message RPC, event & file transfer, remote shell, production hardening | Planned |
+| M5 | Session authorization, pairing/trust, channel scheduling, ByteStream | Done |
+| M6 | Message service and unary RPC | Done |
+| M7–M9 | Event & file transfer, remote shell, production hardening | Planned |
 | M10 | Gateway proxy service (scoped L4 gateway over an authorized session, protocol 1.3) | Planned |
+| M11 | Android (NDK) port | Planned |
 
 ## Features
 
@@ -51,24 +57,31 @@ for details.
   `PeerPathPolicy` supporting `lan_only`, `relay_only`, and automatic routing with endpoint
   deduplication across LAN and relay routes.
 - Signed `heyaki.session-hello.v1` mutual authentication binding the session to verified
-  signaling.
+  signaling, with default-deny per-session authorization, password pairing, and signed
+  TrustGrants (`heyaki.trust-grant.v1`).
+- Authorized byte streams over negotiated channels with weighted scheduling and initial
+  window credit.
+- A message service (`MessageEnvelope`, `best_effort`/`peer_acked` delivery, bounded TTL
+  dedup) and unary RPC (per-method scope/policy, relative deadlines, cooperative
+  cancellation, at-most-once result caching, `outcome_unknown` on interrupted
+  non-idempotent calls) exposed through the `heyaki::Node` public API.
 - Bounded backpressure and lifecycle observability through executor facilities.
 - An FTXUI diagnostics TUI showing endpoints by route, session state, RTT, buffered bytes,
-  and structured failures.
+  structured failures, pairing/trust management, and message/RPC views.
 
 ## Components
 
 | Target | Kind | Description |
 | --- | --- | --- |
 | `heyaki-relay` | App | Relay server: config, SQLite persistence, enrollment/login, leases, endpoint directory, rate limiting, TURN credentials, WSS signaling forwarding |
-| `heyaki-tui` | App | FTXUI terminal client: profile setup, device/endpoint/session views, `connect`/`close` REPL |
-| `heyaki-m2-profile-demo`, `heyaki-m3b-relay-demo` | Apps | Small demos of the profile store and relay enrollment flows |
+| `heyaki-tui` | App | FTXUI terminal client: profile setup, pairing/trust, device/endpoint/session/stream views, message and RPC views, `connect`/`close` REPL |
+| `heyaki-m2-profile-demo`, `heyaki-m3b-relay-demo`, `heyaki-m6-message-rpc-demo` | Apps | Small demos of the profile store, relay enrollment, and message/RPC semantics (admission vs. completion vs. ACK vs. `outcome_unknown`) |
 | `heyaki_core` | Library | Public types, wire protocol, canonical signing, signaling/session protocols, replay cache, identity, limits |
-| `heyaki_client` | Library | `heyaki::Node` connection assembly: discovery, signaling coordinator, `PeerSession`, LAN directory, relay enrollment, runtime |
+| `heyaki_client` | Library | `heyaki::Node` connection assembly: discovery, signaling coordinator, `PeerSession`, LAN directory, relay enrollment, runtime, authorization/byte-stream, message service, and unary RPC |
 | `heyaki_profile` | Library | `ProfileStore` (SQLite), Argon2id password hashing, secret backend |
 | `heyaki_transport_webrtc` | Library | `WebRtcTransportSession` wrapping pinned libdatachannel |
 | `heyaki_relay` | Library | Relay server implementation behind `heyaki-relay` |
-| `heyaki_services` | Library | Placeholder for business services (M5+) |
+| `heyaki_services` | Library | Placeholder for future business services (M7+); the M5/M6 pairing, byte-stream, message, and RPC services live in `heyaki_client` |
 
 ## Build
 

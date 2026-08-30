@@ -1,6 +1,9 @@
 # Heyaki Threat Model
 
-> Baseline: protocol 1.1, including the frozen optional LAN extension and protocol 1.0 N-1 behavior
+> Baseline: protocol 1.2 — the frozen optional LAN extension (1.1), the M4 session-restart
+> renegotiation (1.2), and protocol 1.0 N-1 behavior. The M5 authorization/ByteStream and
+> M6 message/unary-RPC surfaces operate inside the session, pairing, and replay boundaries
+> analyzed below.
 >
 > Scope: device library, LAN discovery/signaling, `heyaki-relay`, coturn integration, ProfileStore,
 > and TUI
@@ -138,11 +141,13 @@ being represented as authenticated success.
 ## 7. Security gates
 
 Protocol parsers and state machines must cover golden, truncated, duplicate, unknown, boundary, and
-oversize frame/datagram inputs under sanitizer and fuzz smoke runs. LAN code must prove multicast flood
-limits, provisional TLS limits, certificate-binding MITM rejection, crossed-connect arbitration,
-replay-cache full rejection, cancellation, and shutdown convergence before M4. Enrollment and minimal
-session code must prove signature/fingerprint/transcript failures before M4; restricted-session
-isolation must pass before M5 opens pairing. File code must prove path containment and quota checks
+oversize frame/datagram inputs under sanitizer and fuzz smoke runs. LAN code had to prove multicast
+flood limits, provisional TLS limits, certificate-binding MITM rejection, crossed-connect arbitration,
+replay-cache full rejection, cancellation, and shutdown convergence before M4 — verified at M4 close
+(2026-08-27, CI network matrix MATRIX_OK). Enrollment and minimal
+session code had to prove signature/fingerprint/transcript failures before M4, and restricted-session
+isolation had to pass before M5 opened pairing — both gates passed with the M4/M5 closures
+(2026-08-27/2026-08-28). File code must prove path containment and quota checks
 before M7. Shell remains disabled until its
 VT parser, process containment, logging exclusions, and termination escalation receive a separate
 review in M8.

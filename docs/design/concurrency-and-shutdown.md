@@ -1,7 +1,8 @@
 # Heyaki 并发与关闭设计
 
-> 状态：M2 冻结版，含 M3A LAN 与 M3B relay WSS 骨架增补
-> 日期：2026-08-16
+> 状态：M2 冻结版，含 M3A LAN 与 M3B relay WSS 骨架增补；M4-M6 的会话重启、配对/ByteStream
+> 与消息/RPC 并发面沿用本设计的所有权与关闭模型（executor 单一 owner、comm 组件、有序关闭）
+> 日期：2026-08-16（状态行同步至 2026-08-29）
 > 适用范围：`heyaki::Node`、LAN discovery/signaling、`PeerSession`、`heyaki-relay`、`heyaki-tui` 与阻塞 I/O 适配器
 
 ## 1. 所有权边界
