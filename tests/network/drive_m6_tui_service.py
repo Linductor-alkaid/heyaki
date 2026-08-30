@@ -97,7 +97,9 @@ def main():
     state_b = os.environ["HEYAKI_TUI_STATE_B"]
     log_path = os.environ.get("HEYAKI_M6_TUI_LOG", "/dev/null")
     password = "correct horse battery staple\n"
-    deadline = time.monotonic() + 90.0
+    # Loaded runners can spend most of a minute on init+discovery+pairing;
+    # the service exchange itself needs real P2P round trips on top.
+    deadline = time.monotonic() + 150.0
 
     peer = TuiProcess("peer", tui_bin, state_b)
     local = TuiProcess("local", tui_bin, state_a)
@@ -223,21 +225,24 @@ def main():
     if not local.wait_for("sent id=", deadline):
         shutdown()
         fail("message view did not report admission")
-    # The ACK observer records the delivery event.
-    local.send("acks\n")
-    if not local.wait_for("delivery id=", deadline):
-        shutdown()
-        fail("message view never showed a delivery event")
-    local.read_available()
-    if not re.search(rb"delivery id=\S+ acked", local.output):
-        # The peer may still be processing; give the view one more poll.
-        local.send("acks\n")
-        if not local.wait_for("delivery id=", deadline):
-            shutdown()
+    # Poll the acks view until the delivery event reaches the acked state:
+    # the ACK is a real P2P round trip plus executor dispatch, which can
+    # trail the send by seconds on a loaded runner.
+    acked = False
+    next_poll = 0.0
+    while time.monotonic() < deadline:
         local.read_available()
-        if not re.search(rb"delivery id=\S+ acked", local.output):
-            shutdown()
-            fail("peer_acked message never reached the acked state")
+        if re.search(rb"delivery id=\S+ acked", local.output):
+            acked = True
+            break
+        now = time.monotonic()
+        if now >= next_poll:
+            local.send("acks\n")
+            next_poll = now + 2.0
+        time.sleep(0.05)
+    if not acked:
+        shutdown()
+        fail("peer_acked message never reached the acked state")
     local.send("exit\n")
     if not local.wait_for("message-view-closed", deadline):
         shutdown()

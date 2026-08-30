@@ -788,7 +788,7 @@ if(HEYAKI_BUILD_APPS)
     LABELS "network;tui;lan;security;m6"
     RESOURCE_LOCK heyaki_m3a_profile_state
     SKIP_RETURN_CODE 77
-    TIMEOUT 240)
+    TIMEOUT 330)
 
   add_test(
     NAME heyaki_m6_semantics_smoke
