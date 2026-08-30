@@ -81,6 +81,29 @@ void crash_report(int signal_number, siginfo_t* info, void* context) {
         uc ? static_cast<unsigned long long>(uc->uc_mcontext.gregs[REG_RSP]) : 0ULL);
     if (written > 0) emit(prefix, static_cast<std::size_t>(written));
   }
+  // Backtrace FIRST: a maps read faulting inside the handler would trip
+  // SA_RESETHAND and kill the process before the frames print (observed).
+  emit("MATRIX_CRASH backtrace:\n", sizeof("MATRIX_CRASH backtrace:\n") - 1U);
+  void* frames[64];
+  const int depth = backtrace(frames, 64);
+  if (depth > 0) {
+    backtrace_symbols_fd(frames, depth, STDERR_FILENO);
+  }
+  // Memory-pressure indicators: a page fault the kernel cannot service
+  // (allocation failure under pressure) delivers SIGBUS with a null address.
+  {
+    emit("MATRIX_CRASH statm:\n", sizeof("MATRIX_CRASH statm:\n") - 1U);
+    const int statm = open("/proc/self/statm", O_RDONLY);
+    if (statm >= 0) {
+      char statm_buffer[256];
+      const auto read_bytes = read(statm, statm_buffer, sizeof(statm_buffer) - 1U);
+      close(statm);
+      if (read_bytes > 0) {
+        statm_buffer[read_bytes] = '\0';
+        emit(statm_buffer, static_cast<std::size_t>(read_bytes));
+      }
+    }
+  }
   emit("MATRIX_CRASH maps:\n", sizeof("MATRIX_CRASH maps:\n") - 1U);
   const int maps = open("/proc/self/maps", O_RDONLY);
   if (maps >= 0) {
@@ -91,12 +114,6 @@ void crash_report(int signal_number, siginfo_t* info, void* context) {
       emit(chunk, static_cast<std::size_t>(read_bytes));
     }
     close(maps);
-  }
-  emit("MATRIX_CRASH backtrace:\n", sizeof("MATRIX_CRASH backtrace:\n") - 1U);
-  void* frames[64];
-  const int depth = backtrace(frames, 64);
-  if (depth > 0) {
-    backtrace_symbols_fd(frames, depth, STDERR_FILENO);
   }
   _exit(128 + signal_number);
 }
