@@ -148,3 +148,22 @@
   SIGBUS 在该轮未出现（历史出现率约 1/3）；崩溃报告器已升级为寄存器+
   /proc/self/maps 转储，若再现即可定位故障地址归属——作为低频追踪项
   留守，不阻塞 M6 关闭。
+
+### 第 5 轮（2026-08-30）：SIGBUS 结构性消除（45bd5f5）
+
+- 完整回溯捕获：`MessageService::send → observe_ack(queued) → ACK
+  observer _M_invoke`，故障指令为闭包堆存储中 weak_ptr 控制块指针的普通
+  读取；寄存器两次捕获均显示该槽位为高熵垃圾值（0x2a35.../0x5276...），
+  null 检查已通过。逐帧生命周期审计（服务/Impl 强引用、attach 与调用同
+  strand 串行、teardown 持本地强引用过 observe）无法构造该闭包被释放的
+  路径；本地 52+ 组进程对（ASAN/TSAN）零复现，仅 CI netem+TURN 环境
+  以约 1/3 概率命中同一指令。
+- 处置：按"移除脆弱状态而非继续追因"重构投递路径——MessageService/
+  RpcService 自持 peer，Node 以无捕获静态转发函数 + context 指针（内联
+  双字，零堆分配）注册投递出口；RPC completion 直接携带 peer，Node 不再
+  为每次调用构造包装闭包。崩溃路径上不再存在按服务分配的闭包状态，也不
+  再有 weak.lock()。与 executor 台账 P2-1（观察者链裸 std::function 的
+  指引方向）一致。
+- 验证：35 项 M6 单测、全量 unit 19/19、ASAN 下 M6 套件、M6 TUI 端到端
+  harness（真实 Node 路径）全部通过；崩溃报告器保持值守——若根因是
+  邻接堆损坏，其下次出现将指向新的受害点并以回溯直接命名。

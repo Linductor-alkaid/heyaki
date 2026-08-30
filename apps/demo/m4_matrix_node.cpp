@@ -505,7 +505,10 @@ int run_node(const std::filesystem::path& database, std::string_view application
                 // left the device — a deterministic, never-executed outcome.
                 m6_rpc_status.store(-2);
               } else {
-                m6_rpc_status.store(-9);
+                // Any other local admission failure: encode the error code so
+                // the matrix result line names it (e.g. -124 = internal).
+                m6_rpc_status.store(-100 - static_cast<int>(
+                                               outcome.error_if()->code()));
               }
             });
         (void)wait_until(
