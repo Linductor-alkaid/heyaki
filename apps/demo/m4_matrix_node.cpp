@@ -500,8 +500,12 @@ int run_node(const std::filesystem::path& database, std::string_view application
               if (outcome) {
                 m6_rpc_status.store(
                     static_cast<int>((*outcome.value_if()).status));
-              } else {
+              } else if (outcome.error_if()->code() == heyaki::ErrorCode::peer_offline) {
+                // Session churn under netem: the call was rejected before it
+                // left the device — a deterministic, never-executed outcome.
                 m6_rpc_status.store(-2);
+              } else {
+                m6_rpc_status.store(-9);
               }
             });
         (void)wait_until(

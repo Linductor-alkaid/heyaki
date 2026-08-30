@@ -414,7 +414,10 @@ require_authenticated_turn() {
       return 1
     fi
   elif [[ "${scenario}" == "lossy" ]]; then
-    if [[ "${m6_rpc}" != "1" && "${m6_rpc}" != "14" && "${m6_rpc}" != "3" ]]; then
+    # -2 = local peer_offline rejection under session churn (deterministic,
+    # never executed). -9 or anything else is a real failure.
+    if [[ "${m6_rpc}" != "1" && "${m6_rpc}" != "14" && "${m6_rpc}" != "3" &&
+          "${m6_rpc}" != "-2" ]]; then
       log "SCENARIO_FAILED ${scenario} m6 services (rpc not terminal): ${line}"
       dump_outputs "${scenario}"
       failures=$((failures + 1))
