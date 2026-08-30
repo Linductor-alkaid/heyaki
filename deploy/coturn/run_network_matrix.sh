@@ -530,10 +530,31 @@ for scenario in "${scenarios[@]}"; do
       add_loss
       # Automatic policy with STUN+TURN under netem: the loss/latency
       # condition itself is under test, not the relay-only policy variant.
-      run_pair "lossy" 90000 --stun ":${turn_port}" \
-        --turn ":${turn_port}" --turn-secret "${secret}" --connect-retries 5 \
-        --authenticate-budget-ms 75000 || failures=$((failures + 1))
-      require_authenticated_turn "$(first_result)" lossy || true
+      # Pre-authentication infrastructure flakes under 10% loss (missed relay
+      # heartbeats expiring an attempt, endpoint visibility gaps) are a known
+      # M4-era runner family: retry ONCE with fresh participants when the
+      # failure is pre-auth — a genuinely broken path fails twice.
+      lossy_authenticated=0
+      for lossy_try in 1 2; do
+        run_pair "lossy-${lossy_try}" 90000 --stun ":${turn_port}" \
+          --turn ":${turn_port}" --turn-secret "${secret}" --connect-retries 5 \
+          --authenticate-budget-ms 75000 || failures=$((failures + 1))
+        line=$(first_result)
+        if [[ "$(result_field "${line}" authenticated)" == "1" ]]; then
+          lossy_authenticated=1
+          break
+        fi
+        if [[ "${lossy_try}" == "1" ]]; then
+          log "LOSSY_RETRY pre-auth flake: ${line}"
+        fi
+      done
+      if [[ "${lossy_authenticated}" == "1" ]]; then
+        require_authenticated_turn "$(first_result)" lossy || true
+      else
+        log "SCENARIO_FAILED lossy (pre-auth on both tries): $(first_result)"
+        dump_outputs lossy
+        failures=$((failures + 1))
+      fi
       remove_loss
       ;;
     relay_restart)
