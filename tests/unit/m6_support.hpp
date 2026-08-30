@@ -232,50 +232,66 @@ struct M6ServicePair {
     ASSERT_TRUE(right->authenticated());
   }
 
+  // Test doubles mirroring the Node's sink wiring: function pointers plus a
+  // context struct instead of per-service closures.
+  struct SinkContext {
+    std::function<void(const DeviceEndpointKey&, const MessageEnvelope&)> inbound;
+    std::function<void(const DeviceEndpointKey&, const MessageId&,
+                       MessageDeliveryEvent, std::optional<Error>)>
+        ack;
+  };
+  SinkContext left_sinks;
+  SinkContext right_sinks;
+
+  static void sink_inbound(void* context, const DeviceEndpointKey& peer,
+                           const MessageEnvelope& envelope) {
+    auto& sinks = *static_cast<SinkContext*>(context);
+    if (sinks.inbound) sinks.inbound(peer, envelope);
+  }
+
+  static void sink_ack(void* context, const DeviceEndpointKey& peer,
+                       const MessageId& id, MessageDeliveryEvent event,
+                       std::optional<Error> error) {
+    auto& sinks = *static_cast<SinkContext*>(context);
+    if (sinks.ack) sinks.ack(peer, id, event, std::move(error));
+  }
+
+  [[nodiscard]] std::function<bool(std::string_view)> scope_check(
+      const std::shared_ptr<PeerSession>& session) {
+    return [session](std::string_view scope) {
+      for (const auto& granted : session->authorized_scopes()) {
+        if (trust_scope_covers(granted, scope)) return true;
+      }
+      return false;
+    };
+  }
+
   void attach_services(const Options& options) {
     if (options.attach_message) {
       left_messages = std::make_shared<MessageService>(
-          *left, options.left_message, left_dispatch.dispatcher(),
-          [session = left](std::string_view scope) {
-            for (const auto& granted : session->authorized_scopes()) {
-              if (trust_scope_covers(granted, scope)) return true;
-            }
-            return false;
-          },
-          [this] { return left_clock; });
+          *left, left_key(), options.left_message, left_dispatch.dispatcher(),
+          scope_check(left), [this] { return left_clock; });
+      left_messages->set_inbound_sink(&sink_inbound, &left_sinks);
+      left_messages->set_ack_sink(&sink_ack, &left_sinks);
       ASSERT_TRUE(left_messages->attach());
       right_messages = std::make_shared<MessageService>(
-          *right, options.right_message, right_dispatch.dispatcher(),
-          [session = right](std::string_view scope) {
-            for (const auto& granted : session->authorized_scopes()) {
-              if (trust_scope_covers(granted, scope)) return true;
-            }
-            return false;
-          },
-          [this] { return right_clock; });
+          *right, right_key(), options.right_message, right_dispatch.dispatcher(),
+          scope_check(right), [this] { return right_clock; });
+      right_messages->set_inbound_sink(&sink_inbound, &right_sinks);
+      right_messages->set_ack_sink(&sink_ack, &right_sinks);
       ASSERT_TRUE(right_messages->attach());
     }
 
     if (options.attach_rpc) {
       left_rpc = std::make_shared<RpcService>(
-          *left, options.left_rpc, left_registry, left_dispatch.dispatcher(),
-          [session = left](std::string_view scope) {
-            for (const auto& granted : session->authorized_scopes()) {
-              if (trust_scope_covers(granted, scope)) return true;
-            }
-            return false;
-          },
-          left_poster.poster(), [this] { return left_clock; });
+          *left, left_key(), options.left_rpc, left_registry,
+          left_dispatch.dispatcher(), scope_check(left), left_poster.poster(),
+          [this] { return left_clock; });
       ASSERT_TRUE(left_rpc->attach());
       right_rpc = std::make_shared<RpcService>(
-          *right, options.right_rpc, right_registry, right_dispatch.dispatcher(),
-          [session = right](std::string_view scope) {
-            for (const auto& granted : session->authorized_scopes()) {
-              if (trust_scope_covers(granted, scope)) return true;
-            }
-            return false;
-          },
-          right_poster.poster(), [this] { return right_clock; });
+          *right, right_key(), options.right_rpc, right_registry,
+          right_dispatch.dispatcher(), scope_check(right), right_poster.poster(),
+          [this] { return right_clock; });
       ASSERT_TRUE(right_rpc->attach());
     }
     pump();

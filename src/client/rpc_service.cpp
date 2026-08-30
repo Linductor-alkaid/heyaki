@@ -41,11 +41,13 @@ std::string sanitize_detail(std::string detail) {
 
 }  // namespace
 
-RpcService::RpcService(PeerSession& session, RpcServiceConfig config,
+RpcService::RpcService(PeerSession& session, DeviceEndpointKey peer,
+                       RpcServiceConfig config,
                        const std::shared_ptr<ServiceRegistry>& registry,
                        ServiceDispatch dispatch, ScopeCheck scope_check,
                        StrandPoster poster, std::function<std::uint64_t()> wall_clock)
     : session_(session),
+      peer_(std::move(peer)),
       config_(config),
       registry_(registry),
       dispatch_(std::move(dispatch)),
@@ -148,7 +150,7 @@ Result<RequestId> RpcService::resubmit(RetryableCall call) {
                                               : 0U;
   if (remaining == 0U) {
     ++stats_.outcome_unknown_calls;
-    call.completion(Result<RpcCallOutcome>::success(
+    call.completion(peer_, Result<RpcCallOutcome>::success(
         RpcCallOutcome{StableStatus::outcome_unknown, "retry_deadline_expired", {}}));
     return Result<RequestId>::success(call.request.request_id);
   }
@@ -165,20 +167,20 @@ Result<RequestId> RpcService::submit_call(RpcRequestBody request, bool idempoten
   auto encoded = encode_rpc_request(request, session_.channels().limits());
   if (!encoded) {
     ++stats_.calls_admission_rejected;
-    completion(Result<RpcCallOutcome>::failure(*encoded.error_if()));
+    completion(peer_, Result<RpcCallOutcome>::failure(*encoded.error_if()));
     return Result<RequestId>::failure(*encoded.error_if());
   }
   if (pending_.size() >= config_.max_pending_client_calls) {
     ++stats_.calls_admission_rejected;
     const auto error =
         rpc_service_error(ErrorCode::resource_exhausted, "pending_call_capacity");
-    completion(Result<RpcCallOutcome>::failure(error));
+    completion(peer_, Result<RpcCallOutcome>::failure(error));
     return Result<RequestId>::failure(error);
   }
   if (pending_.contains(id)) {
     ++stats_.calls_admission_rejected;
     const auto error = rpc_service_error(ErrorCode::configuration, "request_id_in_use");
-    completion(Result<RpcCallOutcome>::failure(error));
+    completion(peer_, Result<RpcCallOutcome>::failure(error));
     return Result<RequestId>::failure(error);
   }
   Frame frame;
@@ -191,7 +193,7 @@ Result<RequestId> RpcService::submit_call(RpcRequestBody request, bool idempoten
     // Admission failure: the request never left this device, so the outcome
     // is deterministic (this is NOT outcome_unknown).
     ++stats_.calls_admission_rejected;
-    completion(Result<RpcCallOutcome>::failure(*sent.error_if()));
+    completion(peer_, Result<RpcCallOutcome>::failure(*sent.error_if()));
     return Result<RequestId>::failure(*sent.error_if());
   }
   PendingCall pending;
@@ -264,7 +266,7 @@ void RpcService::handle_session_closed() {
     auto completion = std::move(entry.completion);
     const auto detail = entry.idempotent ? "session_lost_idempotent_no_retry"
                                          : "session_lost_non_idempotent";
-    completion(Result<RpcCallOutcome>::success(
+    completion(peer_, Result<RpcCallOutcome>::success(
         RpcCallOutcome{StableStatus::outcome_unknown, detail, {}}));
   }
 }
@@ -622,7 +624,7 @@ void RpcService::complete_pending(const RequestId& id, Result<RpcCallOutcome> ou
   auto completion = std::move(pending->second.completion);
   pending_.erase(pending);
   ++stats_.responses_matched;
-  completion(std::move(outcome));
+  completion(peer_, std::move(outcome));
 }
 
 void RpcService::prune_client_deadlines() {
@@ -632,7 +634,7 @@ void RpcService::prune_client_deadlines() {
       ++stats_.local_deadline_exceeded;
       auto completion = std::move(entry->second.completion);
       entry = pending_.erase(entry);
-      completion(Result<RpcCallOutcome>::success(
+      completion(peer_, Result<RpcCallOutcome>::success(
           RpcCallOutcome{StableStatus::deadline_exceeded, "local_deadline", {}}));
     } else {
       ++entry;

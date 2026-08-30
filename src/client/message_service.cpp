@@ -36,10 +36,12 @@ Error message_service_error(ErrorCode code, std::string_view detail) {
 
 }  // namespace
 
-MessageService::MessageService(PeerSession& session, MessageServiceConfig config,
+MessageService::MessageService(PeerSession& session, DeviceEndpointKey peer,
+                               MessageServiceConfig config,
                                ServiceDispatch dispatch, ScopeCheck scope_check,
                                std::function<std::uint64_t()> wall_clock)
     : session_(session),
+      peer_(std::move(peer)),
       config_(config),
       dispatch_(std::move(dispatch)),
       scope_check_(std::move(scope_check)),
@@ -146,12 +148,14 @@ Result<MessageId> MessageService::send(MessageEnvelope envelope) {
   return Result<MessageId>::success(id);
 }
 
-void MessageService::set_inbound_handler(InboundHandler handler) {
-  inbound_handler_ = std::move(handler);
+void MessageService::set_inbound_sink(InboundSink sink, void* context) {
+  inbound_sink_ = sink;
+  inbound_context_ = context;
 }
 
-void MessageService::set_ack_observer(AckObserver observer) {
-  ack_observer_ = std::move(observer);
+void MessageService::set_ack_sink(AckSink sink, void* context) {
+  ack_sink_ = sink;
+  ack_context_ = context;
 }
 
 void MessageService::prune() {
@@ -292,19 +296,21 @@ void MessageService::send_ack_for(const MessageEnvelope& envelope,
 }
 
 void MessageService::deliver_to_handler(MessageEnvelope envelope) {
-  if (!inbound_handler_) {
+  if (inbound_sink_ == nullptr) {
     return;
   }
-  auto handler = inbound_handler_;
+  const auto sink = inbound_sink_;
+  const auto context = inbound_context_;
   auto record = std::make_shared<DispatchRecord>();
   const std::uint64_t record_id = next_dispatch_id_++;
   dispatch_records_[record_id] = record;
   ++stats_.dispatched;
   auto dispatched = dispatch_(
       "heyaki-message-handler",
-      [record, handler = std::move(handler), envelope = std::move(envelope)]() mutable {
+      [record, sink, context, peer = peer_,
+       envelope = std::move(envelope)]() mutable {
         try {
-          handler(envelope);
+          sink(context, peer, envelope);
           record->completed.fetch_add(1U, std::memory_order_relaxed);
         } catch (...) {
           // Handler failures are contained: any ACK already went out at
@@ -345,8 +351,8 @@ void MessageService::handle_inbound_ack(const FrameView& frame) {
 
 void MessageService::observe_ack(const MessageId& id, MessageDeliveryEvent event,
                                  std::optional<Error> error) {
-  if (ack_observer_) {
-    ack_observer_(id, event, std::move(error));
+  if (ack_sink_ != nullptr) {
+    ack_sink_(ack_context_, peer_, id, event, std::move(error));
   }
 }
 

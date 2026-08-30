@@ -143,7 +143,7 @@ TEST(M6RpcServiceTest, UnaryCallSucceedsEndToEnd) {
   std::vector<Result<RpcCallOutcome>> results;
   auto started = harness.left_rpc->call(
       "device", "echo", {std::byte{0x42}}, RpcCallOptions{},
-      [&results](Result<RpcCallOutcome> outcome) {
+      [&results](const heyaki::DeviceEndpointKey&, Result<RpcCallOutcome> outcome) {
         results.push_back(std::move(outcome));
       });
   ASSERT_TRUE(started);
@@ -168,7 +168,7 @@ TEST(M6RpcServiceTest, UnknownMethodAnswersUnimplemented) {
   std::vector<Result<RpcCallOutcome>> results;
   ASSERT_TRUE(harness.left_rpc->call(
       "device", "nope", {}, RpcCallOptions{},
-      [&results](Result<RpcCallOutcome> outcome) { results.push_back(std::move(outcome)); }));
+      [&results](const heyaki::DeviceEndpointKey&, Result<RpcCallOutcome> outcome) { results.push_back(std::move(outcome)); }));
   harness.cycle();
   ASSERT_EQ(results.size(), 1U);
   ASSERT_TRUE(results.front());
@@ -187,7 +187,7 @@ TEST(M6RpcServiceTest, StreamingMethodsStayUnimplemented) {
   std::vector<Result<RpcCallOutcome>> results;
   ASSERT_TRUE(harness.left_rpc->call(
       "device", "watch", {}, RpcCallOptions{},
-      [&results](Result<RpcCallOutcome> outcome) { results.push_back(std::move(outcome)); }));
+      [&results](const heyaki::DeviceEndpointKey&, Result<RpcCallOutcome> outcome) { results.push_back(std::move(outcome)); }));
   harness.cycle();
   ASSERT_EQ(results.size(), 1U);
   ASSERT_TRUE(results.front());
@@ -239,7 +239,7 @@ TEST(M6RpcServiceTest, ScopeMissingAnswersPermissionDenied) {
   std::vector<Result<RpcCallOutcome>> results;
   ASSERT_TRUE(harness.left_rpc->call(
       "device", "configure", {}, RpcCallOptions{},
-      [&results](Result<RpcCallOutcome> outcome) { results.push_back(std::move(outcome)); }));
+      [&results](const heyaki::DeviceEndpointKey&, Result<RpcCallOutcome> outcome) { results.push_back(std::move(outcome)); }));
   harness.cycle();
   ASSERT_EQ(results.size(), 1U);
   ASSERT_TRUE(results.front());
@@ -265,7 +265,7 @@ TEST(M6RpcServiceTest, ConcurrencyLimitAnswersResourceExhausted) {
   std::vector<Result<RpcCallOutcome>> first_results;
   ASSERT_TRUE(harness.left_rpc->call(
       "device", "slow", {}, RpcCallOptions{},
-      [&first_results](Result<RpcCallOutcome> outcome) {
+      [&first_results](const heyaki::DeviceEndpointKey&, Result<RpcCallOutcome> outcome) {
         first_results.push_back(std::move(outcome));
       }));
   harness.pump();
@@ -275,7 +275,7 @@ TEST(M6RpcServiceTest, ConcurrencyLimitAnswersResourceExhausted) {
   std::vector<Result<RpcCallOutcome>> second_results;
   ASSERT_TRUE(harness.left_rpc->call(
       "device", "slow", {}, RpcCallOptions{},
-      [&second_results](Result<RpcCallOutcome> outcome) {
+      [&second_results](const heyaki::DeviceEndpointKey&, Result<RpcCallOutcome> outcome) {
         second_results.push_back(std::move(outcome));
       }));
   harness.pump();
@@ -303,7 +303,7 @@ TEST(M6RpcServiceTest, DispatchRejectionAnswersResourceExhausted) {
   std::vector<Result<RpcCallOutcome>> results;
   ASSERT_TRUE(harness.left_rpc->call(
       "device", "echo", {}, RpcCallOptions{},
-      [&results](Result<RpcCallOutcome> outcome) { results.push_back(std::move(outcome)); }));
+      [&results](const heyaki::DeviceEndpointKey&, Result<RpcCallOutcome> outcome) { results.push_back(std::move(outcome)); }));
   harness.pump();
   ASSERT_EQ(results.size(), 1U);
   ASSERT_TRUE(results.front());
@@ -324,7 +324,7 @@ TEST(M6RpcServiceTest, HandlerExceptionMapsToSafeInternal) {
   std::vector<Result<RpcCallOutcome>> results;
   ASSERT_TRUE(harness.left_rpc->call(
       "device", "boom", {}, RpcCallOptions{},
-      [&results](Result<RpcCallOutcome> outcome) { results.push_back(std::move(outcome)); }));
+      [&results](const heyaki::DeviceEndpointKey&, Result<RpcCallOutcome> outcome) { results.push_back(std::move(outcome)); }));
   harness.cycle();
   ASSERT_EQ(results.size(), 1U);
   ASSERT_TRUE(results.front());
@@ -347,7 +347,7 @@ TEST(M6RpcServiceTest, CooperativeCancelReachesHandler) {
   RequestId request_id;
   auto started = harness.left_rpc->call(
       "device", "wait", {}, RpcCallOptions{},
-      [&results](Result<RpcCallOutcome> outcome) { results.push_back(std::move(outcome)); });
+      [&results](const heyaki::DeviceEndpointKey&, Result<RpcCallOutcome> outcome) { results.push_back(std::move(outcome)); });
   ASSERT_TRUE(started);
   request_id = *started.value_if();
   harness.pump();
@@ -385,7 +385,7 @@ TEST(M6RpcServiceTest, DeadlineWhileExecutingAnswersAndDropsLateResult) {
   options.deadline_remaining_milliseconds = 1000U;
   ASSERT_TRUE(harness.left_rpc->call(
       "device", "slow", {}, options,
-      [&results](Result<RpcCallOutcome> outcome) { results.push_back(std::move(outcome)); }));
+      [&results](const heyaki::DeviceEndpointKey&, Result<RpcCallOutcome> outcome) { results.push_back(std::move(outcome)); }));
   harness.pump();
   ASSERT_TRUE(harness.right_dispatch.has_pending());
 
@@ -426,7 +426,7 @@ TEST(M6RpcServiceTest, DuplicateRequestReplaysCachedResultWithoutRerun) {
   RequestId request_id;
   auto started = harness.left_rpc->call(
       "device", "once", {std::byte{0x11}}, RpcCallOptions{},
-      [&results](Result<RpcCallOutcome> outcome) { results.push_back(std::move(outcome)); });
+      [&results](const heyaki::DeviceEndpointKey&, Result<RpcCallOutcome> outcome) { results.push_back(std::move(outcome)); });
   ASSERT_TRUE(started);
   request_id = *started.value_if();
   harness.cycle();
@@ -491,7 +491,7 @@ TEST(M6RpcServiceTest, SessionLossNonIdempotentIsOutcomeUnknown) {
   std::vector<Result<RpcCallOutcome>> results;
   ASSERT_TRUE(harness.left_rpc->call(
       "device", "slow", {}, RpcCallOptions{},
-      [&results](Result<RpcCallOutcome> outcome) { results.push_back(std::move(outcome)); }));
+      [&results](const heyaki::DeviceEndpointKey&, Result<RpcCallOutcome> outcome) { results.push_back(std::move(outcome)); }));
   harness.pump();
   ASSERT_EQ(harness.left_rpc->pending_calls(), 1U);
 
@@ -540,7 +540,7 @@ TEST(M6RpcServiceTest, IdempotentRetryResubmitsAcrossSessions) {
   options.deadline_remaining_milliseconds = 60'000U;
   auto started = harness.left_rpc->call(
       "device", "safe", {std::byte{0x33}}, options,
-      [&results](Result<RpcCallOutcome> outcome) { results.push_back(std::move(outcome)); });
+      [&results](const heyaki::DeviceEndpointKey&, Result<RpcCallOutcome> outcome) { results.push_back(std::move(outcome)); });
   ASSERT_TRUE(started);
   harness.pump();
 
@@ -583,7 +583,7 @@ TEST(M6RpcServiceTest, LocalDeadlineExpiresPendingCall) {
   options.deadline_remaining_milliseconds = 700U;
   ASSERT_TRUE(harness.left_rpc->call(
       "device", "slow", {}, options,
-      [&results](Result<RpcCallOutcome> outcome) { results.push_back(std::move(outcome)); }));
+      [&results](const heyaki::DeviceEndpointKey&, Result<RpcCallOutcome> outcome) { results.push_back(std::move(outcome)); }));
   harness.pump();
 
   harness.left_clock += 701U;
@@ -612,14 +612,14 @@ TEST(M6RpcServiceTest, PendingCapacityIsBounded) {
   std::vector<Result<RpcCallOutcome>> first;
   ASSERT_TRUE(harness.left_rpc->call(
       "device", "slow", {}, RpcCallOptions{},
-      [&first](Result<RpcCallOutcome> outcome) { first.push_back(std::move(outcome)); }));
+      [&first](const heyaki::DeviceEndpointKey&, Result<RpcCallOutcome> outcome) { first.push_back(std::move(outcome)); }));
   harness.pump();
   ASSERT_EQ(harness.left_rpc->pending_calls(), 1U);
 
   std::vector<Result<RpcCallOutcome>> second;
   auto started = harness.left_rpc->call(
       "device", "slow", {}, RpcCallOptions{},
-      [&second](Result<RpcCallOutcome> outcome) { second.push_back(std::move(outcome)); });
+      [&second](const heyaki::DeviceEndpointKey&, Result<RpcCallOutcome> outcome) { second.push_back(std::move(outcome)); });
   EXPECT_FALSE(started);
   ASSERT_EQ(second.size(), 1U);
   EXPECT_FALSE(second.front());

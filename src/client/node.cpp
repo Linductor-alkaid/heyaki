@@ -3290,6 +3290,28 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     return false;
   }
 
+  // ---- M6 service sinks ----
+  // Static trampolines plus the Impl pointer: no per-service closures are
+  // heap-allocated on the delivery paths. The sinks run on this strand;
+  // Impl outlives every service it owns (teardown/close_peers precede its
+  // destruction and run on the same strand).
+  static void message_inbound_sink(void* context, const DeviceEndpointKey& peer,
+                                   const MessageEnvelope& envelope) {
+    auto& impl = *static_cast<Node::Impl*>(context);
+    if (impl.message_inbound_handler) {
+      impl.message_inbound_handler(peer, envelope);
+    }
+  }
+
+  static void message_ack_sink(void* context, const DeviceEndpointKey& peer,
+                               const MessageId& id, MessageDeliveryEvent event,
+                               std::optional<Error> error) {
+    auto& impl = *static_cast<Node::Impl*>(context);
+    if (impl.message_ack_observer) {
+      impl.message_ack_observer(peer, id, event, std::move(error));
+    }
+  }
+
   // Attaches the message and RPC services to an authorized session. The
   // scope check consults the session's effective scopes live, so a grant
   // adjudicated at upgrade time governs every later frame.
@@ -3304,7 +3326,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     const auto session = attempt->session;
     if (!message_services.contains(peer)) {
       auto service = std::make_shared<MessageService>(
-          *session, message_service_config, service_dispatch(),
+          *session, peer, message_service_config, service_dispatch(),
           [session](std::string_view scope) {
             return session_scope_covers(*session, scope);
           },
@@ -3316,24 +3338,13 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         });
         return;
       }
-      auto weak = weak_from_this();
-      service->set_inbound_handler([weak, peer](const MessageEnvelope& envelope) {
-        auto self = weak.lock();
-        if (!self || !self->message_inbound_handler) return;
-        self->message_inbound_handler(peer, envelope);
-      });
-      service->set_ack_observer(
-          [weak, peer](const MessageId& id, MessageDeliveryEvent event,
-                       std::optional<Error> error) {
-            auto self = weak.lock();
-            if (!self || !self->message_ack_observer) return;
-            self->message_ack_observer(peer, id, event, std::move(error));
-          });
+      service->set_inbound_sink(&Node::Impl::message_inbound_sink, this);
+      service->set_ack_sink(&Node::Impl::message_ack_sink, this);
       message_services.emplace(peer, std::move(service));
     }
     if (!rpc_services.contains(peer)) {
       auto service = std::make_shared<RpcService>(
-          *session, rpc_service_config, service_registry, service_dispatch(),
+          *session, peer, rpc_service_config, service_registry, service_dispatch(),
           [session](std::string_view scope) {
             return session_scope_covers(*session, scope);
           },
@@ -3388,7 +3399,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
               auto evicted = std::move(queue.front());
               queue.pop_front();
               if (evicted.completion) {
-                evicted.completion(Result<RpcCallOutcome>::success(RpcCallOutcome{
+                evicted.completion(peer, Result<RpcCallOutcome>::success(RpcCallOutcome{
                     StableStatus::outcome_unknown, "retry_queue_capacity", {}}));
               }
             }
@@ -3397,7 +3408,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         } else {
           for (auto& retryable : retryables) {
             if (retryable.completion) {
-              retryable.completion(Result<RpcCallOutcome>::success(RpcCallOutcome{
+              retryable.completion(peer, Result<RpcCallOutcome>::success(RpcCallOutcome{
                   StableStatus::outcome_unknown, "retry_aborted_shutdown", {}}));
             }
           }
@@ -3446,15 +3457,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return Result<RequestId>::failure(
           node_error(ErrorCode::internal, "rpc_service_unavailable"));
     }
-    auto wrapped = [peer, completion = std::move(completion)](
-                       Result<RpcCallOutcome> outcome) {
-      if (completion) {
-        completion(peer, std::move(outcome));
-      }
-    };
     return service->second->call(std::move(service_name), std::move(method),
                                  std::move(payload), std::move(options),
-                                 std::move(wrapped), request_id);
+                                 std::move(completion), request_id);
   }
 
   Result<void> cancel_rpc_strand(DeviceEndpointKey peer, const RequestId& request_id) {
@@ -3546,10 +3551,12 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       auto& queue = queue_entry->second;
       const auto current = unix_milliseconds_now();
       for (auto entry = queue.begin(); entry != queue.end();) {
-        if (entry->deadline_unix_milliseconds <= current) {
+          if (entry->deadline_unix_milliseconds <= current) {
           if (entry->completion) {
-            entry->completion(Result<RpcCallOutcome>::success(RpcCallOutcome{
-                StableStatus::outcome_unknown, "retry_deadline_expired", {}}));
+            entry->completion(queue_entry->first, Result<RpcCallOutcome>::success(
+                                                     RpcCallOutcome{
+                                                         StableStatus::outcome_unknown,
+                                                         "retry_deadline_expired", {}}));
           }
           entry = queue.erase(entry);
         } else {
@@ -5256,7 +5263,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       service->handle_session_closed();
       for (auto& retryable : service->take_retryable_calls()) {
         if (retryable.completion) {
-          retryable.completion(Result<RpcCallOutcome>::success(
+          retryable.completion(peer, Result<RpcCallOutcome>::success(
               RpcCallOutcome{StableStatus::outcome_unknown, "retry_aborted_shutdown", {}}));
         }
       }
@@ -5266,7 +5273,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       (void)peer;
       for (auto& retryable : queue) {
         if (retryable.completion) {
-          retryable.completion(Result<RpcCallOutcome>::success(
+          retryable.completion(peer, Result<RpcCallOutcome>::success(
               RpcCallOutcome{StableStatus::outcome_unknown, "retry_aborted_shutdown", {}}));
         }
       }

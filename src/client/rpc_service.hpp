@@ -55,7 +55,10 @@ struct RpcServiceConfig {
 
 class RpcService : public std::enable_shared_from_this<RpcService> {
  public:
-  using Completion = std::function<void(Result<RpcCallOutcome>)>;
+  // Completions receive the peer from the service itself: the Node passes
+  // its user completion straight through with no per-call wrapper closure
+  // (same closure-elimination rationale as the MessageService sinks).
+  using Completion = std::function<void(const DeviceEndpointKey&, Result<RpcCallOutcome>)>;
   using ScopeCheck = std::function<bool(std::string_view scope)>;
   // Posts one unit of work back onto the owning strand.
   using StrandPoster = std::function<void(std::function<void()> task)>;
@@ -70,7 +73,7 @@ class RpcService : public std::enable_shared_from_this<RpcService> {
     Completion completion;
   };
 
-  RpcService(PeerSession& session, RpcServiceConfig config,
+  RpcService(PeerSession& session, DeviceEndpointKey peer, RpcServiceConfig config,
              const std::shared_ptr<ServiceRegistry>& registry,
              ServiceDispatch dispatch, ScopeCheck scope_check, StrandPoster poster,
              std::function<std::uint64_t()> wall_clock = {});
@@ -176,6 +179,7 @@ class RpcService : public std::enable_shared_from_this<RpcService> {
   void prune_executing_deadlines();
 
   PeerSession& session_;
+  DeviceEndpointKey peer_;
   RpcServiceConfig config_;
   std::shared_ptr<ServiceRegistry> registry_;
   ServiceDispatch dispatch_;

@@ -43,15 +43,23 @@ struct MessageServiceConfig {
 
 class MessageService : public std::enable_shared_from_this<MessageService> {
  public:
-  using InboundHandler = std::function<void(const MessageEnvelope&)>;
-  using AckObserver =
-      std::function<void(const MessageId&, MessageDeliveryEvent, std::optional<Error>)>;
+  // Delivery notifications leave the service through function-pointer sinks
+  // instead of per-service std::function closures: the sink pair is two
+  // words stored inline, so nothing on the notification path dereferences
+  // heap-allocated closure state (a CI-only deterministic SIGBUS fired in
+  // exactly that closure's weak_ptr control-block read; see the M6 stage
+  // file). The context is the owning Node::Impl, outliving every service.
+  using InboundSink = void (*)(void* context, const DeviceEndpointKey& peer,
+                               const MessageEnvelope& envelope);
+  using AckSink = void (*)(void* context, const DeviceEndpointKey& peer,
+                           const MessageId& id, MessageDeliveryEvent event,
+                           std::optional<Error> error);
   // Returns whether the peer's effective session scopes cover `scope`.
   using ScopeCheck = std::function<bool(std::string_view scope)>;
 
-  MessageService(PeerSession& session, MessageServiceConfig config,
-                 ServiceDispatch dispatch, ScopeCheck scope_check,
-                 std::function<std::uint64_t()> wall_clock = {});
+  MessageService(PeerSession& session, DeviceEndpointKey peer,
+                 MessageServiceConfig config, ServiceDispatch dispatch,
+                 ScopeCheck scope_check, std::function<std::uint64_t()> wall_clock = {});
   ~MessageService();
 
   MessageService(const MessageService&) = delete;
@@ -66,8 +74,8 @@ class MessageService : public std::enable_shared_from_this<MessageService> {
   // message_id is assigned here. Failure means the frame was NOT admitted.
   [[nodiscard]] Result<MessageId> send(MessageEnvelope envelope);
 
-  void set_inbound_handler(InboundHandler handler);
-  void set_ack_observer(AckObserver observer);
+  void set_inbound_sink(InboundSink sink, void* context);
+  void set_ack_sink(AckSink sink, void* context);
 
   // TTL maintenance: expires dedup entries and pending ACKs (firing ack
   // observers with ack_timeout) and merges finished dispatch records.
@@ -114,12 +122,15 @@ class MessageService : public std::enable_shared_from_this<MessageService> {
   void merge_dispatch_records();
 
   PeerSession& session_;
+  DeviceEndpointKey peer_;
   MessageServiceConfig config_;
   ServiceDispatch dispatch_;
   ScopeCheck scope_check_;
   std::function<std::uint64_t()> wall_clock_;
-  InboundHandler inbound_handler_;
-  AckObserver ack_observer_;
+  InboundSink inbound_sink_{};
+  void* inbound_context_{};
+  AckSink ack_sink_{};
+  void* ack_context_{};
   std::map<MessageId, DedupEntry> dedup_;
   std::map<MessageId, PendingAck> pending_acks_;
   std::map<std::uint64_t, std::shared_ptr<DispatchRecord>> dispatch_records_;

@@ -126,8 +126,10 @@ TEST(M6MessageProtocolTest, AckCodecRoundTrip) {
 TEST(M6MessageServiceTest, BestEffortCompletesAtQueueAdmission) {
   test::M6ServicePair harness;
   std::vector<MessageEnvelope> received;
-  harness.right_messages->set_inbound_handler(
-      [&received](const MessageEnvelope& envelope) { received.push_back(envelope); });
+  harness.right_sinks.inbound =
+      [&received](const DeviceEndpointKey&, const MessageEnvelope& envelope) {
+        received.push_back(envelope);
+      };
 
   auto envelope = harness.make_envelope("test.best", MessageDeliveryMode::best_effort);
   auto sent = harness.left_messages->send(envelope);
@@ -148,14 +150,15 @@ TEST(M6MessageServiceTest, BestEffortCompletesAtQueueAdmission) {
 TEST(M6MessageServiceTest, PeerAckedAcksAfterBasicValidationOnly) {
   test::M6ServicePair harness;
   std::vector<MessageEnvelope> received;
-  harness.right_messages->set_inbound_handler(
-      [&received](const MessageEnvelope& envelope) { received.push_back(envelope); });
+  harness.right_sinks.inbound =
+      [&received](const DeviceEndpointKey&, const MessageEnvelope& envelope) {
+        received.push_back(envelope);
+      };
 
   std::vector<std::pair<MessageId, MessageDeliveryEvent>> events;
-  harness.left_messages->set_ack_observer(
-      [&events](const MessageId& id, MessageDeliveryEvent event, std::optional<Error>) {
-        events.emplace_back(id, event);
-      });
+  harness.left_sinks.ack =
+      [&events](const DeviceEndpointKey&, const MessageId& id, MessageDeliveryEvent event,
+                std::optional<Error>) { events.emplace_back(id, event); };
 
   auto envelope =
       harness.make_envelope("test.acked", MessageDeliveryMode::peer_acked);
@@ -188,10 +191,9 @@ TEST(M6MessageServiceTest, AckLossSurfacesAsTtlTimeout) {
   harness.right_messages.reset();
 
   std::vector<MessageDeliveryEvent> events;
-  harness.left_messages->set_ack_observer(
-      [&events](const MessageId&, MessageDeliveryEvent event, std::optional<Error>) {
-        events.push_back(event);
-      });
+  harness.left_sinks.ack =
+      [&events](const DeviceEndpointKey&, const MessageId&, MessageDeliveryEvent event,
+                std::optional<Error>) { events.push_back(event); };
 
   auto envelope = harness.make_envelope("test.lost", MessageDeliveryMode::peer_acked,
                                         {std::byte{5}}, 1000U);
@@ -214,8 +216,10 @@ TEST(M6MessageServiceTest, AckLossSurfacesAsTtlTimeout) {
 TEST(M6MessageServiceTest, DuplicateEnvelopeDeliveredOnceAndAckReplayed) {
   test::M6ServicePair harness;
   std::vector<MessageEnvelope> received;
-  harness.right_messages->set_inbound_handler(
-      [&received](const MessageEnvelope& envelope) { received.push_back(envelope); });
+  harness.right_sinks.inbound =
+      [&received](const DeviceEndpointKey&, const MessageEnvelope& envelope) {
+        received.push_back(envelope);
+      };
 
   const auto envelope =
       harness.make_envelope("test.dup", MessageDeliveryMode::peer_acked);
@@ -240,8 +244,10 @@ TEST(M6MessageServiceTest, DuplicateEnvelopeDeliveredOnceAndAckReplayed) {
 TEST(M6MessageServiceTest, SameIdDifferentBytesIsProtocolViolation) {
   test::M6ServicePair harness;
   std::vector<MessageEnvelope> received;
-  harness.right_messages->set_inbound_handler(
-      [&received](const MessageEnvelope& envelope) { received.push_back(envelope); });
+  harness.right_sinks.inbound =
+      [&received](const DeviceEndpointKey&, const MessageEnvelope& envelope) {
+        received.push_back(envelope);
+      };
 
   auto first = harness.make_envelope("test.conflict", MessageDeliveryMode::best_effort);
   ASSERT_TRUE(harness.left_messages->send(first));
@@ -275,8 +281,10 @@ TEST(M6MessageServiceTest, SameIdDifferentBytesIsProtocolViolation) {
 TEST(M6MessageServiceTest, DedupEntryExpiresAfterTtl) {
   test::M6ServicePair harness;
   std::vector<MessageEnvelope> received;
-  harness.right_messages->set_inbound_handler(
-      [&received](const MessageEnvelope& envelope) { received.push_back(envelope); });
+  harness.right_sinks.inbound =
+      [&received](const DeviceEndpointKey&, const MessageEnvelope& envelope) {
+        received.push_back(envelope);
+      };
 
   const auto envelope = harness.make_envelope("test.ttl", MessageDeliveryMode::best_effort,
                                               {std::byte{7}}, 500U);
@@ -304,8 +312,10 @@ TEST(M6MessageServiceTest, DedupCapacityEvictsBounded) {
   options.right_message.dedup_capacity = 2U;
   test::M6ServicePair harness{options};
   std::vector<MessageEnvelope> received;
-  harness.right_messages->set_inbound_handler(
-      [&received](const MessageEnvelope& envelope) { received.push_back(envelope); });
+  harness.right_sinks.inbound =
+      [&received](const DeviceEndpointKey&, const MessageEnvelope& envelope) {
+        received.push_back(envelope);
+      };
 
   for (int index = 0; index < 3; ++index) {
     auto envelope = harness.make_envelope("test.cap");
@@ -326,8 +336,10 @@ TEST(M6MessageServiceTest, ScopeMissingBlocksHandlerAndAck) {
   options.right_scopes = {"rpc.device.read"};
   test::M6ServicePair harness{options};
   std::vector<MessageEnvelope> received;
-  harness.right_messages->set_inbound_handler(
-      [&received](const MessageEnvelope& envelope) { received.push_back(envelope); });
+  harness.right_sinks.inbound =
+      [&received](const DeviceEndpointKey&, const MessageEnvelope& envelope) {
+        received.push_back(envelope);
+      };
 
   const auto envelope =
       harness.make_envelope("test.scope", MessageDeliveryMode::peer_acked);
@@ -357,9 +369,9 @@ TEST(M6MessageServiceTest, InvalidEnvelopeCountedWithoutAck) {
 
 TEST(M6MessageServiceTest, HandlerExceptionIsContained) {
   test::M6ServicePair harness;
-  harness.right_messages->set_inbound_handler([](const MessageEnvelope&) {
+  harness.right_sinks.inbound = [](const DeviceEndpointKey&, const MessageEnvelope&) {
     throw std::runtime_error("handler exploded");
-  });
+  };
 
   const auto envelope = harness.make_envelope("test.throw");
   ASSERT_TRUE(harness.left_messages->send(envelope));
@@ -379,8 +391,10 @@ TEST(M6MessageServiceTest, DispatchRejectionIsObservable) {
   harness.right_dispatch.admit = false;
 
   std::vector<MessageEnvelope> received;
-  harness.right_messages->set_inbound_handler(
-      [&received](const MessageEnvelope& envelope) { received.push_back(envelope); });
+  harness.right_sinks.inbound =
+      [&received](const DeviceEndpointKey&, const MessageEnvelope& envelope) {
+        received.push_back(envelope);
+      };
 
   const auto envelope = harness.make_envelope("test.full");
   ASSERT_TRUE(harness.left_messages->send(envelope));
@@ -396,10 +410,9 @@ TEST(M6MessageServiceTest, DispatchRejectionIsObservable) {
 TEST(M6MessageServiceTest, SessionClosedFailsPendingAcks) {
   test::M6ServicePair harness;
   std::vector<MessageDeliveryEvent> events;
-  harness.left_messages->set_ack_observer(
-      [&events](const MessageId&, MessageDeliveryEvent event, std::optional<Error>) {
-        events.push_back(event);
-      });
+  harness.left_sinks.ack =
+      [&events](const DeviceEndpointKey&, const MessageId&, MessageDeliveryEvent event,
+                std::optional<Error>) { events.push_back(event); };
 
   const auto envelope =
       harness.make_envelope("test.close", MessageDeliveryMode::peer_acked,
