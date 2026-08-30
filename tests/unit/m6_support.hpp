@@ -84,17 +84,21 @@ struct ManualCancellableDispatch {
       auto entry = std::make_shared<Entry>();
       entry->task = std::move(task);
       tasks.push_back(entry);
-      return Result<TaskCancelRequest>::success([this,
-                                                 entry]() -> executor::TaskCancellationResponse {
-        if (entry->done) {
-          return {executor::TaskCancellationResult::AlreadyCompleted};
-        }
-        if (emulate_running_cancel) {
-          return {executor::TaskCancellationResult::RequestedRunning};
-        }
-        entry->done = true;  // Removed without running: queued cancellation.
-        return {executor::TaskCancellationResult::RequestedBeforeStart};
-      });
+      // The cancel closure must not own the entry: entry->task captures the
+      // ServerCallState, whose cancel_request holds this closure — a shared
+      // capture would create a reference cycle (LeakSanitizer-visible).
+      return Result<TaskCancelRequest>::success(
+          [this, entry = std::weak_ptr<Entry>{entry}]() -> executor::TaskCancellationResponse {
+            auto queued = entry.lock();
+            if (!queued || queued->done) {
+              return {executor::TaskCancellationResult::AlreadyCompleted};
+            }
+            if (emulate_running_cancel) {
+              return {executor::TaskCancellationResult::RequestedRunning};
+            }
+            queued->done = true;  // Removed without running: queued cancellation.
+            return {executor::TaskCancellationResult::RequestedBeforeStart};
+          });
     };
   }
 
