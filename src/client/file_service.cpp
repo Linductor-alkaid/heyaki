@@ -1255,7 +1255,6 @@ void FileService::dispatch_chunk_write(ReceiverState& receive) {
   auto pending = std::move(receive.write_queue.front());
   receive.write_queue.pop_front();
   const auto offset = pending.offset;
-  const auto length = pending.data.size();
   auto weak = weak_from_this();
   const auto id = receive.transfer_id;
   const auto temp_path = receive.temp_path;

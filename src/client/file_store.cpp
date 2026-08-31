@@ -15,7 +15,9 @@
 #include <string>
 #include <system_error>
 
-#ifndef _WIN32
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
