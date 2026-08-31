@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -64,6 +65,24 @@ struct FileEventLog {
   }
 };
 
+
+// Compact failure diagnostics: the CI Windows jobs fail these pushes without
+// observable detail, so dump both sides' counters at the assertion point.
+void dump_transfer_stats(const char* tag, const FileServiceStats& stats) {
+  std::printf(
+      "%s manifests_sent=%zu accepts=%zu chunks_sent=%zu deferred=%zu "
+      "complete=%zu committed=%zu failed=%zu readfail=%zu | manifests=%zu "
+      "rejected=%zu accepts=%zu chunks=%zu dup=%zu conflict=%zu hashfail=%zu "
+      "writefail=%zu verify=%zu committed=%zu commitfail=%zu path=%zu\n",
+      tag, stats.manifests_sent, stats.accepts_received, stats.chunks_sent,
+      stats.chunk_send_deferred, stats.completes_sent, stats.sender_committed,
+      stats.sender_failed, stats.read_failures, stats.manifests_received,
+      stats.manifests_rejected, stats.accepts_sent, stats.chunks_received,
+      stats.duplicate_chunks, stats.conflicting_chunks, stats.chunk_hash_failures,
+      stats.write_failures, stats.verifies_started, stats.committed,
+      stats.commit_failures, stats.path_rejected);
+}
+
 void install_right_log(M7ServicePair& harness, FileEventLog& log) {
   harness.right_file_sinks.events = [&log](const DeviceEndpointKey&,
                                            const FileTransferEvent& event) {
@@ -84,6 +103,17 @@ TEST(M7FileService, PushCommitsWithBlake3AndAtomicRename) {
   harness.cycle();
 
   const auto final_path = harness.right_root_dir.path / "inbox" / "nested" / "report.bin";
+  if (!std::filesystem::exists(final_path)) {
+    dump_transfer_stats("PUSH1-LEFT", harness.left_files->stats());
+    dump_transfer_stats("PUSH1-RIGHT", harness.right_files->stats());
+    for (const auto& event : right_log.events) {
+      std::printf("PUSH1-EVENT phase=%s error=%s\n",
+                  std::string{file_transfer_phase_name(event.phase)}.c_str(),
+                  event.error.has_value()
+                      ? std::string{event.error->safe_detail()}.c_str()
+                      : "-");
+    }
+  }
   ASSERT_TRUE(std::filesystem::exists(final_path));
   EXPECT_EQ(M7ServicePair::read_file_bytes(final_path),
             M7ServicePair::read_file_bytes(source));
@@ -120,6 +150,10 @@ TEST(M7FileService, MultiChunkPushCommitsInOrder) {
   harness.cycle(256);
 
   const auto final_path = harness.right_root_dir.path / "inbox" / "multi" / "big.bin";
+  if (!std::filesystem::exists(final_path)) {
+    dump_transfer_stats("MULTI-LEFT", harness.left_files->stats());
+    dump_transfer_stats("MULTI-RIGHT", harness.right_files->stats());
+  }
   ASSERT_TRUE(std::filesystem::exists(final_path));
   EXPECT_EQ(M7ServicePair::read_file_bytes(final_path),
             M7ServicePair::read_file_bytes(source));
