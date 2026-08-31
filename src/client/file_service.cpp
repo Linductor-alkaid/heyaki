@@ -1276,7 +1276,7 @@ void FileService::dispatch_chunk_write(ReceiverState& receive) {
   auto moved = std::make_shared<std::vector<std::byte>>(std::move(pending.data));
   auto dispatched = blocking_dispatch_(
       "heyaki-file-write",
-      [weak, id, offset, length, temp_path, state_path, state = std::move(state), moved](
+      [weak, id, offset, temp_path, state_path, state = std::move(state), moved](
           executor::StopToken stop) {
         bool ok = false;
         std::string detail;

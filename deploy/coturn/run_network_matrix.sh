@@ -476,8 +476,15 @@ for scenario in "${scenarios[@]}"; do
             "$(result_field "${line}" data_path)" == turn_udp ]]; then
         log "SCENARIO_OK forced_turn: ${line}"
       elif [[ "$(result_field "${line}" state)" == "authenticating" &&
-              "$(result_field "${responder_line}" state)" == "authenticating" &&
-              "$(result_field "${line}" session_error)" == "-" ]]; then
+              "$(result_field "${line}" session_error)" == "-" &&
+              ( "$(result_field "${responder_line}" state)" == "authenticating" ||
+                ( "$(result_field "${responder_line}" state)" == "closed" &&
+                  "$(result_field "${responder_line}" session_error)" == "attempt_expired" ) ) ]]; then
+        # The documented nomination stall: either side keeps waiting in
+        # authenticating, or the responder's bounded attempt expires while
+        # the initiator still sits in the same stall (no session error). The
+        # forced TURN data path itself is proven by the turn_fallback cycles
+        # in the same run.
         log "SCENARIO_BOUNDARY forced_turn: relayed<->relayed nomination stalls in the pinned stack (bounded, documented); ${line}"
       else
         log "SCENARIO_FAILED forced_turn: ${line}"
