@@ -85,25 +85,37 @@ demo (`apps/demo/m6_message_rpc_demo.cpp`). See the
 
 ## Build
 
-Fetch and verify the pinned source dependencies, then use a preset:
+Configure and build with a preset:
 
 ```sh
-scripts/fetch_third_party.sh --with-tests
 cmake --preset debug
 cmake --build --preset debug
 ctest --preset debug
 ```
 
+By default, CMake synchronizes missing or outdated repositories from
+`third_party/dependencies.lock` during configuration, verifies their exact commits, and
+installs the resulting artifacts into `build/debug/install`. The `heyaki-deploy` target is
+part of the normal build, so no separate dependency or install command is required for a
+local deployment. To choose another install directory, pass
+`-DHEYAKI_INSTALL_PREFIX=/path/to/install` when configuring.
+
 `release`, `asan`, `ubsan`, and `tsan` presets provide the matching build and test entry
 points. The build fails with an actionable dependency command when a selected runtime, test,
 or optional checkout is absent or no longer matches its locked commit.
 
+For offline or CI builds where dependencies must already be present, configure with
+`-DHEYAKI_FETCH_DEPENDENCIES=OFF`; CMake will perform check-only verification. Disable
+automatic installation with `-DHEYAKI_AUTO_INSTALL=OFF` when an external packaging step
+owns the install tree.
+
 Requirements: CMake ≥ 3.25, a C++20 toolchain, and system OpenSSL ≥ 3.0 (< 4.0). Linux
 (GCC 13.3 / Clang) and Windows (MSVC) are supported; all other dependencies (executor,
 libdatachannel, libsodium, protobuf, abseil, sqlite, boost subset, FTXUI, …) are pinned in
-`third_party/dependencies.lock` and fetched by `scripts/fetch_third_party.sh`.
+`third_party/dependencies.lock` and fetched automatically by CMake.
 
-Notable CMake options: `HEYAKI_BUILD_APPS` (default ON), `HEYAKI_BUILD_FUZZERS` (Clang),
+Notable CMake options: `HEYAKI_BUILD_APPS` (default ON), `HEYAKI_FETCH_DEPENDENCIES`
+(default ON), `HEYAKI_AUTO_INSTALL` (default ON), `HEYAKI_BUILD_FUZZERS` (Clang),
 `HEYAKI_ENABLE_EXCEPTIONS` (a no-exceptions build is supported), `HEYAKI_WARNINGS_AS_ERRORS`,
 `HEYAKI_ENABLE_CLANG_TIDY`, and `HEYAKI_REQUIRE_SANITIZER_RUNTIME`.
 

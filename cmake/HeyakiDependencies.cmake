@@ -10,14 +10,21 @@ find_program(HEYAKI_BASH_EXECUTABLE
   DOC "Bash executable used by Heyaki dependency and test scripts")
 mark_as_advanced(HEYAKI_BASH_EXECUTABLE)
 
-if((HEYAKI_VERIFY_DEPENDENCIES OR BUILD_TESTING) AND NOT HEYAKI_BASH_EXECUTABLE)
+if((HEYAKI_FETCH_DEPENDENCIES OR HEYAKI_VERIFY_DEPENDENCIES OR BUILD_TESTING) AND
+   NOT HEYAKI_BASH_EXECUTABLE)
   message(FATAL_ERROR
     "Bash is required for dependency verification and tests. "
     "Install Git for Windows or set HEYAKI_BASH_EXECUTABLE explicitly.")
 endif()
 
 function(heyaki_verify_dependencies)
-  set(arguments --check)
+  # In the normal local workflow, synchronize missing/outdated checkouts before
+  # verifying them.  Offline and CI callers can disable this with
+  # HEYAKI_FETCH_DEPENDENCIES=OFF and retain strict check-only behavior.
+  set(arguments)
+  if(NOT HEYAKI_FETCH_DEPENDENCIES)
+    list(APPEND arguments --check)
+  endif()
   set(fetch_hint "scripts/fetch_third_party.sh")
 
   if(BUILD_TESTING)
@@ -38,9 +45,13 @@ function(heyaki_verify_dependencies)
     ERROR_VARIABLE dependency_error)
   if(NOT dependency_result EQUAL 0)
     message(FATAL_ERROR
-      "Pinned dependency verification failed. Run `${fetch_hint}` and configure again.\n"
+      "Pinned dependency setup failed. Run `${fetch_hint}` and configure again.\n"
       "Process result: ${dependency_result}\n"
       "${dependency_output}${dependency_error}")
   endif()
-  message(STATUS "Pinned dependency verification passed")
+  if(HEYAKI_FETCH_DEPENDENCIES)
+    message(STATUS "Pinned dependencies fetched and verified")
+  else()
+    message(STATUS "Pinned dependency verification passed")
+  endif()
 endfunction()

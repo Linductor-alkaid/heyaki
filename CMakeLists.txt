@@ -16,6 +16,8 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 option(HEYAKI_BUILD_APPS "Build heyaki-relay and heyaki-tui" ON)
+option(HEYAKI_FETCH_DEPENDENCIES
+  "Fetch and synchronize missing pinned dependencies during CMake configure" ON)
 option(HEYAKI_VERIFY_DEPENDENCIES "Verify pinned dependency checkouts at configure time" ON)
 option(HEYAKI_VERIFY_ZSTD_DEPENDENCY
   "Include the optional zstd checkout in configure-time pin verification" OFF)
@@ -37,6 +39,10 @@ set(HEYAKI_TEST_STATE_DIR "${CMAKE_CURRENT_BINARY_DIR}/test-state" CACHE PATH
     "Temporary profiles, credentials, and databases used by tests")
 set(HEYAKI_FUZZ_CORPUS_DIR "${CMAKE_CURRENT_BINARY_DIR}/fuzz-corpus" CACHE PATH
     "Generated fuzz corpus directory")
+set(HEYAKI_INSTALL_PREFIX "${CMAKE_CURRENT_BINARY_DIR}/install" CACHE PATH
+    "Local installation directory used by the automatic heyaki-deploy target")
+option(HEYAKI_AUTO_INSTALL
+  "Install Heyaki artifacts into HEYAKI_INSTALL_PREFIX after each successful build" ON)
 
 function(heyaki_require_binary_path variable_name)
   cmake_path(ABSOLUTE_PATH ${variable_name} NORMALIZE OUTPUT_VARIABLE absolute_path)
@@ -61,7 +67,7 @@ include(HeyakiProjectOptions)
 include(HeyakiVendoredRuntime)
 include(HeyakiVersion)
 
-if(HEYAKI_VERIFY_DEPENDENCIES)
+if(HEYAKI_FETCH_DEPENDENCIES OR HEYAKI_VERIFY_DEPENDENCIES OR BUILD_TESTING)
   heyaki_verify_dependencies()
 endif()
 
@@ -391,3 +397,16 @@ install(FILES
   "${CMAKE_CURRENT_BINARY_DIR}/heyakiConfig.cmake"
   "${CMAKE_CURRENT_BINARY_DIR}/heyakiConfigVersion.cmake"
   DESTINATION "${HEYAKI_CMAKE_INSTALL_DIR}")
+
+if(HEYAKI_AUTO_INSTALL)
+  add_custom_target(heyaki-deploy ALL
+    COMMAND "${CMAKE_COMMAND}" --install "${CMAKE_BINARY_DIR}"
+      --config "$<CONFIG>"
+      --prefix "${HEYAKI_INSTALL_PREFIX}"
+    DEPENDS ${HEYAKI_INSTALL_TARGETS}
+    USES_TERMINAL
+    COMMENT "Installing Heyaki into ${HEYAKI_INSTALL_PREFIX}")
+  if(TARGET heyaki-sbom)
+    add_dependencies(heyaki-deploy heyaki-sbom)
+  endif()
+endif()
