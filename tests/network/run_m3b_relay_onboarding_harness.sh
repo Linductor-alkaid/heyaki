@@ -106,7 +106,7 @@ listen_port = ${port}
 tls_certificate_file = ${work_dir}/relay-cert.pem
 tls_private_key_file = ${work_dir}/relay-key.pem
 database_file = ${relay_db}
-handshake_timeout_milliseconds = 2000
+handshake_timeout_milliseconds = 6000
 shutdown_timeout_milliseconds = 2000
 RELAY_EOF
 

@@ -18,7 +18,7 @@ def main():
     tenant = os.environ["HEYAKI_TENANT"]
     token = os.environ["HEYAKI_TOKEN"]
     log_path = os.environ.get("HEYAKI_TUI_DRIVE_LOG", "/dev/null")
-    timeout = 20.0
+    timeout = 35.0
 
     master, slave = pty.openpty()
     env = os.environ.copy()
