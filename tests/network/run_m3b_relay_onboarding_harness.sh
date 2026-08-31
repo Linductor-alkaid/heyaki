@@ -131,15 +131,28 @@ done
 [[ -n "${proxy_port}" ]] || { cat "${work_dir}/proxy.log"; printf 'capture proxy did not start\n'; exit 1; }
 proxy_url="wss://127.0.0.1:${proxy_port}"
 
-XDG_STATE_HOME="${state_dir}" SSL_CERT_FILE="${work_dir}/ca.pem" \
-  HEYAKI_TUI_BIN="${tui_bin}" HEYAKI_RELAY_URL="${proxy_url}" \
-  HEYAKI_TENANT="${tenant}" HEYAKI_TOKEN="${token}" \
-  HEYAKI_TUI_DRIVE_LOG="${work_dir}/tui-enroll.log" \
-  python3 "${script_dir}/drive_tui_relay_enrollment.py" || {
-    cat "${work_dir}/tui-enroll.log"
-    printf 'TUI relay enrollment failed\n'
-    exit 1
-  }
+# Loaded 2-core CI runners occasionally leave the first enrollment run
+# wedged inside its WSS exchange (bounded driver window expires without the
+# prompt returning). A fresh TUI process is a fresh runtime: retry the whole
+# driver once, like the lossy/relay_restart matrix scenarios.
+enroll_ok=false
+for attempt in 1 2; do
+  if XDG_STATE_HOME="${state_dir}" SSL_CERT_FILE="${work_dir}/ca.pem" \
+      HEYAKI_TUI_BIN="${tui_bin}" HEYAKI_RELAY_URL="${proxy_url}" \
+      HEYAKI_TENANT="${tenant}" HEYAKI_TOKEN="${token}" \
+      HEYAKI_TUI_DRIVE_LOG="${work_dir}/tui-enroll.log" \
+      python3 "${script_dir}/drive_tui_relay_enrollment.py"; then
+    enroll_ok=true
+    break
+  fi
+  printf 'enrollment driver attempt %s failed; retrying with a fresh TUI process\n' \
+    "${attempt}"
+done
+if [[ "${enroll_ok}" != true ]]; then
+  cat "${work_dir}/tui-enroll.log"
+  printf 'TUI relay enrollment failed\n'
+  exit 1
+fi
 
 XDG_STATE_HOME="${state_dir}" SSL_CERT_FILE="${work_dir}/ca.pem" \
   "${demo_bin}" run "${profile_db}" org.heyaki.m3b-demo 8000 \
