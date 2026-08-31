@@ -57,12 +57,13 @@ bool windows_device_segment(std::string_view segment) noexcept {
   if (dot != std::string_view::npos) {
     stem = segment.substr(0U, dot);
   }
-  auto iequals = [stem](std::string_view name) {
+  const auto lower = [](char value) {
+    return static_cast<char>(static_cast<unsigned char>(value) | 0x20U);
+  };
+  auto iequals = [stem, lower](std::string_view name) {
     if (stem.size() != name.size()) return false;
     for (std::size_t index = 0U; index < name.size(); ++index) {
-      const char left = stem[index] | 0x20U;  // ASCII lowercase
-      const char right = name[index] | 0x20U;
-      if (left != right) return false;
+      if (lower(stem[index]) != lower(name[index])) return false;
     }
     return true;
   };
@@ -70,10 +71,10 @@ bool windows_device_segment(std::string_view segment) noexcept {
     return true;
   }
   if (stem.size() == 4U) {
-    const bool com = (stem[0U] | 0x20U) == 'c' && (stem[1U] | 0x20U) == 'o' &&
-                     (stem[2U] | 0x20U) == 'm';
-    const bool lpt = (stem[0U] | 0x20U) == 'l' && (stem[1U] | 0x20U) == 'p' &&
-                     (stem[2U] | 0x20U) == 't';
+    const bool com = lower(stem[0U]) == 'c' && lower(stem[1U]) == 'o' &&
+                     lower(stem[2U]) == 'm';
+    const bool lpt = lower(stem[0U]) == 'l' && lower(stem[1U]) == 'p' &&
+                     lower(stem[2U]) == 't';
     const char digit = stem[3U];
     if ((com || lpt) && digit >= '1' && digit <= '9') {
       return true;
