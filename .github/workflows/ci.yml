@@ -79,8 +79,15 @@ jobs:
           if (-not (Test-Path "$opensslRoot/include/openssl/ssl.h")) {
             throw "GitHub runner OpenSSL development files not found at $opensslRoot"
           }
+          # HEYAKI_FETCH_DEPENDENCIES=OFF: dependencies are pre-fetched above, so
+          # configure runs the check-only pin verification instead of a network
+          # sync. HEYAKI_AUTO_INSTALL=OFF: CI never consumes the install tree,
+          # and the Windows install rules of the pinned libdatachannel (DLL +
+          # linker-PDB files) are not part of what CI validates.
           cmake -S . -B build -A x64 `
             -DHEYAKI_WARNINGS_AS_ERRORS=ON `
+            -DHEYAKI_FETCH_DEPENDENCIES=OFF `
+            -DHEYAKI_AUTO_INSTALL=OFF `
             "-DOPENSSL_ROOT_DIR=$opensslRoot"
       - name: Build
         run: cmake --build build --config ${{ matrix.build_type }} --parallel 2
