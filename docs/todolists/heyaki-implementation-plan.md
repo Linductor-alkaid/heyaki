@@ -135,7 +135,7 @@ scope，可与 M7/M8 并行实施，但 gateway 不进入 v1.0 发布门禁，�
 | M4 | [m4-connectivity-mvp.md](m4-connectivity-mvp.md) | 已完成 | 公共签名信令、WebRTC/ICE/TURN 与最小认证会话；17/17 任务完成、退出条件全部达成；第 23 轮修复三个被时序变化放大的既有竞态后，CI run 33094431955 全绿、`heyaki_m4_network_matrix` MATRIX_OK（turn_fallback P95 2203ms），2026-08-27 关闭。 |
 | M5 | [m5-authorization-bytestream.md](m5-authorization-bytestream.md) | 已完成 | 会话授权（pairing/TrustGrant）、通道调度与 ByteStream；20/20 任务与全部退出条件完成，两轮实施记录见阶段文件，2026-08-28 关闭。 |
 | M6 | [m6-message-rpc.md](m6-message-rpc.md) | 已完成 | 消息（best_effort/peer_acked、TTL 去重、scope）、unary RPC（deadline/取消/at-most-once/outcome_unknown）与 TUI/示例；21/21 任务与退出条件于 2026-08-29 完成。 |
-| M7 | [m7-event-file-transfer.md](m7-event-file-transfer.md) | 未开始 | 远程事件与文件传输。 |
+| M7 | [m7-event-file-transfer.md](m7-event-file-transfer.md) | 已完成 | 远程事件与文件传输。 |
 | M8 | [m8-remote-shell.md](m8-remote-shell.md) | 未开始 | Remote Shell 与安全终端 UI（独立安全里程碑，默认关闭）。 |
 | M9 | [m9-production-hardening.md](m9-production-hardening.md) | 未开始 | 生产加固、跨平台、兼容性与 v1 发布。 |
 | M10 | [m10-gateway-proxy.md](m10-gateway-proxy.md) | 未开始 | 受限 L4 Gateway 代理：protocol 1.3 变更单、授权/profile、B 侧网关服务、A 侧 API 与可选 SOCKS5 前端。 |

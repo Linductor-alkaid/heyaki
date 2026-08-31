@@ -91,8 +91,14 @@ struct RpcMethodDescriptor {
   std::string service;
   std::string method;
   std::uint32_t schema_version{1U};
+  // Checked against the caller session's effective scopes before any handler
+  // runs. Built-in methods that enforce a finer-grained per-request scope
+  // themselves (for example heyaki.file/pull's per-root file.pull:<root>)
+  // set handler_enforced_scope instead; the wire behavior is unchanged —
+  // unauthorized calls still answer permission_denied, just from the handler.
   std::string required_scope;
   bool streaming{false};
+  bool handler_enforced_scope{false};
 };
 
 // What one executing handler observes. `cancelled()` is the cooperative
@@ -104,7 +110,8 @@ class RpcCallContext {
   RpcCallContext(RequestId request_id, std::vector<std::byte> payload,
                  std::vector<RpcMetadataEntry> metadata,
                  std::uint64_t deadline_unix_milliseconds,
-                 const std::shared_ptr<const std::atomic<bool>>& cancelled);
+                 const std::shared_ptr<const std::atomic<bool>>& cancelled,
+                 std::optional<DeviceEndpointKey> peer = std::nullopt);
 
   [[nodiscard]] RequestId request_id() const noexcept { return request_id_; }
   [[nodiscard]] std::span<const std::byte> payload() const noexcept {
@@ -119,6 +126,12 @@ class RpcCallContext {
   [[nodiscard]] bool cancelled() const noexcept {
     return cancelled_ != nullptr && cancelled_->load(std::memory_order_acquire);
   }
+  // The authenticated calling peer when the request arrived on a session
+  // (built-in service handlers use it to resolve per-peer state; handlers
+  // registered through the process-wide registry also see it since M7).
+  [[nodiscard]] const std::optional<DeviceEndpointKey>& peer() const noexcept {
+    return peer_;
+  }
 
  private:
   RequestId request_id_;
@@ -126,6 +139,7 @@ class RpcCallContext {
   std::vector<RpcMetadataEntry> metadata_;
   std::uint64_t deadline_unix_milliseconds_;
   std::shared_ptr<const std::atomic<bool>> cancelled_;
+  std::optional<DeviceEndpointKey> peer_;
 };
 
 // Handler result. `status` is the stable wire status; `safe_detail` must be a

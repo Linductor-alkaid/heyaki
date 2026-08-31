@@ -113,6 +113,11 @@ const char* payload_limit_error(std::uint8_t type, std::size_t payload_size,
       payload_size > limits.max_rpc_payload_bytes) {
     return "rpc_payload_limit";
   }
+  if (type >= static_cast<std::uint8_t>(FrameType::event_subscribe) &&
+      type <= static_cast<std::uint8_t>(FrameType::event_unsubscribe) &&
+      payload_size > limits.max_event_payload_bytes) {
+    return "event_payload_limit";
+  }
   if (type >= static_cast<std::uint8_t>(FrameType::pairing_request) &&
       type <= static_cast<std::uint8_t>(FrameType::pairing_result) &&
       payload_size > limits.max_pairing_payload_bytes) {

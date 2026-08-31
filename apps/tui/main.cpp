@@ -116,6 +116,23 @@ struct UiState {
   executor::comm::MpscChannel<RpcResult> rpc_channel;
   executor::comm::LatestMailbox<PairingStatus> pairing;
 
+  // ---- M7 event & file view state ----
+  struct EventItemView {
+    heyaki::DeviceEndpointKey peer;
+    std::string pattern;
+    heyaki::EventItemBody item;
+  };
+  struct FileEventView {
+    heyaki::DeviceEndpointKey peer;
+    heyaki::FileTransferEvent event;
+  };
+  executor::comm::MpscChannel<EventItemView> event_channel{
+      event_channel_options<EventItemView>(64U, "heyaki-tui-event-items")};
+  executor::comm::MpscChannel<FileEventView> file_channel{
+      event_channel_options<FileEventView>(64U, "heyaki-tui-file-events")};
+  std::deque<EventItemView> event_items;
+  std::deque<FileEventView> file_events;
+
   // Render-loop-owned display buffers; single-threaded after the drain.
   std::deque<InboundMessage> inbound_messages;
   std::deque<AckEvent> ack_events;
@@ -146,6 +163,20 @@ struct UiState {
       rpc_results.push_back(std::move(rpc));
       while (rpc_results.size() > 32U) {
         rpc_results.pop_front();
+      }
+    }
+    EventItemView item;
+    while (event_channel.try_receive(item)) {
+      event_items.push_back(std::move(item));
+      while (event_items.size() > 64U) {
+        event_items.pop_front();
+      }
+    }
+    FileEventView file_event;
+    while (file_channel.try_receive(file_event)) {
+      file_events.push_back(std::move(file_event));
+      while (file_events.size() > 64U) {
+        file_events.pop_front();
       }
     }
   }
@@ -899,8 +930,224 @@ void run_rpc_view(const heyaki::DeviceEndpointKey& peer, heyaki::Node& node,
   }
 }
 
-void run_command(std::string line, heyaki::Node& node, UiState& state,
-                 bool& running) {
+// M7-07: remote event view. Topic browse/subscribe/unsubscribe, test
+// publishing, and sequence/drop/lag visibility for received items.
+void run_event_view(const heyaki::DeviceEndpointKey& peer, heyaki::Node& node,
+                    UiState& state) {
+  std::string topic = "telemetry.cpu";
+  heyaki::EventQos qos = heyaki::EventQos::best_effort_latest;
+  bool prefix = true;
+  std::cout << "\nEVENT device=" << heyaki::to_string(peer.device_id)
+            << "\ncommands [topic NAME|qos latest|live|match exact|prefix|sub|unsub|pub "
+               "<text>|items|topics|exit]\n";
+  bool in_view = true;
+  while (in_view) {
+    std::cout << "event topic=" << topic << " qos=" << heyaki::event_qos_name(qos)
+              << " match=" << (prefix ? "prefix" : "exact") << "> " << std::flush;
+    std::string line;
+    if (!std::getline(std::cin, line)) return;
+    std::istringstream input{line};
+    std::string command;
+    input >> command;
+    if (command == "exit") {
+      in_view = false;
+    } else if (command == "topic") {
+      input >> topic;
+    } else if (command == "qos") {
+      std::string which;
+      input >> which;
+      if (which == "live") qos = heyaki::EventQos::reliable_live;
+      if (which == "latest") qos = heyaki::EventQos::best_effort_latest;
+    } else if (command == "match") {
+      std::string which;
+      input >> which;
+      if (which == "exact") prefix = false;
+      if (which == "prefix") prefix = true;
+    } else if (command == "sub") {
+      auto subscribed = node.subscribe_events(peer, topic, prefix, qos);
+      if (!subscribed) {
+        std::cout << "subscribe failed: " << subscribed.error_if()->safe_detail()
+                  << " (" << heyaki::error_code_name(subscribed.error_if()->code())
+                  << ")\n";
+      } else {
+        std::cout << "subscribed topic=" << topic
+                  << " qos=" << heyaki::event_qos_name(qos) << "\n";
+      }
+    } else if (command == "unsub") {
+      const auto removed = node.unsubscribe_events(peer, topic);
+      std::cout << "unsubscribed entries=" << removed << "\n";
+    } else if (command == "pub") {
+      std::string text;
+      std::getline(input, text);
+      if (!text.empty() && text.front() == ' ') text.erase(text.begin());
+      std::vector<std::byte> payload;
+      payload.reserve(text.size());
+      for (const char value : text) {
+        payload.push_back(static_cast<std::byte>(value));
+      }
+      auto published = node.publish_event(peer, topic, std::move(payload), 1U);
+      if (!published) {
+        std::cout << "publish failed: " << published.error_if()->safe_detail() << "\n";
+      } else {
+        std::cout << "published matched=" << *published.value_if() << "\n";
+      }
+    } else if (command == "items") {
+      state.drain_service_events();
+      if (state.event_items.empty()) {
+        std::cout << "no events yet\n";
+      }
+      for (const auto& entry : state.event_items) {
+        std::string payload;
+        payload.reserve(entry.item.payload.size());
+        for (const auto value : entry.item.payload) {
+          payload.push_back(static_cast<char>(value));
+        }
+        std::cout << "event pattern=" << entry.pattern
+                  << " seq=" << entry.item.publisher_sequence
+                  << " schema=" << entry.item.schema_version << " qos="
+                  << heyaki::event_qos_name(entry.item.qos) << " payload=\"" << payload
+                  << "\"\n";
+      }
+      const auto diagnostics = node.service_diagnostics();
+      std::cout << "stats received=" << diagnostics.event.items_received
+                << " lag_events=" << diagnostics.event.lag_events
+                << " lag_sequences=" << diagnostics.event.lag_total_sequences
+                << " stale=" << diagnostics.event.stale_items
+                << " duplicates=" << diagnostics.event.duplicate_items
+                << " conflicts=" << diagnostics.event.conflicting_items
+                << " overwrites=" << diagnostics.event.subscriber_overwrites
+                << " drops=" << diagnostics.event.subscriber_drops << "\n";
+    } else if (command == "topics") {
+      std::cout << "browse: subscribe a pattern under a topic root granted to this "
+                   "peer; the source checks event.subscribe:<root>\n"
+                << "examples: telemetry.cpu  telemetry  chat.room1\n";
+    } else {
+      std::cout << "event command unknown\n";
+    }
+  }
+}
+
+// M7-16: file view. Logical root, push/pull, progress/throughput, pause,
+// cancel, and failure visibility — never a raw remote filesystem view.
+void run_file_view(const heyaki::DeviceEndpointKey& peer, heyaki::Node& node,
+                   UiState& state, const std::filesystem::path& inbox_root) {
+  std::cout << "\nFILE device=" << heyaki::to_string(peer.device_id)
+            << " root=inbox dir=" << inbox_root.string()
+            << "\ncommands [push NAME <local-path>|pull NAME|ls|events|pause "
+               "<id>|resume <id>|cancel <id>|exit]\n";
+  bool in_view = true;
+  while (in_view) {
+    std::cout << "file> " << std::flush;
+    std::string line;
+    if (!std::getline(std::cin, line)) return;
+    std::istringstream input{line};
+    std::string command;
+    input >> command;
+    if (command == "exit") {
+      in_view = false;
+    } else if (command == "push") {
+      std::string name;
+      std::string path_text;
+      input >> name;
+      std::getline(input, path_text);
+      if (!path_text.empty() && path_text.front() == ' ') path_text.erase(path_text.begin());
+      auto pushed = node.push_file(peer, "inbox", name, std::filesystem::path{path_text});
+      if (!pushed) {
+        std::cout << "push failed: " << pushed.error_if()->safe_detail()
+                  << " (" << heyaki::error_code_name(pushed.error_if()->code()) << ")\n";
+      } else {
+        std::cout << "push started id=" << heyaki::to_string(*pushed.value_if()) << "\n";
+      }
+    } else if (command == "pull") {
+      std::string name;
+      input >> name;
+      auto pulled = node.pull_file(peer, "inbox", name);
+      if (!pulled) {
+        std::cout << "pull failed: " << pulled.error_if()->safe_detail() << "\n";
+      } else {
+        std::cout << "pull started id=" << heyaki::to_string(*pulled.value_if()) << "\n";
+      }
+    } else if (command == "ls") {
+      const auto transfers = node.file_transfers(peer);
+      if (transfers.empty()) {
+        std::cout << "no live transfers\n";
+      }
+      for (const auto& transfer : transfers) {
+        const double fraction = transfer.bytes_total == 0U
+                                    ? 0.0
+                                    : static_cast<double>(transfer.bytes_done) /
+                                          static_cast<double>(transfer.bytes_total);
+        std::cout << "transfer id=" << heyaki::to_string(transfer.transfer_id)
+                  << " dir=" << (transfer.direction == heyaki::FileTransferDirection::push
+                                     ? "push"
+                                     : "pull")
+                  << " phase=" << heyaki::file_transfer_phase_name(transfer.phase)
+                  << " name=" << transfer.logical_name << " bytes=" << transfer.bytes_done
+                  << "/" << transfer.bytes_total << " (" << static_cast<int>(fraction * 100.0)
+                  << "%)\n";
+      }
+      const auto diagnostics = node.service_diagnostics();
+      std::cout << "stats committed=" << diagnostics.file.committed
+                << " failed=" << diagnostics.file.commit_failures
+                << " resumed=" << diagnostics.file.resumed_transfers
+                << " chunks=" << diagnostics.file.chunks_received
+                << " dup=" << diagnostics.file.duplicate_chunks
+                << " conflict=" << diagnostics.file.conflicting_chunks
+                << " paused=" << diagnostics.file_paused_transfers << "\n";
+    } else if (command == "events") {
+      state.drain_service_events();
+      if (state.file_events.empty()) {
+        std::cout << "no file events yet\n";
+      }
+      for (const auto& entry : state.file_events) {
+        std::cout << "file phase="
+                  << heyaki::file_transfer_phase_name(entry.event.phase)
+                  << " name=" << entry.event.logical_name
+                  << " bytes=" << entry.event.bytes_done << "/"
+                  << entry.event.bytes_total
+                  << (entry.event.error.has_value()
+                          ? " error=" + std::string{entry.event.error->safe_detail()}
+                          : "")
+                  << "\n";
+      }
+    } else if (command == "pause" || command == "resume" || command == "cancel") {
+      std::string id_text;
+      input >> id_text;
+      const auto id = heyaki::parse_transfer_id(id_text);
+      if (!id) {
+        std::cout << "transfer id invalid\n";
+        continue;
+      }
+      heyaki::Result<void> outcome = heyaki::Result<void>::failure(
+          heyaki::Error{heyaki::ErrorCode::internal, "tui", "no_result"});
+      if (command == "pause") {
+        outcome = node.pause_file_transfer(peer, *id.value);
+      } else if (command == "resume") {
+        outcome = node.resume_file_transfer(peer, *id.value);
+      } else {
+        outcome = node.cancel_file_transfer(peer, *id.value);
+      }
+      if (!outcome) {
+        std::cout << command << " failed: " << outcome.error_if()->safe_detail() << "\n";
+      } else {
+        std::cout << command << " ok\n";
+      }
+    } else {
+      std::cout << "file command unknown\n";
+    }
+  }
+}
+
+// M7-16: the TUI's logical "inbox" root lives beside the profile store
+// (XDG state), one directory per profile.
+std::filesystem::path file_inbox_root(std::string_view profile_name) {
+  auto root = heyaki::ProfileStore::default_profiles_root();
+  const auto base = root ? *root.value_if() : std::filesystem::temp_directory_path();
+  return base.parent_path() / "files" / std::string{profile_name} / "inbox";
+}
+
+void run_command(std::string line, heyaki::Node& node, UiState& state, bool& running,
+                 const std::filesystem::path& file_inbox) {
   std::istringstream input(std::move(line));
   std::string command;
   input >> command;
@@ -1070,6 +1317,20 @@ void run_command(std::string line, heyaki::Node& node, UiState& state,
     // M6-15: unary RPC view (descriptors, raw payloads, deadline, cancel).
     run_rpc_view(*peer, node, state);
     state.command_status = "rpc-view-closed";
+    state.command_error.reset();
+    return;
+  }
+  if (command == "event") {
+    // M7-07: remote event view (topics, subscribe/publish, sequence/drop/lag).
+    run_event_view(*peer, node, state);
+    state.command_status = "event-view-closed";
+    state.command_error.reset();
+    return;
+  }
+  if (command == "file") {
+    // M7-16: file view (logical root, push/pull, progress, pause/cancel).
+    run_file_view(*peer, node, state, file_inbox);
+    state.command_status = "file-view-closed";
     state.command_error.reset();
     return;
   }
@@ -1295,7 +1556,13 @@ int run_tui(const Options& options) {
   auto bridge = std::make_shared<UiBridge>(lan.value_if()->pending_signaling_capacity);
   // No custom signaling handler: the Node assembles signed sessions
   // automatically, and the renderer observes bounded latest-only snapshots.
+  const auto file_inbox = file_inbox_root(options.profile_name);
+  std::error_code inbox_ec;
+  std::filesystem::create_directories(file_inbox, inbox_ec);
   auto make_node = [&]() {
+    heyaki::FileRootConfig inbox_root;
+    inbox_root.name = "inbox";
+    inbox_root.directory = file_inbox;
     return heyaki::Node::create(
         heyaki::NodeConfig{.profile = &*profile,
                            .runtime = nullptr,
@@ -1305,7 +1572,8 @@ int run_tui(const Options& options) {
                            .signaling_validator = {},
                            .signaling_handler = {},
                            .relay_override = std::nullopt,
-                           .path_policy_override = std::nullopt});
+                           .path_policy_override = std::nullopt,
+                           .file_receive_roots = {inbox_root}});
   };
   std::optional<heyaki::Node> node;
   auto created_node = make_node();
@@ -1363,6 +1631,21 @@ int run_tui(const Options& options) {
       [&state](const heyaki::DeviceEndpointKey& peer, const heyaki::MessageId& id,
                heyaki::MessageDeliveryEvent event, std::optional<heyaki::Error> error) {
         push_ack_event(state, peer, id, event, std::move(error));
+      });
+  // M7: remote events and file transfer lifecycle feed the views through the
+  // same bounded channels (drop-oldest, observable via comm stats).
+  node->set_event_inbound_handler([&state](const heyaki::DeviceEndpointKey& peer,
+                                           std::string_view pattern,
+                                           const heyaki::EventItemBody& item) {
+    UiState::EventItemView view;
+    view.peer = peer;
+    view.pattern = std::string{pattern};
+    view.item = item;
+    (void)state.event_channel.try_send(std::move(view));
+  });
+  node->set_file_event_observer(
+      [&state](const heyaki::DeviceEndpointKey& peer, const heyaki::FileTransferEvent& event) {
+        (void)state.file_channel.try_send(UiState::FileEventView{peer, event});
       });
   if (auto registered = register_tui_services(*node); !registered) {
     render_uninitialized(options.profile_name, *registered.error_if());
@@ -1430,7 +1713,7 @@ int run_tui(const Options& options) {
       state.command_error.reset();
       continue;
     }
-    run_command(std::move(line), *node, state, running);
+    run_command(std::move(line), *node, state, running, file_inbox);
   }
   bridge->events.close();
   const auto shutdown = node->shutdown();

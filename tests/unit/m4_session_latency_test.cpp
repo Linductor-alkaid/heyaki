@@ -119,7 +119,15 @@ TEST_F(M4SessionLatencyTest, DirectHostSessionEstablishmentP95UnderThreeSeconds)
                         .signaling_validator = {},
                         .signaling_handler = {},
                         .relay_override = std::nullopt,
-                        .path_policy_override = std::nullopt};
+                        .path_policy_override = std::nullopt,
+                        .pairing_failure_threshold = 0U,
+                        .pairing_backoff_base = std::chrono::milliseconds{0},
+                        .pairing_backoff_max = std::chrono::milliseconds{0},
+                        .pairing_grant_ttl_milliseconds = 0U,
+                        .event_subscriber_queue_items = 0U,
+                        .event_max_subscriptions_per_peer = 0U,
+                        .file_receive_roots = {},
+                        .file_max_peer_receive_bytes = 0U};
     };
     NodeConfig first_config = node_config_for(*first_profile.value_if(),
                                               "com.example.latency.first");

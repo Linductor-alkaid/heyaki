@@ -45,7 +45,12 @@ license file exists, and emits an SPDX 2.3 tag-value document plus a Markdown li
 Generation fails for a missing, duplicate, extra, or malformed package/license record. CTest also
 checks all expected packages and parent/submodule relationships.
 
-The inventory covers 35 direct pins and the 5 recursive libdatachannel submodules. The Boost.Beast WSS closure was added and frozen at M3B entry as Beast 1.88.0 plus its reviewed Asio/System/Config/Assert/ThrowException/Predef/WinAPI/Bind/ContainerHash/Core/Describe/Endian/Intrusive/IO/Move/Mp11/Optional/Preprocessor/SmartPtr/StaticAssert/StaticString/TypeIndex/TypeTraits/Utility module closure. Abseil is pinned
+The inventory covers 35 direct pins and the 5 recursive libdatachannel submodules. M7
+promoted the pinned BLAKE3 checkout (1.8.2, previously a locked-but-unbuilt runtime pin) to
+a built vendored target `heyaki_blake3` compiled from its portable C core only
+(`BLAKE3_NO_SSE2/SSE41/AVX2/AVX512/NEON`): no per-file architecture flags, no assembly
+sources, and deterministic behavior under every sanitizer preset. The SIMD dispatch remains
+available for a future throughput-driven revision. The Boost.Beast WSS closure was added and frozen at M3B entry as Beast 1.88.0 plus its reviewed Asio/System/Config/Assert/ThrowException/Predef/WinAPI/Bind/ContainerHash/Core/Describe/Endian/Intrusive/IO/Move/Mp11/Optional/Preprocessor/SmartPtr/StaticAssert/StaticString/TypeIndex/TypeTraits/Utility module closure. Abseil is pinned
 as the build/runtime dependency required by the pinned Protobuf 31.1 Lite toolchain. The
 [M0 linkage and license audit](m0-linkage-license-audit.md) is the point-in-time record from before
 the first pins were linked; since M1/M2, built artifacts link and redistribute the pinned runtime

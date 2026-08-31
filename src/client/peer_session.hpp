@@ -225,6 +225,11 @@ class PeerSession final : public std::enable_shared_from_this<PeerSession> {
                                         session::FrameClass klass, Frame frame);
 
   [[nodiscard]] const session::SessionChannelManager& channels() const noexcept;
+  // Maximum payload the domain's physical transport channel accepts (the
+  // NEGOTIATED DataChannel/SCTP message size once the channel is open; the
+  // session frame limit as a fallback). File chunk sizing uses this so bulk
+  // frames never exceed what the association can carry.
+  [[nodiscard]] std::size_t max_message_bytes(session::ChannelDomain domain) const;
   // Drains queued frames into writable transport channels.
   void pump();
 

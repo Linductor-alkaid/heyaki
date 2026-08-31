@@ -23,6 +23,11 @@ class RuntimeAccess {
   // running tasks observe a cooperative stop request).
   [[nodiscard]] static Result<TaskCancelRequest> dispatch_general_cancellable(
       Runtime& runtime, std::string name, CancellableTask task);
+  // Blocking file I/O dispatch (M7-12): the task runs on the runtime's
+  // dedicated executor-managed blocking I/O worker.
+  [[nodiscard]] static Result<TaskCancelRequest> dispatch_blocking(Runtime& runtime,
+                                                                   std::string name,
+                                                                   CancellableTask task);
 };
 
 }  // namespace heyaki::detail

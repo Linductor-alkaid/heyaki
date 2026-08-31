@@ -1,5 +1,6 @@
 #pragma once
 
+#include <heyaki/ids.hpp>
 #include <heyaki/lan_protocol.hpp>
 #include <heyaki/profile_store.hpp>
 
@@ -13,16 +14,6 @@
 #include <vector>
 
 namespace heyaki {
-
-struct DeviceEndpointKey {
-  DeviceId device_id;
-  EndpointId endpoint_id;
-
-  friend constexpr bool operator==(const DeviceEndpointKey&,
-                                   const DeviceEndpointKey&) noexcept = default;
-  friend constexpr auto operator<=>(const DeviceEndpointKey&,
-                                    const DeviceEndpointKey&) noexcept = default;
-};
 
 enum class DirectoryObservationOutcome : std::uint8_t {
   inserted,

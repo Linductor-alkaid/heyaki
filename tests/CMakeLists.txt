@@ -415,6 +415,25 @@ heyaki_add_runtime_test(
   heyaki_m6_service heyaki_m6_service_tests
   "unit;session;security;protocol;concurrency;m6")
 
+add_executable(heyaki_m7_service_tests
+  unit/m7_codec_test.cpp
+  unit/m7_event_test.cpp
+  unit/m7_file_test.cpp)
+target_link_libraries(heyaki_m7_service_tests PRIVATE
+  heyaki::client
+  heyaki::core
+  heyaki::blake3
+  executor::executor
+  GTest::gtest_main)
+target_include_directories(heyaki_m7_service_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/client"
+  "${CMAKE_CURRENT_SOURCE_DIR}/unit")
+heyaki_configure_target(heyaki_m7_service_tests)
+heyaki_add_runtime_test(
+  heyaki_m7_service heyaki_m7_service_tests
+  "unit;session;security;protocol;concurrency;m7")
+
 add_executable(heyaki_m5_pairing_service_tests unit/m5_pairing_service_test.cpp)
 target_link_libraries(heyaki_m5_pairing_service_tests PRIVATE
   heyaki::client
@@ -797,6 +816,15 @@ if(HEYAKI_BUILD_APPS)
   set_tests_properties(heyaki_m6_semantics_smoke PROPERTIES
     LABELS "m6;docs"
     PASS_REGULAR_EXPRESSION "outcome_unknown;admission;unimplemented \\(12\\)")
+endif()
+
+if(TARGET heyaki-m7-data-demo)
+  add_test(
+    NAME heyaki_m7_semantics_smoke
+    COMMAND "$<TARGET_FILE:heyaki-m7-data-demo>" semantics)
+  set_tests_properties(heyaki_m7_semantics_smoke PROPERTIES
+    LABELS "m7;docs"
+    PASS_REGULAR_EXPRESSION "invalid_topic;unsafe_name;peer_offline;M7_SEMANTICS_OK")
 endif()
 
 if(WIN32)

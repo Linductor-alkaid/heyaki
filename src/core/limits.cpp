@@ -39,6 +39,10 @@ Result<void> validate_limits(const Limits& limits) {
       limits.max_rpc_payload_bytes > limits.max_frame_bytes) {
     return invalid_limit("max_rpc_payload_bytes");
   }
+  if (outside(limits.max_event_payload_bytes, 1U, 16U * mib) ||
+      limits.max_event_payload_bytes > limits.max_frame_bytes) {
+    return invalid_limit("max_event_payload_bytes");
+  }
   if (outside(limits.max_send_queue_messages, 1U, 65536U)) {
     return invalid_limit("max_send_queue_messages");
   }

@@ -12,6 +12,7 @@ struct Limits {
   std::size_t max_control_frame_bytes{64U * 1024U};
   std::size_t max_message_bytes{1024U * 1024U};
   std::size_t max_rpc_payload_bytes{1024U * 1024U};
+  std::size_t max_event_payload_bytes{256U * 1024U};
   std::size_t max_send_queue_messages{1024U};
   std::size_t max_send_queue_bytes{8U * 1024U * 1024U};
   std::size_t max_receive_window_frames{256U};

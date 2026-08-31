@@ -399,7 +399,8 @@ void RpcService::handle_request(const FrameView& frame) {
                    StableStatus::resource_exhausted, "payload_oversized");
     return;
   }
-  if (!scope_check_ || !scope_check_(method->first.required_scope)) {
+  if (!method->first.handler_enforced_scope &&
+      (!scope_check_ || !scope_check_(method->first.required_scope))) {
     ++stats_.scope_rejected;
     answer_offline(frame.channel_id, request.request_id, digest,
                    StableStatus::permission_denied, "scope_denied");
@@ -457,9 +458,11 @@ void RpcService::start_server_call(const FrameView& frame, const RpcRequestBody&
 
   auto task_handler = method->second;
   auto weak = weak_from_this();
+  const auto calling_peer = peer_;
   const auto dispatched = dispatch_(
       "heyaki-rpc-handler",
-      [weak, call, task_handler = std::move(task_handler)](executor::StopToken token) mutable {
+      [weak, call, task_handler = std::move(task_handler),
+       calling_peer](executor::StopToken token) mutable {
         if (call->phase.load(std::memory_order_acquire) != 0U) {
           return;  // Session died before the task started.
         }
@@ -487,7 +490,8 @@ void RpcService::start_server_call(const FrameView& frame, const RpcRequestBody&
         }
         RpcCallContext context{call->request_id, call->request.payload,
                                call->request.metadata,
-                               call->deadline_unix_milliseconds, call->cancel_requested};
+                               call->deadline_unix_milliseconds, call->cancel_requested,
+                               calling_peer};
         RpcHandlerResult result;
         try {
           result = task_handler(context);

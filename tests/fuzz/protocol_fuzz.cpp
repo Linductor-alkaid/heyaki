@@ -6,6 +6,8 @@
 #include <heyaki/session_protocol.hpp>
 #include <heyaki/signaling_protocol.hpp>
 #include <heyaki/frame_stream.hpp>
+#include <heyaki/event.hpp>
+#include <heyaki/file.hpp>
 #include <heyaki/message.hpp>
 #include <heyaki/rpc.hpp>
 #include <heyaki/pairing_protocol.hpp>
@@ -502,6 +504,67 @@ void m6_service_payload_parser(std::span<const std::byte> input) {
     const auto encoded = encode_rpc_cancel(*cancel.value_if());
     if (!encoded) std::abort();
     if (!parse_rpc_cancel(*encoded.value_if())) std::abort();
+  }
+}
+
+void m7_service_payload_parser(std::span<const std::byte> input) {
+  // M7 event/file payload parsers: every accepted body must re-encode and
+  // re-parse successfully (round-trip property), including the raw 60-byte
+  // FileChunk header layout.
+  const auto subscribe = parse_event_subscribe(input);
+  if (subscribe) {
+    const auto encoded = encode_event_subscribe(*subscribe.value_if());
+    if (!encoded) std::abort();
+    if (!parse_event_subscribe(*encoded.value_if())) std::abort();
+  }
+  const auto item = parse_event_item(input);
+  if (item) {
+    const auto encoded = encode_event_item(*item.value_if());
+    if (!encoded) std::abort();
+    if (!parse_event_item(*encoded.value_if())) std::abort();
+  }
+  const auto unsubscribe = parse_event_unsubscribe(input);
+  if (unsubscribe) {
+    const auto encoded = encode_event_unsubscribe(*unsubscribe.value_if());
+    if (!encoded) std::abort();
+    if (!parse_event_unsubscribe(*encoded.value_if())) std::abort();
+  }
+  const auto manifest = parse_file_manifest(input);
+  if (manifest) {
+    const auto encoded = encode_file_manifest(*manifest.value_if());
+    if (!encoded) std::abort();
+    if (!parse_file_manifest(*encoded.value_if())) std::abort();
+  }
+  const auto accept = parse_file_accept(input);
+  if (accept) {
+    const auto encoded = encode_file_accept(*accept.value_if());
+    if (!encoded) std::abort();
+    if (!parse_file_accept(*encoded.value_if())) std::abort();
+  }
+  const auto reject = parse_file_reject(input);
+  if (reject) {
+    const auto encoded = encode_file_reject(*reject.value_if());
+    if (!encoded) std::abort();
+    if (!parse_file_reject(*encoded.value_if())) std::abort();
+  }
+  const auto complete = parse_file_complete(input);
+  if (complete) {
+    const auto encoded = encode_file_complete(*complete.value_if());
+    if (!encoded) std::abort();
+    if (!parse_file_complete(*encoded.value_if())) std::abort();
+  }
+  const auto pull = parse_file_pull_request(input);
+  if (pull) {
+    const auto encoded = encode_file_pull_request(*pull.value_if());
+    if (!encoded) std::abort();
+    if (!parse_file_pull_request(*encoded.value_if())) std::abort();
+  }
+  const auto chunk = parse_file_chunk(input);
+  if (chunk) {
+    // The data span aliases the input; the header must round-trip.
+    const auto encoded = encode_file_chunk(chunk.value_if()->header, chunk.value_if()->data);
+    if (encoded.size() != input.size()) std::abort();
+    if (!parse_file_chunk(encoded)) std::abort();
   }
 }
 

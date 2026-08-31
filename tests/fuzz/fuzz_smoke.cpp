@@ -1,5 +1,7 @@
 #include "fuzz_targets.hpp"
 
+#include <heyaki/event.hpp>
+#include <heyaki/file.hpp>
 #include <heyaki/message.hpp>
 #include <heyaki/rpc.hpp>
 #include "m1_golden_vectors.hpp"
@@ -392,6 +394,92 @@ int main(int argc, char** argv) {
       heyaki::fuzz::m6_service_payload_parser(seed);
       if (!write_seed(corpus_root / "m6-service-payload", name, seed)) {
         std::cerr << "cannot write M6 seed " << name << '\n';
+        return 1;
+      }
+    }
+  }
+
+  // M7 event/file seeds (subscribe/item/unsubscribe, manifest/accept/reject/
+  // complete, pull request, raw chunk header).
+  {
+    heyaki::EventSubscriptionId subscription_id{};
+    for (std::size_t index = 0U; index < subscription_id.size(); ++index) {
+      subscription_id[index] = static_cast<std::byte>(0x40U + index);
+    }
+    heyaki::EventId event_id{};
+    for (std::size_t index = 0U; index < event_id.size(); ++index) {
+      event_id[index] = static_cast<std::byte>(0x50U + index);
+    }
+    const auto encoded_subscribe = heyaki::encode_event_subscribe(
+        heyaki::EventSubscribeBody{subscription_id, "telemetry.cpu", true,
+                                   heyaki::EventQos::reliable_live});
+    const auto encoded_unsubscribe = heyaki::encode_event_unsubscribe(
+        heyaki::EventUnsubscribeBody{subscription_id});
+    heyaki::EventItemBody item;
+    item.subscription_id = subscription_id;
+    item.event_id = event_id;
+    heyaki::DeviceId::Storage device{};
+    for (std::size_t index = 0U; index < device.size(); ++index) {
+      device[index] = static_cast<std::byte>(0x60U + index);
+    }
+    item.publisher_device_id = heyaki::DeviceId{device};
+    item.publisher_sequence = 7U;
+    item.schema_version = 1U;
+    item.qos = heyaki::EventQos::best_effort_latest;
+    item.payload = {std::byte{1}, std::byte{2}, std::byte{3}};
+    const auto encoded_item = heyaki::encode_event_item(item);
+
+    heyaki::TransferId::Storage transfer{};
+    for (std::size_t index = 0U; index < transfer.size(); ++index) {
+      transfer[index] = static_cast<std::byte>(0x70U + index);
+    }
+    const heyaki::TransferId transfer_id{transfer};
+    heyaki::FileManifestBody manifest;
+    manifest.transfer_id = transfer_id;
+    manifest.logical_name = "inbox/report.txt";
+    manifest.size = 12'345U;
+    manifest.blake3.assign(32U, std::byte{0xAB});
+    manifest.chunk_size = 8'192U;
+    const auto encoded_manifest = heyaki::encode_file_manifest(manifest);
+    const auto encoded_accept = heyaki::encode_file_accept(
+        heyaki::FileAcceptBody{transfer_id, {1U, 3U}});
+    const auto encoded_reject = heyaki::encode_file_reject(
+        heyaki::FileRejectBody{transfer_id, heyaki::StableStatus::resource_exhausted,
+                               "root_quota"});
+    const auto encoded_complete = heyaki::encode_file_complete(
+        heyaki::FileCompleteBody{transfer_id, heyaki::StableStatus::ok, {}});
+    const auto encoded_pull = heyaki::encode_file_pull_request(
+        heyaki::FilePullRequestBody{transfer_id, "inbox", "report.txt"});
+    heyaki::FileChunkHeader chunk_header;
+    chunk_header.transfer_id = transfer_id;
+    chunk_header.offset = 8'192U;
+    chunk_header.data_length = 4U;
+    chunk_header.blake3.fill(std::byte{0xCD});
+    const std::vector<std::byte> chunk_data{std::byte{9}, std::byte{8}, std::byte{7},
+                                            std::byte{6}};
+    const auto encoded_chunk = heyaki::encode_file_chunk(chunk_header, chunk_data);
+
+    std::vector<std::pair<std::string_view, std::vector<std::byte>>> m7_seeds;
+    if (encoded_subscribe) m7_seeds.emplace_back("event-subscribe", *encoded_subscribe.value_if());
+    if (encoded_item) m7_seeds.emplace_back("event-item", *encoded_item.value_if());
+    if (encoded_unsubscribe) {
+      m7_seeds.emplace_back("event-unsubscribe", *encoded_unsubscribe.value_if());
+    }
+    if (encoded_manifest) m7_seeds.emplace_back("file-manifest", *encoded_manifest.value_if());
+    if (encoded_accept) m7_seeds.emplace_back("file-accept", *encoded_accept.value_if());
+    if (encoded_reject) m7_seeds.emplace_back("file-reject", *encoded_reject.value_if());
+    if (encoded_complete) {
+      m7_seeds.emplace_back("file-complete", *encoded_complete.value_if());
+    }
+    if (encoded_pull) m7_seeds.emplace_back("file-pull", *encoded_pull.value_if());
+    m7_seeds.emplace_back("file-chunk", encoded_chunk);
+    auto truncated = encoded_chunk;
+    truncated.pop_back();
+    m7_seeds.emplace_back("file-chunk-truncated", std::move(truncated));
+    for (const auto& [name, seed] : m7_seeds) {
+      heyaki::fuzz::m7_service_payload_parser(seed);
+      if (!write_seed(corpus_root / "m7-service-payload", name, seed)) {
+        std::cerr << "cannot write M7 seed " << name << '\n';
         return 1;
       }
     }

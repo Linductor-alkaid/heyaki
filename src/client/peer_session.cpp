@@ -1008,6 +1008,14 @@ Result<void> PeerSession::send_frame(std::uint32_t channel_id,
   return Result<void>::success();
 }
 
+std::size_t PeerSession::max_message_bytes(session::ChannelDomain domain) const {
+  const auto channel = physical_channels_.find(domain);
+  if (channel != physical_channels_.end() && channel->second != nullptr) {
+    return channel->second->max_message_bytes();
+  }
+  return config_.limits.max_frame_bytes;
+}
+
 transport::TransportChannel* PeerSession::physical_channel_for_domain(
     session::ChannelDomain domain) {
   auto found = physical_channels_.find(domain);

@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <optional>
@@ -312,12 +313,29 @@ int run_node(const std::filesystem::path& database, std::string_view application
     policy.allow_ipv4_host = false;
   }
 
+  // M7: both matrix roles host an "inbox" root beside their profile and a
+  // small source file the initiator pushes across the topology under test.
+  const auto m7_state_dir = database.parent_path() / "m7-files";
+  std::error_code m7_dir_ec;
+  std::filesystem::create_directories(m7_state_dir, m7_dir_ec);
+  const auto m7_source = m7_state_dir / "matrix-source.bin";
+  {
+    std::ofstream out(m7_source, std::ios::binary | std::ios::trunc);
+    for (int index = 0; index < 6000; ++index) {
+      out << "m7 matrix payload " << index << '\n';
+    }
+  }
+  heyaki::FileRootConfig m7_root;
+  m7_root.name = "inbox";
+  m7_root.directory = m7_state_dir / "inbox";
+  std::filesystem::create_directories(m7_root.directory, m7_dir_ec);
   heyaki::NodeConfig config;
   config.profile = profiled;
   config.application_id = std::string{application_id};
   config.lan_override = lan;
   config.relay_override = relay;
   config.path_policy_override = policy;
+  config.file_receive_roots = {m7_root};
   auto node = heyaki::Node::create(std::move(config));
   if (!node) {
     std::cerr << "node create failed: " << node.error_if()->safe_detail() << '\n';
@@ -349,8 +367,12 @@ int run_node(const std::filesystem::path& database, std::string_view application
   // executor comm mailboxes (latest-value semantics, observable stats).
   executor::comm::LatestMailbox<bool> m6_message_acked{"heyaki-m4-matrix-acked"};
   executor::comm::LatestMailbox<int> m6_rpc_status{"heyaki-m4-matrix-rpc-status"};
+  executor::comm::LatestMailbox<bool> m7_event_received{"heyaki-m4-matrix-m7-event"};
+  executor::comm::LatestMailbox<bool> m7_file_committed{"heyaki-m4-matrix-m7-file"};
   (void)m6_message_acked.try_publish(false);
   (void)m6_rpc_status.try_publish(-1);
+  (void)m7_event_received.try_publish(false);
+  (void)m7_file_committed.try_publish(false);
   {
     heyaki::RpcMethodDescriptor echo;
     echo.service = "heyaki.matrix";
@@ -371,6 +393,18 @@ int run_node(const std::filesystem::path& database, std::string_view application
                           std::optional<Error>) {
         if (event == heyaki::MessageDeliveryEvent::acked) {
           (void)m6_message_acked.try_publish(true);
+        }
+      });
+  node.value_if()->set_event_inbound_handler(
+      [&m7_event_received](const heyaki::DeviceEndpointKey&, std::string_view,
+                           const heyaki::EventItemBody&) {
+        (void)m7_event_received.try_publish(true);
+      });
+  node.value_if()->set_file_event_observer(
+      [&m7_file_committed](const heyaki::DeviceEndpointKey&,
+                           const heyaki::FileTransferEvent& event) {
+        if (event.phase == heyaki::FileTransferPhase::committed) {
+          (void)m7_file_committed.try_publish(true);
         }
       });
   const auto begin = std::chrono::steady_clock::now();
@@ -447,6 +481,22 @@ int run_node(const std::filesystem::path& database, std::string_view application
         --connect_retries;
         return (bool)node.value_if()->connect(peer->key);
       });
+  // Responder side: subscribe to the telemetry root so the initiator's
+  // event publish has a matching subscription (publisher-direct model).
+  if (options.role != "initiator") {
+    (void)wait_until(
+        [&] {
+          for (const auto& session : node.value_if()->peer_sessions()) {
+            if (session.state == heyaki::NodePeerSessionState::authenticated) {
+              (void)node.value_if()->subscribe_events(
+                  session.peer, "telemetry", true, heyaki::EventQos::best_effort_latest);
+              return true;
+            }
+          }
+          return false;
+        },
+        std::chrono::milliseconds{2000});
+  }
   const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                            std::chrono::steady_clock::now() - begin)
                            .count();
@@ -528,6 +578,38 @@ int run_node(const std::filesystem::path& database, std::string_view application
                   << (message_acked ? 1 : 0)
                   << " rpc=" << rpc_status << "\n";
       }
+      // M7: events and a file push ride the same session on every topology
+      // (the responder subscribes to the telemetry root; both directions
+      // carry file scopes).
+      if (!peer_key.device_id.is_zero() &&
+          wait_until(
+              [&] {
+                const auto services = node.value_if()->service_diagnostics();
+                return services.event_sessions > 0U && services.file_sessions > 0U;
+              },
+              std::chrono::milliseconds{5000})) {
+        std::cout << "MATRIX_PHASE m7-exercise-begin\n";
+        const std::string text = "matrix m7 load";
+        std::vector<std::byte> payload;
+        for (const char value : text) {
+          payload.push_back(static_cast<std::byte>(value));
+        }
+        (void)node.value_if()->publish_event(peer_key, "telemetry.matrix.load",
+                                             std::move(payload), 1U);
+        (void)node.value_if()->push_file(peer_key, "inbox", "matrix/m7.bin", m7_source);
+        bool event_received = false;
+        bool file_committed = false;
+        (void)wait_until(
+            [&] {
+              (void)m7_event_received.try_load(event_received);
+              (void)m7_file_committed.try_load(file_committed);
+              return file_committed;  // events are best-effort: file is the gate
+            },
+            std::chrono::milliseconds{15'000});
+        std::cout << "MATRIX_PHASE m7-exercise-end event="
+                  << (event_received ? 1 : 0)
+                  << " file=" << (file_committed ? 1 : 0) << "\n";
+      }
     }
     executor::comm::PhaseGate hold{"heyaki-m4-matrix-hold"};
     (void)hold.wait_for(1U, options.hold);
@@ -547,8 +629,12 @@ int run_node(const std::filesystem::path& database, std::string_view application
   const auto snapshot = node.value_if()->snapshot();
   bool final_message_acked = false;
   int final_rpc_status = -1;
+  bool final_event_received = false;
+  bool final_file_committed = false;
   (void)m6_message_acked.try_load(final_message_acked);
   (void)m6_rpc_status.try_load(final_rpc_status);
+  (void)m7_event_received.try_load(final_event_received);
+  (void)m7_file_committed.try_load(final_file_committed);
   std::cout << "MATRIX_RESULT authenticated=" << (authenticated ? 1 : 0)
             << " data_path=" << data_path << " duration_ms=" << elapsed
             << " attempted=" << (attempted ? 1 : 0)
@@ -557,6 +643,8 @@ int run_node(const std::filesystem::path& database, std::string_view application
             << " session_error=" << session_error
             << " m6_message_acked=" << (final_message_acked ? 1 : 0)
             << " m6_rpc_status=" << final_rpc_status
+            << " m7_event=" << (final_event_received ? 1 : 0)
+            << " m7_file=" << (final_file_committed ? 1 : 0)
             << " relay_state=" << heyaki::relay_node_state_name(snapshot.relay.state)
             << " coordinator_attempts="
             << snapshot.session_coordinator.current_attempts
@@ -672,7 +760,10 @@ int main(int argc, char** argv) {
       std::cerr << second.error_if()->safe_detail() << '\n';
       return 1;
     }
-    const std::vector<std::string> scopes = {"matrix.connect", "message.send", "rpc.device.read"};
+    // Grants canonicalize to a sorted, deduplicated scope list.
+  const std::vector<std::string> scopes = {"event.subscribe:*", "file.pull:inbox",
+                                        "file.push:inbox",   "matrix.connect",
+                                        "message.send",      "rpc.device.read"};
     auto forward = seed_one_way_trust(*first.value_if(), *second.value_if(), scopes, 1U);
     if (!forward) {
       std::cerr << forward.error_if()->safe_detail() << '\n';

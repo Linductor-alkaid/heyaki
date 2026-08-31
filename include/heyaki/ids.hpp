@@ -58,6 +58,18 @@ using RequestId = Identifier<IdentifierKind::request, 16>;
 using TransferId = Identifier<IdentifierKind::transfer, 16>;
 using GrantId = Identifier<IdentifierKind::grant, 16>;
 
+// Stable peer identity key across services: the authenticated remote device
+// plus the endpoint the session is bound to.
+struct DeviceEndpointKey {
+  DeviceId device_id;
+  EndpointId endpoint_id;
+
+  friend constexpr bool operator==(const DeviceEndpointKey&,
+                                   const DeviceEndpointKey&) noexcept = default;
+  friend constexpr auto operator<=>(const DeviceEndpointKey&,
+                                   const DeviceEndpointKey&) noexcept = default;
+};
+
 enum class IdentifierDecodeError : std::uint8_t {
   none,
   invalid_prefix,

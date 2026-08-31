@@ -251,6 +251,51 @@ function(heyaki_add_vendored_sodium)
   endif()
 endfunction()
 
+# BLAKE3 (M7 file transfer digests). Built from the pinned checkout's
+# portable C core only: the dispatcher's SIMD/NEON branches are disabled via
+# BLAKE3_NO_* so no per-file architecture flags or assembly sources are
+# needed and sanitizer builds stay deterministic on every supported
+# platform. The portable implementation still exceeds the v1 WebRTC data
+# path's throughput budget by an order of magnitude.
+function(heyaki_add_vendored_blake3)
+  if(TARGET heyaki_blake3)
+    return()
+  endif()
+
+  set(blake3_root "${CMAKE_CURRENT_SOURCE_DIR}/third_party/blake3/c")
+  add_library(heyaki_blake3 STATIC
+    "${blake3_root}/blake3.c"
+    "${blake3_root}/blake3_dispatch.c"
+    "${blake3_root}/blake3_portable.c")
+  add_library(heyaki::blake3 ALIAS heyaki_blake3)
+  set_target_properties(heyaki_blake3 PROPERTIES
+    EXPORT_NAME blake3
+    OUTPUT_NAME heyaki_blake3)
+  target_include_directories(heyaki_blake3
+    PUBLIC "$<BUILD_INTERFACE:${blake3_root}>")
+  target_compile_definitions(heyaki_blake3 PRIVATE
+    BLAKE3_NO_SSE2 BLAKE3_NO_SSE41 BLAKE3_NO_AVX2 BLAKE3_NO_AVX512 BLAKE3_NO_NEON)
+  set_target_properties(heyaki_blake3 PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED ON
+    POSITION_INDEPENDENT_CODE ON)
+
+  if(NOT HEYAKI_SANITIZER STREQUAL "none" AND
+     CMAKE_C_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+    if(HEYAKI_SANITIZER STREQUAL "address")
+      set(blake3_sanitizer_flag -fsanitize=address)
+    elseif(HEYAKI_SANITIZER STREQUAL "undefined")
+      set(blake3_sanitizer_flag -fsanitize=undefined)
+    elseif(HEYAKI_SANITIZER STREQUAL "thread")
+      set(blake3_sanitizer_flag -fsanitize=thread)
+    endif()
+    target_compile_options(heyaki_blake3 PRIVATE
+      "${blake3_sanitizer_flag}" -fno-omit-frame-pointer)
+    target_link_options(heyaki_blake3 PUBLIC
+      "${blake3_sanitizer_flag}" -fno-omit-frame-pointer)
+  endif()
+endfunction()
+
 function(heyaki_add_vendored_sqlite)
   if(TARGET heyaki_sqlite)
     return()

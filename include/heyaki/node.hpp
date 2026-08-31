@@ -1,6 +1,8 @@
 #pragma once
 
 #include <heyaki/byte_stream.hpp>
+#include <heyaki/event.hpp>
+#include <heyaki/file.hpp>
 #include <heyaki/lan_directory.hpp>
 #include <heyaki/message.hpp>
 #include <heyaki/profile_store.hpp>
@@ -314,6 +316,16 @@ struct NodeConfig {
   std::chrono::milliseconds pairing_backoff_max{0};
   // Optional grant TTL; 0 disables expiry.
   std::uint64_t pairing_grant_ttl_milliseconds{0U};
+  // ---- M7 remote events & file transfer ----
+  // Per-remote-subscriber staging (items) and per-peer subscription cap for
+  // the event service; zero keeps service defaults.
+  std::size_t event_subscriber_queue_items{0U};
+  std::size_t event_max_subscriptions_per_peer{0U};
+  // Accepted receive roots for the file service; a push/pull into an
+  // unlisted root is rejected before any byte is accepted (M7-09).
+  std::vector<FileRootConfig> file_receive_roots;
+  // Per-peer cumulative received-byte quota; 0 disables the user quota.
+  std::uint64_t file_max_peer_receive_bytes{0U};
 };
 
 // Terminal outcome of one password pairing attempt; `value` holds the
@@ -328,17 +340,59 @@ struct NodeByteStreamOptions {
   std::uint32_t receive_window_frames{64U};
 };
 
-// ---- M6 message & unary RPC ----
+// ---- M7 remote events & file transfer ----
+// One local fan-out message bridged at the device boundary (M7-05): the
+// local counterpart of a remote EventItemBody with deliberately distinct
+// naming and lifecycle (executor::comm topic semantics, not wire QoS).
+struct NodeLocalEvent {
+  std::string topic;
+  std::uint32_t schema_version{1U};
+  std::vector<std::byte> payload;
+};
+
+// Movable handle onto the node's local event topic; try_receive drains one
+// fanned-out message without blocking.
+class NodeLocalEventSubscription {
+ public:
+  NodeLocalEventSubscription();
+  ~NodeLocalEventSubscription();
+  NodeLocalEventSubscription(NodeLocalEventSubscription&&) noexcept;
+  NodeLocalEventSubscription& operator=(NodeLocalEventSubscription&&) noexcept;
+  NodeLocalEventSubscription(const NodeLocalEventSubscription&) = delete;
+  NodeLocalEventSubscription& operator=(const NodeLocalEventSubscription&) = delete;
+  [[nodiscard]] bool valid() const noexcept { return impl_ != nullptr; }
+  [[nodiscard]] bool try_receive(NodeLocalEvent& out);
+
+ private:
+  friend class Node;
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
+// Inbound remote event delivery (scope-checked and sequence-validated at
+// protocol level before this fires); `pattern` is the matched subscription.
+using NodeEventInboundHandler =
+    std::function<void(const DeviceEndpointKey&, std::string_view pattern,
+                       const EventItemBody& item)>;
+// File transfer lifecycle (phase changes and per-chunk progress).
+using NodeFileEventObserver =
+    std::function<void(const DeviceEndpointKey&, const FileTransferEvent&)>;
+
 // Aggregate service diagnostics across every authorized peer session; executor
 // facilities remain the source of truth for task health (EXEC-08).
 struct NodeServiceDiagnostics {
   MessageServiceStats message;
   RpcServiceStats rpc;
+  EventServiceStats event;
+  FileServiceStats file;
   std::size_t message_pending_acks{};
   std::size_t rpc_pending_calls{};
   std::size_t rpc_retry_queue{};
   std::size_t message_sessions{};
   std::size_t rpc_sessions{};
+  std::size_t event_sessions{};
+  std::size_t file_sessions{};
+  std::size_t file_paused_transfers{};
 };
 
 // Inbound message delivery (already deduplicated, scope-checked, and
@@ -440,6 +494,57 @@ class Node {
   [[nodiscard]] Result<void> cancel_rpc(const DeviceEndpointKey& peer,
                                         const RequestId& request_id);
   [[nodiscard]] NodeServiceDiagnostics service_diagnostics();
+
+  // ---- M7 remote events (public API) ----
+  // Subscribes to the peer's topic pattern (exact match, or segment-boundary
+  // prefix when prefix_match). Items surface through the event inbound
+  // handler and the local event topic below.
+  [[nodiscard]] Result<EventSubscriptionId> subscribe_events(
+      const DeviceEndpointKey& peer, std::string pattern, bool prefix_match,
+      EventQos qos);
+  // Unsubscribes every local subscription with this exact pattern.
+  [[nodiscard]] std::size_t unsubscribe_events(const DeviceEndpointKey& peer,
+                                               std::string_view pattern);
+  // Publishes one event under `topic` to the peer's matching subscriptions
+  // (QoS is per subscription). Returns the matched subscription count.
+  [[nodiscard]] Result<std::size_t> publish_event(const DeviceEndpointKey& peer,
+                                                  std::string topic,
+                                                  std::vector<std::byte> payload,
+                                                  std::uint32_t schema_version);
+  void set_event_inbound_handler(
+      std::function<void(const DeviceEndpointKey&, std::string_view pattern,
+                         const EventItemBody& item)> handler);
+  // The local half of the M7-05 bridge: remote events fan out through the
+  // node's executor::comm topic, and locally published messages bridge to
+  // matching remote subscriptions.
+  [[nodiscard]] NodeLocalEventSubscription subscribe_local_events();
+  [[nodiscard]] Result<std::size_t> publish_local_event(const DeviceEndpointKey& peer,
+                                                        std::string topic,
+                                                        std::vector<std::byte> payload,
+                                                        std::uint32_t schema_version);
+
+  // ---- M7 file transfer (public API) ----
+  // Starts pushing one local file into the peer's logical root under
+  // `logical_name`. A caller-provided transfer id resumes a prior transfer
+  // on the receiver (M7-13). Progress surfaces through the file observer.
+  [[nodiscard]] Result<TransferId> push_file(const DeviceEndpointKey& peer,
+                                             std::string root, std::string logical_name,
+                                             std::filesystem::path source_path,
+                                             TransferId transfer_id = {});
+  // Asks the file owner to send `logical_name` from its root; the transfer
+  // lands in this node's same-named receive root under the file.pull scope.
+  [[nodiscard]] Result<TransferId> pull_file(const DeviceEndpointKey& peer,
+                                             std::string root, std::string logical_name);
+  [[nodiscard]] Result<void> pause_file_transfer(const DeviceEndpointKey& peer,
+                                                 const TransferId& id);
+  [[nodiscard]] Result<void> resume_file_transfer(const DeviceEndpointKey& peer,
+                                                  const TransferId& id);
+  [[nodiscard]] Result<void> cancel_file_transfer(const DeviceEndpointKey& peer,
+                                                  const TransferId& id);
+  void set_file_event_observer(
+      std::function<void(const DeviceEndpointKey&, const FileTransferEvent&)> observer);
+  [[nodiscard]] std::vector<FileTransferSummary> file_transfers(
+      const DeviceEndpointKey& peer);
 
   [[nodiscard]] NodeShutdownReport shutdown();
 

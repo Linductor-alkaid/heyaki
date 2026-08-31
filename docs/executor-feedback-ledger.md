@@ -206,9 +206,23 @@ heyaki pin 于 2026-08-29 从 `077d854` 升至 `4e8e8eb`，PR #176/#177）：
 3. P1-1（序列化上下文/strand 纳管）——收益最大但设计面广，建议先出文档化指南再定 API。
 4. P2-1/P2-2 —— 待 M6/M7 的消息与文件传输真实压测后再定形，避免过早抽象。
 
+## M7 使用记录（无新增缺口）
+
+- M7 文件传输按 M7-12 要求引入第二个 executor-managed blocking worker（`FileIoWorker`，
+  `runtime.cpp`）：executor `start_worker(BlockingWorkerSpec)` + 有界
+  `executor::comm::MpscChannel` 工作队列 + 每 item `StopSource` 协作取消；wakeup 以
+  channel close 释放 receive 等待。既有能力完全覆盖需求，未触发新缺口。
+- 已知语义边界（非缺口）：排队中的文件任务无法从 channel 中移除，取消请求统一报告
+  `RequestedRunning`（token 已置位，任务开始即观察到并退出）——消费方只依赖
+  accepted 语义，不区分变体。若未来需要排队期精确移除，再评估 executor 队列 API。
+- BLAKE3 streaming 校验在阻塞 worker 内随读递增（哈希与 I/O 读耦合）；纯内存块
+  哈希（收发两端 chunk 校验）走 `ServiceDispatch` 普通任务，符合“有限 CPU 工作”边界。
+- P2-1/P2-2 的定形仍按原计划等待真实压测数据。
+
 ## 变更记录
 
 - 2026-08-29：初始盘点（M0–M5），7 条 P1/P2、1 条违规、P3 待办清单。
+- 2026-08-31：M7 落地使用记录（FileIoWorker；无新增缺口）。
 - 2026-08-29：executor 上游落地 P1-3（C1）与 P1-2 的 T1 部分，S1 指南与 G1 裸回调指引同步
   上线；heyaki pin 升至 `4e8e8eb`（dependencies.lock 同步），新增"上游收敛状态"一节。
   heyaki 侧迁移待办：EXEC-07 deadline 取消改用 `submit_cancellable`；非 strand 定时器改用

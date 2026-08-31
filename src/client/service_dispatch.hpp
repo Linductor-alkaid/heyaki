@@ -43,4 +43,13 @@ using TaskCancelRequest = std::function<executor::TaskCancellationResponse()>;
 using CancellableServiceDispatch =
     std::function<Result<TaskCancelRequest>(std::string_view task_name, CancellableTask task)>;
 
+// Blocking file-I/O dispatch (M7-12): file reads, writes, fsync, rename, and
+// streamed digests run as tasks on an executor-managed blocking I/O worker
+// (production: the Runtime's dedicated file worker loop), never on the
+// network strand or a general CPU task. Cancellation is cooperative between
+// file operations. A failed Result means admission was rejected before the
+// task ran.
+using BlockingDispatch =
+    std::function<Result<TaskCancelRequest>(std::string_view task_name, CancellableTask task)>;
+
 }  // namespace heyaki

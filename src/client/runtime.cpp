@@ -296,6 +296,52 @@ class AsioWorker final : public executor::IBlockingIoWorker {
   executor::comm::PhaseGate& exit_gate_;
 };
 
+// M7-12: blocking file I/O runs on this dedicated executor-managed worker,
+// never on the asio event loop (which the network callbacks share) and never
+// on a general CPU task. Work items arrive through a bounded executor::comm
+// channel; wakeup() closes the channel so the receive wait releases. A stop
+// token alone cannot interrupt an in-flight open/read/fsync, so cancellation
+// is cooperative between file operations: each item owns a StopSource the
+// cancel request fires.
+struct FileIoWorkItem {
+  std::function<void(executor::StopToken)> task;
+  std::shared_ptr<executor::StopSource> stop;
+};
+
+class FileIoWorker final : public executor::IBlockingIoWorker {
+ public:
+  static constexpr std::uint64_t exit_phase = 1U;
+
+  explicit FileIoWorker(executor::comm::MpscChannel<FileIoWorkItem>& queue,
+                        executor::comm::PhaseGate& exit_gate) noexcept
+      : queue_(queue), exit_gate_(exit_gate) {}
+
+  void run(executor::StopToken stop_token) override {
+    while (!stop_token.stop_requested()) {
+      FileIoWorkItem item;
+      const auto received =
+          queue_.receive_for(item, std::chrono::milliseconds{100});
+      if (!received) {
+        continue;
+      }
+      if (item.task) {
+        item.task(item.stop ? item.stop->get_token() : executor::StopToken{});
+      }
+    }
+    // Items still queued at shutdown are dropped: admission for new file work
+    // closed before the worker stops, and each transfer's completion path
+    // observes the loss through its own service teardown.
+    queue_.close();
+    (void)exit_gate_.advance_to(exit_phase);
+  }
+
+  void wakeup() noexcept override { queue_.close(); }
+
+ private:
+  executor::comm::MpscChannel<FileIoWorkItem>& queue_;
+  executor::comm::PhaseGate& exit_gate_;
+};
+
 class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
  public:
   RuntimeState(RuntimeOwnership ownership, RuntimeConfig config,
@@ -318,6 +364,10 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
     io_.stop();
     if (!worker_.name().empty()) {
       worker_.stop();
+    }
+    if (!file_worker_.name().empty()) {
+      file_io_queue_.close();
+      file_worker_.stop();
     }
     if (owned_executor_) {
       (void)owned_executor_->shutdown(false);
@@ -347,9 +397,54 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
           Error{ErrorCode::internal, "runtime", "asio_worker_start_failed",
                 static_cast<std::int64_t>(worker_.start_result().error_code)});
     }
+    executor::BlockingWorkerSpec file_spec;
+    file_spec.name = config_.worker_name + "-file-io";
+    file_spec.config.thread_name = config_.worker_name + "-file-io";
+    file_spec.config.startup_timeout = config_.worker_start_timeout;
+    file_spec.worker = std::make_unique<FileIoWorker>(file_io_queue_, file_io_exit_);
+    file_worker_ = executor_->start_worker(std::move(file_spec));
+    if (!file_worker_.started()) {
+      work_guard_.reset();
+      io_.stop();
+      worker_.stop();
+      return Result<void>::failure(
+          Error{ErrorCode::internal, "runtime", "file_io_worker_start_failed",
+                static_cast<std::int64_t>(file_worker_.start_result().error_code)});
+    }
     admission_open_.store(true, std::memory_order_release);
     publish_phase(RuntimePhase::running);
     return Result<void>::success();
+  }
+
+  Result<TaskCancelRequest> dispatch_blocking(std::string name, CancellableTask task) {
+    (void)name;
+    if (!admission_open_.load(std::memory_order_acquire) || !task) {
+      return Result<TaskCancelRequest>::failure(
+          Error{ErrorCode::cancelled, "runtime", "runtime_admission_closed"});
+    }
+    auto stop = std::make_shared<executor::StopSource>();
+    FileIoWorkItem item;
+    item.task = std::move(task);
+    item.stop = stop;
+    if (!file_io_queue_.try_send(std::move(item))) {
+      diagnostics_->record_executor_event();
+      return Result<TaskCancelRequest>::failure(
+          Error{file_io_queue_.is_closed() ? ErrorCode::cancelled
+                                           : ErrorCode::resource_exhausted,
+                "runtime",
+                file_io_queue_.is_closed() ? "runtime_admission_closed"
+                                           : "file_io_capacity_exhausted"});
+    }
+    // Queued file work cannot be removed from the channel; the stop token is
+    // set immediately, so a not-yet-started task observes it on entry and
+    // exits without touching the filesystem. Report the conservative
+    // cooperative result — consumers key on acceptance, not the variant.
+    return Result<TaskCancelRequest>::success([stop]() {
+      const bool first = stop->request_stop();
+      return executor::TaskCancellationResponse{
+          first ? executor::TaskCancellationResult::RequestedRunning
+                : executor::TaskCancellationResult::AlreadyRequested};
+    });
   }
 
   Result<RuntimeContext> create_context(RuntimeContextKind kind, std::string name) {
@@ -530,6 +625,20 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
       }
     }
     worker_.stop();
+
+    // The file worker drains what it can within the bounded stop timeout;
+    // queued-but-unstarted items are dropped and their services observe the
+    // loss through session teardown.
+    file_io_queue_.close();
+    file_worker_.request_stop();
+    if (file_worker_.status().is_running) {
+      const auto file_exited = file_io_exit_.wait_for(FileIoWorker::exit_phase,
+                                                      config_.worker_stop_timeout);
+      if (!file_exited) {
+        report.worker_stop_timed_out = true;
+      }
+    }
+    file_worker_.stop();
 
     cancel_callbacks_left_after_worker_stop(report);
     drain_tracked_tasks(report);
@@ -995,6 +1104,10 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
   boost::asio::steady_timer task_sweep_timer_{io_};
   bool task_sweep_active_{false};
   executor::comm::PhaseGate asio_exit_{"heyaki-asio-worker-exit"};
+  executor::comm::PhaseGate file_io_exit_{"heyaki-file-io-worker-exit"};
+  executor::comm::MpscChannel<FileIoWorkItem> file_io_queue_{
+      executor::comm::ChannelOptions{64U, executor::comm::DropPolicy::RejectNewest, true,
+                                     "heyaki-runtime-file-io"}};
   std::optional<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>
       work_guard_;
   executor::comm::MpscChannel<RuntimeCallbackEvent> callbacks_;
@@ -1002,6 +1115,7 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
   std::shared_ptr<RuntimeDiagnostics> diagnostics_;
   executor::comm::DoubleBuffer<RuntimeCoreState> core_state_;
   executor::WorkerHandle worker_;
+  executor::WorkerHandle file_worker_;
   std::vector<std::shared_ptr<RuntimeOperationState>> operations_;
   std::vector<std::shared_ptr<TrackedTask>> tracked_tasks_;
   std::vector<std::shared_ptr<InternalTask>> internal_tasks_;
@@ -1126,6 +1240,16 @@ Result<TaskCancelRequest> detail::RuntimeAccess::dispatch_general_cancellable(
         Error{ErrorCode::cancelled, "runtime", "runtime_not_running"});
   }
   return runtime.state_->dispatch_general_cancellable(std::move(name), std::move(task));
+}
+
+Result<TaskCancelRequest> detail::RuntimeAccess::dispatch_blocking(Runtime& runtime,
+                                                                   std::string name,
+                                                                   CancellableTask task) {
+  if (!runtime.state_) {
+    return Result<TaskCancelRequest>::failure(
+        Error{ErrorCode::cancelled, "runtime", "runtime_not_running"});
+  }
+  return runtime.state_->dispatch_blocking(std::move(name), std::move(task));
 }
 
 Result<Runtime> Runtime::create_borrowed(executor::Executor& executor,

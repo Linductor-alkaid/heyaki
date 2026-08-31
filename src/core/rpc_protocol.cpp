@@ -304,12 +304,14 @@ Result<RpcCancelBody> parse_rpc_cancel(std::span<const std::byte> payload) {
 RpcCallContext::RpcCallContext(RequestId request_id, std::vector<std::byte> payload,
                                std::vector<RpcMetadataEntry> metadata,
                                std::uint64_t deadline_unix_milliseconds,
-                               const std::shared_ptr<const std::atomic<bool>>& cancelled)
+                               const std::shared_ptr<const std::atomic<bool>>& cancelled,
+                               std::optional<DeviceEndpointKey> peer)
     : request_id_(request_id),
       payload_(std::move(payload)),
       metadata_(std::move(metadata)),
       deadline_unix_milliseconds_(deadline_unix_milliseconds),
-      cancelled_(cancelled) {}
+      cancelled_(cancelled),
+      peer_(std::move(peer)) {}
 
 Result<void> ServiceRegistry::register_method(RpcMethodDescriptor descriptor,
                                               RpcMethodHandler handler) {

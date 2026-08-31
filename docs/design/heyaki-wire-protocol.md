@@ -1,8 +1,8 @@
 # Heyaki Wire Protocol v1
 
-> Status: protocol 1.2 baseline, implemented through M6 — pairing/ByteStream frames delivered by
-> M5 (2026-08-28), message/unary-RPC frames by M6 (2026-08-29); the event/file/shell frame
-> families below remain reserved for M7/M8
+> Status: protocol 1.2 baseline, implemented through M7 — pairing/ByteStream frames delivered by
+> M5 (2026-08-28), message/unary-RPC frames by M6 (2026-08-29), event/file frames by M7
+> (2026-08-31); the shell frame family below remains reserved for M8
 >
 > Protocol version: 1.2
 >
@@ -427,6 +427,28 @@ observable error; it does not silently drop or close unrelated channels. Non-ide
 loses its transport after admission becomes `outcome-unknown` and is never automatically retried.
 
 ### 6.3 Stream, file, and shell
+
+M7 implementation notes (event/file delivered 2026-08-31; normative rows unchanged):
+
+- The `FileManifest` schema has no separate root field: the FIRST logical-name segment
+  selects the receiver's configured root (`inbox/docs/a.txt` → root `inbox`), and the
+  receiver maps only the remainder inside that root.
+- A sender MAY abort an in-flight transfer with `FILE_REJECT` (typically `cancelled` or
+  `resource_exhausted`); the receiver treats it as an explicit terminal failure and cleans
+  the staged bytes. The receiver's verifying-phase terminal verdict rides `FILE_COMPLETE`
+  (status `ok` = committed).
+- The pull request carrier is the frozen unary-RPC surface: service `heyaki.file`, method
+  `pull`, payload = `{transfer_id, root, logical_name}`. The response only vouches for
+  request shape; the authoritative acceptance is the file protocol's accept/reject. The
+  receiving direction checks `file.pull:<root>` only while its pending pull is registered —
+  a pull grant never doubles as a push grant.
+- Event subscription admission checks `event.subscribe:<topic-root>` on the event source
+  (qualifier = first topic segment); refusals answer with `EVENT_UNSUBSCRIBE` so the peer
+  observes them explicitly.
+- Compressed manifests (`zstd_compressed`) are rejected with `unimplemented` until the
+  compression build feature exists; the `expanded_size` bounds are enforced by the codec
+  regardless.
+
 
 | Domain/current state | Frame | Transition and exceptional rule |
 | --- | --- | --- |

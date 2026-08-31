@@ -139,7 +139,15 @@ NodeConfig restart_node_config(ProfileStore& profile,
                     .signaling_validator = {},
                     .signaling_handler = {},
                     .relay_override = std::nullopt,
-                    .path_policy_override = std::nullopt};
+                    .path_policy_override = std::nullopt,
+                        .pairing_failure_threshold = 0U,
+                        .pairing_backoff_base = std::chrono::milliseconds{0},
+                        .pairing_backoff_max = std::chrono::milliseconds{0},
+                        .pairing_grant_ttl_milliseconds = 0U,
+                        .event_subscriber_queue_items = 0U,
+                        .event_max_subscriptions_per_peer = 0U,
+                        .file_receive_roots = {},
+                        .file_max_peer_receive_bytes = 0U};
 }
 
 std::optional<NodePeerSessionSnapshot> active_session(const Node& node,

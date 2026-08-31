@@ -281,7 +281,15 @@ NodeConfig node_config(ProfileStore& profile, std::string application_id,
                     .signaling_validator = std::move(validator),
                     .signaling_handler = std::move(handler),
                     .relay_override = std::nullopt,
-                    .path_policy_override = std::nullopt};
+                    .path_policy_override = std::nullopt,
+                        .pairing_failure_threshold = 0U,
+                        .pairing_backoff_base = std::chrono::milliseconds{0},
+                        .pairing_backoff_max = std::chrono::milliseconds{0},
+                        .pairing_grant_ttl_milliseconds = 0U,
+                        .event_subscriber_queue_items = 0U,
+                        .event_max_subscriptions_per_peer = 0U,
+                        .file_receive_roots = {},
+                        .file_max_peer_receive_bytes = 0U};
 }
 
 RequestId request_id(std::uint8_t tag) {
@@ -2300,7 +2308,8 @@ TEST_F(M3aNodeTest, LanLifecyclePressureRemainsBounded) {
       EXPECT_TRUE(runtime_snapshot.worker_ready);
       EXPECT_TRUE(runtime_snapshot.worker_running);
       EXPECT_FALSE(runtime_snapshot.executor_snapshot_partial);
-      EXPECT_EQ(runtime_snapshot.executor_blocking_io_count, 1U);
+      // M7 added the dedicated file I/O worker next to the asio worker.
+      EXPECT_EQ(runtime_snapshot.executor_blocking_io_count, 2U);
       EXPECT_LE(runtime_snapshot.executor_active_task_count,
                 runtime_configuration.executor_max_threads);
       EXPECT_LE(runtime_snapshot.executor_queued_task_count,
@@ -2367,7 +2376,7 @@ TEST_F(M3aNodeTest, LanLifecyclePressureRemainsBounded) {
       std::chrono::seconds{2}));
   const auto before_runtime_shutdown = runtime.value_if()->snapshot();
   EXPECT_TRUE(before_runtime_shutdown.worker_running);
-  EXPECT_EQ(before_runtime_shutdown.executor_blocking_io_count, 1U);
+  EXPECT_EQ(before_runtime_shutdown.executor_blocking_io_count, 2U);
   EXPECT_EQ(before_runtime_shutdown.executor_submit_rejected_count, 0U);
   EXPECT_EQ(before_runtime_shutdown.executor_task_exception_count, 0U);
   const auto runtime_shutdown = runtime.value_if()->shutdown();

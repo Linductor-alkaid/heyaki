@@ -197,6 +197,20 @@ class WebRtcTransportSession::Impl
 
     ChannelKind kind() const noexcept override { return kind_; }
     const ChannelOptions& options() const noexcept override { return options_; }
+    // The negotiated SCTP message size may be smaller than what was
+    // requested; options_ keeps the REQUESTED value (the re-open consistency
+    // check compares against it) and the negotiated cap is tracked apart.
+    [[nodiscard]] std::size_t max_message_bytes() const noexcept override {
+      return negotiated_max_message_bytes_.load(std::memory_order_acquire);
+    }
+    void note_negotiated_message_size() {
+      const std::size_t negotiated = channel_->maxMessageSize();
+      if (negotiated == 0U) {
+        return;
+      }
+      negotiated_max_message_bytes_.store(
+          std::min(options_.max_message_bytes, negotiated), std::memory_order_release);
+    }
 
     Result<void> send(std::span<const std::byte> payload) override {
       auto owner = owner_.lock();
@@ -310,6 +324,7 @@ class WebRtcTransportSession::Impl
     std::weak_ptr<Impl> owner_;
     ChannelKind kind_;
     ChannelOptions options_;
+    std::atomic<std::size_t> negotiated_max_message_bytes_{options_.max_message_bytes};
     std::shared_ptr<rtc::DataChannel> channel_;
     std::atomic<std::size_t> queued_messages_{0U};
     std::atomic<bool> paused_{false};
@@ -528,6 +543,7 @@ class WebRtcTransportSession::Impl
   }
   void handle(OpenEvent& event) {
     ++channels_opened_;
+    event.channel->note_negotiated_message_size();
     const auto pending = pending_opens_.find(event.channel->kind());
     if (pending != pending_opens_.end()) {
       auto completion = std::move(pending->second);

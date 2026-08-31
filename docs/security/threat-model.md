@@ -1,9 +1,11 @@
 # Heyaki Threat Model
 
 > Baseline: protocol 1.2 — the frozen optional LAN extension (1.1), the M4 session-restart
-> renegotiation (1.2), and protocol 1.0 N-1 behavior. The M5 authorization/ByteStream and
-> M6 message/unary-RPC surfaces operate inside the session, pairing, and replay boundaries
-> analyzed below.
+> renegotiation (1.2), and protocol 1.0 N-1 behavior. The M5 authorization/ByteStream,
+> M6 message/unary-RPC, and M7 event/file surfaces operate inside the session, pairing,
+> and replay boundaries analyzed below; the M7 file receive path adds its own pre-byte
+> admission gate (root scope, quota, and logical-name safety before any byte is
+> accepted, plus symlink-race-resistant staging with atomic rename).
 >
 > Scope: device library, LAN discovery/signaling, `heyaki-relay`, coturn integration, ProfileStore,
 > and TUI

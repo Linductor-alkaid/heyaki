@@ -1,7 +1,9 @@
 # Heyaki 设备通信基础设施设计
 
 > 状态：架构设计修订版（授权密码、自动登录、LAN 无服务器连接、`heyaki-tui`、Gateway 代理服务与 Android（NDK）适配）
-> 日期：2026-08-27（2026-08-29 增补 M11 Android 适配范围，见 §2.1）
+> 日期：2026-08-27（2026-08-29 增补 M11 Android 适配范围，见 §2.1；2026-08-31 M7 事件/文件
+> 落地：§8.3/§8.4 所述语义按冻结 wire 协议交付，事件订阅作用域为 event.subscribe:<root>，
+> manifest 逻辑名首段为接收根选择器，pull 以 heyaki.file/pull unary RPC 承载）
 > 目标版本：MVP 至 v1
 > 适用范围：设备端 C++20 库、`heyaki-tui`、注册/信令服务、NAT 穿透与中继服务
 

@@ -75,6 +75,7 @@ heyaki_resolve_build_commit(HEYAKI_RESOLVED_BUILD_COMMIT)
 heyaki_add_pinned_boost_asio()
 heyaki_add_pinned_boost_beast()
 heyaki_add_vendored_sodium()
+heyaki_add_vendored_blake3()
 heyaki_add_vendored_sqlite()
 find_package(OpenSSL 3.0 REQUIRED COMPONENTS SSL Crypto)
 if(OPENSSL_VERSION VERSION_GREATER_EQUAL 4.0)
@@ -137,6 +138,8 @@ configure_file(
 
 add_library(heyaki_core
   src/core/error.cpp
+  src/core/event_protocol.cpp
+  src/core/file_protocol.cpp
   src/core/frame_stream.cpp
   src/core/identity.cpp
   src/core/ids.cpp
@@ -166,7 +169,7 @@ target_include_directories(heyaki_core
     "$<BUILD_INTERFACE:${HEYAKI_GENERATED_DIR}>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libsodium/src/libsodium/include")
-target_link_libraries(heyaki_core PRIVATE heyaki::sodium)
+target_link_libraries(heyaki_core PRIVATE heyaki::sodium heyaki::blake3)
 heyaki_configure_target(heyaki_core)
 
 add_library(heyaki_profile
@@ -190,6 +193,9 @@ add_library(heyaki_client
   src/client/byte_stream.cpp
   src/client/byte_stream_facade.cpp
   src/client/connection_attempt.cpp
+  src/client/event_service.cpp
+  src/client/file_service.cpp
+  src/client/file_store.cpp
   src/client/message_service.cpp
   src/client/peer_session.cpp
   src/client/rpc_service.cpp
@@ -213,7 +219,7 @@ target_include_directories(heyaki_client PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src/transport")
 target_link_libraries(heyaki_client
   PUBLIC heyaki::profile
-  PRIVATE executor::executor heyaki::sodium OpenSSL::SSL OpenSSL::Crypto)
+  PRIVATE executor::executor heyaki::sodium heyaki::blake3 OpenSSL::SSL OpenSSL::Crypto)
 if(WIN32)
   target_link_libraries(heyaki_client PRIVATE iphlpapi ws2_32)
 endif()
@@ -302,6 +308,7 @@ endif()
 
 set(HEYAKI_INSTALL_TARGETS
   heyaki_sodium
+  heyaki_blake3
   heyaki_sqlite
   heyaki_core
   heyaki_profile
@@ -342,6 +349,11 @@ if(HEYAKI_BUILD_APPS)
   heyaki_configure_target(heyaki-m6-message-rpc-demo)
   heyaki_enable_executor_exception_adapter_source(apps/demo/m6_message_rpc_demo.cpp)
 
+  add_executable(heyaki-m7-data-demo apps/demo/m7_data_demo.cpp)
+  target_link_libraries(heyaki-m7-data-demo PRIVATE heyaki::client executor::executor)
+  heyaki_configure_target(heyaki-m7-data-demo)
+  heyaki_enable_executor_exception_adapter_source(apps/demo/m7_data_demo.cpp)
+
   add_executable(heyaki-m4-matrix-node apps/demo/m4_matrix_node.cpp)
   target_link_libraries(heyaki-m4-matrix-node
     PRIVATE heyaki::client heyaki::profile executor::executor OpenSSL::SSL OpenSSL::Crypto)
@@ -350,7 +362,7 @@ if(HEYAKI_BUILD_APPS)
   heyaki_enable_executor_exception_adapter_source(apps/demo/m4_matrix_node.cpp)
 
   list(APPEND HEYAKI_INSTALL_TARGETS heyaki-relay heyaki-tui heyaki-m2-profile-demo
-       heyaki-m3b-relay-demo heyaki-m4-matrix-node)
+       heyaki-m3b-relay-demo heyaki-m4-matrix-node heyaki-m7-data-demo)
 endif()
 
 heyaki_add_developer_targets()

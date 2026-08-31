@@ -126,6 +126,13 @@ class TransportChannel {
 
   [[nodiscard]] virtual ChannelKind kind() const noexcept = 0;
   [[nodiscard]] virtual const ChannelOptions& options() const noexcept = 0;
+  // The largest payload this channel can actually carry: the NEGOTIATED
+  // transport limit once known (WebRTC DataChannel/SCTP), otherwise the
+  // requested options value. Callers sizing large frames must use this, not
+  // options(), so they never exceed what the association can deliver.
+  [[nodiscard]] virtual std::size_t max_message_bytes() const noexcept {
+    return options().max_message_bytes;
+  }
   [[nodiscard]] virtual Result<void> send(std::span<const std::byte> payload) = 0;
   [[nodiscard]] virtual std::size_t buffered_amount() const noexcept = 0;
   [[nodiscard]] virtual bool writable() const noexcept = 0;

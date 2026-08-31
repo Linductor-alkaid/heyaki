@@ -30,6 +30,16 @@ a message service (`best_effort`/`peer_acked` with bounded TTL dedup), unary RPC
 `outcome_unknown` semantics), Node public APIs, TUI message/RPC views, and a semantics
 demo (`apps/demo/m6_message_rpc_demo.cpp`). See the
 [implementation plan](docs/todolists/heyaki-implementation-plan.md) for details.
+M7 (Remote events & file transfer) is closed (2026-08-31): a publisher-direct event
+bus (exact/segment-prefix topics, per-subscriber bounded staging with
+keep-latest or reliable-live QoS, observable overwrite/drop/stale/lag), an explicit
+executor::comm Topic bridge at the device boundary, and a resumable file protocol
+(manifest → accept-with-bitmap → bounded-window chunks → BLAKE3 verify → fsync →
+atomic rename) with root mapping, quotas, symlink-race-resistant staging, pause/
+cancel/resume by transfer id, and pull riding the frozen unary-RPC surface. Node
+public APIs, TUI event/file views, and the semantics demo
+(`apps/demo/m7_data_demo.cpp`) ship with it.
+
 
 | Milestone | Scope | State |
 | --- | --- | --- |
@@ -41,7 +51,8 @@ demo (`apps/demo/m6_message_rpc_demo.cpp`). See the
 | M4 | Connectivity MVP (WebRTC sessions, dual routing, session restart, TUI) | Done |
 | M5 | Session authorization, pairing/trust, channel scheduling, ByteStream | Done |
 | M6 | Message service and unary RPC | Done |
-| M7–M9 | Event & file transfer, remote shell, production hardening | Planned |
+| M7 | Remote events (best_effort_latest / reliable_live) and resumable file transfer | Done |
+| M8–M9 | Remote shell, production hardening | Planned |
 | M10 | Gateway proxy service (scoped L4 gateway over an authorized session, protocol 1.3) | Planned |
 | M11 | Android (NDK) port | Planned |
 

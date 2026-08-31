@@ -3,6 +3,8 @@
 #include "runtime_access.hpp"
 
 #include "byte_stream.hpp"
+#include "event_service.hpp"
+#include "file_service.hpp"
 #include "message_service.hpp"
 #include "pairing_service.hpp"
 #include "connection_attempt.hpp"
@@ -3009,7 +3011,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
          .wall_clock = unix_milliseconds_now,
          // M6: message/rpc physical channels are created by the session
          // initiator only; the responder adopts the peer's channel.
-         .initiator_owned_domains = {session::ChannelDomain::message,
+         .initiator_owned_domains = {session::ChannelDomain::event,
+                                        session::ChannelDomain::file,
+                                        session::ChannelDomain::message,
                                      session::ChannelDomain::rpc}});
     if (!session) return Result<void>::failure(*session.error_if());
     iterator->second.session = *session.value_if();
@@ -3260,12 +3264,49 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
 
   // ---- M6 message & unary RPC (strand context) ----
 
+  // Runs one mutation on the strand and waits for it (bounded). Called from
+  // the strand itself (e.g. inside an RPC completion) it runs inline — the
+  // post-and-wait would deadlock. A post failure or timeout leaves the
+  // caller's pre-set failure outcome in place.
+  template <typename F>
+  void run_on_strandAndWait(F fn) {
+    if (strand.running_in_this_thread()) {
+      fn(*this);
+      return;
+    }
+    auto promise = std::make_shared<std::promise<void>>();
+    auto future = promise->get_future();
+    auto weak = weak_from_this();
+    try {
+      boost::asio::post(strand, [weak, promise, fn = std::move(fn)]() mutable {
+        if (auto self = weak.lock()) {
+          fn(*self);
+        }
+        promise->set_value();
+      });
+    } catch (...) {
+      return;
+    }
+    (void)future.wait_for(std::chrono::seconds{5});
+  }
+
   ServiceDispatch service_dispatch() {
     auto* runtime_ptr = runtime;
     return [runtime_ptr](std::string_view task_name, std::function<void()> task) {
       return detail::RuntimeAccess::dispatch_general(*runtime_ptr,
                                                      std::string{task_name},
                                                      std::move(task));
+    };
+  }
+
+  // M7-12: file reads/writes/fsync/rename/disk digests run on the runtime's
+  // dedicated executor-managed blocking I/O worker.
+  BlockingDispatch blocking_dispatch() {
+    auto* runtime_ptr = runtime;
+    return [runtime_ptr](std::string_view task_name, CancellableTask task) {
+      return detail::RuntimeAccess::dispatch_blocking(*runtime_ptr,
+                                                       std::string{task_name},
+                                                       std::move(task));
     };
   }
 
@@ -3320,6 +3361,22 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     auto& impl = *static_cast<Node::Impl*>(context);
     if (impl.message_ack_observer) {
       impl.message_ack_observer(peer, id, event, std::move(error));
+    }
+  }
+
+  static void event_inbound_sink(void* context, const DeviceEndpointKey& peer,
+                                 std::string_view pattern, const EventItemBody& item) {
+    auto& impl = *static_cast<Node::Impl*>(context);
+    if (impl.event_inbound_handler) {
+      impl.event_inbound_handler(peer, pattern, item);
+    }
+  }
+
+  static void file_event_sink(void* context, const DeviceEndpointKey& peer,
+                              const FileTransferEvent& event) {
+    auto& impl = *static_cast<Node::Impl*>(context);
+    if (impl.file_event_observer) {
+      impl.file_event_observer(peer, event);
     }
   }
 
@@ -3382,6 +3439,45 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         }
       }
     }
+    if (!event_services.contains(peer)) {
+      auto service = std::make_shared<EventService>(
+          *session, peer, identity.device_id(), event_service_config, service_dispatch(),
+          [session](std::string_view scope) {
+            return session_scope_covers(*session, scope);
+          },
+          local_event_topic_, unix_milliseconds_now);
+      auto attached = service->attach();
+      if (!attached) {
+        update_snapshot([&](NodeSnapshot& snapshot) {
+          snapshot.last_error = *attached.error_if();
+        });
+        return;
+      }
+      service->set_inbound_sink(&Node::Impl::event_inbound_sink, this);
+      event_services.emplace(peer, std::move(service));
+    }
+    if (!file_services.contains(peer)) {
+      auto& book = transfer_books[peer];
+      if (!book) {
+        book = std::make_shared<FileTransferBook>();
+      }
+      auto service = std::make_shared<FileService>(
+          *session, peer, file_service_config, book, service_dispatch(),
+          blocking_dispatch(),
+          [session](std::string_view scope) {
+            return session_scope_covers(*session, scope);
+          },
+          service_strand_poster(), unix_milliseconds_now);
+      auto attached = service->attach();
+      if (!attached) {
+        update_snapshot([&](NodeSnapshot& snapshot) {
+          snapshot.last_error = *attached.error_if();
+        });
+        return;
+      }
+      service->set_event_sink(&Node::Impl::file_event_sink, this);
+      file_services.emplace(peer, std::move(service));
+    }
   }
 
   // Finalizes the services of one peer session: pending messages become
@@ -3395,6 +3491,20 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     if (message != message_services.end()) {
       auto service = message->second;
       message_services.erase(message);
+      service->handle_session_closed();
+    }
+    const auto event_entry = event_services.find(peer);
+    if (event_entry != event_services.end()) {
+      auto service = event_entry->second;
+      event_services.erase(event_entry);
+      service->handle_session_closed();
+    }
+    const auto file_entry = file_services.find(peer);
+    if (file_entry != file_services.end()) {
+      auto service = file_entry->second;
+      file_services.erase(file_entry);
+      // Sender transfers park in the book (paused, M7-13); the book stays
+      // for the next session. Receiver sidecars live on disk.
       service->handle_session_closed();
     }
     const auto rpc = rpc_services.find(peer);
@@ -3483,10 +3593,202 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     return service->second->cancel(request_id);
   }
 
+  // ---- M7 event & file (strand context) ----
+
+  Result<EventSubscriptionId> subscribe_events_strand(DeviceEndpointKey peer,
+                                                      std::string pattern,
+                                                      bool prefix_match, EventQos qos) {
+    ensure_peer_services(peer);
+    const auto service = event_services.find(peer);
+    if (service == event_services.end()) {
+      return Result<EventSubscriptionId>::failure(
+          node_error(ErrorCode::peer_offline, "peer_session_missing"));
+    }
+    return service->second->subscribe(std::move(pattern), prefix_match, qos);
+  }
+
+  std::size_t unsubscribe_events_strand(const DeviceEndpointKey& peer,
+                                        std::string pattern) {
+    const auto service = event_services.find(peer);
+    if (service == event_services.end()) {
+      return 0U;
+    }
+    return service->second->unsubscribe(pattern);
+  }
+
+  Result<std::size_t> publish_event_strand(DeviceEndpointKey peer, std::string topic,
+                                           std::vector<std::byte> payload,
+                                           std::uint32_t schema_version) {
+    ensure_peer_services(peer);
+    const auto service = event_services.find(peer);
+    if (service == event_services.end()) {
+      return Result<std::size_t>::failure(
+          node_error(ErrorCode::peer_offline, "peer_session_missing"));
+    }
+    auto outcome =
+        service->second->publish(std::move(topic), std::move(payload), schema_version);
+    if (!outcome) {
+      return Result<std::size_t>::failure(*outcome.error_if());
+    }
+    return Result<std::size_t>::success(outcome.value_if()->matched);
+  }
+
+  Result<std::size_t> publish_local_event_strand(DeviceEndpointKey peer, std::string topic,
+                                                 std::vector<std::byte> payload,
+                                                 std::uint32_t schema_version) {
+    // Outbound half of the M7-05 bridge: local fan-out plus remote forward.
+    LocalEventMessage message;
+    message.topic = topic;
+    message.schema_version = schema_version;
+    message.payload = payload;
+    (void)local_event_topic_.publish(message);
+    auto outcome = publish_event_strand(std::move(peer), std::move(topic),
+                                        std::move(payload), schema_version);
+    if (!outcome) {
+      return outcome;
+    }
+    return outcome;
+  }
+
+  Result<TransferId> push_file_strand(DeviceEndpointKey peer, std::string root,
+                                      std::string logical_name,
+                                      std::filesystem::path source_path,
+                                      TransferId transfer_id) {
+    ensure_peer_services(peer);
+    const auto service = file_services.find(peer);
+    if (service == file_services.end()) {
+      return Result<TransferId>::failure(
+          node_error(ErrorCode::peer_offline, "peer_session_missing"));
+    }
+    return service->second->push_file(std::move(root), std::move(logical_name),
+                                      std::move(source_path), transfer_id);
+  }
+
+  Result<TransferId> pull_file_strand(DeviceEndpointKey peer, std::string root,
+                                      std::string logical_name) {
+    ensure_peer_services(peer);
+    const auto file_service = file_services.find(peer);
+    const auto rpc_service = rpc_services.find(peer);
+    if (file_service == file_services.end() || rpc_service == rpc_services.end()) {
+      return Result<TransferId>::failure(
+          node_error(ErrorCode::peer_offline, "peer_session_missing"));
+    }
+    TransferId::Storage bytes{};
+    do {
+      randombytes_buf(bytes.data(), bytes.size());
+    } while (TransferId{bytes}.is_zero());
+    const TransferId transfer_id{bytes};
+    auto expected = file_service->second->expect_pull(transfer_id, root, logical_name);
+    if (!expected) {
+      return Result<TransferId>::failure(*expected.error_if());
+    }
+    // The pull request rides the frozen unary-RPC surface; the authoritative
+    // acceptance is the file protocol's accept/reject (M7-09).
+    FilePullRequestBody request;
+    request.transfer_id = transfer_id;
+    request.root = std::move(root);
+    request.logical_name = std::move(logical_name);
+    auto encoded = encode_file_pull_request(request);
+    if (!encoded) {
+      return Result<TransferId>::failure(*encoded.error_if());
+    }
+    auto weak = weak_from_this();
+    auto called = rpc_service->second->call(
+        "heyaki.file", "pull", std::move(*encoded.value_if()),
+        RpcCallOptions{.deadline_remaining_milliseconds = 15000U,
+                       .idempotent = false,
+                       .idempotency_key = std::nullopt,
+                       .retry_on_reconnect = false,
+                       .metadata = {}},
+        [weak, peer, transfer_id](const DeviceEndpointKey&,
+                                  Result<RpcCallOutcome> outcome) {
+          if (auto self = weak.lock()) {
+            self->handle_pull_rpc_result(peer, transfer_id, std::move(outcome));
+          }
+        });
+    if (!called) {
+      return Result<TransferId>::failure(*called.error_if());
+    }
+    return Result<TransferId>::success(transfer_id);
+  }
+
+  void handle_pull_rpc_result(const DeviceEndpointKey& peer, const TransferId& id,
+                              Result<RpcCallOutcome> outcome) {
+    const auto service = file_services.find(peer);
+    if (service == file_services.end()) {
+      return;
+    }
+    if (outcome && outcome.value_if()->status == StableStatus::ok) {
+      return;  // The file protocol carries the rest.
+    }
+    std::string detail = "pull_request_failed";
+    if (outcome && !outcome.value_if()->safe_detail.empty()) {
+      detail = outcome.value_if()->safe_detail;
+    }
+    service->second->fail_pending_pull(id, detail);
+  }
+
+  Result<void> pause_file_transfer_strand(const DeviceEndpointKey& peer,
+                                          const TransferId& id) {
+    const auto service = file_services.find(peer);
+    if (service == file_services.end()) {
+      return Result<void>::failure(node_error(ErrorCode::peer_offline,
+                                              "peer_session_missing"));
+    }
+    return service->second->pause_transfer(id);
+  }
+
+  Result<void> resume_file_transfer_strand(const DeviceEndpointKey& peer,
+                                           const TransferId& id) {
+    const auto service = file_services.find(peer);
+    if (service == file_services.end()) {
+      return Result<void>::failure(node_error(ErrorCode::peer_offline,
+                                              "peer_session_missing"));
+    }
+    return service->second->resume_transfer(id);
+  }
+
+  Result<void> cancel_file_transfer_strand(const DeviceEndpointKey& peer,
+                                           const TransferId& id) {
+    const auto service = file_services.find(peer);
+    if (service == file_services.end()) {
+      return Result<void>::failure(node_error(ErrorCode::peer_offline,
+                                              "peer_session_missing"));
+    }
+    return service->second->cancel_transfer(id);
+  }
+
+  std::vector<FileTransferSummary> file_transfers_strand(const DeviceEndpointKey& peer) {
+    const auto service = file_services.find(peer);
+    if (service == file_services.end()) {
+      return {};
+    }
+    return service->second->transfers();
+  }
+
   NodeServiceDiagnostics service_diagnostics_strand() {
     NodeServiceDiagnostics diagnostics;
     diagnostics.message_sessions = message_services.size();
     diagnostics.rpc_sessions = rpc_services.size();
+    diagnostics.event_sessions = event_services.size();
+    diagnostics.file_sessions = file_services.size();
+    for (auto& [peer, book] : transfer_books) {
+      (void)peer;
+      for (const auto& [id, entry] : book->entries()) {
+        (void)id;
+        if (entry.phase == FileTransferPhase::paused) {
+          ++diagnostics.file_paused_transfers;
+        }
+      }
+    }
+    for (const auto& [peer, service] : event_services) {
+      (void)peer;
+      accumulate(diagnostics.event, service->stats());
+    }
+    for (const auto& [peer, service] : file_services) {
+      (void)peer;
+      accumulate(diagnostics.file, service->stats());
+    }
     for (const auto& [peer, service] : message_services) {
       const auto stats = service->stats();
       diagnostics.message.sent_best_effort += stats.sent_best_effort;
@@ -3555,6 +3857,12 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       service->prune();
     }
     for (auto& [peer, service] : rpc_services) {
+      service->prune();
+    }
+    for (auto& [peer, service] : event_services) {
+      service->prune();
+    }
+    for (auto& [peer, service] : file_services) {
       service->prune();
     }
     // Retries whose deadline passed while no session existed finalize now.
@@ -4201,7 +4509,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
                    peer_public_key, requested_scopes);
              },
          .wall_clock = unix_milliseconds_now,
-         .initiator_owned_domains = {session::ChannelDomain::message,
+         .initiator_owned_domains = {session::ChannelDomain::event,
+                                        session::ChannelDomain::file,
+                                        session::ChannelDomain::message,
                                      session::ChannelDomain::rpc}});
     if (!session) return Result<void>::failure(*session.error_if());
     restart.session = *session.value_if();
@@ -5461,6 +5771,14 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   std::function<void(const DeviceEndpointKey&, ByteStream)> stream_inbound_handler;
   // ---- M6 message & unary RPC ----
   std::shared_ptr<ServiceRegistry> service_registry{std::make_shared<ServiceRegistry>()};
+  // M7: per-peer event/file services plus the transfer books that outlive
+  // sessions (paused sender transfers resume on the next session, M7-13).
+  std::map<DeviceEndpointKey, std::shared_ptr<EventService>> event_services;
+  std::map<DeviceEndpointKey, std::shared_ptr<FileService>> file_services;
+  std::map<DeviceEndpointKey, std::shared_ptr<FileTransferBook>> transfer_books;
+  executor::comm::Topic<LocalEventMessage> local_event_topic_{"heyaki-node-events"};
+  NodeEventInboundHandler event_inbound_handler;
+  NodeFileEventObserver file_event_observer;
   std::map<DeviceEndpointKey, std::shared_ptr<MessageService>> message_services;
   std::map<DeviceEndpointKey, std::shared_ptr<RpcService>> rpc_services;
   std::map<DeviceEndpointKey, std::deque<RpcService::RetryableCall>> rpc_retry_queue;
@@ -5468,6 +5786,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   NodeMessageAckObserver message_ack_observer;
   MessageServiceConfig message_service_config{};
   RpcServiceConfig rpc_service_config{};
+  EventServiceConfig event_service_config{};
+  FileServiceConfig file_service_config{};
   std::size_t rpc_retry_capacity{64U};
   LanSignalingValidator signaling_validator;
   LanSignalingHandler signaling_handler;
@@ -5625,6 +5945,63 @@ Result<Node> Node::create(NodeConfig config) {
         .wall_clock = unix_milliseconds_now,
         .audit_sink = nullptr};
     impl->pairing_service = std::make_unique<PairingService>(std::move(pairing_config));
+  }
+  // M7 service configuration: zero values keep the service defaults; roots
+  // and quotas map straight through from NodeConfig.
+  if (config.event_subscriber_queue_items > 0U) {
+    impl->event_service_config.subscriber_queue_items =
+        config.event_subscriber_queue_items;
+  }
+  if (config.event_max_subscriptions_per_peer > 0U) {
+    impl->event_service_config.max_subscriptions_per_peer =
+        config.event_max_subscriptions_per_peer;
+  }
+  impl->file_service_config.receive_roots = std::move(config.file_receive_roots);
+  impl->file_service_config.max_peer_receive_bytes = config.file_max_peer_receive_bytes;
+  // Built-in pull serving: heyaki.file/pull turns a validated request into a
+  // sender-role transfer on this node's strand. The authoritative acceptance
+  // still rides the file protocol (FILE_ACCEPT/FILE_REJECT), so the RPC only
+  // vouches for request shape.
+  {
+    auto weak = std::weak_ptr<Node::Impl>{impl};
+    auto pull_registered = impl->service_registry->register_method(
+        RpcMethodDescriptor{.service = "heyaki.file",
+                            .method = "pull",
+                            .schema_version = 1U,
+                            .required_scope = "heyaki.file",
+                            .streaming = false,
+                            .handler_enforced_scope = true},
+        [weak](const RpcCallContext& context) -> RpcHandlerResult {
+          auto parsed = parse_file_pull_request(context.payload());
+          if (!parsed) {
+            return RpcHandlerResult{StableStatus::permission_denied, {},
+                                    "pull_request_invalid"};
+          }
+          const auto caller = context.peer();
+          const auto request = *parsed.value_if();
+          if (!caller.has_value()) {
+            return RpcHandlerResult{StableStatus::permission_denied, {},
+                                    "pull_request_invalid"};
+          }
+          auto self = weak.lock();
+          if (!self) {
+            return RpcHandlerResult{StableStatus::unavailable, {}, "node_stopping"};
+          }
+          boost::asio::post(self->strand, [self, caller = *caller, request]() mutable {
+            const auto service = self->file_services.find(caller);
+            if (service == self->file_services.end()) {
+              return;
+            }
+            (void)service->second->serve_pull(request);
+          });
+          return RpcHandlerResult{StableStatus::ok, {}, "pull_serving"};
+        });
+    if (!pull_registered) {
+      if (owned_runtime) {
+        (void)owned_runtime->shutdown();
+      }
+      return Result<Node>::failure(*pull_registered.error_if());
+    }
   }
   auto initialized = impl->initialize();
   if (!initialized) {
@@ -6058,6 +6435,269 @@ Result<void> Node::cancel_rpc(const DeviceEndpointKey& peer,
                                             "rpc_cancel_schedule_failed"));
   }
   return Result<void>::success();
+}
+
+// ---- M7 event & file public API ----
+
+Result<EventSubscriptionId> Node::subscribe_events(const DeviceEndpointKey& peer,
+                                                   std::string pattern,
+                                                   bool prefix_match, EventQos qos) {
+  if (!impl_) {
+    return Result<EventSubscriptionId>::failure(
+        node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  if (!valid_event_topic(pattern)) {
+    return Result<EventSubscriptionId>::failure(
+        node_error(ErrorCode::configuration, "event_topic_invalid"));
+  }
+  // Fast feedback without the strand: no authorized session, no subscribe.
+  const auto sessions = impl_->peer_session_snapshots.load().value;
+  const auto authorized =
+      std::any_of(sessions.begin(), sessions.end(), [&](const auto& session) {
+        return session.peer == peer &&
+               session.state == NodePeerSessionState::authenticated;
+      });
+  if (!authorized) {
+    return Result<EventSubscriptionId>::failure(
+        node_error(ErrorCode::peer_offline, "peer_session_missing"));
+  }
+  Result<EventSubscriptionId> outcome =
+      Result<EventSubscriptionId>::failure(node_error(ErrorCode::internal,
+                                                      "event_subscribe_no_result"));
+  impl_->run_on_strandAndWait([&](Impl& impl) {
+    outcome = impl.subscribe_events_strand(peer, pattern, prefix_match, qos);
+  });
+  return outcome;
+}
+
+std::size_t Node::unsubscribe_events(const DeviceEndpointKey& peer,
+                                     std::string_view pattern) {
+  if (!impl_ || pattern.size() > max_event_topic_bytes) {
+    return 0U;
+  }
+  std::size_t removed = 0U;
+  impl_->run_on_strandAndWait([&](Impl& impl) {
+    removed = impl.unsubscribe_events_strand(peer, std::string{pattern});
+  });
+  return removed;
+}
+
+Result<std::size_t> Node::publish_event(const DeviceEndpointKey& peer, std::string topic,
+                                        std::vector<std::byte> payload,
+                                        std::uint32_t schema_version) {
+  if (!impl_) {
+    return Result<std::size_t>::failure(
+        node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  if (!valid_event_topic(topic)) {
+    return Result<std::size_t>::failure(
+        node_error(ErrorCode::configuration, "event_topic_invalid"));
+  }
+  if (payload.size() > Limits{}.max_event_payload_bytes) {
+    return Result<std::size_t>::failure(
+        node_error(ErrorCode::configuration, "payload_oversized"));
+  }
+  const auto sessions = impl_->peer_session_snapshots.load().value;
+  const auto authorized =
+      std::any_of(sessions.begin(), sessions.end(), [&](const auto& session) {
+        return session.peer == peer &&
+               session.state == NodePeerSessionState::authenticated;
+      });
+  if (!authorized) {
+    return Result<std::size_t>::failure(
+        node_error(ErrorCode::peer_offline, "peer_session_missing"));
+  }
+  Result<std::size_t> outcome = Result<std::size_t>::failure(
+      node_error(ErrorCode::internal, "event_publish_no_result"));
+  impl_->run_on_strandAndWait([&](Impl& impl) {
+    outcome = impl.publish_event_strand(peer, topic, payload, schema_version);
+  });
+  return outcome;
+}
+
+void Node::set_event_inbound_handler(NodeEventInboundHandler handler) {
+  if (!impl_) return;
+  impl_->event_inbound_handler = std::move(handler);
+}
+
+NodeLocalEventSubscription Node::subscribe_local_events() {
+  NodeLocalEventSubscription subscription;
+  if (!impl_) {
+    return subscription;
+  }
+  subscription.impl_ = std::make_unique<NodeLocalEventSubscription::Impl>(
+      impl_->local_event_topic_.subscribe(executor::comm::TopicSubscriptionOptions{
+          512U, executor::comm::DropPolicy::DropOldest, true, "heyaki-node-events"}));
+  return subscription;
+}
+
+Result<std::size_t> Node::publish_local_event(const DeviceEndpointKey& peer,
+                                              std::string topic,
+                                              std::vector<std::byte> payload,
+                                              std::uint32_t schema_version) {
+  if (!impl_) {
+    return Result<std::size_t>::failure(
+        node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  if (!valid_event_topic(topic)) {
+    return Result<std::size_t>::failure(
+        node_error(ErrorCode::configuration, "event_topic_invalid"));
+  }
+  const auto sessions = impl_->peer_session_snapshots.load().value;
+  const auto authorized =
+      std::any_of(sessions.begin(), sessions.end(), [&](const auto& session) {
+        return session.peer == peer &&
+               session.state == NodePeerSessionState::authenticated;
+      });
+  if (!authorized) {
+    return Result<std::size_t>::failure(
+        node_error(ErrorCode::peer_offline, "peer_session_missing"));
+  }
+  Result<std::size_t> outcome = Result<std::size_t>::failure(
+      node_error(ErrorCode::internal, "event_publish_no_result"));
+  impl_->run_on_strandAndWait([&](Impl& impl) {
+    outcome = impl.publish_local_event_strand(peer, topic, payload, schema_version);
+  });
+  return outcome;
+}
+
+Result<TransferId> Node::push_file(const DeviceEndpointKey& peer, std::string root,
+                                   std::string logical_name,
+                                   std::filesystem::path source_path,
+                                   TransferId transfer_id) {
+  if (!impl_) {
+    return Result<TransferId>::failure(
+        node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  if (!safe_logical_root_name(root) || !safe_logical_file_name(logical_name)) {
+    return Result<TransferId>::failure(
+        node_error(ErrorCode::configuration, "file_name_invalid"));
+  }
+  const auto sessions = impl_->peer_session_snapshots.load().value;
+  const auto authorized =
+      std::any_of(sessions.begin(), sessions.end(), [&](const auto& session) {
+        return session.peer == peer &&
+               session.state == NodePeerSessionState::authenticated;
+      });
+  if (!authorized) {
+    return Result<TransferId>::failure(
+        node_error(ErrorCode::peer_offline, "peer_session_missing"));
+  }
+  Result<TransferId> outcome = Result<TransferId>::failure(
+      node_error(ErrorCode::internal, "file_push_no_result"));
+  impl_->run_on_strandAndWait([&](Impl& impl) {
+    outcome = impl.push_file_strand(peer, root, logical_name, source_path, transfer_id);
+  });
+  return outcome;
+}
+
+Result<TransferId> Node::pull_file(const DeviceEndpointKey& peer, std::string root,
+                                   std::string logical_name) {
+  if (!impl_) {
+    return Result<TransferId>::failure(
+        node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  if (!safe_logical_root_name(root) || !safe_logical_file_name(logical_name)) {
+    return Result<TransferId>::failure(
+        node_error(ErrorCode::configuration, "file_name_invalid"));
+  }
+  const auto sessions = impl_->peer_session_snapshots.load().value;
+  const auto authorized =
+      std::any_of(sessions.begin(), sessions.end(), [&](const auto& session) {
+        return session.peer == peer &&
+               session.state == NodePeerSessionState::authenticated;
+      });
+  if (!authorized) {
+    return Result<TransferId>::failure(
+        node_error(ErrorCode::peer_offline, "peer_session_missing"));
+  }
+  Result<TransferId> outcome = Result<TransferId>::failure(
+      node_error(ErrorCode::internal, "file_pull_no_result"));
+  impl_->run_on_strandAndWait([&](Impl& impl) {
+    outcome = impl.pull_file_strand(peer, root, logical_name);
+  });
+  return outcome;
+}
+
+Result<void> Node::pause_file_transfer(const DeviceEndpointKey& peer,
+                                       const TransferId& id) {
+  if (!impl_) {
+    return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  Result<void> outcome =
+      Result<void>::failure(node_error(ErrorCode::internal, "file_pause_no_result"));
+  impl_->run_on_strandAndWait(
+      [&](Impl& impl) { outcome = impl.pause_file_transfer_strand(peer, id); });
+  return outcome;
+}
+
+Result<void> Node::resume_file_transfer(const DeviceEndpointKey& peer,
+                                        const TransferId& id) {
+  if (!impl_) {
+    return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  Result<void> outcome =
+      Result<void>::failure(node_error(ErrorCode::internal, "file_resume_no_result"));
+  impl_->run_on_strandAndWait(
+      [&](Impl& impl) { outcome = impl.resume_file_transfer_strand(peer, id); });
+  return outcome;
+}
+
+Result<void> Node::cancel_file_transfer(const DeviceEndpointKey& peer,
+                                        const TransferId& id) {
+  if (!impl_) {
+    return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  Result<void> outcome =
+      Result<void>::failure(node_error(ErrorCode::internal, "file_cancel_no_result"));
+  impl_->run_on_strandAndWait(
+      [&](Impl& impl) { outcome = impl.cancel_file_transfer_strand(peer, id); });
+  return outcome;
+}
+
+void Node::set_file_event_observer(NodeFileEventObserver observer) {
+  if (!impl_) return;
+  impl_->file_event_observer = std::move(observer);
+}
+
+std::vector<FileTransferSummary> Node::file_transfers(const DeviceEndpointKey& peer) {
+  if (!impl_) {
+    return {};
+  }
+  // Live transfer state lives on the strand; the bounded snapshot refresh on
+  // the periodic tick is the diagnostics surface, so this API answers from
+  // the file services' own strand-owned maps via a synchronous hop.
+  std::vector<FileTransferSummary> transfers;
+  impl_->run_on_strandAndWait(
+      [&](Impl& impl) { transfers = impl.file_transfers_strand(peer); });
+  return transfers;
+}
+
+NodeLocalEventSubscription::NodeLocalEventSubscription() = default;
+NodeLocalEventSubscription::~NodeLocalEventSubscription() = default;
+NodeLocalEventSubscription::NodeLocalEventSubscription(
+    NodeLocalEventSubscription&&) noexcept = default;
+NodeLocalEventSubscription& NodeLocalEventSubscription::operator=(
+    NodeLocalEventSubscription&&) noexcept = default;
+
+struct NodeLocalEventSubscription::Impl {
+  explicit Impl(executor::comm::TopicSubscription<LocalEventMessage> subscription)
+      : subscription(std::move(subscription)) {}
+  executor::comm::TopicSubscription<LocalEventMessage> subscription;
+};
+
+bool NodeLocalEventSubscription::try_receive(NodeLocalEvent& out) {
+  if (impl_ == nullptr) {
+    return false;
+  }
+  LocalEventMessage message;
+  if (!impl_->subscription.try_receive(message)) {
+    return false;
+  }
+  out.topic = std::move(message.topic);
+  out.schema_version = message.schema_version;
+  out.payload = std::move(message.payload);
+  return true;
 }
 
 NodeServiceDiagnostics Node::service_diagnostics() {
