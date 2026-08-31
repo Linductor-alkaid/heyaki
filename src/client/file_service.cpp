@@ -1181,8 +1181,9 @@ void FileService::handle_inbound_chunk(const FrameView& frame) {
     fail_receive(*receive, StableStatus::internal, "chunk_conflict");
     return;
   }
-  receive->accepted.emplace(chunk.header.offset,
-                            std::make_pair(chunk.data.size(), chunk.header.blake3));
+  receive->accepted.emplace(
+      chunk.header.offset,
+      std::make_pair(static_cast<std::uint32_t>(chunk.data.size()), chunk.header.blake3));
   PendingChunk pending;
   pending.offset = chunk.header.offset;
   pending.data.assign(chunk.data.begin(), chunk.data.end());
