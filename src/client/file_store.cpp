@@ -42,6 +42,25 @@ bool path_is_reparse_point(const std::wstring& wide) noexcept {
          (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U;
 }
 
+// GitHub Windows runners instrument new files with Defender: sharing
+// violations on freshly created files are transient, not real conflicts.
+// Bounded retry on the sharing/access errors instead of failing transfers.
+template <typename Try>
+auto retry_sharing_violation(Try&& attempt) -> decltype(attempt()) {
+  for (int tries = 0; tries < 10; ++tries) {
+    const auto handle = attempt();
+    if (handle != nullptr && handle != INVALID_HANDLE_VALUE) {
+      return handle;
+    }
+    const DWORD error = GetLastError();
+    if (error != ERROR_SHARING_VIOLATION && error != ERROR_ACCESS_DENIED) {
+      return handle;
+    }
+    ::Sleep(50);
+  }
+  return attempt();
+}
+
 std::wstring wide_of(const std::filesystem::path& path) { return path.wstring(); }
 
 Result<void> ensure_directory_real(const std::filesystem::path& directory) {
@@ -160,8 +179,10 @@ Result<SourceFile> open_source(const std::filesystem::path& path) {
 Result<std::vector<std::byte>> read_source_range(const std::filesystem::path& path,
                                                  std::uint64_t offset, std::size_t length) {
 #ifdef _WIN32
-  HANDLE file = CreateFileW(wide_of(path).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  HANDLE file = retry_sharing_violation([&] {
+    return CreateFileW(wide_of(path).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  });
   if (file == INVALID_HANDLE_VALUE) {
     return Result<std::vector<std::byte>>::failure(
         store_error(ErrorCode::transport, "source_read_failed"));
@@ -285,8 +306,10 @@ Result<void> write_staging_at(const std::filesystem::path& temp_path, std::uint6
 #ifdef _WIN32
   // OPEN_ALWAYS keeps an existing staging file from a resumed transfer; the
   // positional write only touches this chunk's range.
-  HANDLE file = CreateFileW(wide_of(temp_path).c_str(), FILE_GENERIC_WRITE, 0, nullptr,
-                            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  HANDLE file = retry_sharing_violation([&] {
+    return CreateFileW(wide_of(temp_path).c_str(), FILE_GENERIC_WRITE, FILE_SHARE_READ,
+                       nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  });
   if (file == INVALID_HANDLE_VALUE) {
     return Result<void>::failure(store_error(ErrorCode::transport, "staging_write_failed"));
   }
@@ -349,8 +372,19 @@ Result<void> remove_quietly(const std::filesystem::path& path) {
 
 Result<void> commit_staging(const StagingFile& staging) {
 #ifdef _WIN32
-  if (!MoveFileExW(wide_of(staging.temp_path).c_str(), wide_of(staging.final_path).c_str(),
-                   MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+  bool moved = false;
+  for (int tries = 0; tries < 10 && !moved; ++tries) {
+    moved = MoveFileExW(wide_of(staging.temp_path).c_str(),
+                        wide_of(staging.final_path).c_str(),
+                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    if (!moved && (GetLastError() == ERROR_SHARING_VIOLATION ||
+                   GetLastError() == ERROR_ACCESS_DENIED)) {
+      ::Sleep(50);
+      continue;
+    }
+    break;
+  }
+  if (!moved) {
     return Result<void>::failure(store_error(ErrorCode::internal, "commit_rename_failed"));
   }
 #else
@@ -412,8 +446,10 @@ std::uint64_t get_u64(const std::byte* bytes) {
 
 Result<std::vector<std::byte>> read_small_file(const std::filesystem::path& path) {
 #ifdef _WIN32
-  HANDLE file = CreateFileW(wide_of(path).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  HANDLE file = retry_sharing_violation([&] {
+    return CreateFileW(wide_of(path).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  });
   if (file == INVALID_HANDLE_VALUE) {
     return Result<std::vector<std::byte>>::failure(
         store_error(ErrorCode::peer_offline, "state_read_failed"));
