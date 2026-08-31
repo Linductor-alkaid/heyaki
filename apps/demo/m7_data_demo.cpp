@@ -33,6 +33,17 @@
 #endif
 #include <vector>
 
+#ifdef _WIN32
+#include <process.h>
+namespace {
+long current_pid() { return _getpid(); }
+}
+#else
+namespace {
+long current_pid() { return ::getpid(); }
+}
+#endif
+
 namespace {
 
 using heyaki::DeviceEndpointKey;
@@ -167,7 +178,7 @@ int print_semantics() {
   heyaki::DeviceEndpointKey nobody{};
   // Profile stores require owner-only directory permissions.
   const auto semantics_dir = std::filesystem::temp_directory_path() /
-                             ("heyaki-m7-semantics-" + std::to_string(::getpid()));
+                             ("heyaki-m7-semantics-" + std::to_string(current_pid()));
   std::error_code dir_ec;
   std::filesystem::create_directories(semantics_dir, dir_ec);
   // Profile stores reject directories with group/other permission bits.

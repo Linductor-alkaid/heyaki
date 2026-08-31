@@ -473,9 +473,9 @@ int main(int argc, char** argv) {
     }
     if (encoded_pull) m7_seeds.emplace_back("file-pull", *encoded_pull.value_if());
     m7_seeds.emplace_back("file-chunk", encoded_chunk);
-    auto truncated = encoded_chunk;
-    truncated.pop_back();
-    m7_seeds.emplace_back("file-chunk-truncated", std::move(truncated));
+    auto truncated_chunk = encoded_chunk;
+    truncated_chunk.pop_back();
+    m7_seeds.emplace_back("file-chunk-truncated", std::move(truncated_chunk));
     for (const auto& [name, seed] : m7_seeds) {
       heyaki::fuzz::m7_service_payload_parser(seed);
       if (!write_seed(corpus_root / "m7-service-payload", name, seed)) {

@@ -26,9 +26,22 @@
 #include <string>
 #include <vector>
 
-#ifndef _WIN32
+#ifdef _WIN32
+#include <process.h>
+#else
 #include <unistd.h>
 #endif
+
+namespace heyaki::test {
+// MSVC deprecates the POSIX getpid name; both spellings serve one helper.
+inline long current_pid() {
+#ifdef _WIN32
+  return _getpid();
+#else
+  return ::getpid();
+#endif
+}
+}  // namespace heyaki::test
 
 namespace heyaki::test {
 
@@ -91,7 +104,7 @@ struct M7TempDir {
   M7TempDir() {
     std::random_device device;
     std::string name = "heyaki-m7-" + std::to_string(device()) + "-" +
-                       std::to_string(::getpid());
+                       std::to_string(current_pid());
     path = std::filesystem::temp_directory_path() / name;
     std::filesystem::create_directories(path);
   }
