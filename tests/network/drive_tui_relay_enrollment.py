@@ -62,20 +62,40 @@ def main():
         payload = text if isinstance(text, bytes) else text.encode()
         os.write(master, payload)
 
-    steps = [
+    enrollment_steps = [
         ("command [refresh|relay", b"relay\n"),
         ("relay URL", (relay_url + "\n").encode()),
         ("tenant [default]", (tenant + "\n").encode()),
         ("bootstrap token:", (token + "\n").encode()),
-        ("command [refresh|relay", b"quit\n"),
     ]
     deadline = time.monotonic() + timeout
-    for fragment, text in steps:
-        if not wait_for(fragment.encode(), deadline):
+    # Loaded CI runners occasionally drop the first enrollment attempt (the
+    # relay/capture proxy barely beat the TUI to ready); the login is a fresh
+    # WSS attempt each time, so retry the sequence a bounded number of times
+    # before declaring failure.
+    attempts = 3
+    while True:
+        failure_mark = len(output)
+        for fragment, text in enrollment_steps:
+            if not wait_for(fragment.encode(), deadline):
+                break
+            if time.monotonic() >= deadline:
+                break
+            send(text)
+        # The prompt returns on both success and failure; a failure prints
+        # its marker after the token step.
+        wait_for(b"command [refresh|relay", min(deadline, time.monotonic() + 8.0))
+        time.sleep(0.2)
+        read_available()
+        attempts -= 1
+        if b"TUI relay enrollment failed" not in output[failure_mark:]:
             break
-        if time.monotonic() >= deadline:
+        if attempts <= 0 or time.monotonic() >= deadline:
             break
-        send(text)
+        time.sleep(2.0)
+    if time.monotonic() < deadline:
+        if wait_for(b"command [refresh|relay", deadline):
+            send(b"quit\n")
 
     try:
         proc.wait(timeout=max(0.0, deadline - time.monotonic()))
