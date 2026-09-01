@@ -66,9 +66,12 @@ std::wstring wide_of(const std::filesystem::path& path) { return path.wstring();
 Result<void> ensure_directory_real(const std::filesystem::path& directory) {
   std::error_code ec;
   const auto status = std::filesystem::symlink_status(directory, ec);
-  if (!ec && status.type() == std::filesystem::file_type::not_found) {
-    std::filesystem::create_directory(directory, ec);
-    if (ec) {
+  // A missing path reports not_found AND ENOENT in `ec` (same as POSIX):
+  // branch on the type, not on `ec`, or fresh subdirectories fail.
+  if (status.type() == std::filesystem::file_type::not_found) {
+    std::error_code mkdir_ec;
+    std::filesystem::create_directory(directory, mkdir_ec);
+    if (mkdir_ec) {
       return Result<void>::failure(store_error(ErrorCode::transport, "mkdir_failed"));
     }
   } else if (ec || !std::filesystem::is_directory(status)) {
