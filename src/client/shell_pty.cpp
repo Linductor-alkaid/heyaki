@@ -622,6 +622,17 @@ SpawnOutcome conpty_spawn(ShellPtySession& session) {
 
   STARTUPINFOEXW info{};
   info.StartupInfo.cb = sizeof(info);
+  // PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE only reroutes std handles that are
+  // console handles; when this host's own std handles are redirected (CI
+  // runners capture test output through pipes), the console-subsystem child
+  // inherits them verbatim and bypasses the PTY entirely
+  // (microsoft/terminal#11276). Explicitly requesting empty std handles makes
+  // the child reconnect them to the pseudoconsole regardless of how this
+  // process was launched.
+  info.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+  info.StartupInfo.hStdInput = nullptr;
+  info.StartupInfo.hStdOutput = nullptr;
+  info.StartupInfo.hStdError = nullptr;
   SIZE_T attribute_size = 0U;
   (void)::InitializeProcThreadAttributeList(nullptr, 1U, 0U, &attribute_size);
   std::vector<std::byte> attribute_storage(
