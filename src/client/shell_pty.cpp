@@ -541,7 +541,7 @@ bool make_pipe_pair(bool ours_reads, HANDLE* ours, HANDLE* theirs) {
   name += std::to_wstring(static_cast<unsigned long long>(::GetCurrentProcessId()));
   name.push_back(L'-');
   name += std::to_wstring(static_cast<unsigned long long>(serial));
-  name.push_back(ours_reads ? L'-o' : L'-i');
+  name.push_back(ours_reads ? L'o' : L'i');
 
   HANDLE server = ::CreateNamedPipeW(
       name.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
