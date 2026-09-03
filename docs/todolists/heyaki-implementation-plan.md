@@ -136,7 +136,7 @@ scope，可与 M7/M8 并行实施，但 gateway 不进入 v1.0 发布门禁，�
 | M5 | [m5-authorization-bytestream.md](m5-authorization-bytestream.md) | 已完成 | 会话授权（pairing/TrustGrant）、通道调度与 ByteStream；20/20 任务与全部退出条件完成，两轮实施记录见阶段文件，2026-08-28 关闭。 |
 | M6 | [m6-message-rpc.md](m6-message-rpc.md) | 已完成 | 消息（best_effort/peer_acked、TTL 去重、scope）、unary RPC（deadline/取消/at-most-once/outcome_unknown）与 TUI/示例；21/21 任务与退出条件于 2026-08-29 完成。 |
 | M7 | [m7-event-file-transfer.md](m7-event-file-transfer.md) | 已完成 | 远程事件与文件传输。 |
-| M8 | [m8-remote-shell.md](m8-remote-shell.md) | 开发完成 | Remote Shell 与安全终端 UI（独立安全里程碑，默认关闭）。2026-09-03 交付：ShellProfile/scope 授权、全帧协议、executor PTY worker（POSIX/ConPTY + 升级阶梯 + 速率/时限/背压上限）、内容无关审计、安全 VT 渲染器、Node API 与 TUI 视图；45 项 M8 测试 + fuzz 目标绿，全仓 51 项绿。生产启用待独立安全评审签字（默认保持禁用）。 |
+| M8 | [m8-remote-shell.md](m8-remote-shell.md) | 开发完成 | Remote Shell 与安全终端 UI（独立安全里程碑，默认关闭）。2026-09-03 交付：ShellProfile/scope 授权、全帧协议、executor PTY worker（POSIX/ConPTY + 升级阶梯 + 速率/时限/背压上限）、内容无关审计、安全 VT 渲染器、Node API 与 TUI 视图；45 项 M8 测试 + fuzz 目标绿，本机全仓 51 项绿 + m8 ASan 绿，CI 全矩阵（含 Windows ConPTY 生命周期）10/10 绿。生产启用待独立安全评审签字（默认保持禁用）。 |
 | M9 | [m9-production-hardening.md](m9-production-hardening.md) | 未开始 | 生产加固、跨平台、兼容性与 v1 发布。 |
 | M10 | [m10-gateway-proxy.md](m10-gateway-proxy.md) | 未开始 | 受限 L4 Gateway 代理：protocol 1.3 变更单、授权/profile、B 侧网关服务、A 侧 API 与可选 SOCKS5 前端。 |
 | M11 | [m11-android-port.md](m11-android-port.md) | 未开始 | Android（NDK）适配：依赖交叉编译、平台层验证、JNI 集成边界与 NDK CI；v1.x 交付，不阻塞 v1.0。 |

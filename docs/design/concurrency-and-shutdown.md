@@ -57,6 +57,12 @@ Heyaki 只允许一个明确 owner 初始化和关闭每个 executor 实例。�
 跨执行上下文传递的 payload 必须拥有其内存。callback 不得把指向第三方临时 buffer 的
 `span` 投递到 strand 或 handler。
 
+专用长期阻塞 I/O 各自注册一个 Blocking I/O worker，不在彼此的队列上排队长驻工作：
+文件 I/O（M7 起，`*-file-io` worker + 有界 `MpscChannel` 工作项 + 每项 StopSource）与
+Shell 子进程（M8 起，`*-shell-pty` worker：spawn/读/写/信号/升级终止/waitpid 回收全部在
+该 worker；命令与事件各有界 `MpscChannel`，事件由节点 strand 周期 tick drain，事件队列
+满时停读 PTY 形成背压；仅在 Node 配置了 shell profile 时启动）。
+
 LAN discovery 不注册第二个 Blocking I/O worker，也不在普通 executor pool task 中运行长期
 `receive`/`accept` 循环。UDP socket、TLS acceptor/client、interface refresh、lease 和 handshake
 timer 全部挂在现有 `io_context`；关闭 socket/acceptor 与取消 timer 必须解除 pending Asio wait。
@@ -100,7 +106,9 @@ SQLite，只放入有界 `RelayTtlTable` 内存结构并在 strand 内过期。
    再关闭 PeerSession 和 transport；外部 callback 只允许投递终态/关闭事件。
 5. 运行 `unregister_relay` hook 注销 relay endpoint；超过注销预算时记录 timeout，继续本地关闭。
 6. 关闭 callback `MpscChannel`，strand 消费到 closed，随后释放 discovery、route 与 session 状态。
-7. 释放 Asio work guard，唤醒并停止承载 `io_context::run()` 的 Blocking I/O worker。
+7. 释放 Asio work guard，唤醒并停止承载 `io_context::run()` 的 Blocking I/O worker；
+   随后按各自预算关闭文件 I/O 与 Shell PTY worker——PTY worker 停止路径先硬杀全部子进程、
+   有界回收并发出终态 exit 事件，节点在自身 service teardown 阶段已 drain 这些事件。
 8. 在预算内等待本 Node 提交的 future/operation；借用模式不得等待或 drain 其他组件任务。
 9. 运行 `flush_persistence` hook，刷新 ProfileStore、文件恢复状态和审计记录。
 10. 仅进程 owner 调用 executor `wait_for_completion_ex()`，再按结果选择

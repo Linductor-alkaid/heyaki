@@ -39,6 +39,17 @@ atomic rename) with root mapping, quotas, symlink-race-resistant staging, pause/
 cancel/resume by transfer id, and pull riding the frozen unary-RPC surface. Node
 public APIs, TUI event/file views, and the semantics demo
 (`apps/demo/m7_data_demo.cpp`) ship with it.
+M8 (Remote Shell) is code-complete (2026-09-03): a default-off shell service with locally
+configured profiles (`ShellProfileConfig`: fixed program, OS user, working directory, env
+allowlist, timeouts, caps), live `shell.open:<profile>` scope and per-profile concurrency
+checks, the full frozen shell frame family with a per-shell state machine, a third
+executor-managed blocking worker owning every child process (POSIX forkpty/process group,
+Windows ConPTY/job object) with a TERM→grace→kill escalation ladder, idle/absolute/output
+caps and bounded stdin, content-free audit records, a first-party safe-subset VT renderer
+(OSC/clipboard/title and unknown sequences dropped, SGR degraded, UTF-8 validated), Node
+public APIs, and a TUI `shell` view. Production enablement is gated on the independent
+security review sign-off — v1 stays compiled but disabled by default. See the
+[M8 milestone file](docs/todolists/m8-remote-shell.md) for the delivery record.
 
 
 | Milestone | Scope | State |
@@ -52,7 +63,8 @@ public APIs, TUI event/file views, and the semantics demo
 | M5 | Session authorization, pairing/trust, channel scheduling, ByteStream | Done |
 | M6 | Message service and unary RPC | Done |
 | M7 | Remote events (best_effort_latest / reliable_live) and resumable file transfer | Done |
-| M8–M9 | Remote shell, production hardening | Planned |
+| M8 | Remote shell (default-off, executor PTY worker, safe VT renderer, TUI shell view) | Done — pending security review for production enable |
+| M9 | Production hardening | Planned |
 | M10 | Gateway proxy service (scoped L4 gateway over an authorized session, protocol 1.3) | Planned |
 | M11 | Android (NDK) port | Planned |
 
@@ -76,9 +88,14 @@ public APIs, TUI event/file views, and the semantics demo
   dedup) and unary RPC (per-method scope/policy, relative deadlines, cooperative
   cancellation, at-most-once result caching, `outcome_unknown` on interrupted
   non-idempotent calls) exposed through the `heyaki::Node` public API.
+- A default-off Remote Shell service: locally configured profiles, live
+  `shell.open:<profile>` scope checks, an executor-managed PTY worker per node owning every
+  child (process-tree termination escalation, idle/absolute/output caps, bounded stdin), a
+  content-free audit trail, and a safe-subset VT renderer so remote bytes never reach the
+  host terminal unfiltered.
 - Bounded backpressure and lifecycle observability through executor facilities.
 - An FTXUI diagnostics TUI showing endpoints by route, session state, RTT, buffered bytes,
-  structured failures, pairing/trust management, and message/RPC views.
+  structured failures, pairing/trust management, message/RPC, event/file, and shell views.
 
 ## Components
 
@@ -88,11 +105,11 @@ public APIs, TUI event/file views, and the semantics demo
 | `heyaki-tui` | App | FTXUI terminal client: profile setup, pairing/trust, device/endpoint/session/stream views, message and RPC views, `connect`/`close` REPL |
 | `heyaki-m2-profile-demo`, `heyaki-m3b-relay-demo`, `heyaki-m6-message-rpc-demo` | Apps | Small demos of the profile store, relay enrollment, and message/RPC semantics (admission vs. completion vs. ACK vs. `outcome_unknown`) |
 | `heyaki_core` | Library | Public types, wire protocol, canonical signing, signaling/session protocols, replay cache, identity, limits |
-| `heyaki_client` | Library | `heyaki::Node` connection assembly: discovery, signaling coordinator, `PeerSession`, LAN directory, relay enrollment, runtime, authorization/byte-stream, message service, and unary RPC |
+| `heyaki_client` | Library | `heyaki::Node` connection assembly: discovery, signaling coordinator, `PeerSession`, LAN directory, relay enrollment, runtime, authorization/byte-stream, message/unary-RPC/event/file services, and the default-off remote shell service with its executor-managed PTY worker |
 | `heyaki_profile` | Library | `ProfileStore` (SQLite), Argon2id password hashing, secret backend |
 | `heyaki_transport_webrtc` | Library | `WebRtcTransportSession` wrapping pinned libdatachannel |
 | `heyaki_relay` | Library | Relay server implementation behind `heyaki-relay` |
-| `heyaki_services` | Library | Placeholder for future business services (M7+); the M5/M6 pairing, byte-stream, message, and RPC services live in `heyaki_client` |
+| `heyaki_services` | Library | Placeholder for future business services; the M5–M8 pairing, byte-stream, message/RPC, event/file, and shell services live in `heyaki_client` |
 
 ## Build
 
@@ -137,7 +154,8 @@ inventory and license manifest from the lock files.
 ## Testing
 
 `ctest --preset <preset>` runs the unit and integration suites (signaling, session hello,
-peer session, WebRTC transport, relay route, path policy, TUI setup) plus script harnesses
+peer session, WebRTC transport, relay route, path policy, TUI setup, per-milestone service
+suites including the M8 shell/PTY-lifecycle and VT-renderer tests) plus script harnesses
 for network topologies, relay onboarding, TUI session establishment, and the pinned coturn
 deployment. coturn-dependent checks are skipped automatically when the required environment
 is not present. Performance tests include session-establishment P95 budgets.

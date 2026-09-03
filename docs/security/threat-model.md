@@ -5,7 +5,12 @@
 > M6 message/unary-RPC, and M7 event/file surfaces operate inside the session, pairing,
 > and replay boundaries analyzed below; the M7 file receive path adds its own pre-byte
 > admission gate (root scope, quota, and logical-name safety before any byte is
-> accepted, plus symlink-race-resistant staging with atomic rename).
+> accepted, plus symlink-race-resistant staging with atomic rename). The M8 Remote Shell
+> (delivered 2026-09-03, compiled but disabled by default) executes the "malicious
+> terminal data" row below with a locally configured profile boundary, an
+> executor-owned child-process worker with escalation and caps, a content-free audit
+> trail, and a safe-subset VT renderer; its production enablement remains gated on the
+> independent security review sign-off recorded in the M8 milestone file.
 >
 > Scope: device library, LAN discovery/signaling, `heyaki-relay`, coturn integration, ProfileStore,
 > and TUI
@@ -150,9 +155,14 @@ replay-cache full rejection, cancellation, and shutdown convergence before M4 �
 session code had to prove signature/fingerprint/transcript failures before M4, and restricted-session
 isolation had to pass before M5 opened pairing — both gates passed with the M4/M5 closures
 (2026-08-27/2026-08-28). File code must prove path containment and quota checks
-before M7. Shell remains disabled until its
-VT parser, process containment, logging exclusions, and termination escalation receive a separate
-review in M8.
+before M7. Shell code landed with M8 (2026-09-03): the safe-subset VT parser (OSC/DCS/
+private/unknown sequences dropped and counted, SGR degraded, UTF-8 validated, bounded
+buffers) and its fuzz target, child-process containment (single executor-managed PTY
+worker, pre-fork fork-safe plan, TERM→grace→process-tree-kill escalation, idle/absolute/
+output caps, bounded stdin, disconnect termination, no-zombie reaping), terminal-content
+logging exclusion, and content-free audit records are implemented and covered by the M8
+test suite on the CI matrix. Remote Shell stays compiled but disabled by default;
+production enablement waits on the separate independent security review sign-off.
 
 Residual risks accepted for v1 are LAN stable-ID enumeration, local/relay/coturn denial of service and
 traffic analysis, compromise of a device OS principal, lack of cross-VLAN serverless discovery, and lack
