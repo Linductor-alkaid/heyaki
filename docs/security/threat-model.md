@@ -9,8 +9,10 @@
 > (delivered 2026-09-03, compiled but disabled by default) executes the "malicious
 > terminal data" row below with a locally configured profile boundary, an
 > executor-owned child-process worker with escalation and caps, a content-free audit
-> trail, and a safe-subset VT renderer; its production enablement remains gated on the
-> independent security review sign-off recorded in the M8 milestone file.
+> trail, and a safe-subset VT renderer; its production enablement (POSIX only — Windows
+> stays fail-closed pending the path-validation fix) was signed off on 2026-09-04 per
+> the independent security review recorded in `m8-remote-shell-security-review.md` and
+> the M8 milestone file.
 >
 > Scope: device library, LAN discovery/signaling, `heyaki-relay`, coturn integration, ProfileStore,
 > and TUI
@@ -161,9 +163,20 @@ buffers) and its fuzz target, child-process containment (single executor-managed
 worker, pre-fork fork-safe plan, TERM→grace→process-tree-kill escalation, idle/absolute/
 output caps, bounded stdin, disconnect termination, no-zombie reaping), terminal-content
 logging exclusion, and content-free audit records are implemented and covered by the M8
-test suite on the CI matrix. Remote Shell stays compiled but disabled by default;
-production enablement waits on the separate independent security review sign-off.
+test suite on the CI matrix. Remote Shell stays compiled but disabled by default; production
+enablement (POSIX only for now) was signed off on 2026-09-04 after the independent security
+review in `m8-remote-shell-security-review.md` — no P0/P1 findings; the review's P2-F2
+(silent PTY-worker session-limit refusal) was fixed before enablement
+(`spawn_failed`/`worker_session_limit` is now observable end to end). Windows enablement
+stays blocked in the fail-closed state until the review's P2-F1 (profile validation rejects
+native absolute paths) is fixed.
 
 Residual risks accepted for v1 are LAN stable-ID enumeration, local/relay/coturn denial of service and
 traffic analysis, compromise of a device OS principal, lack of cross-VLAN serverless discovery, and lack
-of lossless network migration. They are not represented as successful or authorized operation outcomes.
+of lossless network migration. Remote Shell adds two accepted residuals (review P3-F4/P3-F5): a POSIX
+child that escapes its process group (its own `setsid`/daemonization) is outside the escalation ladder's
+signal reach — mitigated by operator profile discipline (fixed programs, non-privileged `os_user`) and
+the same class of exposure as PTY-based remote shells without cgroups, while the Windows job object
+contains its tree; and shell scopes are adjudicated from the session's upgrade-time snapshot, so a grant
+expiring mid-session does not close already-open shells — bounded by session lifetime and the profile
+absolute timeout (default 1 h). They are not represented as successful or authorized operation outcomes.

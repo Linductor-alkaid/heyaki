@@ -1,6 +1,6 @@
 # M8：Remote Shell
 
-> - 状态：开发完成（2026-09-03；45 项 M8 单测全绿、本机全仓 51 项 ctest + m8 ASan 绿、CI 全矩阵 10/10 job 绿含 Windows ConPTY 生命周期；编译存在、配置默认禁用，生产启用待独立安全评审签字）
+> - 状态：已放行（2026-09-04 安全评审签字后生产启用解禁，限 POSIX；开发完成于 2026-09-03，46 项 M8 单测全绿、本机全仓 51 项 ctest + m8 ASan 绿、CI 全矩阵含 Windows ConPTY 生命周期；评审报告见 [docs/security/m8-remote-shell-security-review.md](../security/m8-remote-shell-security-review.md)）
 > - 所属计划：[Heyaki MVP 至 v1 实施 TODO 计划](heyaki-implementation-plan.md)
 > - 前置：M7 | 建议发布点：v0.4 Shell beta
 
@@ -27,7 +27,7 @@
 - [x] fuzz VT parser 和 Shell frame；恶意 OSC/escape 不触达宿主剪贴板、标题、文件或命令执行（m8_shell_frame_parser/m8_vt_terminal_parser 进入 libFuzzer 入口与 smoke 种子：OSC 剪贴板/标题、DCS、非法 UTF-8、超长序列；渲染器无任何宿主副作用面——纯内存模型）。
 - [x] Linux PTY 生命周期测试通过（m8_pty_test：round-trip、升级阶梯、空闲超时、stdin 往返、shutdown 回收、spawn 失败）；exit 事件即 waitpid 回收证明，无僵尸。Windows ConPTY 路径已实现（ConPTY 动态解析 + job object + overlapped 管道），生命周期用例跨平台编写（cmd.exe 变体），由 CI Windows 矩阵验证。
 - [x] 文件持续传输时 Shell 交互延迟满足冻结预算；退出和取消 control 帧始终有保留容量（M8ShellScheduler.BulkBacklogCannotStarveShellFrames 钉死 interactive/standard 对 bulk 的加权优先与提前穿插；control 保留额度沿 M5-04 既有性质）。
-- [ ] 独立安全评审签字后才允许生产构建启用 Shell；否则 v1 保持编译存在但配置默认禁用。（后半句已满足并测试：默认无 profile 即关闭、未配置 worker 的 borrowed runtime 打开请求以 failed_precondition 拒绝；生产启用维持阻塞，待人工安全评审签字——负责人：用户，本条不勾选。）
+- [x] 独立安全评审签字后才允许生产构建启用 Shell；否则 v1 保持编译存在但配置默认禁用。（后半句已满足并测试：默认无 profile 即关闭、未配置 worker 的 borrowed runtime 打开请求以 failed_precondition 拒绝。签字：2026-09-04 用户批准——依据 [docs/security/m8-remote-shell-security-review.md](../security/m8-remote-shell-security-review.md)（无 P0/P1），放行条件为 P2-F2 先修复并 CI 全绿；F2 已修（PTY worker 会话上限拒绝现以 `spawn_failed`/`worker_session_limit` 事件可观测、`SHELL_ERROR` 透传失败 detail，`SessionLimitRefusalIsObservableNotSilent` 钉死），残余风险 P3-F4/P3-F5 已记入威胁模型；放行范围限 POSIX，Windows 待 P2-F1 路径校验修复，当前保持 fail-closed 禁用态。）
 
 ## 实施记录（2026-09-03）
 
@@ -35,7 +35,7 @@
 `src/core/shell_protocol.cpp`、`src/core/shell_terminal.cpp`、
 `src/client/shell_pty.{hpp,cpp}`、`src/client/shell_service.{hpp,cpp}`、
 runtime/node/TUI 接线（runtime 第三阻塞 worker、Node 公共 API 与审计队列、
-`shell N` 视图）、`heyaki_m8_service_tests`（45 项）与两个新 fuzz 目标。
+`shell N` 视图）、`heyaki_m8_service_tests` 与两个新 fuzz 目标。
 提交序列：ab255d2（主体交付）→ 1a69a30 → 36c4ec8 → ef5b50e → 1ba6b2d →
 9585a74（Windows ConPTY 修复链）；最终 CI 全矩阵 10/10 job 绿。
 
@@ -94,13 +94,15 @@ runtime/node/TUI 接线（runtime 第三阻塞 worker、Node 公共 API 与审�
 
 ### 测试与验收
 
-`heyaki_m8_service_tests` 45/45（codec 10、profile 2、service 17、调度 1、VT 10、
-PTY 6，Windows 上 stdin 往返用例按平台跳过）；fuzz smoke 含 6 个 M8 种子；本机全仓
-ctest 51/51 绿 + m8 套件 ASan 绿；最终 CI 全矩阵（gcc/clang×Debug/Release、MSVC×2、
-asan/ubsan/tsan、coturn-topology）10/10 绿。
+`heyaki_m8_service_tests` 交付时 45/45（codec 10、profile 2、service 17、调度 1、
+VT 10、PTY 6，Windows 上 stdin 往返用例按平台跳过）；安全评审后 F2 修复新增
+`SessionLimitRefusalIsObservableNotSilent`，现为 46/46。fuzz smoke 含 6 个 M8 种子；
+本机全仓 ctest 51/51 绿 + m8 套件 ASan 绿；交付时 CI 全矩阵
+（gcc/clang×Debug/Release、MSVC×2、asan/ubsan/tsan、coturn-topology）10/10 绿。
 
 ### 遗留（不阻塞 M8 关闭）
 
-生产启用 Shell 等待独立安全评审签字（唯一未勾选退出条件）；TUI shell 视图为行式交互
-（与既有视图一致），全屏交互式终端不属于本里程碑范围；Windows stdin 交互往返用例以
-平台差异为由跳过，输出/生命周期路径已被其余用例覆盖。
+安全评审已签字（2026-09-04，记录见上），生产启用解禁（限 POSIX）；Windows 启用待 P2-F1
+（profile 路径校验拒绝原生绝对路径）修复，评审硬化项 P4-F6..F9 随后续里程碑顺带处理。TUI
+shell 视图为行式交互（与既有视图一致），全屏交互式终端不属于本里程碑范围；Windows stdin
+交互往返用例以平台差异为由跳过，输出/生命周期路径已被其余用例覆盖。

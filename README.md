@@ -47,8 +47,10 @@ executor-managed blocking worker owning every child process (POSIX forkpty/proce
 Windows ConPTY/job object) with a TERM→grace→kill escalation ladder, idle/absolute/output
 caps and bounded stdin, content-free audit records, a first-party safe-subset VT renderer
 (OSC/clipboard/title and unknown sequences dropped, SGR degraded, UTF-8 validated), Node
-public APIs, and a TUI `shell` view. Production enablement is gated on the independent
-security review sign-off — v1 stays compiled but disabled by default. See the
+public APIs, and a TUI `shell` view. Production enablement on POSIX was signed off on
+2026-09-04 after the independent security review
+([report](docs/security/m8-remote-shell-security-review.md)); Windows stays fail-closed
+until the profile path-validation gap is fixed. See the
 [M8 milestone file](docs/todolists/m8-remote-shell.md) for the delivery record.
 
 
@@ -63,7 +65,7 @@ security review sign-off — v1 stays compiled but disabled by default. See the
 | M5 | Session authorization, pairing/trust, channel scheduling, ByteStream | Done |
 | M6 | Message service and unary RPC | Done |
 | M7 | Remote events (best_effort_latest / reliable_live) and resumable file transfer | Done |
-| M8 | Remote shell (default-off, executor PTY worker, safe VT renderer, TUI shell view) | Done — pending security review for production enable |
+| M8 | Remote shell (default-off, executor PTY worker, safe VT renderer, TUI shell view) | Done — production enable signed off (POSIX; Windows pending path-validation fix) |
 | M9 | Production hardening | Planned |
 | M10 | Gateway proxy service (scoped L4 gateway over an authorized session, protocol 1.3) | Planned |
 | M11 | Android (NDK) port | Planned |
