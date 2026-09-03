@@ -28,7 +28,6 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -63,8 +62,7 @@ namespace heyaki {
 namespace {
 
 constexpr std::size_t kReadChunkBytes = 16U * 1024U;
-// WaitForMultipleObjects caps a wait at 64 handles: wake + read/write event
-// per session bounds concurrent shells on Windows.
+// Cross-platform sanity cap on concurrently live shells per PTY worker.
 constexpr std::size_t kWorkerSessionLimit = 24U;
 
 std::uint64_t steady_ms_now() noexcept {
@@ -115,13 +113,12 @@ struct ShellPtySession {
   HPCON pseudo_console{nullptr};
   HANDLE process{nullptr};
   HANDLE job{nullptr};
-  HANDLE out_read{nullptr};  // our end: child output (overlapped)
-  HANDLE in_write{nullptr};  // our end: child stdin (overlapped)
-  OVERLAPPED read_overlapped{};
-  OVERLAPPED write_overlapped{};
-  bool read_pending{false};
-  bool write_pending{false};
-  std::vector<std::byte> write_buffer;
+  // Synchronous anonymous-pipe ends (the documented ConPTY pattern,
+  // microsoft/terminal#262: overlapped pipe handles must not be handed to
+  // CreatePseudoConsole). Reads poll via PeekNamedPipe; stdin writes are
+  // bounded by the pending-input cap plus an oversized pipe buffer.
+  HANDLE out_read{nullptr};  // our end: child output
+  HANDLE in_write{nullptr};  // our end: child stdin
   std::array<std::byte, kReadChunkBytes> read_buffer{};
 #endif
 };
@@ -530,35 +527,19 @@ std::wstring wide_from_utf8(const std::string& text) {
   return wide;
 }
 
-std::atomic<std::uint64_t> g_pipe_counter{0U};
+// Canonical ConPTY plumbing (Creating a Pseudoconsole session): two
+// anonymous pipes; the ConPTY-facing ends go to CreatePseudoConsole, ours
+// stay for the worker's polled I/O. The input pipe buffer covers the whole
+// pending-input budget so a synchronous WriteFile does not block the worker
+// while ConPTY drains continuously.
+constexpr std::size_t kInputPipeBytes = 128U * 1024U;
 
-// Named-pipe pair with OUR end overlapped (synchronous pipes cannot join a
-// WaitForMultipleObjects loop). The ConPTY-facing client end stays
-// synchronous like the documented CreatePipe sample.
-bool make_pipe_pair(bool ours_reads, HANDLE* ours, HANDLE* theirs) {
-  const std::uint64_t serial = g_pipe_counter.fetch_add(1U);
-  std::wstring name = L"\\\\.\\pipe\\heyaki-shell-";
-  name += std::to_wstring(static_cast<unsigned long long>(::GetCurrentProcessId()));
-  name.push_back(L'-');
-  name += std::to_wstring(static_cast<unsigned long long>(serial));
-  name.push_back(ours_reads ? L'o' : L'i');
-
-  HANDLE server = ::CreateNamedPipeW(
-      name.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-      PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1U, 32U * 1024U,
-      32U * 1024U, 0U, nullptr);
-  if (server == INVALID_HANDLE_VALUE) {
-    return false;
-  }
-  HANDLE client = ::CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0U,
-                                nullptr, OPEN_EXISTING, 0U, nullptr);
-  if (client == INVALID_HANDLE_VALUE) {
-    ::CloseHandle(server);
-    return false;
-  }
-  *ours = server;
-  *theirs = client;
-  return true;
+bool make_conpty_pipes(HANDLE* in_conpty, HANDLE* in_ours, HANDLE* out_ours,
+                       HANDLE* out_conpty) {
+  SECURITY_ATTRIBUTES inheritable{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+  return ::CreatePipe(in_conpty, in_ours, &inheritable,
+                      static_cast<DWORD>(kInputPipeBytes)) != 0 &&
+         ::CreatePipe(out_ours, out_conpty, &inheritable, 0U) != 0;
 }
 
 SpawnOutcome conpty_spawn(ShellPtySession& session) {
@@ -571,8 +552,8 @@ SpawnOutcome conpty_spawn(ShellPtySession& session) {
   HANDLE input_conpty = nullptr; // ConPTY reads child stdin
   HANDLE output_ours = nullptr;  // we read child output
   HANDLE output_conpty = nullptr;
-  if (!make_pipe_pair(false, &input_ours, &input_conpty) ||
-      !make_pipe_pair(true, &output_ours, &output_conpty)) {
+  if (!make_conpty_pipes(&input_conpty, &input_ours, &output_ours,
+                         &output_conpty)) {
     if (input_ours) ::CloseHandle(input_ours);
     if (input_conpty) ::CloseHandle(input_conpty);
     if (output_ours) ::CloseHandle(output_ours);
@@ -693,52 +674,18 @@ SpawnOutcome conpty_spawn(ShellPtySession& session) {
   session.job = job;
   session.in_write = input_ours;
   session.out_read = output_ours;
-  session.read_overlapped.hEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
-  session.write_overlapped.hEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
-  if (session.read_overlapped.hEvent == nullptr ||
-      session.write_overlapped.hEvent == nullptr) {
-    return {false, "conpty_events_failed"};
-  }
   return {true, {}};
 }
 
-void conpty_arm_read(ShellPtySession& session) {
-  if (session.read_pending || session.out_read == nullptr) {
-    return;
-  }
-  ::ResetEvent(session.read_overlapped.hEvent);
-  DWORD read = 0U;
-  const BOOL ok = ::ReadFile(session.out_read, session.read_buffer.data(),
-                             static_cast<DWORD>(session.read_buffer.size()), &read,
-                             &session.read_overlapped);
-  if (ok || ::GetLastError() == ERROR_IO_PENDING) {
-    session.read_pending = true;
-    return;
-  }
-  session.read_pending = false;
-}
-
 void conpty_close(ShellPtySession& session) {
-  if (session.read_overlapped.hEvent) {
-    ::CloseHandle(session.read_overlapped.hEvent);
-    session.read_overlapped.hEvent = nullptr;
-  }
-  if (session.write_overlapped.hEvent) {
-    ::CloseHandle(session.write_overlapped.hEvent);
-    session.write_overlapped.hEvent = nullptr;
-  }
   if (session.out_read) {
-    ::CancelIoEx(session.out_read, nullptr);
     ::CloseHandle(session.out_read);
     session.out_read = nullptr;
   }
   if (session.in_write) {
-    ::CancelIoEx(session.in_write, nullptr);
     ::CloseHandle(session.in_write);
     session.in_write = nullptr;
   }
-  session.read_pending = false;
-  session.write_pending = false;
   if (session.job) {
     ::CloseHandle(session.job);
     session.job = nullptr;
@@ -897,24 +844,27 @@ void ShellPtyWorker::run(executor::StopToken stop_token) {
       session.pending_input.pop_front();
     }
 #else
-    if (session.write_pending || session.pending_input.empty() ||
-        session.in_write == nullptr) {
-      return;
-    }
-    session.write_buffer = std::move(session.pending_input.front());
-    session.pending_input.pop_front();
-    session.write_pending = true;
-    ::ResetEvent(session.write_overlapped.hEvent);
-    DWORD put = 0U;
-    const BOOL ok = ::WriteFile(session.in_write, session.write_buffer.data(),
-                                static_cast<DWORD>(session.write_buffer.size()),
-                                &put, &session.write_overlapped);
-    if (!ok && ::GetLastError() != ERROR_IO_PENDING) {
-      session.write_pending = false;
+    // Synchronous write bounded by the pipe buffer (>= the pending-input
+    // cap, see make_conpty_pipes) plus ConPTY's continuous drain.
+    while (!session.pending_input.empty() && session.in_write != nullptr) {
+      auto& front = session.pending_input.front();
+      DWORD put = 0U;
+      const BOOL ok =
+          ::WriteFile(session.in_write, front.data(),
+                      static_cast<DWORD>(front.size()), &put, nullptr);
+      if (!ok || put == 0U) {
+        session.pending_input.clear();
+        session.pending_input_bytes = 0U;
+        return;
+      }
+      session.input_bytes += put;
       session.pending_input_bytes -=
-          std::min<std::size_t>(session.pending_input_bytes,
-                                session.write_buffer.size());
-      session.write_buffer.clear();
+          std::min<std::size_t>(session.pending_input_bytes, put);
+      if (put < front.size()) {
+        front.erase(front.begin(), front.begin() + static_cast<std::ptrdiff_t>(put));
+        return;
+      }
+      session.pending_input.pop_front();
     }
 #endif
   };
@@ -957,9 +907,7 @@ void ShellPtyWorker::run(executor::StopToken stop_token) {
           started.shell_id = id;
           started.kind = ShellPtyEvent::Kind::started;
           (void)emit_event(impl.events, std::move(started));
-#if defined(_WIN32)
-          conpty_arm_read(impl.sessions.at(id));
-#endif
+
           break;
         }
         case ShellPtyCommand::Kind::write_stdin: {
@@ -1233,55 +1181,35 @@ void ShellPtyWorker::run(executor::StopToken stop_token) {
     wake->drain();
 #else
     auto* wake = static_cast<WindowsEventWake*>(&impl.wake);
-    std::vector<HANDLE> handles;
-    handles.push_back(wake->handle());
-    for (auto& [id, session] : impl.sessions) {
-      (void)id;
-      const bool paused = !session.pending_output.empty() || session.output_flood;
-      if (session.read_pending && !paused && session.read_overlapped.hEvent) {
-        handles.push_back(session.read_overlapped.hEvent);
-      }
-      if (session.write_pending && session.write_overlapped.hEvent) {
-        handles.push_back(session.write_overlapped.hEvent);
-      }
-    }
-    (void)::WaitForMultipleObjects(static_cast<DWORD>(handles.size()),
-                                   handles.data(), FALSE,
-                                   static_cast<DWORD>(wait_ms));
+    (void)::WaitForSingleObject(wake->handle(), static_cast<DWORD>(wait_ms));
 
-    // Harvest completed overlapped I/O.
+    // Poll each session's synchronous pipe: PeekNamedPipe bounds the read
+    // to what is already buffered, so ReadFile never blocks the worker.
     for (auto& [id, session] : impl.sessions) {
       (void)id;
-      if (session.read_pending && session.read_overlapped.hEvent != nullptr &&
-          ::WaitForSingleObject(session.read_overlapped.hEvent, 0U) ==
-              WAIT_OBJECT_0) {
-        DWORD got = 0U;
-        const BOOL ok = ::GetOverlappedResult(session.out_read,
-                                              &session.read_overlapped, &got,
-                                              FALSE);
-        session.read_pending = false;
-        if (ok && got > 0U) {
-          deliver_output(session, session.read_buffer.data(), got);
-        }
-        if (!session.output_flood && session.pending_output.empty() &&
-            session.out_read != nullptr) {
-          conpty_arm_read(session);
-        }
+      if (session.out_read == nullptr || session.exit_emitted ||
+          !session.pending_output.empty() || session.output_flood) {
+        continue;
       }
-      if (session.write_pending && session.write_overlapped.hEvent != nullptr &&
-          ::WaitForSingleObject(session.write_overlapped.hEvent, 0U) ==
-              WAIT_OBJECT_0) {
-        DWORD put = 0U;
-        const BOOL ok = ::GetOverlappedResult(session.in_write,
-                                              &session.write_overlapped, &put,
-                                              FALSE);
-        session.write_pending = false;
-        if (ok) {
-          session.input_bytes += put;
-          session.pending_input_bytes -=
-              std::min<std::size_t>(session.pending_input_bytes, put);
+      for (int rounds = 0; rounds < 4; ++rounds) {
+        DWORD available = 0U;
+        if (!::PeekNamedPipe(session.out_read, nullptr, 0U, nullptr, &available,
+                             nullptr) ||
+            available == 0U) {
+          break;
         }
-        session.write_buffer.clear();
+        const DWORD want = std::min<DWORD>(available,
+                                           static_cast<DWORD>(kReadChunkBytes));
+        DWORD got = 0U;
+        if (!::ReadFile(session.out_read, session.read_buffer.data(), want, &got,
+                        nullptr) ||
+            got == 0U) {
+          break;
+        }
+        deliver_output(session, session.read_buffer.data(), got);
+        if (session.output_flood || !session.pending_output.empty()) {
+          break;
+        }
       }
     }
 #endif
