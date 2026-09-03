@@ -16,5 +16,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
   heyaki::fuzz::frame_stream_decoder(input);
   heyaki::fuzz::pairing_request_parser(input);
   heyaki::fuzz::trust_grant_parser(input);
+  heyaki::fuzz::m8_shell_frame_parser(input);
+  heyaki::fuzz::m8_vt_terminal_parser(input);
   return 0;
 }

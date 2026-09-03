@@ -55,7 +55,9 @@ Result<void> validate_config(const RuntimeConfig& config) {
       config.relay_unregister_timeout.count() < 0 ||
       config.operation_drain_timeout.count() < 0 || config.worker_stop_timeout.count() < 0 ||
       config.persistence_flush_timeout.count() < 0 ||
-      config.executor_drain_timeout.count() < 0) {
+      config.executor_drain_timeout.count() < 0 ||
+      config.shell_command_capacity == 0U || config.shell_event_capacity == 0U ||
+      config.shell_worker_stop_timeout.count() < 0) {
     return Result<void>::failure(
         Error{ErrorCode::configuration, "runtime", "invalid_runtime_configuration"});
   }
@@ -369,6 +371,10 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
       file_io_queue_.close();
       file_worker_.stop();
     }
+    if (!shell_worker_.name().empty()) {
+      shell_commands_.close();
+      shell_worker_.stop();
+    }
     if (owned_executor_) {
       (void)owned_executor_->shutdown(false);
     }
@@ -411,13 +417,41 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
           Error{ErrorCode::internal, "runtime", "file_io_worker_start_failed",
                 static_cast<std::int64_t>(file_worker_.start_result().error_code)});
     }
+    if (config_.shell_pty_worker_enabled) {
+      if (!shell_wake_) {
+        work_guard_.reset();
+        io_.stop();
+        worker_.stop();
+        file_io_queue_.close();
+        file_worker_.stop();
+        return Result<void>::failure(
+            Error{ErrorCode::internal, "runtime", "shell_wake_init_failed"});
+      }
+      executor::BlockingWorkerSpec shell_spec;
+      shell_spec.name = config_.worker_name + "-shell-pty";
+      shell_spec.config.thread_name = config_.worker_name + "-shell-pty";
+      shell_spec.config.startup_timeout = config_.worker_start_timeout;
+      shell_spec.worker =
+          std::make_unique<ShellPtyWorker>(shell_commands_, shell_events_,
+                                           *shell_wake_, shell_exit_);
+      shell_worker_ = executor_->start_worker(std::move(shell_spec));
+      if (!shell_worker_.started()) {
+        work_guard_.reset();
+        io_.stop();
+        worker_.stop();
+        file_io_queue_.close();
+        file_worker_.stop();
+        return Result<void>::failure(
+            Error{ErrorCode::internal, "runtime", "shell_pty_worker_start_failed",
+                  static_cast<std::int64_t>(shell_worker_.start_result().error_code)});
+      }
+    }
     admission_open_.store(true, std::memory_order_release);
     publish_phase(RuntimePhase::running);
     return Result<void>::success();
   }
 
-  Result<TaskCancelRequest> dispatch_blocking(std::string name, CancellableTask task) {
-    (void)name;
+  Result<TaskCancelRequest> dispatch_blocking(std::string name, CancellableTask task) {    (void)name;
     if (!admission_open_.load(std::memory_order_acquire) || !task) {
       return Result<TaskCancelRequest>::failure(
           Error{ErrorCode::cancelled, "runtime", "runtime_admission_closed"});
@@ -445,6 +479,44 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
           first ? executor::TaskCancellationResult::RequestedRunning
                 : executor::TaskCancellationResult::AlreadyRequested};
     });
+  }
+
+  // ---- M8 shell PTY worker ----
+
+  bool shell_pty_enabled() const noexcept {
+    return config_.shell_pty_worker_enabled && !shell_worker_.name().empty();
+  }
+
+  Result<void> shell_pty_submit(ShellPtyCommand&& command) {
+    if (!shell_pty_enabled()) {
+      return Result<void>::failure(
+          Error{ErrorCode::internal, "runtime", "shell_pty_worker_disabled"});
+    }
+    if (!admission_open_.load(std::memory_order_acquire)) {
+      return Result<void>::failure(
+          Error{ErrorCode::cancelled, "runtime", "runtime_admission_closed"});
+    }
+    if (!shell_commands_.try_send(std::move(command))) {
+      diagnostics_->record_executor_event();
+      return Result<void>::failure(
+          Error{shell_commands_.is_closed() ? ErrorCode::cancelled
+                                            : ErrorCode::resource_exhausted,
+                "runtime",
+                shell_commands_.is_closed() ? "runtime_admission_closed"
+                                            : "shell_command_capacity_exhausted"});
+    }
+    shell_wake_->signal();
+    return Result<void>::success();
+  }
+
+  void shell_pty_drain(const std::function<void(const ShellPtyEvent&)>& sink) {
+    if (!shell_pty_enabled() || !sink) {
+      return;
+    }
+    ShellPtyEvent event;
+    while (shell_events_.try_receive(event)) {
+      sink(event);
+    }
   }
 
   Result<RuntimeContext> create_context(RuntimeContextKind kind, std::string name) {
@@ -639,6 +711,22 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
       }
     }
     file_worker_.stop();
+
+    // The shell PTY worker hard-kills every remaining child (M8-05) and
+    // publishes terminal events before it exits; the node drains them during
+    // its own service teardown, before this point.
+    if (!shell_worker_.name().empty()) {
+      shell_commands_.close();
+      shell_worker_.request_stop();
+      if (shell_worker_.status().is_running) {
+        const auto shell_exited = shell_exit_.wait_for(
+            ShellPtyWorker::exit_phase, config_.shell_worker_stop_timeout);
+        if (!shell_exited) {
+          report.worker_stop_timed_out = true;
+        }
+      }
+      shell_worker_.stop();
+    }
 
     cancel_callbacks_left_after_worker_stop(report);
     drain_tracked_tasks(report);
@@ -1108,6 +1196,17 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
   executor::comm::MpscChannel<FileIoWorkItem> file_io_queue_{
       executor::comm::ChannelOptions{64U, executor::comm::DropPolicy::RejectNewest, true,
                                      "heyaki-runtime-file-io"}};
+  // M8 shell PTY worker state; only armed when the config enables it.
+  executor::comm::PhaseGate shell_exit_{"heyaki-shell-pty-worker-exit"};
+  executor::comm::MpscChannel<ShellPtyCommand> shell_commands_{
+      executor::comm::ChannelOptions{config_.shell_command_capacity,
+                                     executor::comm::DropPolicy::RejectNewest, true,
+                                     "heyaki-runtime-shell-commands"}};
+  executor::comm::MpscChannel<ShellPtyEvent> shell_events_{
+      executor::comm::ChannelOptions{config_.shell_event_capacity,
+                                     executor::comm::DropPolicy::RejectNewest, true,
+                                     "heyaki-runtime-shell-events"}};
+  std::unique_ptr<ShellPtyWake> shell_wake_{make_shell_pty_wake()};
   std::optional<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>
       work_guard_;
   executor::comm::MpscChannel<RuntimeCallbackEvent> callbacks_;
@@ -1116,6 +1215,7 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
   executor::comm::DoubleBuffer<RuntimeCoreState> core_state_;
   executor::WorkerHandle worker_;
   executor::WorkerHandle file_worker_;
+  executor::WorkerHandle shell_worker_;
   std::vector<std::shared_ptr<RuntimeOperationState>> operations_;
   std::vector<std::shared_ptr<TrackedTask>> tracked_tasks_;
   std::vector<std::shared_ptr<InternalTask>> internal_tasks_;
@@ -1250,6 +1350,27 @@ Result<TaskCancelRequest> detail::RuntimeAccess::dispatch_blocking(Runtime& runt
         Error{ErrorCode::cancelled, "runtime", "runtime_not_running"});
   }
   return runtime.state_->dispatch_blocking(std::move(name), std::move(task));
+}
+
+bool detail::RuntimeAccess::shell_pty_enabled(const Runtime& runtime) {
+  return runtime.state_ != nullptr && runtime.state_->shell_pty_enabled();
+}
+
+Result<void> detail::RuntimeAccess::shell_pty_submit(Runtime& runtime,
+                                                     ShellPtyCommand&& command) {
+  if (!runtime.state_) {
+    return Result<void>::failure(
+        Error{ErrorCode::cancelled, "runtime", "runtime_not_running"});
+  }
+  return runtime.state_->shell_pty_submit(std::move(command));
+}
+
+void detail::RuntimeAccess::shell_pty_drain(
+    Runtime& runtime, const std::function<void(const ShellPtyEvent&)>& sink) {
+  if (!runtime.state_) {
+    return;
+  }
+  runtime.state_->shell_pty_drain(sink);
 }
 
 Result<Runtime> Runtime::create_borrowed(executor::Executor& executor,

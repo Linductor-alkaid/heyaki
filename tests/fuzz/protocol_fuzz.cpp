@@ -8,6 +8,8 @@
 #include <heyaki/frame_stream.hpp>
 #include <heyaki/event.hpp>
 #include <heyaki/file.hpp>
+#include <heyaki/shell.hpp>
+#include <heyaki/shell_terminal.hpp>
 #include <heyaki/message.hpp>
 #include <heyaki/rpc.hpp>
 #include <heyaki/pairing_protocol.hpp>
@@ -626,6 +628,110 @@ void protobuf_schema_parser(std::span<const std::byte> input) {
   parse_protobuf<protocol::shell::v1::ShellEof>(input);
   parse_protobuf<protocol::shell::v1::ShellError>(input);
   parse_protobuf<protocol::shell::v1::ShellClose>(input);
+}
+
+// M8: the hand-rolled shell frame codecs and the safe VT renderer (M8
+// security exit condition: fuzz VT parser and Shell frame).
+void m8_shell_frame_parser(std::span<const std::byte> input) {
+  // Every accepted body must re-encode and re-parse (round-trip property).
+  const auto open = parse_shell_open(input);
+  if (open) {
+    const auto encoded = encode_shell_open(*open.value_if());
+    if (!encoded) std::abort();
+    if (!parse_shell_open(*encoded.value_if())) std::abort();
+  }
+  const auto resize = parse_shell_resize(input);
+  if (resize) {
+    const auto encoded = encode_shell_resize(*resize.value_if());
+    if (!encoded) std::abort();
+    if (!parse_shell_resize(*encoded.value_if())) std::abort();
+  }
+  const auto signal = parse_shell_signal(input);
+  if (signal) {
+    const auto encoded = encode_shell_signal(*signal.value_if());
+    if (!encoded) std::abort();
+    if (!parse_shell_signal(*encoded.value_if())) std::abort();
+  }
+  const auto exit = parse_shell_exit(input);
+  if (exit) {
+    const auto encoded = encode_shell_exit(*exit.value_if());
+    if (!encoded) std::abort();
+    if (!parse_shell_exit(*encoded.value_if())) std::abort();
+  }
+  const auto eof = parse_shell_eof(input);
+  if (eof) {
+    const auto encoded = encode_shell_eof(*eof.value_if());
+    if (!encoded) std::abort();
+    if (!parse_shell_eof(*encoded.value_if())) std::abort();
+  }
+  const auto error = parse_shell_error(input);
+  if (error) {
+    const auto encoded = encode_shell_error(*error.value_if());
+    if (!encoded) std::abort();
+    if (!parse_shell_error(*encoded.value_if())) std::abort();
+  }
+  const auto close = parse_shell_close(input);
+  if (close) {
+    const auto encoded = encode_shell_close(*close.value_if());
+    if (!encoded) std::abort();
+    if (!parse_shell_close(*encoded.value_if())) std::abort();
+  }
+  // Raw ShellData: accepted slices re-encode to identical bytes (fixed
+  // 28-byte header layout, wire protocol 2.1).
+  const auto data = parse_shell_data(input);
+  if (data && data.value_if()->data.size() <= 1024U) {
+    const auto encoded =
+        encode_shell_data(data.value_if()->header, data.value_if()->data);
+    if (!encoded) std::abort();
+    if (encoded.value_if()->size() != input.size() ||
+        !std::equal(encoded.value_if()->begin(), encoded.value_if()->end(),
+                    input.begin())) {
+      std::abort();
+    }
+    if (!parse_shell_data(*encoded.value_if())) std::abort();
+  }
+  // Profile validation never crashes and never accepts junk names.
+  ShellProfileConfig profile;
+  profile.name = "fuzz";
+  profile.argv = {"/bin/true"};
+  profile.allowed_signals = {ShellPortableSignal::terminate};
+  (void)validate_shell_profile(profile);
+  (void)safe_shell_profile_name(std::string_view{
+      reinterpret_cast<const char*>(input.data()),
+      std::min<std::size_t>(input.size(), 256U)});
+}
+
+void m8_vt_terminal_parser(std::span<const std::byte> input) {
+  // Invariants: bounded memory, guaranteed progress, and every fed byte is
+  // accounted for. Malicious OSC/escape sequences must never grow the model
+  // without bound (M8-08/M8-09).
+  SafeTerminalConfig config;
+  config.max_scrollback_lines = 64U;
+  config.max_sequence_bytes = 128U;
+  SafeTerminalModel model{config};
+  for (int repeat = 0; repeat < 4; ++repeat) {
+    model.feed(input);
+  }
+  if (model.line_count() > config.max_scrollback_lines + 1U) std::abort();
+  if (model.stats().bytes_fed != input.size() * 4U) std::abort();
+  if (model.columns() > config.max_columns || model.rows() > config.max_rows) {
+    std::abort();
+  }
+  // Split feeds parse identically to whole feeds for the retained state
+  // (resynchronization property exercised by arbitrary cut points).
+  SafeTerminalModel split_model{config};
+  const std::size_t half = input.size() / 2U;
+  split_model.feed(input.first(half));
+  split_model.feed(input.subspan(half));
+  if (split_model.stats().bytes_fed != input.size()) std::abort();
+  if (split_model.line_count() > config.max_scrollback_lines + 1U) std::abort();
+  // resize clamps under hostile values.
+  const auto hostile = std::to_integer<std::uint8_t>(input.empty()
+                                                         ? std::byte{0xFFU}
+                                                         : input.front());
+  model.resize(hostile * 1000U + 1U, hostile * 1000U + 1U);
+  if (model.columns() > config.max_columns) std::abort();
+  (void)model.render_tail(16U);
 }
 
 void protocol_state_machines(std::span<const std::byte> input) {

@@ -69,6 +69,14 @@ struct RuntimeConfig {
   std::chrono::milliseconds persistence_flush_timeout{2000};
   std::chrono::milliseconds executor_drain_timeout{5000};
   std::string worker_name{"heyaki-asio"};
+  // ---- M8 Remote Shell PTY worker ----
+  // Remote Shell is DEFAULT OFF: the dedicated executor-managed PTY worker
+  // (spawn/read/escalate/reap for every shell child) only starts when a node
+  // is explicitly configured with shell profiles.
+  bool shell_pty_worker_enabled{false};
+  std::size_t shell_command_capacity{128U};
+  std::size_t shell_event_capacity{256U};
+  std::chrono::milliseconds shell_worker_stop_timeout{5000};
 };
 
 struct RuntimeSecurityContext {

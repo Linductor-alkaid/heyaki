@@ -153,6 +153,8 @@ add_library(heyaki_core
   src/core/security.cpp
   src/core/session_protocol.cpp
   src/core/session_restart.cpp
+  src/core/shell_protocol.cpp
+  src/core/shell_terminal.cpp
   src/core/signaling_protocol.cpp
   src/core/signaling_replay_cache.cpp
   src/core/signing.cpp
@@ -208,6 +210,8 @@ add_library(heyaki_client
   src/client/relay_wss_control.cpp
   src/client/runtime.cpp
   src/client/session_channels.cpp
+  src/client/shell_pty.cpp
+  src/client/shell_service.cpp
   src/client/signaling_coordinator.cpp
   src/relay/relay_endpoint.cpp
   src/relay/relay_enrollment.cpp

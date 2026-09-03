@@ -230,6 +230,19 @@ heyaki pin 于 2026-08-29 从 `077d854` 升至 `4e8e8eb`，PR #176/#177）：
 - 2026-08-29：M6 开发在 P1-3 追加 rpc_service 私有取消 token 的实例（迁移待办扩围至
   dispatch_general + M6 handler 派发）；M6 的 strand 回投（StrandPoster）与 ServiceDispatch/
   ScopeCheck 回调分别归入既有 P1-1、P2-1 条目形态，不另立新条。
+- 2026-09-03：M8 落地使用记录（ShellPtyWorker，无新增缺口）。第三个 executor 托管
+  阻塞 I/O worker（`heyaki-asio-shell-pty`），`start_worker(BlockingWorkerSpec)` 启动，
+  仅在 Node 配置了 shell profile 时开启（默认关闭，M8-01）。所选 API 与语义：命令经
+  有界 `MpscChannel<ShellPtyCommand>`（容量 128，RejectNewest，满载返回
+  `resource_exhausted`）；事件经有界 `MpscChannel<ShellPtyEvent>`（容量 256）由节点
+  strand 周期 tick drain，队列满时 worker 停读该会话 PTY（内核缓冲对子进程形成背压），
+  超过 profile `max_output_pending_bytes` 终止（洪泛，M8-06）；进程树终止升级
+  （TERM→grace→KILL）与 waitpid 回收全部在 worker 线程（M8-04/05）；`wakeup()` 为
+  自管理 wake 原语（POSIX self-pipe / Windows event），因为 stop token 无法中断
+  `poll()`；worker 停止路径硬杀全部子进程并在有界预算内回收（`shell_worker_stop_timeout`）。
+  forkpty 前 ChildPlan 预构建（子进程仅 async-signal-safe 调用，避免多线程 fork 的
+  malloc 锁死锁），exec 判决读取带 5s 上界。既有 FileIoWorker 模式完全覆盖需求，无
+  新增 executor 能力诉求。
 - 2026-08-31：全仓线程/通信审计后第二轮迁移——pin 升至 `4fd8e60`（S2 + 有界准入）；
   rpc_service 取消 token 迁移 `submit_cancellable`；V-1 与 demo 同型 mutex/atomic 整改
   （LatestMailbox/MpscChannel）；relay stop 原子镜像删除；ServiceRegistry mutex、webrtc

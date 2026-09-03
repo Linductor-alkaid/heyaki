@@ -7,8 +7,9 @@ design delta (2026-08-27) and DEC-14 records the M11 Android port scope (2026-08
 points for DEC-01 through DEC-05 and DEC-07 through DEC-12 have since passed (the last was the
 M5 entry gate, reached after the M4 close on 2026-08-27) with these defaults applied unchanged
 and no override recorded, so they remain the
-governing defaults pending explicit product confirmation; DEC-03 final values and DEC-06 freeze at
-M9/M8 entry respectively.
+governing defaults pending explicit product confirmation; DEC-03 final values freeze at M9; DEC-06 froze at M8 entry
+(2026-09-03) applied unchanged: Shell is interactive-maintenance only, default off,
+and requires an independent security review sign-off before production enablement.
 
 | ID | Provisional default | Owner | Freeze no later than |
 | --- | --- | --- | --- |

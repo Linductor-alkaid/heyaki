@@ -11,6 +11,8 @@
 #include <heyaki/byte_stream.hpp>
 #include <heyaki/message.hpp>
 #include <heyaki/rpc.hpp>
+#include <heyaki/shell.hpp>
+#include <heyaki/shell_terminal.hpp>
 #include <heyaki/trust_grant.hpp>
 
 #include <atomic>
@@ -133,6 +135,15 @@ struct UiState {
   std::deque<EventItemView> event_items;
   std::deque<FileEventView> file_events;
 
+  // ---- M8 shell view state ----
+  struct ShellEventView {
+    heyaki::DeviceEndpointKey peer;
+    heyaki::ShellServiceEvent event;
+  };
+  executor::comm::MpscChannel<ShellEventView> shell_channel{
+      event_channel_options<ShellEventView>(128U, "heyaki-tui-shell-events")};
+  std::deque<ShellEventView> shell_events;
+
   // Render-loop-owned display buffers; single-threaded after the drain.
   std::deque<InboundMessage> inbound_messages;
   std::deque<AckEvent> ack_events;
@@ -177,6 +188,13 @@ struct UiState {
       file_events.push_back(std::move(file_event));
       while (file_events.size() > 64U) {
         file_events.pop_front();
+      }
+    }
+    ShellEventView shell_event;
+    while (shell_channel.try_receive(shell_event)) {
+      shell_events.push_back(std::move(shell_event));
+      while (shell_events.size() > 128U) {
+        shell_events.pop_front();
       }
     }
   }
@@ -1138,6 +1156,247 @@ void run_file_view(const heyaki::DeviceEndpointKey& peer, heyaki::Node& node,
   }
 }
 
+
+// M8-10/M8-11: the Shell view. Remote output is NEVER written raw to the
+// host terminal: every byte passes the safe-subset VT renderer, and the view
+// prints the model's lines itself (M8-08/09). Profiles offered for selection
+// come from the live session grant (shell.open:<profile> / shell.open:*);
+// leaving the view or losing the session closes the shell explicitly and
+// waits bounded for convergence.
+void run_shell_view(const heyaki::DeviceEndpointKey& peer, heyaki::Node& node,
+                    UiState& state) {
+  std::cout << "\nSHELL device=" << heyaki::to_string(peer.device_id) << "\n";
+
+  // Profile selection: granted shell.open scopes on this session.
+  std::vector<std::string> profiles;
+  bool wildcard_shell = false;
+  for (const auto& session : node.peer_sessions()) {
+    if (session.peer != peer ||
+        session.state != heyaki::NodePeerSessionState::authenticated) {
+      continue;
+    }
+    for (const auto& scope : session.authorized_scopes) {
+      constexpr std::string_view prefix = "shell.open:";
+      if (scope == "shell.open:*") {
+        wildcard_shell = true;
+        continue;
+      }
+      if (scope.starts_with(prefix)) {
+        std::string name = scope.substr(prefix.size());
+        if (heyaki::safe_shell_profile_name(name) &&
+            std::find(profiles.begin(), profiles.end(), name) == profiles.end()) {
+          profiles.push_back(std::move(name));
+        }
+      }
+    }
+  }
+  if (profiles.empty() && !wildcard_shell) {
+    std::cout << "no shell.open grant on this session; pair with a wider grant first\n";
+    return;
+  }
+  std::cout << "profiles:";
+  for (const auto& name : profiles) {
+    std::cout << " " << name;
+  }
+  if (wildcard_shell) {
+    std::cout << " (wildcard grant: any server-configured profile)";
+  }
+  std::cout << "\ncommands [open PROFILE [COLS ROWS]|resize C R|signal "
+               "int|term|hup|quit|kill|eof|close|stats|view|exit; other text -> stdin]\n";
+
+  heyaki::SafeTerminalModel terminal;
+  std::optional<heyaki::ShellId> shell_id;
+  bool shell_terminal = false;
+  executor::comm::PhaseGate poll{"heyaki-tui-shell-wait"};
+
+  const auto render_output = [&]() {
+    const auto lines = terminal.render_tail(20U);
+    for (const auto& line : lines) {
+      std::cout << "| " << line << "\n";
+    }
+  };
+  const auto drain_events = [&]() {
+    state.drain_service_events();
+    while (!state.shell_events.empty()) {
+      auto entry = std::move(state.shell_events.front());
+      state.shell_events.pop_front();
+      if (!shell_id.has_value() || entry.event.shell_id != *shell_id) {
+        continue;
+      }
+      if (!entry.event.output.empty()) {
+        terminal.feed(entry.event.output);
+      }
+      if (entry.event.error.has_value()) {
+        std::cout << "shell error: " << entry.event.error->safe_detail();
+        if (!shell_terminal) {
+          std::cout << " (shell stays active)";
+        }
+        std::cout << "\n";
+      }
+      if (entry.event.phase == heyaki::ShellPhase::exited ||
+          entry.event.phase == heyaki::ShellPhase::closed) {
+        shell_terminal = true;
+        std::cout << "shell "
+                  << heyaki::shell_phase_name(entry.event.phase) << " reason="
+                  << heyaki::shell_close_reason_name(entry.event.close_reason);
+        if (entry.event.exit_code.has_value()) {
+          std::cout << " exit=" << *entry.event.exit_code;
+        }
+        std::cout << " bytes in=" << entry.event.input_bytes
+                  << " out=" << entry.event.output_bytes << "\n";
+      }
+    }
+  };
+  const auto settle = [&](std::uint32_t wait_ms) {
+    const auto limit =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds{wait_ms};
+    while (std::chrono::steady_clock::now() < limit) {
+      drain_events();
+      (void)poll.wait_for(1U, std::chrono::milliseconds{20});
+    }
+    drain_events();
+  };
+
+  bool in_view = true;
+  while (in_view) {
+    std::cout << "shell> " << std::flush;
+    std::string line;
+    if (!std::getline(std::cin, line)) {
+      in_view = false;
+      break;
+    }
+    std::istringstream input{line};
+    std::string command;
+    input >> command;
+    if (command == "exit") {
+      in_view = false;
+    } else if (command == "open") {
+      if (shell_id.has_value() && !shell_terminal) {
+        std::cout << "shell already open\n";
+        continue;
+      }
+      std::string profile;
+      input >> profile;
+      heyaki::ShellOpenOptions options;
+      std::uint32_t columns = 0U;
+      std::uint32_t rows = 0U;
+      input >> columns >> rows;
+      if (columns > 0U && rows > 0U) {
+        options.columns = columns;
+        options.rows = rows;
+      }
+      auto opened = node.open_shell(peer, profile, options);
+      if (!opened) {
+        std::cout << "open failed: " << opened.error_if()->safe_detail() << " ("
+                  << heyaki::error_code_name(opened.error_if()->code()) << ")\n";
+        continue;
+      }
+      shell_id = *opened.value_if();
+      shell_terminal = false;
+      terminal.~SafeTerminalModel();
+      new (&terminal) heyaki::SafeTerminalModel{};
+      if (columns > 0U && rows > 0U) {
+        terminal.resize(columns, rows);
+      }
+      std::cout << "opening shell id=" << heyaki::to_string(*shell_id) << "\n";
+      settle(400U);
+    } else if (command == "resize") {
+      if (!shell_id.has_value() || shell_terminal) {
+        std::cout << "no open shell\n";
+        continue;
+      }
+      std::uint32_t columns = 0U;
+      std::uint32_t rows = 0U;
+      input >> columns >> rows;
+      auto resized = node.shell_resize(peer, *shell_id, columns, rows);
+      std::cout << (resized ? "resize sent" : "resize failed") << "\n";
+      if (resized) {
+        terminal.resize(columns, rows);
+      }
+    } else if (command == "signal") {
+      if (!shell_id.has_value() || shell_terminal) {
+        std::cout << "no open shell\n";
+        continue;
+      }
+      std::string name;
+      input >> name;
+      heyaki::ShellPortableSignal signal = heyaki::ShellPortableSignal::interrupt;
+      if (name == "term") {
+        signal = heyaki::ShellPortableSignal::terminate;
+      } else if (name == "hup") {
+        signal = heyaki::ShellPortableSignal::hangup;
+      } else if (name == "quit") {
+        signal = heyaki::ShellPortableSignal::quit;
+      } else if (name == "kill") {
+        signal = heyaki::ShellPortableSignal::kill;
+      } else if (name != "int") {
+        std::cout << "signal unknown (int|term|hup|quit|kill)\n";
+        continue;
+      }
+      auto signalled = node.shell_signal(peer, *shell_id, signal);
+      std::cout << (signalled ? "signal sent" : "signal failed") << "\n";
+      settle(400U);
+    } else if (command == "eof") {
+      if (!shell_id.has_value() || shell_terminal) {
+        std::cout << "no open shell\n";
+        continue;
+      }
+      auto closed = node.shell_send_eof(peer, *shell_id);
+      std::cout << (closed ? "eof sent" : "eof failed") << "\n";
+      settle(400U);
+    } else if (command == "close") {
+      if (!shell_id.has_value() || shell_terminal) {
+        std::cout << "no open shell\n";
+        continue;
+      }
+      (void)node.close_shell(peer, *shell_id);
+      settle(1000U);
+      render_output();
+    } else if (command == "stats") {
+      const auto diagnostics = node.service_diagnostics();
+      std::cout << "shell stats opens_sent=" << diagnostics.shell.opens_sent
+                << " outputs=" << diagnostics.shell.outputs_received
+                << " output_bytes=" << diagnostics.shell.output_bytes_received
+                << " errors=" << diagnostics.shell.errors_received << "\n";
+      const auto& model = terminal.stats();
+      std::cout << "terminal fed=" << model.bytes_fed
+                << " osc_dropped=" << model.osc_dropped
+                << " csi_dropped=" << model.csi_dropped
+                << " sgr_degraded=" << model.sgr_degraded
+                << " invalid_utf8=" << model.invalid_utf8_replaced << "\n";
+    } else if (command == "view") {
+      drain_events();
+      render_output();
+    } else if (command.empty()) {
+      drain_events();
+    } else if (shell_id.has_value() && !shell_terminal) {
+      // Any other text becomes stdin plus a newline.
+      std::string payload = line;
+      payload.push_back('\n');
+      std::vector<std::byte> bytes;
+      bytes.reserve(payload.size());
+      for (const char character : payload) {
+        bytes.push_back(static_cast<std::byte>(static_cast<unsigned char>(character)));
+      }
+      auto sent = node.shell_send_input(peer, *shell_id, bytes);
+      if (!sent) {
+        std::cout << "input failed: " << sent.error_if()->safe_detail() << "\n";
+      }
+      settle(400U);
+      render_output();
+    } else {
+      std::cout << "open a shell first: open <profile>\n";
+    }
+  }
+
+  // M8-11: leaving the view closes an open shell explicitly and waits
+  // bounded for the executor-managed operation to converge.
+  if (shell_id.has_value() && !shell_terminal) {
+    (void)node.close_shell(peer, *shell_id);
+    settle(2000U);
+  }
+}
+
 // M7-16: the TUI's logical "inbox" root lives beside the profile store
 // (XDG state), one directory per profile.
 std::filesystem::path file_inbox_root(std::string_view profile_name) {
@@ -1331,6 +1590,14 @@ void run_command(std::string line, heyaki::Node& node, UiState& state, bool& run
     // M7-16: file view (logical root, push/pull, progress, pause/cancel).
     run_file_view(*peer, node, state, file_inbox);
     state.command_status = "file-view-closed";
+    state.command_error.reset();
+    return;
+  }
+  if (command == "shell") {
+    // M8-10: shell view (profile selection, stdin, resize/signal/EOF/close,
+    // safe VT rendering, exit status).
+    run_shell_view(*peer, node, state);
+    state.command_status = "shell-view-closed";
     state.command_error.reset();
     return;
   }
@@ -1573,7 +1840,8 @@ int run_tui(const Options& options) {
                            .signaling_handler = {},
                            .relay_override = std::nullopt,
                            .path_policy_override = std::nullopt,
-                           .file_receive_roots = {inbox_root}});
+                           .file_receive_roots = {inbox_root},
+                           .shell_profiles = {}});
   };
   std::optional<heyaki::Node> node;
   auto created_node = make_node();
@@ -1647,6 +1915,12 @@ int run_tui(const Options& options) {
       [&state](const heyaki::DeviceEndpointKey& peer, const heyaki::FileTransferEvent& event) {
         (void)state.file_channel.try_send(UiState::FileEventView{peer, event});
       });
+  // M8: shell lifecycle and output feed the shell view's bounded channel;
+  // raw terminal bytes are only ever consumed by the safe VT renderer.
+  node->set_shell_event_observer(
+      [&state](const heyaki::DeviceEndpointKey& peer, const heyaki::ShellServiceEvent& event) {
+        (void)state.shell_channel.try_send(UiState::ShellEventView{peer, event});
+      });
   if (auto registered = register_tui_services(*node); !registered) {
     render_uninitialized(options.profile_name, *registered.error_if());
     (void)node->shutdown();
@@ -1661,7 +1935,7 @@ int run_tui(const Options& options) {
     render_pairing_status(state);
     std::cout << "\ncommand [refresh|relay|connect N|close N|pair N|trust N|"
                  "revoke N M|rotate-password|rotate-password-revoke|stream N|"
-                 "msg N|rpc N|quit]> "
+                 "msg N|rpc N|file N|event N|shell N|quit]> "
               << std::flush;
     std::string line;
     if (!std::getline(std::cin, line)) {

@@ -20,6 +20,7 @@ enum class IdentifierKind : std::uint8_t {
   request,
   transfer,
   grant,
+  shell,
 };
 
 template <IdentifierKind Kind, std::size_t Size>
@@ -57,6 +58,7 @@ using MessageId = Identifier<IdentifierKind::message, 16>;
 using RequestId = Identifier<IdentifierKind::request, 16>;
 using TransferId = Identifier<IdentifierKind::transfer, 16>;
 using GrantId = Identifier<IdentifierKind::grant, 16>;
+using ShellId = Identifier<IdentifierKind::shell, 16>;
 
 // Stable peer identity key across services: the authenticated remote device
 // plus the endpoint the session is bound to.
@@ -94,6 +96,7 @@ struct IdentifierDecodeResult {
 [[nodiscard]] std::string to_string(const RequestId& id);
 [[nodiscard]] std::string to_string(const TransferId& id);
 [[nodiscard]] std::string to_string(const GrantId& id);
+[[nodiscard]] std::string to_string(const ShellId& id);
 
 [[nodiscard]] IdentifierDecodeResult<DeviceId> parse_device_id(std::string_view text);
 [[nodiscard]] IdentifierDecodeResult<EndpointId> parse_endpoint_id(std::string_view text);

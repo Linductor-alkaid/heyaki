@@ -5,6 +5,7 @@
 #include "byte_stream.hpp"
 #include "event_service.hpp"
 #include "file_service.hpp"
+#include "shell_service.hpp"
 #include "message_service.hpp"
 #include "pairing_service.hpp"
 #include "connection_attempt.hpp"
@@ -3380,6 +3381,25 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     }
   }
 
+  static void shell_event_sink(void* context, const DeviceEndpointKey& peer,
+                               const ShellServiceEvent& event) {
+    auto& impl = *static_cast<Node::Impl*>(context);
+    if (impl.shell_event_observer) {
+      impl.shell_event_observer(peer, event);
+    }
+  }
+
+  static void shell_audit_sink(void* context, const DeviceEndpointKey& peer,
+                               const ShellAuditRecord& record) {
+    (void)peer;
+    auto& impl = *static_cast<Node::Impl*>(context);
+    constexpr std::size_t kShellAuditCapacity = 256U;
+    impl.shell_audit_log.push_back(record);
+    while (impl.shell_audit_log.size() > kShellAuditCapacity) {
+      impl.shell_audit_log.pop_front();
+    }
+  }
+
   // Attaches the message and RPC services to an authorized session. The
   // scope check consults the session's effective scopes live, so a grant
   // adjudicated at upgrade time governs every later frame.
@@ -3478,6 +3498,24 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       service->set_event_sink(&Node::Impl::file_event_sink, this);
       file_services.emplace(peer, std::move(service));
     }
+    if (!shell_services.contains(peer)) {
+      auto service = std::make_shared<ShellService>(
+          *session, peer, shell_service_config, shell_pty,
+          [session](std::string_view scope) {
+            return session_scope_covers(*session, scope);
+          },
+          unix_milliseconds_now);
+      auto attached = service->attach();
+      if (!attached) {
+        update_snapshot([&](NodeSnapshot& snapshot) {
+          snapshot.last_error = *attached.error_if();
+        });
+        return;
+      }
+      service->set_event_sink(&Node::Impl::shell_event_sink, this);
+      service->set_audit_sink(&Node::Impl::shell_audit_sink, this);
+      shell_services.emplace(peer, std::move(service));
+    }
   }
 
   // Finalizes the services of one peer session: pending messages become
@@ -3506,6 +3544,15 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       // Sender transfers park in the book (paused, M7-13); the book stays
       // for the next session. Receiver sidecars live on disk.
       service->handle_session_closed();
+    }
+    const auto shell_entry = shell_services.find(peer);
+    if (shell_entry != shell_services.end()) {
+      auto service = shell_entry->second;
+      shell_services.erase(shell_entry);
+      // Serving children die with the session (default terminate, M8-05);
+      // the coordinator drops its sinks so late worker events are ignored.
+      service->handle_session_closed();
+      shell_pty->detach_all();
     }
     const auto rpc = rpc_services.find(peer);
     if (rpc != rpc_services.end()) {
@@ -3772,6 +3819,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     diagnostics.rpc_sessions = rpc_services.size();
     diagnostics.event_sessions = event_services.size();
     diagnostics.file_sessions = file_services.size();
+    diagnostics.shell_sessions = shell_services.size();
     for (auto& [peer, book] : transfer_books) {
       (void)peer;
       for (const auto& [id, entry] : book->entries()) {
@@ -3788,6 +3836,10 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     for (const auto& [peer, service] : file_services) {
       (void)peer;
       accumulate(diagnostics.file, service->stats());
+    }
+    for (const auto& [peer, service] : shell_services) {
+      (void)peer;
+      accumulate(diagnostics.shell, service->stats());
     }
     for (const auto& [peer, service] : message_services) {
       const auto stats = service->stats();
@@ -3853,6 +3905,11 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   // Periodic maintenance on the expiry tick: TTL pruning for messages and
   // deadline pruning for RPC, then a fresh diagnostics snapshot.
   void prune_peer_services() {
+    // PTY events reach the owning services' sinks here, on the strand
+    // (M8-04): output staging then drains inside each service's prune.
+    if (shell_pty) {
+      shell_pty->drain();
+    }
     for (auto& [peer, service] : message_services) {
       service->prune();
     }
@@ -3863,6 +3920,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       service->prune();
     }
     for (auto& [peer, service] : file_services) {
+      service->prune();
+    }
+    for (auto& [peer, service] : shell_services) {
       service->prune();
     }
     // Retries whose deadline passed while no session existed finalize now.
@@ -5779,6 +5839,13 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   executor::comm::Topic<LocalEventMessage> local_event_topic_{"heyaki-node-events"};
   NodeEventInboundHandler event_inbound_handler;
   NodeFileEventObserver file_event_observer;
+  // ---- M8 Remote Shell ----
+  // The coordinator fronts the runtime's executor-managed PTY worker; the
+  // bounded audit log never stores terminal content (M8-07).
+  std::map<DeviceEndpointKey, std::shared_ptr<ShellService>> shell_services;
+  std::shared_ptr<ShellPtyCoordinator> shell_pty{std::make_shared<ShellPtyCoordinator>()};
+  NodeShellEventObserver shell_event_observer;
+  std::deque<ShellAuditRecord> shell_audit_log;
   std::map<DeviceEndpointKey, std::shared_ptr<MessageService>> message_services;
   std::map<DeviceEndpointKey, std::shared_ptr<RpcService>> rpc_services;
   std::map<DeviceEndpointKey, std::deque<RpcService::RetryableCall>> rpc_retry_queue;
@@ -5788,6 +5855,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   RpcServiceConfig rpc_service_config{};
   EventServiceConfig event_service_config{};
   FileServiceConfig file_service_config{};
+  ShellServiceConfig shell_service_config{};
   std::size_t rpc_retry_capacity{64U};
   LanSignalingValidator signaling_validator;
   LanSignalingHandler signaling_handler;
@@ -5896,6 +5964,11 @@ Result<Node> Node::create(NodeConfig config) {
   std::optional<Runtime> owned_runtime;
   Runtime* runtime = config.runtime;
   if (runtime == nullptr) {
+    // Remote Shell stays default off (M8-01): the dedicated PTY worker only
+    // starts when this node actually serves shell profiles.
+    if (!config.shell_profiles.empty()) {
+      config.runtime_config.shell_pty_worker_enabled = true;
+    }
     auto created = Runtime::create_owned(config.runtime_config);
     if (!created) {
       return Result<Node>::failure(*created.error_if());
@@ -5958,6 +6031,20 @@ Result<Node> Node::create(NodeConfig config) {
   }
   impl->file_service_config.receive_roots = std::move(config.file_receive_roots);
   impl->file_service_config.max_peer_receive_bytes = config.file_max_peer_receive_bytes;
+  // M8 shell configuration: every profile validates before the node starts;
+  // a borrowed runtime without the PTY worker keeps serving fail-closed.
+  for (const auto& shell_profile : config.shell_profiles) {
+    auto valid_shell_profile = validate_shell_profile(shell_profile);
+    if (!valid_shell_profile) {
+      if (owned_runtime) {
+        (void)owned_runtime->shutdown();
+      }
+      return Result<Node>::failure(*valid_shell_profile.error_if());
+    }
+  }
+  impl->shell_service_config.profiles = std::move(config.shell_profiles);
+  // Bind to the Impl's runtime (the local optional was moved into it).
+  impl->shell_pty->bind(*impl->runtime, detail::RuntimeAccess::shell_pty_enabled(*impl->runtime));
   // Built-in pull serving: heyaki.file/pull turns a validated request into a
   // sender-role transfer on this node's strand. The authoritative acceptance
   // still rides the file protocol (FILE_ACCEPT/FILE_REJECT), so the RPC only
@@ -6698,6 +6785,144 @@ bool NodeLocalEventSubscription::try_receive(NodeLocalEvent& out) {
   out.schema_version = message.schema_version;
   out.payload = std::move(message.payload);
   return true;
+}
+
+
+// ---- M8 Remote Shell (public API) ----
+
+Result<ShellId> Node::open_shell(const DeviceEndpointKey& peer, std::string profile,
+                                 ShellOpenOptions options) {
+  if (!impl_) {
+    return Result<ShellId>::failure(
+        node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  if (!safe_shell_profile_name(profile)) {
+    return Result<ShellId>::failure(
+        node_error(ErrorCode::configuration, "shell_profile_name_invalid"));
+  }
+  const auto sessions = impl_->peer_session_snapshots.load().value;
+  const auto authorized =
+      std::any_of(sessions.begin(), sessions.end(), [&](const auto& session) {
+        return session.peer == peer &&
+               session.state == NodePeerSessionState::authenticated;
+      });
+  if (!authorized) {
+    return Result<ShellId>::failure(
+        node_error(ErrorCode::peer_offline, "peer_session_missing"));
+  }
+  Result<ShellId> outcome = Result<ShellId>::failure(
+      node_error(ErrorCode::internal, "shell_open_no_result"));
+  impl_->run_on_strandAndWait([&](Impl& impl) {
+    const auto service = impl.shell_services.find(peer);
+    if (service == impl.shell_services.end()) {
+      outcome = Result<ShellId>::failure(
+          node_error(ErrorCode::peer_offline, "shell_service_missing"));
+      return;
+    }
+    outcome = service->second->open_shell(std::move(profile), std::move(options));
+  });
+  return outcome;
+}
+
+Result<void> shell_control_frame(Node::Impl& impl, const DeviceEndpointKey& peer,
+                                 const ShellId& shell,
+                                 const std::function<Result<void>(ShellService&)>& action) {
+  (void)shell;  // forwarded inside `action`
+  const auto service = impl.shell_services.find(peer);
+  if (service == impl.shell_services.end()) {
+    return Result<void>::failure(
+        node_error(ErrorCode::peer_offline, "shell_service_missing"));
+  }
+  return action(*service->second);
+}
+
+Result<void> Node::shell_send_input(const DeviceEndpointKey& peer, const ShellId& shell,
+                                    std::span<const std::byte> data) {
+  if (!impl_) {
+    return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  Result<void> outcome =
+      Result<void>::failure(node_error(ErrorCode::internal, "shell_input_no_result"));
+  impl_->run_on_strandAndWait([&](Impl& impl) {
+    outcome = shell_control_frame(impl, peer, shell, [&](ShellService& service) {
+      return service.send_input(shell, data);
+    });
+  });
+  return outcome;
+}
+
+Result<void> Node::shell_resize(const DeviceEndpointKey& peer, const ShellId& shell,
+                                std::uint32_t columns, std::uint32_t rows) {
+  if (!impl_) {
+    return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  Result<void> outcome =
+      Result<void>::failure(node_error(ErrorCode::internal, "shell_resize_no_result"));
+  impl_->run_on_strandAndWait([&](Impl& impl) {
+    outcome = shell_control_frame(impl, peer, shell, [&](ShellService& service) {
+      return service.resize_shell(shell, columns, rows);
+    });
+  });
+  return outcome;
+}
+
+Result<void> Node::shell_signal(const DeviceEndpointKey& peer, const ShellId& shell,
+                                ShellPortableSignal signal) {
+  if (!impl_) {
+    return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  Result<void> outcome =
+      Result<void>::failure(node_error(ErrorCode::internal, "shell_signal_no_result"));
+  impl_->run_on_strandAndWait([&](Impl& impl) {
+    outcome = shell_control_frame(impl, peer, shell, [&](ShellService& service) {
+      return service.signal_shell(shell, signal);
+    });
+  });
+  return outcome;
+}
+
+Result<void> Node::shell_send_eof(const DeviceEndpointKey& peer, const ShellId& shell) {
+  if (!impl_) {
+    return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  Result<void> outcome =
+      Result<void>::failure(node_error(ErrorCode::internal, "shell_eof_no_result"));
+  impl_->run_on_strandAndWait([&](Impl& impl) {
+    outcome = shell_control_frame(impl, peer, shell, [&](ShellService& service) {
+      return service.send_eof(shell);
+    });
+  });
+  return outcome;
+}
+
+Result<void> Node::close_shell(const DeviceEndpointKey& peer, const ShellId& shell) {
+  if (!impl_) {
+    return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  Result<void> outcome =
+      Result<void>::failure(node_error(ErrorCode::internal, "shell_close_no_result"));
+  impl_->run_on_strandAndWait([&](Impl& impl) {
+    outcome = shell_control_frame(impl, peer, shell, [&](ShellService& service) {
+      return service.close_shell(shell);
+    });
+  });
+  return outcome;
+}
+
+void Node::set_shell_event_observer(NodeShellEventObserver observer) {
+  if (impl_) {
+    impl_->shell_event_observer = std::move(observer);
+  }
+}
+
+std::vector<ShellAuditRecord> Node::shell_audit_records() const {
+  if (!impl_) {
+    return {};
+  }
+  std::vector<ShellAuditRecord> records;
+  impl_->run_on_strandAndWait(
+      [&](Impl& impl) { records.assign(impl.shell_audit_log.begin(), impl.shell_audit_log.end()); });
+  return records;
 }
 
 NodeServiceDiagnostics Node::service_diagnostics() {

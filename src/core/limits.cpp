@@ -84,6 +84,15 @@ Result<void> validate_limits(const Limits& limits) {
   if (outside(limits.max_diagnostic_events, 16U, 1024U * 1024U)) {
     return invalid_limit("max_diagnostic_events");
   }
+  constexpr std::size_t shell_data_header_bytes = 28U;
+  if (outside(limits.max_shell_data_bytes, 256U, 1024U * kib) ||
+      limits.max_shell_data_bytes + shell_data_header_bytes > limits.max_frame_bytes) {
+    return invalid_limit("max_shell_data_bytes");
+  }
+  if (outside(limits.max_shell_control_bytes, 256U, 64U * kib) ||
+      limits.max_shell_control_bytes > limits.max_frame_bytes) {
+    return invalid_limit("max_shell_control_bytes");
+  }
   return Result<void>::success();
 }
 

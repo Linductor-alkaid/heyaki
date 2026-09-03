@@ -2,7 +2,8 @@
 
 > Status: protocol 1.2 baseline, implemented through M7 — pairing/ByteStream frames delivered by
 > M5 (2026-08-28), message/unary-RPC frames by M6 (2026-08-29), event/file frames by M7
-> (2026-08-31); the shell frame family below remains reserved for M8
+> (2026-08-31); the shell frame family below was delivered with M8
+> (2026-09-03)
 >
 > Protocol version: 1.2
 >
@@ -449,6 +450,31 @@ M7 implementation notes (event/file delivered 2026-08-31; normative rows unchang
   compression build feature exists; the `expanded_size` bounds are enforced by the codec
   regardless.
 
+
+M8 implementation notes (shell delivered 2026-09-03; normative rows unchanged):
+
+- A node serves shells only when its local configuration lists profiles; an
+  empty profile list keeps the capability compiled but refused with
+  `SHELL_ERROR failed_precondition`/`not_found` (Remote Shell stays default
+  off). Every open re-checks the live `shell.open:<profile>` session scope.
+- `SHELL_OPEN` structurally cannot override the program, OS user, working
+  directory, or environment: those fields do not exist on the wire; the
+  serving side resolves them from `ShellProfileConfig` alone (requester
+  `terminal_type`/`locale` are charset-validated and land in `TERM`/`LANG`).
+- `SHELL_ERROR` with `unimplemented` is the signal-policy NACK ("unsupported
+  signal returns SHELL_ERROR" while the shell stays active); every other
+  status terminal-closes the shell per the table above.
+- Both PTY backends merge stdout/stderr. A POSIX pty master has no
+  half-close, so `SHELL_EOF` delivers EOT (canonical-mode EOF); ConPTY closes
+  its input pipe. Duplicate EOF is idempotent and input after EOF rejects.
+- PTY children live on one executor-managed blocking worker per node: the
+  escalation ladder (graceful signal -> grace -> process-tree kill), the
+  idle/absolute deadlines, the total/pending output caps, and reaping all
+  run there; disconnect terminates by default. Exit events imply the child
+  was reaped (no zombies), and pending output is harvested before the exit
+  event so a fast-exiting child cannot lose its final output.
+- Serving-side audit records initiator device, profile, timestamps, exit
+  code, byte counts, and close reason only — never terminal content.
 
 | Domain/current state | Frame | Transition and exceptional rule |
 | --- | --- | --- |

@@ -22,6 +22,8 @@ void lan_directory_state_machine(std::span<const std::byte> input);
 void protobuf_schema_parser(std::span<const std::byte> input);
 void m6_service_payload_parser(std::span<const std::byte> input);
 void m7_service_payload_parser(std::span<const std::byte> input);
+void m8_shell_frame_parser(std::span<const std::byte> input);
+void m8_vt_terminal_parser(std::span<const std::byte> input);
 void protocol_state_machines(std::span<const std::byte> input);
 
 }  // namespace heyaki::fuzz

@@ -4,6 +4,8 @@
 > 日期：2026-08-27（2026-08-29 增补 M11 Android 适配范围，见 §2.1；2026-08-31 M7 事件/文件
 > 落地：§8.3/§8.4 所述语义按冻结 wire 协议交付，事件订阅作用域为 event.subscribe:<root>，
 > manifest 逻辑名首段为接收根选择器，pull 以 heyaki.file/pull unary RPC 承载）
+> 2026-09-03 M8 落地：§8.5 Remote Shell 按冻结协议交付（executor 托管 PTY worker、
+> 默认关闭、内容无关审计、TUI 安全 VT 渲染；详见 M8 阶段文件）；
 > 目标版本：MVP 至 v1
 > 适用范围：设备端 C++20 库、`heyaki-tui`、注册/信令服务、NAT 穿透与中继服务
 

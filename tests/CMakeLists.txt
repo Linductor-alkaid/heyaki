@@ -415,6 +415,27 @@ heyaki_add_runtime_test(
   heyaki_m6_service heyaki_m6_service_tests
   "unit;session;security;protocol;concurrency;m6")
 
+add_executable(heyaki_m8_service_tests
+  unit/m8_codec_test.cpp
+  unit/m8_shell_test.cpp
+  unit/m8_vt_test.cpp
+  unit/m8_pty_test.cpp)
+target_link_libraries(heyaki_m8_service_tests PRIVATE
+  heyaki::client
+  heyaki::core
+  heyaki::blake3
+  executor::executor
+  GTest::gtest_main)
+target_include_directories(heyaki_m8_service_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/client"
+  "${CMAKE_CURRENT_SOURCE_DIR}/unit")
+heyaki_target_use_pinned_boost_beast(heyaki_m8_service_tests)
+heyaki_configure_target(heyaki_m8_service_tests)
+heyaki_add_runtime_test(
+  heyaki_m8_service heyaki_m8_service_tests
+  "unit;session;security;protocol;concurrency;m8")
+
 add_executable(heyaki_m7_service_tests
   unit/m7_codec_test.cpp
   unit/m7_event_test.cpp

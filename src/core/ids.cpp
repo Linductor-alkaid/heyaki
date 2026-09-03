@@ -99,6 +99,7 @@ std::string to_string(const MessageId& id) { return encode_identifier(id, "hym1_
 std::string to_string(const RequestId& id) { return encode_identifier(id, "hyr1_"); }
 std::string to_string(const TransferId& id) { return encode_identifier(id, "hyt1_"); }
 std::string to_string(const GrantId& id) { return encode_identifier(id, "hyg1_"); }
+std::string to_string(const ShellId& id) { return encode_identifier(id, "hysh1_"); }
 
 IdentifierDecodeResult<DeviceId> parse_device_id(std::string_view text) {
   return decode_identifier<DeviceId>(text, "hy1_");

@@ -129,6 +129,24 @@ const char* payload_limit_error(std::uint8_t type, std::size_t payload_size,
       payload_size - file_chunk_header_bytes > limits.max_file_chunk_bytes) {
     return "file_chunk_limit";
   }
+  constexpr std::size_t shell_data_header_bytes = 28U;
+  if ((type == static_cast<std::uint8_t>(FrameType::shell_input) ||
+       type == static_cast<std::uint8_t>(FrameType::shell_output)) &&
+      payload_size > shell_data_header_bytes &&
+      payload_size - shell_data_header_bytes > limits.max_shell_data_bytes) {
+    return "shell_data_limit";
+  }
+  // All other shell frames are small protobuf control bodies.
+  const bool shell_control = (type == static_cast<std::uint8_t>(FrameType::shell_open) ||
+                              type == static_cast<std::uint8_t>(FrameType::shell_resize) ||
+                              type == static_cast<std::uint8_t>(FrameType::shell_signal) ||
+                              type == static_cast<std::uint8_t>(FrameType::shell_exit) ||
+                              type == static_cast<std::uint8_t>(FrameType::shell_eof) ||
+                              type == static_cast<std::uint8_t>(FrameType::shell_error) ||
+                              type == static_cast<std::uint8_t>(FrameType::shell_close));
+  if (shell_control && payload_size > limits.max_shell_control_bytes) {
+    return "shell_control_limit";
+  }
   return nullptr;
 }
 

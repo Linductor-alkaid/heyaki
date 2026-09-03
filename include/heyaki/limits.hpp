@@ -25,6 +25,13 @@ struct Limits {
   std::size_t max_pairing_attempts_per_session{5U};
   std::size_t max_endpoint_manifest_bytes{64U * 1024U};
   std::size_t max_diagnostic_events{2048U};
+  // M8 shell: per-frame SHELL_INPUT/SHELL_OUTPUT data slice (28-byte raw
+  // header excluded). Interactive latency keeps slices far below
+  // max_frame_bytes; the empirical SCTP user-message cap also applies.
+  std::size_t max_shell_data_bytes{32U * 1024U};
+  // M8 shell: bounded shell control-body ceiling (open/resize/signal/exit/
+  // eof/error/close are tiny; the ceiling blocks oversized junk early).
+  std::size_t max_shell_control_bytes{2U * 1024U};
 };
 
 [[nodiscard]] Result<void> validate_limits(const Limits& limits);

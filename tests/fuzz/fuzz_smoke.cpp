@@ -4,6 +4,7 @@
 #include <heyaki/file.hpp>
 #include <heyaki/message.hpp>
 #include <heyaki/rpc.hpp>
+#include <heyaki/shell.hpp>
 #include "m1_golden_vectors.hpp"
 
 #include <heyaki/lan_protocol.hpp>
@@ -25,6 +26,11 @@
 #include <vector>
 
 namespace {
+
+std::vector<std::byte> bytes_from_text(std::string_view text) {
+  return {reinterpret_cast<const std::byte*>(text.data()),
+          reinterpret_cast<const std::byte*>(text.data()) + text.size()};
+}
 
 std::vector<std::byte> bytes_from_hex(std::string_view hex) {
   std::vector<std::byte> output;
@@ -480,6 +486,49 @@ int main(int argc, char** argv) {
       heyaki::fuzz::m7_service_payload_parser(seed);
       if (!write_seed(corpus_root / "m7-service-payload", name, seed)) {
         std::cerr << "cannot write M7 seed " << name << '\n';
+        return 1;
+      }
+    }
+
+    // M8 seeds: valid shell bodies, raw ShellData slices, and hostile VT
+    // input (OSC clipboard/title, DCS, invalid UTF-8, oversized sequences).
+    std::vector<std::pair<std::string, std::vector<std::byte>>> m8_seeds;
+    {
+      heyaki::ShellOpenBody open;
+      open.shell_id = heyaki::ShellId{[] { heyaki::ShellId::Storage b{}; b[0] = std::byte{7}; return b; }()};
+      open.profile = "maintenance";
+      open.terminal_type = "xterm";
+      open.columns = 80U;
+      open.rows = 24U;
+      open.locale = "C";
+      if (auto encoded = heyaki::encode_shell_open(open)) {
+        m8_seeds.emplace_back("shell-open", *encoded.value_if());
+      }
+    }
+    {
+      heyaki::ShellDataHeader header;
+      header.shell_id = heyaki::ShellId{[] { heyaki::ShellId::Storage b{}; b[0] = std::byte{7}; return b; }()};
+      header.offset = 0U;
+      const std::string text = "echo hello";
+      header.data_length = static_cast<std::uint32_t>(text.size());
+      if (auto encoded = heyaki::encode_shell_data(
+              header,
+              {reinterpret_cast<const std::byte*>(text.data()), text.size()})) {
+        m8_seeds.emplace_back("shell-data", *encoded.value_if());
+      }
+    }
+    m8_seeds.emplace_back(
+        "vt-osc-clipboard",
+        bytes_from_text(std::string{"\x1b]52;c;base64,x"} + "\a" + "after"));
+    m8_seeds.emplace_back("vt-osc-title",
+                          bytes_from_text(std::string{"\x1b]0;title"} + "\a" + "x"));
+    m8_seeds.emplace_back("vt-csi-storm", bytes_from_text("\x1b[1;2;3;4;5;6;7;8;9mA"));
+    m8_seeds.emplace_back("vt-invalid-utf8", bytes_from_text("\xff\xfe\x80"));
+    for (const auto& [name, seed] : m8_seeds) {
+      heyaki::fuzz::m8_shell_frame_parser(seed);
+      heyaki::fuzz::m8_vt_terminal_parser(seed);
+      if (!write_seed(corpus_root / "m8-shell", name, seed)) {
+        std::cerr << "cannot write M8 seed " << name << '\n';
         return 1;
       }
     }

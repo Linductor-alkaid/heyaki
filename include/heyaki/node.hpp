@@ -8,6 +8,7 @@
 #include <heyaki/profile_store.hpp>
 #include <heyaki/rpc.hpp>
 #include <heyaki/runtime.hpp>
+#include <heyaki/shell.hpp>
 
 #include <chrono>
 #include <cstddef>
@@ -16,6 +17,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -326,6 +328,11 @@ struct NodeConfig {
   std::vector<FileRootConfig> file_receive_roots;
   // Per-peer cumulative received-byte quota; 0 disables the user quota.
   std::uint64_t file_max_peer_receive_bytes{0U};
+  // ---- M8 Remote Shell ----
+  // Serving-side shell profiles. EMPTY keeps Remote Shell off (M8-01); an
+  // owned runtime starts the dedicated PTY worker only when a profile is
+  // configured. A borrowed runtime must enable it through RuntimeConfig.
+  std::vector<ShellProfileConfig> shell_profiles;
 };
 
 // Terminal outcome of one password pairing attempt; `value` holds the
@@ -377,6 +384,10 @@ using NodeEventInboundHandler =
 // File transfer lifecycle (phase changes and per-chunk progress).
 using NodeFileEventObserver =
     std::function<void(const DeviceEndpointKey&, const FileTransferEvent&)>;
+// M8 shell lifecycle and output delivery; the observer never receives raw
+// terminal bytes on the serving side (audit stays content-free, M8-07).
+using NodeShellEventObserver =
+    std::function<void(const DeviceEndpointKey&, const ShellServiceEvent&)>;
 
 // Aggregate service diagnostics across every authorized peer session; executor
 // facilities remain the source of truth for task health (EXEC-08).
@@ -385,6 +396,7 @@ struct NodeServiceDiagnostics {
   RpcServiceStats rpc;
   EventServiceStats event;
   FileServiceStats file;
+  ShellServiceStats shell;
   std::size_t message_pending_acks{};
   std::size_t rpc_pending_calls{};
   std::size_t rpc_retry_queue{};
@@ -393,6 +405,7 @@ struct NodeServiceDiagnostics {
   std::size_t event_sessions{};
   std::size_t file_sessions{};
   std::size_t file_paused_transfers{};
+  std::size_t shell_sessions{};
 };
 
 // Inbound message delivery (already deduplicated, scope-checked, and
@@ -545,6 +558,33 @@ class Node {
       std::function<void(const DeviceEndpointKey&, const FileTransferEvent&)> observer);
   [[nodiscard]] std::vector<FileTransferSummary> file_transfers(
       const DeviceEndpointKey& peer);
+
+  // ---- M8 Remote Shell (public API) ----
+  // Opens one shell on the peer's profile; lifecycle and output surface
+  // through the shell event observer. The peer's TrustGrant must cover
+  // shell.open:<profile> (checked live on the serving side, M8-02).
+  [[nodiscard]] Result<ShellId> open_shell(const DeviceEndpointKey& peer,
+                                           std::string profile,
+                                           ShellOpenOptions options = {});
+  [[nodiscard]] Result<void> shell_send_input(const DeviceEndpointKey& peer,
+                                              const ShellId& shell,
+                                              std::span<const std::byte> data);
+  [[nodiscard]] Result<void> shell_resize(const DeviceEndpointKey& peer,
+                                          const ShellId& shell, std::uint32_t columns,
+                                          std::uint32_t rows);
+  [[nodiscard]] Result<void> shell_signal(const DeviceEndpointKey& peer,
+                                          const ShellId& shell,
+                                          ShellPortableSignal signal);
+  [[nodiscard]] Result<void> shell_send_eof(const DeviceEndpointKey& peer,
+                                            const ShellId& shell);
+  // Explicit close terminates the serving child through the escalation
+  // ladder (M8-05).
+  [[nodiscard]] Result<void> close_shell(const DeviceEndpointKey& peer,
+                                         const ShellId& shell);
+  void set_shell_event_observer(NodeShellEventObserver observer);
+  // Bounded serving-side audit history (initiator, profile, times, exit
+  // code, byte counts; no terminal content, M8-07).
+  [[nodiscard]] std::vector<ShellAuditRecord> shell_audit_records() const;
 
   [[nodiscard]] NodeShutdownReport shutdown();
 
