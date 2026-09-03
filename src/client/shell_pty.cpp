@@ -819,25 +819,27 @@ void ShellPtyWorker::run(executor::StopToken stop_token) {
     }
   };
 
-  // Final drain at reap: conhost finishes flushing the child's output as the
-  // process exits, so drain-until-empty (bounded) BEFORE the exit event or
-  // a fast-exiting child loses its tail output.
+  // Final drain at reap: conhost renders the child's tail output
+  // asynchronously after the process handle signals, so drain-until-empty
+  // must tolerate a short quiet window before concluding (bounded overall).
   const auto drain_conpty_final = [&](ShellPtySession& session) {
     if (session.out_read == nullptr) {
       return;
     }
-    for (int attempts = 0; attempts < 50; ++attempts) {
+    int quiet_streak = 0;
+    for (int attempts = 0; attempts < 120 && quiet_streak < 4; ++attempts) {
       bool progressed = false;
       for (int rounds = 0; rounds < 8; ++rounds) {
         DWORD available = 0U;
         if (!::PeekNamedPipe(session.out_read, nullptr, 0U, nullptr, &available,
                              nullptr)) {
-          return;
+          return;  // pipe broken: conhost is gone, nothing more to read
         }
         if (available == 0U) {
           break;
         }
         progressed = true;
+        quiet_streak = 0;
         const DWORD want =
             std::min<DWORD>(available, static_cast<DWORD>(kReadChunkBytes));
         DWORD got = 0U;
@@ -852,7 +854,8 @@ void ShellPtyWorker::run(executor::StopToken stop_token) {
         }
       }
       if (!progressed) {
-        return;
+        ++quiet_streak;
+        ::Sleep(5);  // bounded wait for conhost's tail flush
       }
     }
   };
