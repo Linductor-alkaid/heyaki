@@ -446,9 +446,15 @@ void ShellService::handle_pty_event(const ShellPtyEvent& event) {
     }
     case ShellPtyEvent::Kind::spawn_failed: {
       ++stats_.spawn_failures;
-      send_error(*record, StableStatus::failed_precondition, "spawn_failed");
+      // The worker's detail is a bounded control-free literal (exec verdict,
+      // ConPTY, or admission refusal); it rides the SHELL_ERROR so the peer
+      // sees WHY the open failed.
+      const std::string_view detail =
+          event.detail.empty() ? std::string_view{"spawn_failed"}
+                               : std::string_view{event.detail};
+      send_error(*record, StableStatus::failed_precondition, detail);
       finish_terminal(*record, ShellPhase::closed, ShellCloseReason::spawn_failed,
-                      Error{ErrorCode::internal, "shell", "spawn_failed"});
+                      Error{ErrorCode::internal, "shell", std::string{detail}});
       return;
     }
     case ShellPtyEvent::Kind::input_rejected: {

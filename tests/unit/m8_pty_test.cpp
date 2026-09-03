@@ -11,6 +11,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <optional>
 #include <string>
@@ -30,6 +31,7 @@ namespace {
 struct CollectedEvents {
   bool started{false};
   bool spawn_failed{false};
+  std::string spawn_failed_detail;
   std::int64_t exit_code{-2147483648LL};
   int exit_reason{-1};
   std::string output;
@@ -49,6 +51,7 @@ struct CollectedEvents {
         break;
       case ShellPtyEvent::Kind::spawn_failed:
         spawn_failed = true;
+        spawn_failed_detail = event.detail;
         break;
       case ShellPtyEvent::Kind::input_rejected:
         break;
@@ -331,6 +334,115 @@ TEST(M8ShellPtyWorker, SpawnFailureSurfacesAsEvent) {
   pty.drain_once();
   SUCCEED();
   (void)id;
+}
+
+TEST(M8ShellPtyWorker, SessionLimitRefusalIsObservableNotSilent) {
+  // A direct worker with a one-session limit (security-review finding F2):
+  // the refused open must answer spawn_failed with worker_session_limit
+  // instead of vanishing while the strand side waits for a verdict.
+  executor::comm::MpscChannel<ShellPtyCommand> commands{
+      executor::comm::ChannelOptions{16U, executor::comm::DropPolicy::RejectNewest,
+                                     true, "m8-pty-limit-commands"}};
+  executor::comm::MpscChannel<ShellPtyEvent> events{
+      executor::comm::ChannelOptions{16U, executor::comm::DropPolicy::RejectNewest,
+                                     true, "m8-pty-limit-events"}};
+  executor::comm::PhaseGate exit_gate{"m8-pty-limit-exit"};
+  auto wake = make_shell_pty_wake();
+  ASSERT_NE(wake, nullptr);
+
+  executor::Executor executor;
+  executor::ExecutorConfig executor_config;
+  executor_config.min_threads = 1U;
+  executor_config.max_threads = 2U;
+  ASSERT_TRUE(executor.initialize_ex(executor_config));
+  executor::BlockingWorkerSpec worker_spec;
+  worker_spec.name = "m8-pty-limit-worker";
+  worker_spec.config.thread_name = "m8-pty-limit-worker";
+  worker_spec.worker =
+      std::make_unique<ShellPtyWorker>(commands, events, *wake, exit_gate, 1U);
+  auto worker = executor.start_worker(std::move(worker_spec));
+  ASSERT_TRUE(worker.started()) << worker.start_result().message;
+
+  const auto send_command = [&](ShellPtyCommand command) {
+    if (!commands.try_send(std::move(command))) {
+      ADD_FAILURE() << "command admission failed";
+      return false;
+    }
+    wake->signal();
+    return true;
+  };
+
+  std::vector<ShellPtyEvent> received;
+  const auto pump = [&]() {
+    ShellPtyEvent event;
+    while (events.try_receive(event)) {
+      received.push_back(std::move(event));
+    }
+#if defined(_WIN32)
+    Sleep(5);
+#else
+    std::this_thread::sleep_for(std::chrono::milliseconds{5});
+#endif
+  };
+  const auto wait_for = [&](const auto& predicate, std::chrono::seconds budget) {
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    while (std::chrono::steady_clock::now() < deadline) {
+      pump();
+      if (std::any_of(received.begin(), received.end(), predicate)) {
+        return true;
+      }
+    }
+    return std::any_of(received.begin(), received.end(), predicate);
+  };
+
+  // 1) The single session slot goes to a live child.
+  auto live_spec = make_spec(stubborn_argv());
+  const ShellId live_id = live_spec.shell_id;
+  ShellPtyCommand open_live;
+  open_live.kind = ShellPtyCommand::Kind::open;
+  open_live.shell_id = live_id;
+  open_live.spawn = std::move(live_spec);
+  ASSERT_TRUE(send_command(std::move(open_live)));
+  ASSERT_TRUE(wait_for(
+      [&](const ShellPtyEvent& event) {
+        return event.shell_id == live_id &&
+               event.kind == ShellPtyEvent::Kind::started;
+      },
+      std::chrono::seconds{10}));
+
+  // 2) The second open while the slot is held is refused observably.
+  auto refused_spec = make_spec(stubborn_argv());
+  const ShellId refused_id = refused_spec.shell_id;
+  ShellPtyCommand open_refused;
+  open_refused.kind = ShellPtyCommand::Kind::open;
+  open_refused.shell_id = refused_id;
+  open_refused.spawn = std::move(refused_spec);
+  ASSERT_TRUE(send_command(std::move(open_refused)));
+  ASSERT_TRUE(wait_for(
+      [&](const ShellPtyEvent& event) {
+        return event.shell_id == refused_id &&
+               event.kind == ShellPtyEvent::Kind::spawn_failed &&
+               event.detail == "worker_session_limit";
+      },
+      std::chrono::seconds{10}));
+
+  // 3) The live child still works: terminate it and reap the exit.
+  ShellPtyCommand terminate;
+  terminate.kind = ShellPtyCommand::Kind::terminate;
+  terminate.shell_id = live_id;
+  terminate.reason = "test_done";
+  ASSERT_TRUE(send_command(std::move(terminate)));
+  ASSERT_TRUE(wait_for(
+      [&](const ShellPtyEvent& event) {
+        return event.shell_id == live_id && event.kind == ShellPtyEvent::Kind::exit;
+      },
+      std::chrono::seconds{15}));
+
+  commands.close();
+  worker.request_stop();
+  EXPECT_TRUE(exit_gate.wait_for(ShellPtyWorker::exit_phase, std::chrono::seconds{10}));
+  worker.stop();
+  (void)executor.shutdown(true);
 }
 
 }  // namespace

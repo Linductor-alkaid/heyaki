@@ -62,8 +62,6 @@ namespace heyaki {
 namespace {
 
 constexpr std::size_t kReadChunkBytes = 16U * 1024U;
-// Cross-platform sanity cap on concurrently live shells per PTY worker.
-constexpr std::size_t kWorkerSessionLimit = 24U;
 
 std::uint64_t steady_ms_now() noexcept {
   return static_cast<std::uint64_t>(
@@ -723,13 +721,19 @@ struct ShellPtyWorker::Impl {
   ShellPtyEventQueue& events;
   ShellPtyWake& wake;
   executor::comm::PhaseGate& exit_gate;
+  std::size_t session_limit;
   std::map<ShellId, ShellPtySession> sessions;
 };
 
 ShellPtyWorker::ShellPtyWorker(ShellPtyCommandQueue& commands,
                                ShellPtyEventQueue& events, ShellPtyWake& wake,
-                               executor::comm::PhaseGate& exit_gate)
-    : impl_(std::make_unique<Impl>(commands, events, wake, exit_gate)) {}
+                               executor::comm::PhaseGate& exit_gate,
+                               std::size_t session_limit)
+    : impl_(std::make_unique<Impl>(commands, events, wake, exit_gate,
+                                   session_limit > 0U
+                                       ? session_limit
+                                       : ShellPtyWorker::default_session_limit)) {
+}
 
 ShellPtyWorker::~ShellPtyWorker() = default;
 
@@ -959,8 +963,18 @@ void ShellPtyWorker::run(executor::StopToken stop_token) {
       auto found = impl.sessions.find(command.shell_id);
       switch (command.kind) {
         case ShellPtyCommand::Kind::open: {
-          if (found != impl.sessions.end() ||
-              impl.sessions.size() >= kWorkerSessionLimit) {
+          if (found != impl.sessions.end()) {
+            break;
+          }
+          if (impl.sessions.size() >= impl.session_limit) {
+            // The strand side already holds a record awaiting
+            // started/spawn_failed; an admission refusal must stay
+            // observable instead of vanishing (silent-loss review F2).
+            ShellPtyEvent event;
+            event.shell_id = command.shell_id;
+            event.kind = ShellPtyEvent::Kind::spawn_failed;
+            event.detail = "worker_session_limit";
+            (void)emit_event(impl.events, std::move(event));
             break;
           }
           ShellPtySession session;

@@ -397,6 +397,10 @@ TEST(M8ShellService, SpawnFailureIsTerminal) {
   const auto closed = left_log.last_phase(ShellPhase::closed);
   ASSERT_TRUE(closed.has_value());
   EXPECT_EQ(pair.right_shell->stats().spawn_failures, 1U);
+  // The worker's failure detail rides the SHELL_ERROR so the peer observes
+  // WHY the open failed (review F2: exec verdict / admission refusals).
+  ASSERT_TRUE(closed->error.has_value());
+  EXPECT_EQ(closed->error->safe_detail(), "pty_exec_failed");
 }
 
 TEST(M8ShellService, SessionCloseTerminatesServingChildren) {

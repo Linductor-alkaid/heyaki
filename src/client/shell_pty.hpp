@@ -131,9 +131,13 @@ class ShellPtyWake {
 class ShellPtyWorker final : public executor::IBlockingIoWorker {
  public:
   static constexpr std::uint64_t exit_phase = 1U;
+  // Cross-platform sanity cap on concurrently live shells per PTY worker.
+  // Production keeps the default; tests inject a small limit.
+  static constexpr std::size_t default_session_limit = 24U;
 
   ShellPtyWorker(ShellPtyCommandQueue& commands, ShellPtyEventQueue& events,
-                 ShellPtyWake& wake, executor::comm::PhaseGate& exit_gate);
+                 ShellPtyWake& wake, executor::comm::PhaseGate& exit_gate,
+                 std::size_t session_limit = default_session_limit);
   ~ShellPtyWorker() override;
 
   void run(executor::StopToken stop_token) override;
