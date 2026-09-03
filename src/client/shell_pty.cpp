@@ -778,6 +778,75 @@ void ShellPtyWorker::run(executor::StopToken stop_token) {
     }
   };
 
+#if defined(_WIN32)
+  // Peek-bounded read of the session's output pipe; ReadFile never blocks
+  // because it only asks for bytes PeekNamedPipe already counted.
+  const auto poll_conpty_output = [&](ShellPtySession& session) {
+    if (session.out_read == nullptr || session.exit_emitted ||
+        !session.pending_output.empty() || session.output_flood) {
+      return;
+    }
+    for (int rounds = 0; rounds < 4; ++rounds) {
+      DWORD available = 0U;
+      if (!::PeekNamedPipe(session.out_read, nullptr, 0U, nullptr, &available,
+                           nullptr) ||
+          available == 0U) {
+        return;
+      }
+      const DWORD want =
+          std::min<DWORD>(available, static_cast<DWORD>(kReadChunkBytes));
+      DWORD got = 0U;
+      if (!::ReadFile(session.out_read, session.read_buffer.data(), want, &got,
+                      nullptr) ||
+          got == 0U) {
+        return;
+      }
+      deliver_output(session, session.read_buffer.data(), got);
+      if (session.output_flood || !session.pending_output.empty()) {
+        return;
+      }
+    }
+  };
+
+  // Final drain at reap: conhost finishes flushing the child's output as the
+  // process exits, so drain-until-empty (bounded) BEFORE the exit event or
+  // a fast-exiting child loses its tail output.
+  const auto drain_conpty_final = [&](ShellPtySession& session) {
+    if (session.out_read == nullptr) {
+      return;
+    }
+    for (int attempts = 0; attempts < 50; ++attempts) {
+      bool progressed = false;
+      for (int rounds = 0; rounds < 8; ++rounds) {
+        DWORD available = 0U;
+        if (!::PeekNamedPipe(session.out_read, nullptr, 0U, nullptr, &available,
+                             nullptr)) {
+          return;
+        }
+        if (available == 0U) {
+          break;
+        }
+        progressed = true;
+        const DWORD want =
+            std::min<DWORD>(available, static_cast<DWORD>(kReadChunkBytes));
+        DWORD got = 0U;
+        if (!::ReadFile(session.out_read, session.read_buffer.data(), want,
+                        &got, nullptr) ||
+            got == 0U) {
+          return;
+        }
+        deliver_output(session, session.read_buffer.data(), got);
+        if (session.output_flood) {
+          return;
+        }
+      }
+      if (!progressed) {
+        return;
+      }
+    }
+  };
+#endif
+
   const auto drain_pending_output = [&](ShellPtySession& session) {
     while (!session.pending_output.empty()) {
       const std::size_t slice =
@@ -1102,10 +1171,10 @@ void ShellPtyWorker::run(executor::StopToken stop_token) {
         }
         drain_pending_output(session);
 #else
-        // ConPTY output pending at exit drains on the next wait pass; the
-        // read stays armed until conpty_close, so emit after one more
-        // completion round is impossible here — pending bytes flush into
-        // the event queue before close below.
+        if (!session.output_flood) {
+          drain_conpty_final(session);
+        }
+        drain_pending_output(session);
 #endif
         session.exit_emitted = true;
         ShellPtyEvent event;
@@ -1187,30 +1256,7 @@ void ShellPtyWorker::run(executor::StopToken stop_token) {
     // to what is already buffered, so ReadFile never blocks the worker.
     for (auto& [id, session] : impl.sessions) {
       (void)id;
-      if (session.out_read == nullptr || session.exit_emitted ||
-          !session.pending_output.empty() || session.output_flood) {
-        continue;
-      }
-      for (int rounds = 0; rounds < 4; ++rounds) {
-        DWORD available = 0U;
-        if (!::PeekNamedPipe(session.out_read, nullptr, 0U, nullptr, &available,
-                             nullptr) ||
-            available == 0U) {
-          break;
-        }
-        const DWORD want = std::min<DWORD>(available,
-                                           static_cast<DWORD>(kReadChunkBytes));
-        DWORD got = 0U;
-        if (!::ReadFile(session.out_read, session.read_buffer.data(), want, &got,
-                        nullptr) ||
-            got == 0U) {
-          break;
-        }
-        deliver_output(session, session.read_buffer.data(), got);
-        if (session.output_flood || !session.pending_output.empty()) {
-          break;
-        }
-      }
+      poll_conpty_output(session);
     }
 #endif
   }
