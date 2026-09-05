@@ -11,6 +11,7 @@
 #include <heyaki/shell.hpp>
 
 #include <chrono>
+#include <algorithm>
 #include <cstddef>
 #include <filesystem>
 #include <cstdint>
@@ -408,6 +409,132 @@ struct NodeServiceDiagnostics {
   std::size_t shell_sessions{};
 };
 
+// ---- Device metrics export (M9-01) ----
+// One snapshot aggregating the architecture §13.2 indicators that already
+// exist as per-service diagnostics, LAN/relay snapshots, and coordinator
+// counters, plus the counters introduced with M9-01 itself. `runtime`
+// carries the executor failure/status and comm-stats correlation fields:
+// task-health attribution stays with executor (repo rule), and these
+// fields let a scraper join protocol metrics with executor health.
+
+// Password pairing and TrustGrant lifecycle counters (§13.2 "密码配对
+// 成功/失败/限速、TrustGrant 签发与撤销"). Counts, never passwords.
+struct NodePairingMetrics {
+  std::uint64_t attempts{};
+  std::uint64_t granted{};
+  std::uint64_t denied_password{};
+  std::uint64_t denied_policy{};
+  std::uint64_t denied_backoff{};
+  std::uint64_t grant_accepted{};
+  std::uint64_t grant_rejected{};
+  std::uint64_t grant_revoked{};
+  std::uint64_t password_rotated{};
+  std::uint64_t grants_revoked{};
+};
+
+// Connection establishment outcomes (§13.2 "endpoint 来源、signaling
+// route/... 直连率、中继率和失败原因"). Data-path and route counters are
+// recorded when a session reaches authenticated, so their sum equals
+// `sessions_authenticated`.
+struct NodeConnectivityMetrics {
+  std::uint64_t connections_initiated{};
+  std::uint64_t sessions_authenticated{};
+  std::uint64_t sessions_pairing_restricted{};
+  std::uint64_t connection_failures{};
+  std::uint64_t sessions_superseded{};
+  std::uint64_t signaling_route_lan{};
+  std::uint64_t signaling_route_relay{};
+  std::uint64_t data_path_unknown{};
+  std::uint64_t data_path_direct_host{};
+  std::uint64_t data_path_direct_srflx{};
+  std::uint64_t data_path_turn_udp{};
+  std::uint64_t data_path_turn_tcp{};
+  std::uint64_t data_path_turn_tls{};
+  // connect() admission to authenticated, in milliseconds.
+  std::uint64_t connect_duration_samples{};
+  std::uint64_t connect_duration_milliseconds_sum{};
+  std::uint64_t connect_duration_milliseconds_max{};
+
+  void record_authenticated(const NodePeerSessionSnapshot& session,
+                            std::chrono::steady_clock::time_point begun,
+                            std::chrono::steady_clock::time_point now) {
+    ++sessions_authenticated;
+    if (session.signaling_route == SignalingRouteKind::lan) {
+      ++signaling_route_lan;
+    } else {
+      ++signaling_route_relay;
+    }
+    switch (session.data_path) {
+      case NodeDataPathKind::direct_host:
+        ++data_path_direct_host;
+        break;
+      case NodeDataPathKind::direct_srflx:
+        ++data_path_direct_srflx;
+        break;
+      case NodeDataPathKind::turn_udp:
+        ++data_path_turn_udp;
+        break;
+      case NodeDataPathKind::turn_tcp:
+        ++data_path_turn_tcp;
+        break;
+      case NodeDataPathKind::turn_tls:
+        ++data_path_turn_tls;
+        break;
+      case NodeDataPathKind::unknown:
+        ++data_path_unknown;
+        break;
+    }
+    const auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - begun);
+    ++connect_duration_samples;
+    connect_duration_milliseconds_sum +=
+        static_cast<std::uint64_t>(duration.count() < 0 ? 0 : duration.count());
+    connect_duration_milliseconds_max = std::max(
+        connect_duration_milliseconds_max,
+        static_cast<std::uint64_t>(duration.count() < 0 ? 0 : duration.count()));
+  }
+};
+
+// Live transport gauges aggregated across peer sessions (§13.2 "peer RTT、
+// 丢包估计、buffered bytes").
+struct NodeTransportGauges {
+  std::size_t peer_sessions{};
+  std::size_t authenticated_sessions{};
+  std::size_t pairing_restricted_sessions{};
+  std::uint64_t rtt_samples{};
+  std::uint64_t rtt_milliseconds_sum{};
+  std::uint64_t rtt_milliseconds_max{};
+  std::uint64_t buffered_amount_sum{};
+};
+
+// Session channel queue aggregates (§13.2 "每 channel 队列深度、发送/接收
+// 字节、drop"). Sums across every business channel of every live session.
+struct NodeChannelMetrics {
+  std::uint64_t channels{};
+  std::uint64_t queued_frames{};
+  std::uint64_t queued_bytes{};
+  std::uint64_t sent_frames{};
+  std::uint64_t sent_bytes{};
+  std::uint64_t dropped_frames{};
+  std::uint64_t dropped_bytes{};
+  std::uint64_t rejected_frames{};
+  std::uint64_t capacity_waits_completed{};
+};
+
+struct NodeMetrics {
+  std::uint64_t unix_milliseconds{};
+  // Registration/enrollment/LAN presence/TLS/coordinator/restart surfaces.
+  NodeSnapshot node;
+  NodePairingMetrics pairing;
+  NodeConnectivityMetrics connectivity;
+  NodeTransportGauges transport;
+  NodeChannelMetrics channels;
+  NodeServiceDiagnostics services;
+  // Executor correlation: failure/status counters and the runtime metrics
+  // mailbox comm stats (overwrites, staleness, consumer lag).
+  RuntimeSnapshot runtime;
+};
+
 // Inbound message delivery (already deduplicated, scope-checked, and
 // ACK-answered at protocol level before this fires).
 using NodeMessageInboundHandler =
@@ -507,6 +634,10 @@ class Node {
   [[nodiscard]] Result<void> cancel_rpc(const DeviceEndpointKey& peer,
                                         const RequestId& request_id);
   [[nodiscard]] NodeServiceDiagnostics service_diagnostics();
+  // Latest device metrics snapshot (M9-01): refreshed on the node's periodic
+  // prune tick; before the first tick a default-constructed snapshot is
+  // returned. Aggregates §13.2 indicators plus executor correlation fields.
+  [[nodiscard]] NodeMetrics metrics() const;
 
   // ---- M7 remote events (public API) ----
   // Subscribes to the peer's topic pattern (exact match, or segment-boundary

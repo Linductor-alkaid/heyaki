@@ -146,6 +146,7 @@ add_library(heyaki_core
   src/core/lan_protocol.cpp
   src/core/limits.cpp
   src/core/message_protocol.cpp
+  src/core/metrics.cpp
   src/core/operation.cpp
   src/core/pairing_protocol.cpp
   src/core/protocol.cpp

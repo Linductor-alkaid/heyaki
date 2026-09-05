@@ -48,6 +48,40 @@ std::uint64_t PairingService::now() const {
 
 void PairingService::audit(PairingAuditKind kind, const DeviceId& peer,
                            const char* detail) {
+  // Metrics counters increment even without an audit sink (M9-01): the
+  // NodeMetrics pairing totals must not depend on observer configuration.
+  switch (kind) {
+    case PairingAuditKind::attempt:
+      ++stats_.attempts;
+      break;
+    case PairingAuditKind::granted:
+      ++stats_.granted;
+      break;
+    case PairingAuditKind::denied_password:
+      ++stats_.denied_password;
+      break;
+    case PairingAuditKind::denied_policy:
+      ++stats_.denied_policy;
+      break;
+    case PairingAuditKind::denied_backoff:
+      ++stats_.denied_backoff;
+      break;
+    case PairingAuditKind::grant_accepted:
+      ++stats_.grant_accepted;
+      break;
+    case PairingAuditKind::grant_rejected:
+      ++stats_.grant_rejected;
+      break;
+    case PairingAuditKind::grant_revoked:
+      ++stats_.grant_revoked;
+      break;
+    case PairingAuditKind::password_rotated:
+      ++stats_.password_rotated;
+      break;
+    case PairingAuditKind::grants_revoked:
+      ++stats_.grants_revoked;
+      break;
+  }
   if (!config_.audit_sink) return;
   config_.audit_sink(PairingAuditEvent{.kind = kind,
                                        .peer = peer,
@@ -341,6 +375,10 @@ Result<std::vector<TrustGrantRecord>> PairingService::grants_for_peer(
 
 std::size_t PairingService::tracked_failure_sources() const noexcept {
   return failures_.size();
+}
+
+const PairingServiceStats& PairingService::stats() const noexcept {
+  return stats_;
 }
 
 TrustGrantRecord PairingService::to_record(const SignedTrustGrant& grant,

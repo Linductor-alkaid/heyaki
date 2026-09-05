@@ -502,6 +502,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
 
   struct PeerAttempt {
     NodePeerSessionSnapshot snapshot;
+    // M9-01: connect-admission timestamp for the connect-duration metric.
+    std::chrono::steady_clock::time_point begun_at{
+        std::chrono::steady_clock::now()};
     IdentityPublicKey peer_public_key{};
     std::shared_ptr<ConnectionAttemptTimeline> timeline;
     std::shared_ptr<transport::webrtc::WebRtcTransportSession> transport;
@@ -2677,6 +2680,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     if (!signaling) return false;
     peer_attempt_by_endpoint.emplace(snapshot.peer, snapshot.request_id);
     peer_attempts.emplace(snapshot.request_id, std::move(attempt));
+    ++connectivity_metrics.connections_initiated;
     publish_peer_sessions();
     return true;
   }
@@ -2735,6 +2739,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     if (!signaling) return Result<void>::failure(*signaling.error_if());
     peer_attempt_by_endpoint.emplace(peer, *request.value_if());
     peer_attempts.emplace(*request.value_if(), std::move(attempt));
+    ++connectivity_metrics.connections_initiated;
     publish_peer_sessions();
     return Result<void>::success();
   }
@@ -3046,6 +3051,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
             diagnostics.negotiated_capabilities;
         iterator->second.snapshot.pairing_restricted = false;
         iterator->second.snapshot.authorized_scopes = diagnostics.authorized_scopes;
+        connectivity_metrics.record_authenticated(
+            peer_session_snapshot(iterator->second), iterator->second.begun_at,
+            std::chrono::steady_clock::now());
         if (iterator->second.session) {
           iterator->second.snapshot.session_epoch =
               iterator->second.session->local_hello().session_epoch;
@@ -3088,6 +3096,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         iterator->second.snapshot.state = NodePeerSessionState::pairing_restricted;
         iterator->second.snapshot.pairing_restricted = true;
         iterator->second.snapshot.authorized_scopes.clear();
+        ++connectivity_metrics.sessions_pairing_restricted;
         if (coordinator) {
           (void)coordinator->cancel_attempt(request_id,
                                             std::chrono::steady_clock::now());
@@ -3112,6 +3121,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
           // error-attach above already ran, so clear it before the snapshot.
           iterator->second.snapshot.error.reset();
           iterator->second.retiring = true;
+          ++connectivity_metrics.sessions_superseded;
           finished_peer_sessions.push_back(peer_session_snapshot(iterator->second));
           while (finished_peer_sessions.size() > lan.diagnostic_capacity) {
             finished_peer_sessions.pop_front();
@@ -3122,6 +3132,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
           return;
         }
         if (!peers_closed && !iterator->second.retiring) {
+          if (!was_authenticated) {
+            ++connectivity_metrics.connection_failures;
+          }
           const auto error = diagnostics.last_error.value_or(
               node_error(ErrorCode::transport, "peer_session_closed"));
           fail_peer_attempt(request_id, error);
@@ -3949,7 +3962,75 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         ++queue_entry;
       }
     }
-    (void)service_diagnostics_snapshots.try_publish(service_diagnostics_strand());
+    const auto services = service_diagnostics_strand();
+    (void)service_diagnostics_snapshots.try_publish(services);
+    (void)metrics_snapshots.try_publish(metrics_strand(services));
+  }
+
+  // Aggregates the M9-01 device metrics on the strand: the published node
+  // snapshot, the pairing audit counters, the connectivity counters, live
+  // transport/channel gauges, service diagnostics, and the executor
+  // correlation fields from Runtime.
+  NodeMetrics metrics_strand(const NodeServiceDiagnostics& services) {
+    NodeMetrics metrics;
+    metrics.unix_milliseconds = unix_milliseconds_now();
+    metrics.node = snapshots.load().value;
+    if (pairing_service) {
+      const auto& stats = pairing_service->stats();
+      metrics.pairing.attempts = stats.attempts;
+      metrics.pairing.granted = stats.granted;
+      metrics.pairing.denied_password = stats.denied_password;
+      metrics.pairing.denied_policy = stats.denied_policy;
+      metrics.pairing.denied_backoff = stats.denied_backoff;
+      metrics.pairing.grant_accepted = stats.grant_accepted;
+      metrics.pairing.grant_rejected = stats.grant_rejected;
+      metrics.pairing.grant_revoked = stats.grant_revoked;
+      metrics.pairing.password_rotated = stats.password_rotated;
+      metrics.pairing.grants_revoked = stats.grants_revoked;
+    }
+    metrics.connectivity = connectivity_metrics;
+    metrics.services = services;
+    if (runtime) {
+      metrics.runtime = runtime->snapshot();
+    }
+    auto& transport = metrics.transport;
+    auto& channels = metrics.channels;
+    for (const auto& [request_id, attempt] : peer_attempts) {
+      (void)request_id;
+      if (!attempt.session) {
+        continue;
+      }
+      ++transport.peer_sessions;
+      const auto& snapshot = attempt.snapshot;
+      if (snapshot.state == NodePeerSessionState::pairing_restricted) {
+        ++transport.pairing_restricted_sessions;
+      } else if (snapshot.state == NodePeerSessionState::authenticated) {
+        ++transport.authenticated_sessions;
+      }
+      if (snapshot.rtt.count() > 0) {
+        ++transport.rtt_samples;
+        transport.rtt_milliseconds_sum +=
+            static_cast<std::uint64_t>(snapshot.rtt.count());
+        transport.rtt_milliseconds_max = std::max(
+            transport.rtt_milliseconds_max,
+            static_cast<std::uint64_t>(snapshot.rtt.count()));
+      }
+      transport.buffered_amount_sum +=
+          static_cast<std::uint64_t>(snapshot.buffered_amount);
+      for (const auto& channel : attempt.session->channels().channel_snapshots()) {
+        const auto& queue = channel.stats;
+        ++channels.channels;
+        channels.queued_frames += queue.queued_frames;
+        channels.queued_bytes += queue.queued_bytes;
+        channels.sent_frames += queue.sent_frames;
+        channels.sent_bytes += queue.sent_bytes;
+        channels.dropped_frames += queue.dropped_frames;
+        channels.dropped_bytes += queue.dropped_bytes;
+        channels.rejected_frames += queue.rejected_frames;
+        channels.capacity_waits_completed += queue.capacity_waits_completed;
+      }
+    }
+    return metrics;
   }
 
   void publish_restart_diagnostics() {
@@ -5812,6 +5893,11 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   executor::comm::MpscChannel<InterfaceScanResult> scan_results;
   executor::comm::DoubleBuffer<NodeSnapshot> snapshots;
   executor::comm::DoubleBuffer<NodeServiceDiagnostics> service_diagnostics_snapshots;
+  // M9-01: connectivity counters mutate strand-side in the session observer;
+  // the full metrics snapshot publishes on the prune tick like the service
+  // diagnostics beside it.
+  NodeConnectivityMetrics connectivity_metrics;
+  executor::comm::DoubleBuffer<NodeMetrics> metrics_snapshots;
   executor::comm::DoubleBuffer<std::vector<EndpointDirectoryEntrySnapshot>> endpoint_snapshots;
   executor::comm::MpscChannel<SignalingCommand> signaling_commands;
   executor::comm::MpscChannel<SignalingCallbackResult> signaling_results;
@@ -6931,7 +7017,12 @@ NodeServiceDiagnostics Node::service_diagnostics() {
   }
   // Latest published snapshot (refreshed on the periodic tick); reading the
   // live maps would race the strand.
-  return impl_->service_diagnostics_snapshots.load().value;
+  return impl_ ? impl_->service_diagnostics_snapshots.load().value
+               : NodeServiceDiagnostics{};
+}
+
+NodeMetrics Node::metrics() const {
+  return impl_ ? impl_->metrics_snapshots.load().value : NodeMetrics{};
 }
 
 Result<void> Node::send_lan_signaling(LanSignalingMessage message) {

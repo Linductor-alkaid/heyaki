@@ -50,6 +50,22 @@ struct PairingAuditEvent {
   const char* detail{""};
 };
 
+// Counters mirrored from the audit funnel (M9-01): every audit event bumps
+// exactly one counter regardless of whether an audit sink is configured, so
+// NodeMetrics pairing totals stay complete without the event stream.
+struct PairingServiceStats {
+  std::uint64_t attempts{};
+  std::uint64_t granted{};
+  std::uint64_t denied_password{};
+  std::uint64_t denied_policy{};
+  std::uint64_t denied_backoff{};
+  std::uint64_t grant_accepted{};
+  std::uint64_t grant_rejected{};
+  std::uint64_t grant_revoked{};
+  std::uint64_t password_rotated{};
+  std::uint64_t grants_revoked{};
+};
+
 struct PairingServiceConfig {
   static constexpr std::size_t kDefaultFailureThreshold = 3U;
 
@@ -112,6 +128,7 @@ class PairingService {
 
   [[nodiscard]] const PairingServiceConfig& config() const noexcept;
   [[nodiscard]] std::size_t tracked_failure_sources() const noexcept;
+  [[nodiscard]] const PairingServiceStats& stats() const noexcept;
 
  private:
   struct FailureRecord {
@@ -129,6 +146,7 @@ class PairingService {
 
   PairingServiceConfig config_;
   std::map<DeviceId, FailureRecord> failures_;
+  PairingServiceStats stats_;
 };
 
 }  // namespace heyaki
