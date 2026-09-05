@@ -155,6 +155,10 @@ struct NodePeerSessionSnapshot {
   std::string selected_candidate;
   std::chrono::milliseconds rtt{};
   std::size_t buffered_amount{};
+  // M9-01: cumulative link-level counters from the transport backend, sampled
+  // on the metrics tick while the session lives (per-association values).
+  std::uint64_t transport_bytes_sent{};
+  std::uint64_t transport_bytes_received{};
   bool initiator{false};
   bool restart_in_flight{false};
   // Trust state of the session (M5): restricted sessions wait for pairing;
@@ -249,6 +253,14 @@ struct RelayNodeSnapshot {
   std::string tenant;
   std::uint64_t enrollment_generation{};
   std::uint64_t lease_generation{};
+  // M9-01 registration lifecycle (§13.2 "注册成功率、租约续期失败"): one
+  // attempt per WSS connect + login cycle, success at login_result accepted,
+  // failure when a cycle ends before ready, and one lease refresh failure per
+  // heartbeat round whose ack is still missing at the next tick.
+  std::uint64_t registration_attempts{};
+  std::uint64_t registration_successes{};
+  std::uint64_t registration_failures{};
+  std::uint64_t lease_refresh_failures{};
   std::uint64_t heartbeats_sent{};
   std::uint64_t heartbeats_missed{};
   std::uint64_t reconnect_count{};
@@ -442,6 +454,15 @@ struct NodeConnectivityMetrics {
   std::uint64_t sessions_pairing_restricted{};
   std::uint64_t connection_failures{};
   std::uint64_t sessions_superseded{};
+  // Route selection winners at attempt admission (§13.2 "signaling
+  // route/fallback/winner"): their sum equals `connections_initiated`, so the
+  // delta against the authenticated-time counters below attributes in-flight
+  // and failed attempts per route. `signaling_route_fallbacks` counts
+  // automatic-mode selections of relay made only because no LAN endpoint was
+  // reachable; pinned (lan_only/relay_only) selections never count.
+  std::uint64_t signaling_route_selected_lan{};
+  std::uint64_t signaling_route_selected_relay{};
+  std::uint64_t signaling_route_fallbacks{};
   std::uint64_t signaling_route_lan{};
   std::uint64_t signaling_route_relay{};
   std::uint64_t data_path_unknown{};
@@ -454,6 +475,15 @@ struct NodeConnectivityMetrics {
   std::uint64_t connect_duration_samples{};
   std::uint64_t connect_duration_milliseconds_sum{};
   std::uint64_t connect_duration_milliseconds_max{};
+
+  void record_route_selection(SignalingRouteKind route, bool fallback) {
+    if (route == SignalingRouteKind::lan) {
+      ++signaling_route_selected_lan;
+    } else {
+      ++signaling_route_selected_relay;
+    }
+    if (fallback) ++signaling_route_fallbacks;
+  }
 
   void record_authenticated(const NodePeerSessionSnapshot& session,
                             std::chrono::steady_clock::time_point begun,
@@ -496,7 +526,9 @@ struct NodeConnectivityMetrics {
 };
 
 // Live transport gauges aggregated across peer sessions (§13.2 "peer RTT、
-// 丢包估计、buffered bytes").
+// 丢包估计、buffered bytes"). Byte sums add the transport backend's per-
+// association cumulative counters over live sessions, so they can decrease
+// when a session closes; they are gauges, not lifetime counters.
 struct NodeTransportGauges {
   std::size_t peer_sessions{};
   std::size_t authenticated_sessions{};
@@ -505,6 +537,8 @@ struct NodeTransportGauges {
   std::uint64_t rtt_milliseconds_sum{};
   std::uint64_t rtt_milliseconds_max{};
   std::uint64_t buffered_amount_sum{};
+  std::uint64_t transport_bytes_sent_sum{};
+  std::uint64_t transport_bytes_received_sum{};
 };
 
 // Session channel queue aggregates (§13.2 "每 channel 队列深度、发送/接收

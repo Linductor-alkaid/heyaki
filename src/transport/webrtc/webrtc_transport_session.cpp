@@ -369,10 +369,12 @@ class WebRtcTransportSession::Impl
   struct BufferedLowEvent {
     std::shared_ptr<Channel> channel;
   };
+  // M9-01: periodic link-stats resampling posted by the node metrics tick.
+  struct StatsEvent {};
   using Event = std::variant<LocalDescriptionEvent, LocalCandidateEvent, PeerStateEvent,
                              IceStateEvent, GatheringEvent, IncomingChannelEvent,
                              OpenEvent, MessageEvent, ChannelErrorEvent,
-                             ChannelClosedEvent, BufferedLowEvent>;
+                             ChannelClosedEvent, BufferedLowEvent, StatsEvent>;
 
   Impl(WebRtcTransportConfig config, RuntimeDispatcher dispatcher,
        WebRtcSignalingHandler signaling)
@@ -473,6 +475,16 @@ class WebRtcTransportSession::Impl
     return Result<void>::success();
   }
 
+  // M9-01: posted by the node's metrics tick. Unlike enqueue(), a full queue
+  // is tolerated here — a dropped stats poll must not fail the session; the
+  // next tick retries.
+  void request_stats_refresh() noexcept {
+    if (closed_.load(std::memory_order_acquire)) return;
+    if (!events_.try_send(StatsEvent{})) return;
+    ++callbacks_enqueued_;
+    schedule_drain();
+  }
+
   void handle(LocalDescriptionEvent& event) {
     if (!event.fingerprint) {
       fail(transport_error(ErrorCode::authentication,
@@ -498,7 +510,7 @@ class WebRtcTransportSession::Impl
         update_snapshot(TransportState::checking);
         break;
       case rtc::PeerConnection::State::Connected:
-        update_selected_path();
+        refresh_path_stats();
         update_snapshot(TransportState::connected);
         break;
       case rtc::PeerConnection::State::Disconnected:
@@ -572,6 +584,10 @@ class WebRtcTransportSession::Impl
     event.channel->buffered_low();
     update_snapshot(snapshot().state);
   }
+  void handle(StatsEvent&) {
+    refresh_path_stats();
+    publish_quiet_snapshot();
+  }
 
   std::shared_ptr<Channel> attach_channel(ChannelKind kind, ChannelOptions options,
                                           std::shared_ptr<rtc::DataChannel> rtc_channel) {
@@ -633,7 +649,14 @@ class WebRtcTransportSession::Impl
     return channel;
   }
 
-  void update_selected_path() {
+  // Resamples the backend link stats on the drain context: RTT and byte
+  // counters whenever a refresh runs, plus candidate-pair classification once
+  // a pair is selected (path switches are picked up by later refreshes).
+  void refresh_path_stats() {
+    if (!peer_) return;
+    path_.rtt = peer_->rtt().value_or(std::chrono::milliseconds{});
+    path_.bytes_sent = static_cast<std::uint64_t>(peer_->bytesSent());
+    path_.bytes_received = static_cast<std::uint64_t>(peer_->bytesReceived());
     rtc::Candidate local;
     rtc::Candidate remote;
     if (!peer_->getSelectedCandidatePair(&local, &remote)) return;
@@ -654,7 +677,6 @@ class WebRtcTransportSession::Impl
     } else {
       path_.data_path = DataPathKind::direct_host;
     }
-    path_.rtt = peer_->rtt().value_or(std::chrono::milliseconds{});
   }
 
   TransportSessionSnapshot snapshot() const noexcept {
@@ -667,6 +689,19 @@ class WebRtcTransportSession::Impl
   }
 
   void update_snapshot(TransportState state, std::optional<Error> error = std::nullopt) {
+    publish_snapshot(state, std::move(error), true);
+  }
+
+  // Publishes a refreshed snapshot without firing the state handler: stats
+  // resampling is not a state transition and must not re-run session logic.
+  // The prior state and error are preserved; only path/buffered refresh.
+  void publish_quiet_snapshot() {
+    const auto current = snapshots_.load().value;
+    publish_snapshot(current.state, current.error, false);
+  }
+
+  void publish_snapshot(TransportState state, std::optional<Error> error,
+                        bool notify_handler) {
     TransportSessionSnapshot next;
     next.state = state;
     next.path = path_;
@@ -675,7 +710,7 @@ class WebRtcTransportSession::Impl
       next.buffered_amount += buffered.load(std::memory_order_acquire);
     }
     snapshots_.publish(next);
-    if (state_handler_) state_handler_(next);
+    if (notify_handler && state_handler_) state_handler_(next);
   }
 
   void fail(Error error) {
@@ -915,8 +950,11 @@ Result<void> WebRtcTransportSession::restart_ice() {
   }
 }
 
-WebRtcTransportDiagnostics WebRtcTransportSession::diagnostics() const noexcept {
-  if (!impl_) return {};
+void WebRtcTransportSession::request_stats_refresh() noexcept {
+  if (impl_) impl_->request_stats_refresh();
+}
+
+WebRtcTransportDiagnostics WebRtcTransportSession::diagnostics() const noexcept {  if (!impl_) return {};
   const auto stats = impl_->events_.stats();
   return WebRtcTransportDiagnostics{
       .callbacks_enqueued = impl_->callbacks_enqueued_.load(std::memory_order_relaxed),

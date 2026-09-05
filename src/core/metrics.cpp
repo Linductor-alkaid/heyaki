@@ -176,6 +176,18 @@ void write_node_section(MetricsWriter& writer, const NodeSnapshot& node) {
                  "Enrollment generation in use (gauge semantics).");
   writer.counter("heyaki_node_relay_lease_generation", relay.lease_generation,
                  "Endpoint lease generation (gauge semantics).");
+  writer.counter("heyaki_node_relay_registration_attempts_total",
+                 relay.registration_attempts,
+                 "Relay WSS connect + login cycles started.");
+  writer.counter("heyaki_node_relay_registration_successes_total",
+                 relay.registration_successes,
+                 "Relay login cycles that reached ready.");
+  writer.counter("heyaki_node_relay_registration_failures_total",
+                 relay.registration_failures,
+                 "Relay login cycles that ended before ready.");
+  writer.counter("heyaki_node_relay_lease_refresh_failures_total",
+                 relay.lease_refresh_failures,
+                 "Heartbeat rounds whose lease ack was still missing at the next tick.");
   writer.counter("heyaki_node_relay_heartbeats_sent_total",
                  relay.heartbeats_sent, "Relay heartbeats sent.");
   writer.counter("heyaki_node_relay_heartbeats_missed_total",
@@ -299,6 +311,15 @@ void write_connectivity_section(MetricsWriter& writer,
   writer.counter("heyaki_connectivity_superseded_total",
                  connectivity.sessions_superseded,
                  "Sessions closed because a restart successor superseded them.");
+  writer.counter("heyaki_connectivity_signaling_route_selected_lan_total",
+                 connectivity.signaling_route_selected_lan,
+                 "Admitted attempts that selected LAN signaling.");
+  writer.counter("heyaki_connectivity_signaling_route_selected_relay_total",
+                 connectivity.signaling_route_selected_relay,
+                 "Admitted attempts that selected relay signaling.");
+  writer.counter("heyaki_connectivity_signaling_route_fallbacks_total",
+                 connectivity.signaling_route_fallbacks,
+                 "Automatic-mode relay selections made because no LAN endpoint was reachable.");
   writer.counter("heyaki_connectivity_signaling_route_lan_total",
                  connectivity.signaling_route_lan,
                  "Authenticated sessions signaled over LAN TLS.");
@@ -352,6 +373,14 @@ void write_transport_section(MetricsWriter& writer,
   writer.gauge("heyaki_transport_buffered_amount_bytes",
                transport.buffered_amount_sum,
                "Sum of per-session transport send buffers.");
+  // Gauge semantics: per-association backend counters summed over live
+  // sessions, so the sum shrinks when a long-lived session closes.
+  writer.gauge("heyaki_transport_backend_bytes_sent",
+               transport.transport_bytes_sent_sum,
+               "Backend-level bytes sent, summed over live peer sessions.");
+  writer.gauge("heyaki_transport_backend_bytes_received",
+               transport.transport_bytes_received_sum,
+               "Backend-level bytes received, summed over live peer sessions.");
 }
 
 void write_channel_section(MetricsWriter& writer,

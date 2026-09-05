@@ -1117,6 +1117,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     relay_phase = RelayLoginPhase::connecting;
     relay_challenge.reset();
     relay_client.reset();
+    ++relay_registration_attempts;
 
     RelayWssClientConfig config;
     config.url = relay_control_url(relay.relay_url);
@@ -1153,8 +1154,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       relay_failed(*started.error_if(), is_relay_security_error(*started.error_if()));
       return;
     }
-    update_snapshot([](NodeSnapshot& snapshot) {
+    update_snapshot([&](NodeSnapshot& snapshot) {
       snapshot.relay.state = RelayNodeState::starting;
+      snapshot.relay.registration_attempts = relay_registration_attempts;
       snapshot.relay.last_error.reset();
     });
     schedule_relay_poll();
@@ -1346,11 +1348,15 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       relay_heartbeat_pending = false;
       relay_reconnect_attempt = 0U;
       relay_backoff = relay.minimum_backoff;
+      ++relay_registration_successes;
       update_snapshot([&](NodeSnapshot& snapshot) {
         snapshot.relay.state = RelayNodeState::ready;
         snapshot.relay.enrollment_generation =
             result.value_if()->enrollment_generation;
         snapshot.relay.lease_generation = relay_lease_generation;
+        snapshot.relay.registration_attempts = relay_registration_attempts;
+        snapshot.relay.registration_successes = relay_registration_successes;
+        snapshot.relay.registration_failures = relay_registration_failures;
         snapshot.relay.last_error.reset();
       });
       relay_heartbeat_tick();
@@ -1440,6 +1446,13 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         relay_phase == RelayLoginPhase::disabled) {
       return;
     }
+    // A cycle that dies before ready is a failed registration; once ready the
+    // same sink only means connection/lease loss (reconnect + missed counts).
+    const bool was_registering =
+        relay_phase == RelayLoginPhase::connecting ||
+        relay_phase == RelayLoginPhase::awaiting_challenge ||
+        relay_phase == RelayLoginPhase::awaiting_login;
+    if (was_registering) ++relay_registration_failures;
     relay_client.reset();
     for (auto entry = stashed_relay_requests.begin();
          entry != stashed_relay_requests.end();) {
@@ -1469,6 +1482,10 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       relay_poll_timer_active = false;
       update_snapshot([&](NodeSnapshot& snapshot) {
         snapshot.relay.state = RelayNodeState::failed;
+        snapshot.relay.registration_attempts = relay_registration_attempts;
+        snapshot.relay.registration_successes = relay_registration_successes;
+        snapshot.relay.registration_failures = relay_registration_failures;
+        snapshot.relay.lease_refresh_failures = relay_lease_refresh_failures;
         snapshot.relay.last_error = std::move(error);
       });
       return;
@@ -1478,6 +1495,10 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     schedule_relay_reconnect();
     update_snapshot([&](NodeSnapshot& snapshot) {
       snapshot.relay.state = RelayNodeState::degraded;
+      snapshot.relay.registration_attempts = relay_registration_attempts;
+      snapshot.relay.registration_successes = relay_registration_successes;
+      snapshot.relay.registration_failures = relay_registration_failures;
+      snapshot.relay.lease_refresh_failures = relay_lease_refresh_failures;
       snapshot.relay.last_error = std::move(error);
       snapshot.relay.reconnect_count = relay_reconnect_count;
       snapshot.relay.backoff = relay_backoff;
@@ -1542,8 +1563,10 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     }
     if (relay_heartbeat_pending) {
       ++relay_heartbeats_missed;
+      ++relay_lease_refresh_failures;
       update_snapshot([&](NodeSnapshot& snapshot) {
         snapshot.relay.heartbeats_missed = relay_heartbeats_missed;
+        snapshot.relay.lease_refresh_failures = relay_lease_refresh_failures;
       });
     }
     if (relay_heartbeats_missed >= relay.missed_heartbeat_limit) {
@@ -2223,6 +2246,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
           self->directory.expire(now);
           if (self->coordinator) self->coordinator->expire(now);
           self->check_peer_transport_failures();
+          self->refresh_peer_transport_stats();
           self->release_stashed_relay_requests();
           self->publish_directory();
           // M6: message TTL/dedup expiry and RPC deadline maintenance ride
@@ -2496,6 +2520,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       snapshot.selected_candidate = transport.path.selected_candidate;
       snapshot.rtt = transport.path.rtt;
       snapshot.buffered_amount = transport.buffered_amount;
+      snapshot.transport_bytes_sent = transport.path.bytes_sent;
+      snapshot.transport_bytes_received = transport.path.bytes_received;
       // A retiring attempt's close reason was already decided (clean
       // supersession or its root-cause error); a transport teardown error
       // arriving during the swap must not fabricate a session failure.
@@ -2681,6 +2707,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     peer_attempt_by_endpoint.emplace(snapshot.peer, snapshot.request_id);
     peer_attempts.emplace(snapshot.request_id, std::move(attempt));
     ++connectivity_metrics.connections_initiated;
+    // Inbound route winner as observed; the remote made the selection, so
+    // there is no local fallback decision to attribute here.
+    connectivity_metrics.record_route_selection(snapshot.route, false);
     publish_peer_sessions();
     return true;
   }
@@ -2740,6 +2769,12 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     peer_attempt_by_endpoint.emplace(peer, *request.value_if());
     peer_attempts.emplace(*request.value_if(), std::move(attempt));
     ++connectivity_metrics.connections_initiated;
+    // Automatic-mode relay selection with no LAN endpoint reachable is the
+    // observable LAN→relay signaling fallback; mode-pinned selections are not.
+    connectivity_metrics.record_route_selection(
+        *selected.value_if(),
+        *selected.value_if() == SignalingRouteKind::relay && !lan_available &&
+            lan.connectivity_mode == ConnectivityMode::automatic);
     publish_peer_sessions();
     return Result<void>::success();
   }
@@ -3967,6 +4002,16 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     (void)metrics_snapshots.try_publish(metrics_strand(services));
   }
 
+  // M9-01: asks every live transport to resample link stats (RTT, backend
+  // byte counters) so the same tick's metrics aggregation reads fresh gauges;
+  // the resample itself completes asynchronously on the drain context.
+  void refresh_peer_transport_stats() {
+    for (auto& [request_id, attempt] : peer_attempts) {
+      (void)request_id;
+      if (attempt.transport) attempt.transport->request_stats_refresh();
+    }
+  }
+
   // Aggregates the M9-01 device metrics on the strand: the published node
   // snapshot, the pairing audit counters, the connectivity counters, live
   // transport/channel gauges, service diagnostics, and the executor
@@ -4001,7 +4046,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         continue;
       }
       ++transport.peer_sessions;
-      const auto& snapshot = attempt.snapshot;
+      // Decorated snapshot: reads live transport gauges (RTT, buffered,
+      // backend byte counters) instead of the stale attempt copy.
+      const auto snapshot = peer_session_snapshot(attempt);
       if (snapshot.state == NodePeerSessionState::pairing_restricted) {
         ++transport.pairing_restricted_sessions;
       } else if (snapshot.state == NodePeerSessionState::authenticated) {
@@ -4017,6 +4064,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       }
       transport.buffered_amount_sum +=
           static_cast<std::uint64_t>(snapshot.buffered_amount);
+      transport.transport_bytes_sent_sum += snapshot.transport_bytes_sent;
+      transport.transport_bytes_received_sum += snapshot.transport_bytes_received;
       for (const auto& channel : attempt.session->channels().channel_snapshots()) {
         const auto& queue = channel.stats;
         ++channels.channels;
@@ -5872,6 +5921,11 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   std::uint64_t relay_record_generation{};
   std::uint64_t relay_heartbeats_sent{};
   std::uint64_t relay_heartbeats_missed{};
+  // M9-01 registration lifecycle counters (see RelayNodeSnapshot).
+  std::uint64_t relay_registration_attempts{};
+  std::uint64_t relay_registration_successes{};
+  std::uint64_t relay_registration_failures{};
+  std::uint64_t relay_lease_refresh_failures{};
   bool relay_heartbeat_pending{false};
   std::uint64_t relay_reconnect_count{};
   std::size_t relay_reconnect_attempt{};

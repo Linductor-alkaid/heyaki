@@ -1,12 +1,12 @@
 # M9：生产加固与 v1 发布
 
-> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1 已交付，见文末实施记录）
+> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2 已交付，见文末实施记录）
 > - 所属计划：[Heyaki MVP 至 v1 实施 TODO 计划](heyaki-implementation-plan.md)
 > - 前置：M8 | 建议发布点：v1.0
 
 ## 可观测性与运维
 
-- [ ] `M9-01` 设备端导出架构第 13.2 节全部 LAN/relay/协议指标，并与 executor failure/status、comm stats 建立明确关联字段。（Round 1 已交付 2026-09-05：`NodeMetrics` 统一聚合 + `Node::metrics()` 周期发布 + Prometheus 文本导出 `format_node_metrics_prometheus`；新增 pairing 审计计数器与连通性结果/时长计数器；executor 关联字段经内嵌 `RuntimeSnapshot`。缺口见实施记录"剩余范围"。）
+- [ ] `M9-01` 设备端导出架构第 13.2 节全部 LAN/relay/协议指标，并与 executor failure/status、comm stats 建立明确关联字段。（Round 1 交付 2026-09-05：`NodeMetrics` 统一聚合 + `Node::metrics()` 周期发布 + Prometheus 文本导出 `format_node_metrics_prometheus`；新增 pairing 审计计数器与连通性结果/时长计数器；executor 关联字段经内嵌 `RuntimeSnapshot`。Round 2 交付 2026-09-05：relay 注册/租约计数器、信令 winner/fallback 聚合、backend 字节 gauge 周期采样、TUI 队列/渲染诊断与 `metrics` 命令；丢包估计受 pinned libdatachannel API 限制，见实施记录。缺口见实施记录"剩余范围"。）
 - [ ] `M9-02` relay 导出 Prometheus 指标、结构化日志、有限审计和可选 trace correlation；高频成功事件采样。
 - [ ] `M9-03` 为 registration、pairing、connection、session、operation 和 transfer 建立不含机密的 correlation ID。
 - [ ] `M9-04` 定义 SLO dashboard 与告警：multicast/listener readiness、presence/handshake reject、登录失败、租约续期、直连率、TURN allocation、pairing 猜测、队列拒绝、RPC overload、文件 hash 和 worker failure。
@@ -79,14 +79,70 @@ Shell → 五个服务 Stats（既有）；executor failure/status 与 metrics m
 stats → 内嵌 `RuntimeSnapshot`（提交拒绝、任务异常、wait 超时、mailbox
 overwrite/stale/lag）。
 
+### Round 2（2026-09-05）：M9-01 剩余缺口收敛
+
+交付物：
+
+- relay 注册生命周期计数器（§13.2 "注册成功率、租约续期失败"）：`RelayNodeSnapshot`
+  新增 `registration_attempts/successes/failures/lease_refresh_failures`；
+  `start_relay_connect` 计 attempt，login_result accepted 计 success，
+  `relay_failed` 在 connecting/awaiting_* 阶段落死计 failure（ready 后的连接
+  损失只计 reconnect/missed，不重复计注册失败），heartbeat 轮在下一 tick 仍未
+  收到 ack 计一次 lease_refresh_failure。导出为
+  `heyaki_node_relay_registration_*_total` 与
+  `heyaki_node_relay_lease_refresh_failures_total`。
+- 信令 winner/fallback 聚合（§13.2 "signaling route/fallback/winner"）：
+  `NodeConnectivityMetrics` 新增 `signaling_route_selected_lan/relay`（attempt
+  准许点记账，含入站对端选择；合计 == connections_initiated，与 authenticated
+  时刻的 route 计数差值即 per-route 在途/失败归因）和 `signaling_route_fallbacks`
+  （automatic 模式下"无 LAN endpoint 可达而选 relay"；lan_only/relay_only 固定
+  选择不计）。记账点：`begin_peer_attempt`/`admit_inbound_attempt`（与
+  connections_initiated 同点，覆盖全部 WebRTC attempt 准许路径，包括 LAN offer
+  owner 经 `maybe_begin_peer_attempt` 的二次选择）。
+- backend 链路统计周期采样：pinned libdatachannel 只暴露
+  `bytesSent()/bytesReceived()/rtt()`（无 packetsLost/jitter），Round 1 只在
+  ICE Connected 时采样一次。现新增 `StatsEvent`：node 500ms tick 经
+  `request_stats_refresh()`（best-effort，队列满丢弃不失败会话，下 tick 重试）
+  投递到 transport 既有 callback drain 上下文，`refresh_path_stats()` 重采样
+  RTT/字节/selected pair 后"安静发布"（只更新 DoubleBuffer 快照，不触发
+  state handler，不重跑会话状态机）。`PathInfo` 增加 `bytes_sent/received`，
+  `NodePeerSessionSnapshot` 透传 `transport_bytes_sent/received`，
+  `NodeTransportGauges` 聚合 `transport_bytes_sent/received_sum`（gauge 语义：
+  活跃会话求和，会话关闭会回落的说明已写入头文件注释）。导出
+  `heyaki_transport_backend_bytes_sent/received`。
+- 修复 Round 1 缺陷：`metrics_strand` 此前直接读 `attempt.snapshot`（rtt/
+  buffered 从未回写，恒为 0），现改用 `peer_session_snapshot(attempt)` 的
+  实时装饰快照，RTT/buffered/bytes gauge 全部激活。
+- TUI 可观测性（§13.2 "TUI event queue 深度、合并/drop 和渲染延迟"）：
+  状态视图新增 QUEUES 块（signal/inbound/ack/rpc/event/file/shell 七通道的
+  depth/capacity@peak:drop + pairing mailbox overwrite 计数，全部来自
+  executor comm stats）与 RENDER 行（渲染 pass 计数、last/max 耗时）；
+  新增 `metrics` 命令直接输出 `format_node_metrics_prometheus(node.metrics())`
+  的 Prometheus 文本，设备侧导出无需 scraper 即可到达。
+- 测试：m9 单测扩展（record_route_selection 单元、新指标族 golden、LAN e2e
+  断言 selected_lan>=1/fallbacks==0/backend bytes 经 tick 采样 >0）；m3b 两个
+  重连测试（outage/restart）断言注册计数器全生命周期语义（含"ready 后连接
+  损失不计注册失败"的负向断言）。本机 ctest 49 通过 + 3 环境门控跳过
+  （coturn/matrix，与 Round 1 基线一致）。
+
+已知限制（记录为 M9-04/M9-11 输入，非本轮阻断）：
+
+- 丢包估计：pinned libdatachannel 的 stats API 不暴露 packetsLost/jitter，
+  只有 bytes/rtt。要做真正的丢包率需要升级 libdatachannel（getStats 全量）
+  或在应用层从不可靠通道序列缺口推导。已聚合 bytes/rtt 作为现状替代面；
+  该缺口不引入 executor ledger 条目（属第三方依赖 API 面，非 executor 限制）。
+- relay 客户端 `lease_refresh_failures` 的正向路径（ready 后静默丢 ack）无
+  稳定自动化测试——现有 harness 只能制造连接关闭（走 reconnect 路径）。
+  计数器与 `heartbeats_missed` 在同一递增点，负向断言（happy path == 0）已覆盖。
+
 ### 剩余范围（M9-01 完成前）
 
-- §13.2 "注册成功率/租约续期失败"缺独立计数器（relay 客户端现有
-  heartbeats/reconnect 是替代面）：需在 relay enrollment/WSS 客户端补
-  registration_attempts/success/lease_refresh_failure 计数。
-- "信令 fallback/winner"聚合（现有 per-attempt 快照无 winner 计数）、"丢包估计"
-  （libdatachannel stats 已启用但未聚合）、TUI 队列深度/渲染延迟（TUI 侧导出）。
-- Prometheus 指标族语义评审 + M9-03 correlation ID 与 instance 标签打通
-  （本轮已支持 instance 标签注入，operation/transfer 级关联待 M9-03）。
+- ~~注册成功率/租约续期失败计数器、信令 fallback/winner 聚合、TUI 队列/渲染
+  导出~~：Round 2 已交付（见上）。
+- 丢包估计受 pinned libdatachannel API 限制（bytes/rtt 已聚合，packetsLost
+  不存在）：升级依赖或在应用层推导的取舍留给 M9-10 基准测试结论后决定。
+- Prometheus 指标族语义评审（命名/标签/类型过一遍 scrape 消费视角）；
+  M9-03 correlation ID 与 instance 标签打通（instance 标签注入已支持，
+  operation/transfer 级关联待 M9-03）。
 - M9-02 relay 侧导出（`RelayServerSnapshot` 数据面已齐，缺 Prometheus 端点与
-  结构化日志）；M9-04/05 dashboard 与 runbook 以本轮指标族为输入。
+  结构化日志）；M9-04/05 dashboard 与 runbook 以 Round 1/2 指标族为输入。

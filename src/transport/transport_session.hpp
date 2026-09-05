@@ -40,6 +40,10 @@ struct PathInfo {
   DataPathKind data_path{DataPathKind::unknown};
   std::string selected_candidate;
   std::chrono::milliseconds rtt{};
+  // M9-01: cumulative per-association counters from the transport backend
+  // (link level, including framing overhead), sampled while the session lives.
+  std::uint64_t bytes_sent{};
+  std::uint64_t bytes_received{};
 
   friend bool operator==(const PathInfo&, const PathInfo&) = default;
 };

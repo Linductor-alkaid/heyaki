@@ -104,6 +104,11 @@ class WebRtcTransportSession final
   [[nodiscard]] Result<void> add_remote_candidate(std::span<const std::byte> candidate);
   [[nodiscard]] Result<void> restart_ice();
   [[nodiscard]] WebRtcTransportDiagnostics diagnostics() const noexcept;
+  // M9-01: asks the backend to resample link stats (RTT, bytes, selected
+  // candidate) on the callback drain context; the refreshed snapshot publishes
+  // without firing the state handler. Best effort: a full callback queue drops
+  // the request and the next metrics tick retries.
+  void request_stats_refresh() noexcept;
 
   void async_open_channel(ChannelKind kind, ChannelOptions options,
                           OpenCompletion completion) override;

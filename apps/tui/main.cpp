@@ -1,4 +1,5 @@
 #include <heyaki/node.hpp>
+#include <heyaki/metrics.hpp>
 #include <heyaki/password.hpp>
 #include <heyaki/relay_enrollment_client.hpp>
 #include <heyaki/profile_store.hpp>
@@ -152,6 +153,12 @@ struct UiState {
   std::deque<heyaki::LanSignalingMessage> signaling_events;
   std::optional<heyaki::Error> command_error;
   std::string command_status;
+
+  // M9-01 render-loop observability (§13.2 "TUI event queue 深度、合并/drop
+  // 和渲染延迟"): last/max wall time of one full render pass.
+  std::uint64_t render_passes{0U};
+  std::chrono::microseconds render_last{0};
+  std::chrono::microseconds render_max{0};
 
   // Moves every queued cross-thread event into the display buffers.
   void drain_service_events() {
@@ -510,9 +517,31 @@ void render_node(std::string_view profile_name, heyaki::Node& node,
     print_error(*failure);
     std::cout << '\n';
   }
-  const auto stats = bridge.events.stats();
-  std::cout << "QUEUE   depth=" << stats.current_depth << '/' << stats.capacity
-            << " rejected=" << bridge.rejected.load(std::memory_order_relaxed) << '\n';
+  // M9-01 UI observability (§13.2 "TUI event queue 深度、合并/drop 和渲染
+  // 延迟"): every cross-thread channel's live/peak depth and drop counts come
+  // from executor comm stats; the pairing mailbox reports overwrites (merges).
+  const auto print_queue = [](std::string_view name,
+                              const executor::comm::CommStats& stats) {
+    std::cout << ' ' << name << '=' << stats.current_depth << '/'
+              << stats.capacity << "@peak" << stats.peak_depth << ":drop"
+              << stats.dropped_count;
+  };
+  std::cout << "QUEUES ";
+  print_queue("signal", bridge.events.stats());
+  std::cout << " rej=" << bridge.rejected.load(std::memory_order_relaxed)
+            << " pair_overwritten="
+            << state.pairing.stats().overwritten_count << '\n';
+  std::cout << "       ";
+  print_queue("inbound", state.inbound_channel.stats());
+  print_queue("ack", state.ack_channel.stats());
+  print_queue("rpc", state.rpc_channel.stats());
+  print_queue("event", state.event_channel.stats());
+  print_queue("file", state.file_channel.stats());
+  print_queue("shell", state.shell_channel.stats());
+  std::cout << '\n';
+  std::cout << "RENDER  passes=" << state.render_passes
+            << " last=" << state.render_last.count() << "us"
+            << " max=" << state.render_max.count() << "us\n";
 }
 
 void set_command_result(UiState& state, heyaki::Result<void> result,
@@ -1414,6 +1443,13 @@ void run_command(std::string line, heyaki::Node& node, UiState& state, bool& run
     set_command_result(state, node.refresh_interfaces(), "interfaces-refreshing");
     return;
   }
+  if (command == "metrics") {
+    // M9-01: dump the device metrics snapshot in Prometheus text format so a
+    // device-side export is reachable without a scraper.
+    std::cout << '\n' << heyaki::format_node_metrics_prometheus(node.metrics())
+              << std::flush;
+    return;
+  }
   if (command == "quit" || command == "exit") {
     running = false;
     return;
@@ -1930,12 +1966,18 @@ int run_tui(const Options& options) {
   bool running = true;
   while (running) {
     std::cout << "\x1b[2J\x1b[H";
+    const auto render_begin = std::chrono::steady_clock::now();
     render_node(options.profile_name, *node, *bridge, state,
                 lan.value_if()->pending_signaling_capacity);
     render_pairing_status(state);
-    std::cout << "\ncommand [refresh|relay|connect N|close N|pair N|trust N|"
-                 "revoke N M|rotate-password|rotate-password-revoke|stream N|"
-                 "msg N|rpc N|file N|event N|shell N|quit]> "
+    const auto render_duration = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - render_begin);
+    ++state.render_passes;
+    state.render_last = render_duration;
+    state.render_max = std::max(state.render_max, render_duration);
+    std::cout << "\ncommand [refresh|relay|metrics|connect N|close N|pair N|"
+                 "trust N|revoke N M|rotate-password|rotate-password-revoke|"
+                 "stream N|msg N|rpc N|file N|event N|shell N|quit]> "
               << std::flush;
     std::string line;
     if (!std::getline(std::cin, line)) {

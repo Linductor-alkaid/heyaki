@@ -1333,10 +1333,24 @@ TEST(M3BRelayWssClientTest, NodeReconnectsWithBoundedBackoffAfterRelayOutage) {
   ASSERT_TRUE(wait_until(
       [&] {
         const auto snapshot = node.value_if()->snapshot();
+        // Wait past the first backoff so at least one re-attempt against the
+        // dead port has started and failed before the counters are read.
         return snapshot.relay.state == RelayNodeState::degraded &&
-               snapshot.relay.reconnect_count > 0U;
+               snapshot.relay.reconnect_count > 0U &&
+               snapshot.relay.registration_attempts >= 2U;
       },
       2s));
+  {
+    // M9-01: every dead-port cycle is one registration attempt that failed;
+    // none can succeed while nothing listens on the port. A cycle may be
+    // in flight when the snapshot is read, so attempts >= failures.
+    const auto relay = node.value_if()->snapshot().relay;
+    EXPECT_GE(relay.registration_attempts, 2U);
+    EXPECT_GE(relay.registration_attempts, relay.registration_failures);
+    EXPECT_GE(relay.registration_failures, 1U);
+    EXPECT_EQ(relay.registration_successes, 0U);
+    EXPECT_EQ(relay.lease_refresh_failures, 0U);
+  }
   const auto degraded = node.value_if()->snapshot().relay;
   EXPECT_GE(degraded.backoff.count(), 100);
   EXPECT_LE(degraded.backoff.count(), 400);
@@ -1348,6 +1362,13 @@ TEST(M3BRelayWssClientTest, NodeReconnectsWithBoundedBackoffAfterRelayOutage) {
   ASSERT_TRUE(wait_until(
       [&] { return node.value_if()->snapshot().relay.state == RelayNodeState::ready; },
       3s));
+  {
+    // The relay coming up completes one cycle: attempts now exceed the
+    // failures and the first success landed.
+    const auto relay = node.value_if()->snapshot().relay;
+    EXPECT_GT(relay.registration_attempts, relay.registration_failures);
+    EXPECT_GE(relay.registration_successes, 1U);
+  }
   EXPECT_TRUE(node.value_if()->shutdown().stopped);
   EXPECT_TRUE(server.value_if()->shutdown().stopped);
 }
@@ -1433,6 +1454,14 @@ TEST(M3BRelayWssClientTest, NodeReconnectsAfterRelayRestart) {
   ASSERT_TRUE(wait_until(
       [&] { return node.value_if()->snapshot().relay.state == RelayNodeState::ready; },
       3s));
+  {
+    // M9-01: a completed login cycle is one attempt and one success; the
+    // first cycle has not failed yet and no lease refresh ran.
+    const auto relay = node.value_if()->snapshot().relay;
+    EXPECT_GE(relay.registration_attempts, 1U);
+    EXPECT_GE(relay.registration_successes, 1U);
+    EXPECT_EQ(relay.registration_failures, 0U);
+  }
   ASSERT_TRUE(wait_until(
       [&] {
         return first_server.value_if()->snapshot().logins_completed >= 1U;
@@ -1443,10 +1472,22 @@ TEST(M3BRelayWssClientTest, NodeReconnectsAfterRelayRestart) {
   ASSERT_TRUE(wait_until(
       [&] {
         const auto snapshot = node.value_if()->snapshot();
+        // The connection loss itself is not a registration failure; the
+        // reconnect cycles against the dead port are, so wait for one.
         return snapshot.relay.state == RelayNodeState::degraded &&
-               snapshot.relay.reconnect_count > 0U;
+               snapshot.relay.reconnect_count > 0U &&
+               snapshot.relay.registration_failures >= 1U;
       },
       3s));
+  {
+    // M9-01: a post-ready loss must not inflate registration failures for
+    // the cycle that succeeded; only the dead-port cycles count.
+    const auto relay = node.value_if()->snapshot().relay;
+    EXPECT_GE(relay.registration_successes, 1U);
+    EXPECT_GE(relay.registration_failures, 1U);
+    EXPECT_GE(relay.registration_attempts,
+              relay.registration_successes + relay.registration_failures);
+  }
 
   auto restarted_config = server_config(directory.path());
   restarted_config.listen_port = port;
@@ -1455,6 +1496,16 @@ TEST(M3BRelayWssClientTest, NodeReconnectsAfterRelayRestart) {
   ASSERT_TRUE(wait_until(
       [&] { return node.value_if()->snapshot().relay.state == RelayNodeState::ready; },
       5s));
+  {
+    // The restarted relay served a second full login cycle: successes must
+    // have advanced again and lease refresh never counted a miss (the
+    // connection was closed, not left silent).
+    const auto relay = node.value_if()->snapshot().relay;
+    EXPECT_GE(relay.registration_successes, 2U);
+    EXPECT_GE(relay.registration_attempts,
+              relay.registration_successes + relay.registration_failures);
+    EXPECT_EQ(relay.lease_refresh_failures, 0U);
+  }
   // Node readiness only proves the login response reached the client; the
   // server publishes its snapshot counters through the coalescing flush, so
   // poll instead of asserting immediate visibility.

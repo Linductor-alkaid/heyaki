@@ -95,6 +95,10 @@ NodeMetrics representative_metrics() {
   metrics.node.directory.current_entries = 2U;
   metrics.node.relay.enabled = true;
   metrics.node.relay.reconnect_count = 4U;
+  metrics.node.relay.registration_attempts = 9U;
+  metrics.node.relay.registration_successes = 7U;
+  metrics.node.relay.registration_failures = 2U;
+  metrics.node.relay.lease_refresh_failures = 1U;
   metrics.node.relay.heartbeats_sent = 40U;
   metrics.node.session_coordinator.attempts_expired = 1U;
   metrics.node.session_restarts.restarts_initiated = 2U;
@@ -105,6 +109,9 @@ NodeMetrics representative_metrics() {
   metrics.pairing.denied_backoff = 1U;
   metrics.connectivity.connections_initiated = 9U;
   metrics.connectivity.sessions_authenticated = 6U;
+  metrics.connectivity.signaling_route_selected_lan = 5U;
+  metrics.connectivity.signaling_route_selected_relay = 4U;
+  metrics.connectivity.signaling_route_fallbacks = 2U;
   metrics.connectivity.signaling_route_lan = 4U;
   metrics.connectivity.signaling_route_relay = 2U;
   metrics.connectivity.data_path_direct_host = 3U;
@@ -118,6 +125,8 @@ NodeMetrics representative_metrics() {
   metrics.transport.rtt_milliseconds_sum = 90U;
   metrics.transport.rtt_milliseconds_max = 60U;
   metrics.transport.buffered_amount_sum = 128U;
+  metrics.transport.transport_bytes_sent_sum = 4096U;
+  metrics.transport.transport_bytes_received_sum = 8192U;
   metrics.channels.channels = 4U;
   metrics.channels.sent_frames = 100U;
   metrics.channels.sent_bytes = 4096U;
@@ -211,6 +220,7 @@ TEST_F(M9MetricsTest, ConnectivityCountersRecordRoutesPathsAndDurations) {
   session.signaling_route = SignalingRouteKind::lan;
   session.data_path = NodeDataPathKind::direct_host;
   const auto begun = std::chrono::steady_clock::now() - std::chrono::milliseconds{1500};
+  connectivity.record_route_selection(SignalingRouteKind::lan, false);
   connectivity.record_authenticated(session, begun,
                                     begun + std::chrono::milliseconds{1500});
   EXPECT_EQ(connectivity.sessions_authenticated, 1U);
@@ -224,6 +234,10 @@ TEST_F(M9MetricsTest, ConnectivityCountersRecordRoutesPathsAndDurations) {
   NodePeerSessionSnapshot relayed;
   relayed.signaling_route = SignalingRouteKind::relay;
   relayed.data_path = NodeDataPathKind::turn_tls;
+  // Automatic mode with no reachable LAN endpoint: the relay selection is a
+  // fallback; a pinned lan selection never counts as one.
+  connectivity.record_route_selection(SignalingRouteKind::relay, true);
+  connectivity.record_route_selection(SignalingRouteKind::lan, false);
   connectivity.record_authenticated(relayed, begun,
                                     begun + std::chrono::milliseconds{300});
   EXPECT_EQ(connectivity.sessions_authenticated, 2U);
@@ -232,6 +246,11 @@ TEST_F(M9MetricsTest, ConnectivityCountersRecordRoutesPathsAndDurations) {
   EXPECT_EQ(connectivity.connect_duration_samples, 2U);
   EXPECT_EQ(connectivity.connect_duration_milliseconds_sum, 1800U);
   EXPECT_EQ(connectivity.connect_duration_milliseconds_max, 1500U);
+  // Selection winners sum to the admitted attempts; fallbacks only count
+  // relay selections that automatic mode made for lack of a LAN endpoint.
+  EXPECT_EQ(connectivity.signaling_route_selected_lan, 2U);
+  EXPECT_EQ(connectivity.signaling_route_selected_relay, 1U);
+  EXPECT_EQ(connectivity.signaling_route_fallbacks, 1U);
 }
 
 TEST_F(M9MetricsTest, PrometheusExportIsWellFormedAndPinsFormat) {
@@ -246,7 +265,24 @@ TEST_F(M9MetricsTest, PrometheusExportIsWellFormedAndPinsFormat) {
                       "heyaki_pairing_attempts_total 7\n"),
             std::string::npos);
   EXPECT_NE(text.find("heyaki_node_relay_reconnects_total 4\n"), std::string::npos);
+  EXPECT_NE(text.find("heyaki_node_relay_registration_attempts_total 9\n"),
+            std::string::npos);
+  EXPECT_NE(text.find("heyaki_node_relay_registration_successes_total 7\n"),
+            std::string::npos);
+  EXPECT_NE(text.find("heyaki_node_relay_registration_failures_total 2\n"),
+            std::string::npos);
+  EXPECT_NE(text.find("heyaki_node_relay_lease_refresh_failures_total 1\n"),
+            std::string::npos);
   EXPECT_NE(text.find("heyaki_connectivity_authenticated_total 6\n"), std::string::npos);
+  EXPECT_NE(text.find("heyaki_connectivity_signaling_route_selected_lan_total 5\n"),
+            std::string::npos);
+  EXPECT_NE(text.find("heyaki_connectivity_signaling_route_selected_relay_total 4\n"),
+            std::string::npos);
+  EXPECT_NE(text.find("heyaki_connectivity_signaling_route_fallbacks_total 2\n"),
+            std::string::npos);
+  EXPECT_NE(text.find("heyaki_transport_backend_bytes_sent 4096\n"), std::string::npos);
+  EXPECT_NE(text.find("heyaki_transport_backend_bytes_received 8192\n"),
+            std::string::npos);
   EXPECT_NE(text.find("heyaki_shell_idle_timeouts_total 1\n"), std::string::npos);
   EXPECT_NE(text.find("# TYPE heyaki_transport_peer_sessions gauge\n"),
             std::string::npos);
@@ -373,8 +409,22 @@ TEST_F(M9MetricsTest, MetricsSnapshotReflectsAuthenticatedLanSession) {
       std::chrono::seconds{5});
   ASSERT_TRUE(connected) << "authenticated metrics never published";
 
+  // The metrics tick asks each live transport to resample backend stats, so
+  // the handshake traffic must show up in the byte gauges within a few ticks.
+  const auto bytes_sampled = wait_until(
+      [&] {
+        const auto metrics = first.value_if()->metrics();
+        return metrics.transport.transport_bytes_sent_sum > 0U &&
+               metrics.transport.transport_bytes_received_sum > 0U;
+      },
+      std::chrono::seconds{5});
+  EXPECT_TRUE(bytes_sampled) << "backend byte gauges never sampled";
+
   const auto metrics = first.value_if()->metrics();
   EXPECT_GE(metrics.connectivity.connections_initiated, 1U);
+  EXPECT_GE(metrics.connectivity.signaling_route_selected_lan, 1U);
+  // lan_only mode pins the route; there is never a fallback to count.
+  EXPECT_EQ(metrics.connectivity.signaling_route_fallbacks, 0U);
   EXPECT_GE(metrics.connectivity.signaling_route_lan, 1U);
   EXPECT_GE(metrics.connectivity.data_path_direct_host, 1U);
   EXPECT_GE(metrics.connectivity.connect_duration_milliseconds_sum,
