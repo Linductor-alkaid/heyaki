@@ -109,6 +109,35 @@ struct ShellProfileConfig {
 // argv, safe env names, positive timeouts/caps, and sane signal policy.
 [[nodiscard]] Result<void> validate_shell_profile(const ShellProfileConfig& profile);
 
+// Path grammar validate_shell_profile accepts for argv[0]. The build picks
+// its own platform's grammar; keeping both grammars explicit lets the
+// acceptance rules stay unit-testable on every platform (M8 review P2-F1).
+enum class ShellExecutableGrammar : std::uint8_t { posix, windows };
+
+// True when `path` is an absolute executable path in `grammar` and free of
+// `..` traversal: POSIX wants a leading '/', Windows accepts drive roots
+// (X:\ or X:/) and UNC roots (\\server\share) — a leading '/' is only a
+// drive-relative form there and stays rejected.
+[[nodiscard]] bool valid_shell_executable_path(
+    std::string_view path, ShellExecutableGrammar grammar) noexcept;
+
+// Upper bound for ShellProfileConfig::max_input_pending_bytes on Windows
+// (M8 review P3-F3): the ConPTY stdin pipe is created with exactly this
+// many bytes of buffer and the worker writes into it synchronously, so a
+// larger pending budget could park the single-threaded worker inside
+// WriteFile when the child stops draining. The profile check and the pipe
+// creation in shell_pty.cpp share this constant.
+inline constexpr std::uint64_t kShellWindowsInputPendingCap = 128ULL * 1024ULL;
+
+// Quotes one argv element for a Windows CreateProcessW command line using
+// the canonical MSVCRT argument rules (M8 review P4-F7): a run of N
+// backslashes followed by a quote becomes 2N+1 backslashes plus the quote,
+// trailing backslashes double before the closing quote, and arguments that
+// are empty or contain space/tab/quote are wrapped in quotes. Works on the
+// UTF-8 bytes directly — every decision character is ASCII and survives the
+// UTF-16 conversion unchanged.
+[[nodiscard]] std::string quote_windows_argument(std::string_view argument);
+
 // Resolved runtime view used by the PTY layer; derived server-side only.
 struct ResolvedShellProfile {
   std::vector<std::string> argv;

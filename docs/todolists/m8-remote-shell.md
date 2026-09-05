@@ -1,6 +1,6 @@
 # M8：Remote Shell
 
-> - 状态：已放行（2026-09-04 安全评审签字后生产启用解禁，限 POSIX；开发完成于 2026-09-03，46 项 M8 单测全绿、本机全仓 51 项 ctest + m8 ASan 绿、CI 全矩阵含 Windows ConPTY 生命周期；评审报告见 [docs/security/m8-remote-shell-security-review.md](../security/m8-remote-shell-security-review.md)）
+> - 状态：已放行（2026-09-04 安全评审签字后生产启用解禁；开发完成于 2026-09-03，46 项 M8 单测全绿、本机全仓 51 项 ctest + m8 ASan 绿、CI 全矩阵含 Windows ConPTY 生命周期；评审报告见 [docs/security/m8-remote-shell-security-review.md](../security/m8-remote-shell-security-review.md)；2026-09-05 遗留处置：P2-F1/P3-F3/P4-F7（+P4-F9）修复，Windows 启用条件满足，套件 49/49）
 > - 所属计划：[Heyaki MVP 至 v1 实施 TODO 计划](heyaki-implementation-plan.md)
 > - 前置：M7 | 建议发布点：v0.4 Shell beta
 
@@ -102,7 +102,16 @@ VT 10、PTY 6，Windows 上 stdin 往返用例按平台跳过）；安全评审�
 
 ### 遗留（不阻塞 M8 关闭）
 
-安全评审已签字（2026-09-04，记录见上），生产启用解禁（限 POSIX）；Windows 启用待 P2-F1
-（profile 路径校验拒绝原生绝对路径）修复，评审硬化项 P4-F6..F9 随后续里程碑顺带处理。TUI
-shell 视图为行式交互（与既有视图一致），全屏交互式终端不属于本里程碑范围；Windows stdin
-交互往返用例以平台差异为由跳过，输出/生命周期路径已被其余用例覆盖。
+安全评审已签字（2026-09-04，记录见上），生产启用解禁（限 POSIX）；2026-09-05 已完成
+Windows 启用三件套修复（评审报告"遗留处置记录"节）：P2-F1 平台语法路径校验
+（`valid_shell_executable_path`，盘符/UNC 根、`/` 与 `..` 拒绝）、P3-F3 输入预算封顶
+（`kShellWindowsInputPendingCap` 与 ConPTY 管道缓冲共享常量）、P4-F7 规范 MSVCRT argv
+转义（`quote_windows_argument`），顺带 P4-F9 exit/close status 闭合校验；新增
+`ExecutablePathGrammarPerPlatform`/`WindowsInputPendingCapMatchesConPTYPipe`/
+`WindowsArgumentQuotingIsCanonical`/`ExitAndCloseRejectUnknownStatusValues` 用例（套件
+49/49）。Windows 生产启用满足批复条件，与 POSIX 同姿态（显式列 profile 才启用）。
+P4-F6（VT overlong UTF-8）待 M9-13 fuzz 扩展触碰 `shell_terminal.cpp` 时顺带、P4-F8
+（审计 close_reason 语义）待 M9 可观测性工作触碰 `shell_service.cpp` 时顺带。TUI shell
+视图为行式交互（与既有视图一致），全屏交互式终端不属于本里程碑范围；Windows stdin
+交互往返用例以平台差异为由跳过（cmd.exe `more` 行为差异，非本三件套范畴），输出/生命
+周期路径已被其余用例覆盖。

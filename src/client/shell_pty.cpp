@@ -529,8 +529,10 @@ std::wstring wide_from_utf8(const std::string& text) {
 // anonymous pipes; the ConPTY-facing ends go to CreatePseudoConsole, ours
 // stay for the worker's polled I/O. The input pipe buffer covers the whole
 // pending-input budget so a synchronous WriteFile does not block the worker
-// while ConPTY drains continuously.
-constexpr std::size_t kInputPipeBytes = 128U * 1024U;
+// while ConPTY drains continuously; validate_shell_profile enforces the
+// matching budget cap (P3-F3).
+constexpr std::size_t kInputPipeBytes =
+    static_cast<std::size_t>(kShellWindowsInputPendingCap);
 
 bool make_conpty_pipes(HANDLE* in_conpty, HANDLE* in_ours, HANDLE* out_ours,
                        HANDLE* out_conpty) {
@@ -599,14 +601,11 @@ SpawnOutcome conpty_spawn(ShellPtySession& session) {
     if (index != 0U) {
       command.push_back(L' ');
     }
-    const std::wstring part = wide_from_utf8(session.spec.argv[index]);
-    if (part.find_first_of(L" \t\"") == std::wstring::npos) {
-      command.append(part);
-    } else {
-      command.push_back(L'"');
-      command.append(part);
-      command.push_back(L'"');
-    }
+    // Canonical MSVCRT quoting (P4-F7): embedded quotes escape, backslash
+    // runs double where the rules require, so operator argv with quotes
+    // round-trips instead of being merely wrapped.
+    command.append(
+        wide_from_utf8(quote_windows_argument(session.spec.argv[index])));
   }
 
   std::wstring environment;

@@ -169,7 +169,13 @@ ShellProfileConfig shell_test_profile(std::string name = "maintenance",
                                       std::size_t max_sessions = 2U) {
   ShellProfileConfig profile;
   profile.name = std::move(name);
+  // argv[0] must satisfy the host grammar (P2-F1): slash roots on POSIX,
+  // drive/UNC roots on Windows. These suites never spawn real children.
+#if defined(_WIN32)
+  profile.argv = {"C:\\Windows\\System32\\cmd.exe", "/c", "echo fixed"};
+#else
   profile.argv = {"/bin/echo", "fixed"};
+#endif
   profile.working_directory = "/";
   profile.environment = {{"PATH", std::nullopt}, {"HOME", std::string{"/tmp"}}};
   profile.max_concurrent_sessions = max_sessions;

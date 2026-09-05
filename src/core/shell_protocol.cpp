@@ -175,6 +175,22 @@ bool safe_shell_profile_name(std::string_view name) noexcept {
   return name.front() != '-' && name.back() != '-';
 }
 
+bool valid_shell_executable_path(std::string_view path,
+                                 ShellExecutableGrammar grammar) noexcept {
+  if (path.find("..") != std::string_view::npos) {
+    return false;
+  }
+  if (grammar == ShellExecutableGrammar::windows) {
+    const bool drive =
+        path.size() >= 3U &&
+        ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) &&
+        path[1] == ':' && (path[2] == '\\' || path[2] == '/');
+    const bool unc = path.size() >= 3U && path.substr(0U, 2U) == "\\\\";
+    return drive || unc;
+  }
+  return !path.empty() && path.front() == '/';
+}
+
 Result<void> validate_shell_profile(const ShellProfileConfig& profile) {
   if (!safe_shell_profile_name(profile.name)) {
     return Result<void>::failure(
@@ -189,11 +205,18 @@ Result<void> validate_shell_profile(const ShellProfileConfig& profile) {
     }
   }
   const std::string& executable = profile.argv.front();
-  if (executable.empty() || executable.front() != '/') {
-    return Result<void>::failure(shell_error("profile_executable_not_absolute"));
-  }
+#if defined(_WIN32)
+  // P2-F1: a leading '/' is drive-relative for CreateProcessW; only drive
+  // roots and UNC roots are absolute on Windows.
+  constexpr auto executable_grammar = ShellExecutableGrammar::windows;
+#else
+  constexpr auto executable_grammar = ShellExecutableGrammar::posix;
+#endif
   if (executable.find("..") != std::string::npos) {
     return Result<void>::failure(shell_error("profile_executable_traversal"));
+  }
+  if (!valid_shell_executable_path(executable, executable_grammar)) {
+    return Result<void>::failure(shell_error("profile_executable_not_absolute"));
   }
   if (profile.max_concurrent_sessions == 0U ||
       profile.max_concurrent_sessions > 16U) {
@@ -213,6 +236,13 @@ Result<void> validate_shell_profile(const ShellProfileConfig& profile) {
       profile.max_output_pending_bytes > profile.max_output_bytes) {
     return Result<void>::failure(shell_error("profile_output_caps_invalid"));
   }
+#if defined(_WIN32)
+  // P3-F3: stdin WriteFile into the ConPTY pipe is synchronous, so the
+  // pending-input budget must fit the pipe buffer the worker creates.
+  if (profile.max_input_pending_bytes > kShellWindowsInputPendingCap) {
+    return Result<void>::failure(shell_error("profile_input_cap_exceeds_pipe"));
+  }
+#endif
   for (const auto& rule : profile.environment) {
     if (!safe_env_name(rule.name) ||
         (rule.value && rule.value->find('\0') != std::string::npos)) {
@@ -236,6 +266,35 @@ Result<void> validate_shell_profile(const ShellProfileConfig& profile) {
     }
   }
   return Result<void>::success();
+}
+
+std::string quote_windows_argument(std::string_view argument) {
+  if (!argument.empty() &&
+      argument.find_first_of(" \t\"") == std::string_view::npos) {
+    return std::string{argument};
+  }
+  std::string quoted;
+  quoted.reserve(argument.size() + 2U);
+  quoted.push_back('"');
+  std::size_t backslashes = 0U;
+  for (const char character : argument) {
+    if (character == '\\') {
+      ++backslashes;
+      continue;
+    }
+    if (character == '"') {
+      quoted.append(2U * backslashes + 1U, '\\');
+      quoted.push_back('"');
+    } else {
+      quoted.append(backslashes, '\\');
+      quoted.push_back(character);
+    }
+    backslashes = 0U;
+  }
+  // The closing quote follows a trailing backslash run, so it doubles too.
+  quoted.append(2U * backslashes, '\\');
+  quoted.push_back('"');
+  return quoted;
 }
 
 std::string_view shell_phase_name(ShellPhase phase) noexcept {
@@ -563,6 +622,12 @@ Result<ShellExitBody> parse_shell_exit(std::span<const std::byte> payload) {
       case 3U: {
         auto value = expect_uint(field);
         if (!value) return Result<void>::failure(*value.error_if());
+        // P4-F9: status must be a known StableStatus value, not any u64.
+        if (*value.value_if() < static_cast<std::uint64_t>(StableStatus::ok) ||
+            *value.value_if() >
+                static_cast<std::uint64_t>(StableStatus::outcome_unknown)) {
+          return Result<void>::failure(shell_error("exit_status_invalid"));
+        }
         exit.status = static_cast<StableStatus>(*value.value_if());
         return Result<void>::success();
       }
@@ -710,6 +775,12 @@ Result<ShellCloseBody> parse_shell_close(std::span<const std::byte> payload) {
       case 2U: {
         auto value = expect_uint(field);
         if (!value) return Result<void>::failure(*value.error_if());
+        // P4-F9: status must be a known StableStatus value, not any u64.
+        if (*value.value_if() < static_cast<std::uint64_t>(StableStatus::ok) ||
+            *value.value_if() >
+                static_cast<std::uint64_t>(StableStatus::outcome_unknown)) {
+          return Result<void>::failure(shell_error("close_status_invalid"));
+        }
         close.status = static_cast<StableStatus>(*value.value_if());
         return Result<void>::success();
       }

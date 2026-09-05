@@ -167,9 +167,11 @@ test suite on the CI matrix. Remote Shell stays compiled but disabled by default
 enablement (POSIX only for now) was signed off on 2026-09-04 after the independent security
 review in `m8-remote-shell-security-review.md` — no P0/P1 findings; the review's P2-F2
 (silent PTY-worker session-limit refusal) was fixed before enablement
-(`spawn_failed`/`worker_session_limit` is now observable end to end). Windows enablement
-stays blocked in the fail-closed state until the review's P2-F1 (profile validation rejects
-native absolute paths) is fixed.
+(`spawn_failed`/`worker_session_limit` is now observable end to end). The P2-F1 blocker on
+Windows enablement was fixed on 2026-09-05 together with P3-F3 (the profile input-pending
+budget is now capped at the ConPTY stdin pipe buffer on Windows) and P4-F7 (ConPTY command
+lines use canonical MSVCRT argv quoting); Windows enablement follows the same posture —
+explicitly listed profiles only.
 
 Residual risks accepted for v1 are LAN stable-ID enumeration, local/relay/coturn denial of service and
 traffic analysis, compromise of a device OS principal, lack of cross-VLAN serverless discovery, and lack

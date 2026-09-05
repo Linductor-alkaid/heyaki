@@ -21,6 +21,32 @@
   `docs/security/threat-model.md`，知情接受。
 - P4-F6..F9 为硬化项，随后续触碰相关文件的里程碑顺带处理。
 
+### 遗留处置记录（2026-09-05）
+
+Windows 启用三件套已修复（M8 遗留任务，本仓库工作区）：
+
+- **P2-F1 已修**：`validate_shell_profile` 按平台语法校验 argv[0]——Windows 接受盘符根
+  （`X:\`/`X:/`）与 UNC 根（`\\server\share`），`/` 前缀（盘符相对形式）与 `..` 穿越
+  两种语法下都保持拒绝；文法以 `valid_shell_executable_path(path, grammar)` 显式导出，
+  双语法在所有平台可测（`M8ShellProfile.ExecutablePathGrammarPerPlatform`，含
+  fail-closed 回归断言）。
+- **P3-F3 已修**：Windows 下 `max_input_pending_bytes` 上限封顶为
+  `kShellWindowsInputPendingCap`（128 KiB），与 `shell_pty.cpp` 创建 ConPTY 输入管道的
+  缓冲共享同一常量（`M8ShellProfile.WindowsInputPendingCapMatchesConPTYPipe`）。
+- **P4-F7 已修**：ConPTY 命令行改用规范 MSVCRT argv 转义
+  （`quote_windows_argument`：引号转义、前置反斜杠run翻倍、空参数包裹），跨平台单测
+  钉死转义规则；argv 仍仅来自操作员配置。
+- **P4-F9 顺带修复**（shell_protocol.cpp 同文件随工）：`parse_shell_exit`/`parse_shell_close`
+  对 status 增加闭合校验（1..14，拒绝 unspecified 与未知值），
+  `M8ShellCodec.ExitAndCloseRejectUnknownStatusValues`。
+- 测试基建同步：`shell_test_profile()` argv[0] 改为平台语法路径（否则 Windows CI 上
+  既有用例会被新文法拒绝）。本机 M8 套件 49/49、全仓 ctest 51/51 绿；Windows 路径由
+  CI 矩阵验证。
+- 批复条件回顾：原批复"Windows 待 P2-F1 修复（届时一并处理 F3/F7）"的条件已满足；
+  Windows 生产启用与 POSIX 同姿态（仅显式列 profile 的配置启用）。P4-F6（VT overlong
+  UTF-8）与 P4-F8（审计 close_reason 语义）待后续触碰 `shell_terminal.cpp`/
+  `shell_service.cpp` 的里程碑（M9-13 fuzz 扩展与可观测性工作）顺带处理。
+
 ## 1. 审计范围与方法
 
 逐行精读 M8 全部交付物（约 5000 行 M8 专属代码），并追踪其接线点：

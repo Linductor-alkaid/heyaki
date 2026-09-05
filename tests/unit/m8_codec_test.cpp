@@ -144,6 +144,30 @@ TEST(M8ShellCodec, ErrorBodyBoundsSafeDetail) {
   EXPECT_FALSE(encode_shell_error(error));
 }
 
+TEST(M8ShellCodec, ExitAndCloseRejectUnknownStatusValues) {
+  // P4-F9: status must land inside the StableStatus closed set; the
+  // encoders cast blindly, so the parse side is the enforcement point.
+  ShellExitBody exit;
+  exit.shell_id = shell_id_of(13U);
+  exit.status = static_cast<StableStatus>(99U);
+  const auto exit_encoded = encode_shell_exit(exit);
+  ASSERT_TRUE(exit_encoded);
+  EXPECT_FALSE(parse_shell_exit(*exit_encoded.value_if()));
+
+  ShellCloseBody close;
+  close.shell_id = shell_id_of(14U);
+  close.status = static_cast<StableStatus>(15U);
+  const auto close_encoded = encode_shell_close(close);
+  ASSERT_TRUE(close_encoded);
+  EXPECT_FALSE(parse_shell_close(*close_encoded.value_if()));
+
+  // unspecified (0) is not a valid wire status for terminal bodies either.
+  close.status = StableStatus::unspecified;
+  const auto unspecified_encoded = encode_shell_close(close);
+  ASSERT_TRUE(unspecified_encoded);
+  EXPECT_FALSE(parse_shell_close(*unspecified_encoded.value_if()));
+}
+
 TEST(M8ShellCodec, ShellDataHeaderLayout) {
   // 28-byte raw header: shell_id(16) | offset(8) | data_length(4), big-endian
   // (wire protocol 2.1).
@@ -213,6 +237,82 @@ TEST(M8ShellProfile, ValidationEnforcesSafeDefaults) {
   auto no_concurrency = shell_test_profile();
   no_concurrency.max_concurrent_sessions = 0U;
   EXPECT_FALSE(validate_shell_profile(no_concurrency));
+}
+
+TEST(M8ShellProfile, ExecutablePathGrammarPerPlatform) {
+  // P2-F1: POSIX accepts only slash roots.
+  const auto posix = ShellExecutableGrammar::posix;
+  EXPECT_TRUE(valid_shell_executable_path("/bin/sh", posix));
+  EXPECT_FALSE(valid_shell_executable_path("bin/sh", posix));
+  EXPECT_FALSE(valid_shell_executable_path("", posix));
+  EXPECT_FALSE(valid_shell_executable_path("C:\\Windows\\cmd.exe", posix));
+
+  // Windows accepts drive roots (both separators) and UNC roots; a leading
+  // '/' is only drive-relative there and must stay rejected.
+  const auto windows = ShellExecutableGrammar::windows;
+  EXPECT_TRUE(valid_shell_executable_path("C:\\Windows\\System32\\cmd.exe", windows));
+  EXPECT_TRUE(valid_shell_executable_path("C:/Windows/System32/cmd.exe", windows));
+  EXPECT_TRUE(valid_shell_executable_path("c:\\tools\\shell.exe", windows));
+  EXPECT_TRUE(valid_shell_executable_path("\\\\fileserver\\share\\cmd.exe", windows));
+  EXPECT_FALSE(valid_shell_executable_path("/usr/bin/sh", windows));
+  EXPECT_FALSE(valid_shell_executable_path("C:cmd.exe", windows));  // drive-relative
+  EXPECT_FALSE(valid_shell_executable_path("\\cmd.exe", windows));  // root-relative
+  EXPECT_FALSE(valid_shell_executable_path("cmd.exe", windows));
+  EXPECT_FALSE(valid_shell_executable_path("", windows));
+
+  // Traversal is rejected in both grammars.
+  EXPECT_FALSE(valid_shell_executable_path("/bin/../bin/sh", posix));
+  EXPECT_FALSE(valid_shell_executable_path("C:\\x\\..\\cmd.exe", windows));
+  EXPECT_FALSE(valid_shell_executable_path("\\\\srv\\share\\..\\cmd.exe", windows));
+
+  // The active validator uses the host grammar (P2-F1 regression): real
+  // Windows paths validate on Windows and fail-closed elsewhere.
+  auto windows_profile = shell_test_profile();
+  windows_profile.argv = {"C:\\Windows\\System32\\cmd.exe", "/k"};
+#if defined(_WIN32)
+  EXPECT_TRUE(validate_shell_profile(windows_profile));
+  auto posix_profile = shell_test_profile();
+  posix_profile.argv = {"/bin/sh"};
+  EXPECT_FALSE(validate_shell_profile(posix_profile));
+#else
+  EXPECT_FALSE(validate_shell_profile(windows_profile));
+  auto posix_profile = shell_test_profile();
+  posix_profile.argv = {"/bin/sh"};
+  EXPECT_TRUE(validate_shell_profile(posix_profile));
+#endif
+}
+
+#if defined(_WIN32)
+TEST(M8ShellProfile, WindowsInputPendingCapMatchesConPTYPipe) {
+  // P3-F3: a pending-input budget above the ConPTY pipe buffer could park
+  // the worker inside a synchronous WriteFile, so validation fails closed.
+  auto oversized = shell_test_profile();
+  oversized.max_input_pending_bytes = kShellWindowsInputPendingCap + 1U;
+  EXPECT_FALSE(validate_shell_profile(oversized));
+  oversized.max_input_pending_bytes = kShellWindowsInputPendingCap;
+  EXPECT_TRUE(validate_shell_profile(oversized));
+}
+#endif
+
+TEST(M8ShellProfile, WindowsArgumentQuotingIsCanonical) {
+  // P4-F7: plain tokens pass through untouched.
+  EXPECT_EQ(quote_windows_argument("cmd.exe"), "cmd.exe");
+  EXPECT_EQ(quote_windows_argument("/k"), "/k");
+  EXPECT_EQ(quote_windows_argument("C:\\Windows\\System32"), "C:\\Windows\\System32");
+
+  // Empty and separator-bearing arguments are wrapped.
+  EXPECT_EQ(quote_windows_argument(""), "\"\"");
+  EXPECT_EQ(quote_windows_argument("program files"), "\"program files\"");
+  EXPECT_EQ(quote_windows_argument("a\tb"), "\"a\tb\"");
+
+  // Embedded quotes escape; backslash runs before a quote double first.
+  EXPECT_EQ(quote_windows_argument("a\"b"), "\"a\\\"b\"");
+  EXPECT_EQ(quote_windows_argument("a\\\"b"), "\"a\\\\\\\"b\"");
+  EXPECT_EQ(quote_windows_argument("\"quoted\""), "\"\\\"quoted\\\"\"");
+
+  // A trailing backslash run doubles because the closing quote follows it.
+  EXPECT_EQ(quote_windows_argument("C:\\my dir\\"), "\"C:\\my dir\\\\\"");
+  EXPECT_EQ(quote_windows_argument("dir\\"), "dir\\");  // no wrap: unchanged
 }
 
 TEST(M8ShellProfile, ScopeStringAndSignalPolicy) {
