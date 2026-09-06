@@ -7,7 +7,7 @@
 ## 可观测性与运维
 
 - [ ] `M9-01` 设备端导出架构第 13.2 节全部 LAN/relay/协议指标，并与 executor failure/status、comm stats 建立明确关联字段。（Round 1 交付 2026-09-05：`NodeMetrics` 统一聚合 + `Node::metrics()` 周期发布 + Prometheus 文本导出 `format_node_metrics_prometheus`；新增 pairing 审计计数器与连通性结果/时长计数器；executor 关联字段经内嵌 `RuntimeSnapshot`。Round 2 交付 2026-09-05：relay 注册/租约计数器、信令 winner/fallback 聚合、backend 字节 gauge 周期采样、TUI 队列/渲染诊断与 `metrics` 命令；丢包估计受 pinned libdatachannel API 限制，见实施记录。缺口见实施记录"剩余范围"。）
-- [ ] `M9-02` relay 导出 Prometheus 指标、结构化日志、有限审计和可选 trace correlation；高频成功事件采样。
+- [x] `M9-02` relay 导出 Prometheus 指标、结构化日志、有限审计和可选 trace correlation；高频成功事件采样。（Round 3 交付 2026-09-06：`format_relay_metrics_prometheus` 全量导出 `RelayServerSnapshot` 七个诊断块；同端口 TLS 上的纯 HTTP `GET /metrics` 端点（无 WebSocket upgrade，`metrics_path` 可配置，非 GET 405）；`RelayLogRecord` JSON Lines 结构化日志（16 类事件，失败/安全/生命周期事件全量，心跳/信令转发/查询按 `success_log_period` 采样，0 关闭采样）；登录/注册完成与拒绝携带 device/endpoint/tenant 审计字段（拒绝含声称身份），信令事件携带 `RequestId` 关联字段，metrics instance 标签 = 证书 SHA-256 十六进制与日志流可 join；`heyaki-relay` main 默认把日志打到 stdout。OpenTelemetry 出口属于部署侧桥接，留 M9-04 工具链决策。见实施记录 Round 3。）
 - [ ] `M9-03` 为 registration、pairing、connection、session、operation 和 transfer 建立不含机密的 correlation ID。
 - [ ] `M9-04` 定义 SLO dashboard 与告警：multicast/listener readiness、presence/handshake reject、登录失败、租约续期、直连率、TURN allocation、pairing 猜测、队列拒绝、RPC overload、文件 hash 和 worker failure。
 - [ ] `M9-05` 编写运维 runbook：证书/credential 轮换、设备吊销、relay/coturn 重启、数据库备份恢复、磁盘满、过载和版本回滚。
@@ -135,6 +135,62 @@ overwrite/stale/lag）。
   稳定自动化测试——现有 harness 只能制造连接关闭（走 reconnect 路径）。
   计数器与 `heartbeats_missed` 在同一递增点，负向断言（happy path == 0）已覆盖。
 
+### Round 3（2026-09-06）：M9-02 relay 侧可观测性
+
+交付物：
+
+- Prometheus 导出：`src/relay/relay_metrics.{hpp,cpp}` 的
+  `format_relay_metrics_prometheus(RelayServerSnapshot, instance)`，覆盖
+  snapshot 七个诊断块（server/database/rate-limit 四 scope/lease/endpoint
+  directory/login/enrollment，共 ~106 个指标族，`heyaki_relay_` 前缀，
+  counter 带 `_total`）。与设备端导出共用 `src/core/metrics_text_writer.hpp`
+  （从 `metrics.cpp` 抽出的 detail writer，转义/HELP/TYPE 布局一致）。
+  `relay_id_to_hex` 把证书 SHA-256 渲染为 instance 标签。
+- `/metrics` HTTP 端点：`RelayServerConfig.metrics_path`（默认 `/metrics`，
+  校验不得与 health/control path 相同，config 文件键 `metrics_path`、CLI
+  `--metrics-path`）。路由发生在 WebSocket upgrade 之前（stock scraper 的
+  纯 GET 会被 `async_accept` 拒绝），非 GET 回 405 + `Allow: GET`。
+  响应在 server 执行上下文用最新 `current` 快照序列化；新增
+  `metrics_scrapes` 计数器。
+- 结构化日志：`src/relay/relay_log.{hpp,cpp}` 定义 16 类
+  `RelayLogEventKind` 与 `RelayLogRecord`（ts/level/event/conn/device/
+  endpoint/tenant/request_id/detail，字段缺省整体省略，JSON 转义含控制
+  字符）。`format_relay_log_json` 输出单行 JSON。`RelayServerConfig.log_sink`
+  在 server 执行上下文同步回调（异常吞掉、必须快速返回）；`heyaki-relay`
+  main 默认打到 stdout（每行 flush）。
+- 采样：`success_log_period`（默认 100，config 键与 CLI 同名；0 关闭采样
+  事件）。heartbeat_refreshed / signaling_forwarded / endpoint_query_served
+  三类高频成功事件按类计数，第 1 条 + 每 N 条放行，其余只递增
+  `log_events_sampled_out`。失败（capacity/handshake/policy/rate/
+  enrollment_rejected/login_rejected/signaling_rejected）、安全审计
+  （enrollment_completed/login_completed/endpoint_published，携带
+  device/endpoint/tenant；拒绝路径携带声称身份）与生命周期
+  （server_state_changed/server_error）不采样。无 sink 时计数器照常递增。
+- 有限审计与 correlation 种子：登录/注册完成与拒绝事件携带身份字段；
+  信令 forward/reject 事件携带 wire `RequestId`（`request_id` 字段，
+  与 M9-03 correlation ID 空间对齐）；metrics instance 标签 = relay id
+  hex，可与日志流 join。OpenTelemetry 出口未内建（架构表述为"可选"），
+  由 M9-04 工具链选型时决定桥接方式。
+- snapshot 扩展：`RelayServerSnapshot` 新增 `relay_id`/`metrics_scrapes`/
+  `log_events_emitted`/`log_events_sampled_out`。
+- 测试：`tests/unit/m9_relay_observability_test.cpp`（11 例）：导出格式
+  良构性 + 代表族钉死、instance 标签转义、relay id hex、JSON 转义与字段
+  省略、config 键加载与冲突拒绝、`/metrics` HTTPS e2e（200/405/计数器/
+  无 WebSocket 计数）、结构化日志 e2e（登录审计字段、period=2 采样 2/3、
+  generation 不符 login_rejected 携带声称身份、信令拒绝携带 request_id）、
+  period=0 关闭采样、无 sink 计数器照常 + 经 /metrics 导出。本机 ctest
+  53/53 通过 + 3 环境门控跳过（coturn/matrix）。
+
+设计说明：
+
+- 日志埋点全部复用现有执行上下文与计数点（`log_event` 不调用 `publish()`，
+  由外层 handler/DeferredPublish 统一 flush）；无新增线程/队列，不引入
+  executor ledger 条目。
+- 采样计数器按事件类独立（`SampledEventCounts`），语义为"第 1 条 +
+  每 N 条"，period=2 时 3 个心跳事件放行第 1、3 条（测试锁定）。
+- `/metrics` 与控制面共用 TLS 监听：scraper 必须持证书信任（与 health
+  端点同安全模型）；独立监听端口如 M9-04 dashboard 阶段有需求再加。
+
 ### 剩余范围（M9-01 完成前）
 
 - ~~注册成功率/租约续期失败计数器、信令 fallback/winner 聚合、TUI 队列/渲染
@@ -144,5 +200,5 @@ overwrite/stale/lag）。
 - Prometheus 指标族语义评审（命名/标签/类型过一遍 scrape 消费视角）；
   M9-03 correlation ID 与 instance 标签打通（instance 标签注入已支持，
   operation/transfer 级关联待 M9-03）。
-- M9-02 relay 侧导出（`RelayServerSnapshot` 数据面已齐，缺 Prometheus 端点与
-  结构化日志）；M9-04/05 dashboard 与 runbook 以 Round 1/2 指标族为输入。
+- ~~M9-02 relay 侧导出~~：Round 3 已交付（见上）。M9-04/05 dashboard 与
+  runbook 以 Round 1/2/3 指标族与日志事件为输入。

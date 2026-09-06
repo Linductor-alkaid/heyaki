@@ -171,7 +171,8 @@ target_include_directories(heyaki_core
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
     "$<BUILD_INTERFACE:${HEYAKI_GENERATED_DIR}>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
-  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libsodium/src/libsodium/include")
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src"
+          "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libsodium/src/libsodium/include")
 target_link_libraries(heyaki_core PRIVATE heyaki::sodium heyaki::blake3)
 heyaki_configure_target(heyaki_core)
 
@@ -285,6 +286,8 @@ add_library(heyaki_relay
   src/relay/relay_enrollment_service.cpp
   src/relay/relay_login_service.cpp
   src/relay/relay_lease_table.cpp
+  src/relay/relay_log.cpp
+  src/relay/relay_metrics.cpp
   src/relay/relay_rate_limiter.cpp
   src/relay/relay_server.cpp
   src/relay/relay_turn_credentials.cpp)

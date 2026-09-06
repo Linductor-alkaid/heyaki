@@ -35,6 +35,7 @@ struct RelayServerSnapshot {
   std::uint64_t tcp_accepted{};
   std::uint64_t websocket_accepted{};
   std::uint64_t health_checks{};
+  std::uint64_t metrics_scrapes{};
   std::uint64_t control_sessions{};
   std::uint64_t enrollment_challenges{};
   std::uint64_t enrollments_completed{};
@@ -51,6 +52,13 @@ struct RelayServerSnapshot {
   std::uint64_t signaling_forwarded{};
   std::uint64_t signaling_rejected{};
   std::uint64_t signaling_backpressure_dropped{};
+  // Emitted vs. sampling-suppressed structured log events (M9-02); the
+  // counters bump whether or not a log sink is configured.
+  std::uint64_t log_events_emitted{};
+  std::uint64_t log_events_sampled_out{};
+  // Public relay identity (SHA-256 of the serving certificate); joins the
+  // Prometheus instance label with the structured log stream.
+  RelayId relay_id{};
   RelayDatabaseSnapshot database;
   RelayRateLimitDiagnostics rate_limits;
   RelayLeaseDiagnostics leases;

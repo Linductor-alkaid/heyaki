@@ -3,6 +3,7 @@
 #include "relay_endpoint.hpp"
 #include "relay_endpoint_directory.hpp"
 #include "relay_lease_table.hpp"
+#include "relay_log.hpp"
 #include "relay_rate_limiter.hpp"
 
 #include <heyaki/runtime.hpp>
@@ -23,6 +24,10 @@ struct RelayServerConfig {
   std::filesystem::path tls_private_key_file;
   std::filesystem::path database_file{":memory:"};
   std::string health_path{"/health"};
+  // Plain-HTTP Prometheus scrape endpoint (M9-02). Unlike health_path it
+  // answers with a normal HTTP response instead of a WebSocket upgrade, so
+  // off-the-shelf scrapers work against it.
+  std::string metrics_path{"/metrics"};
   std::size_t max_connections{1024U};
   std::chrono::milliseconds handshake_timeout{5000};
   std::chrono::milliseconds shutdown_timeout{2000};
@@ -36,6 +41,16 @@ struct RelayServerConfig {
   // (state, stop_requested) changes. Lets embedders block on a completion
   // notification (e.g. executor::comm::PhaseGate) instead of polling.
   std::function<void()> on_state_changed;
+  // Structured log sink (M9-02). Invoked synchronously on the relay's
+  // execution context for every emitted event; must return promptly and
+  // must not throw. Failures and security events always reach the sink;
+  // high-frequency success events are sampled per `success_log_period`.
+  RelayLogSink log_sink;
+  // Sampling period for high-frequency success events (heartbeat refreshes,
+  // signaling forwards, endpoint queries): the 1st and then every Nth event
+  // per kind is emitted. 0 disables sampled events entirely. Failures,
+  // security events, and lifecycle changes are never sampled.
+  std::uint32_t success_log_period{100U};
   RelayLeaseConfig lease;
   RelayEndpointDirectoryConfig endpoint_directory;
   RelayTenantExposurePolicy endpoint_exposure;

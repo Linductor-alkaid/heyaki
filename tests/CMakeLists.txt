@@ -432,6 +432,29 @@ set_tests_properties(heyaki_m9_metrics PROPERTIES
   RESOURCE_LOCK heyaki_m3a_profile_state
   TIMEOUT 180)
 
+add_executable(heyaki_m9_relay_observability_tests
+  unit/m9_relay_observability_test.cpp)
+heyaki_enable_executor_exception_adapter_source(unit/m9_relay_observability_test.cpp)
+target_link_libraries(heyaki_m9_relay_observability_tests PRIVATE
+  heyaki::relay
+  executor::executor
+  heyaki::sqlite
+  GTest::gtest_main
+  OpenSSL::SSL
+  OpenSSL::Crypto)
+heyaki_target_use_pinned_boost_beast(heyaki_m9_relay_observability_tests)
+target_include_directories(heyaki_m9_relay_observability_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/client")
+heyaki_configure_target(heyaki_m9_relay_observability_tests)
+target_compile_definitions(heyaki_m9_relay_observability_tests PRIVATE
+  "HEYAKI_M9_RELAY_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}\"")
+heyaki_add_runtime_test(
+  heyaki_m9_relay_observability heyaki_m9_relay_observability_tests
+  "unit;relay;metrics;m9;observability")
+set_tests_properties(heyaki_m9_relay_observability PROPERTIES
+  RESOURCE_LOCK heyaki_m3a_profile_state
+  TIMEOUT 180)
+
 add_executable(heyaki_m8_service_tests
   unit/m8_codec_test.cpp
   unit/m8_shell_test.cpp

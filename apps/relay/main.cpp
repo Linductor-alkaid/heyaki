@@ -1,3 +1,4 @@
+#include "relay_log.hpp"
 #include "relay_server.hpp"
 
 #include <heyaki/version.hpp>
@@ -23,6 +24,8 @@ struct CommandLine {
   std::optional<std::filesystem::path> tls_private_key_file;
   std::optional<std::filesystem::path> database_file;
   std::optional<std::string> health_path;
+  std::optional<std::string> metrics_path;
+  std::optional<std::uint32_t> success_log_period;
   bool check_config{false};
   bool help{false};
 };
@@ -33,7 +36,9 @@ void print_usage() {
                "[--listen <ip>] [--port <n>]\n"
                "                   [--tls-cert <path>] [--tls-key <path>] "
                "[--database <path>]\n"
-               "                   [--health-path <path>]\n";
+               "                   [--health-path <path>] "
+               "[--metrics-path <path>]\n"
+               "                   [--success-log-period <n>]\n";
 }
 
 std::optional<std::uint16_t> parse_port(std::string_view text) {
@@ -128,6 +133,34 @@ std::optional<CommandLine> parse_arguments(int argc, char** argv) {
         return std::nullopt;
       }
       output.health_path = std::string{*value};
+    } else if (argument == "--metrics-path") {
+      auto value = require_value(argument);
+      if (!value) {
+        return std::nullopt;
+      }
+      output.metrics_path = std::string{*value};
+    } else if (argument == "--success-log-period") {
+      auto value = require_value(argument);
+      if (!value) {
+        return std::nullopt;
+      }
+      std::uint64_t period = 0U;
+      if (value->empty() || value->size() > 10U) {
+        std::cerr << "heyaki-relay: invalid --success-log-period value\n";
+        return std::nullopt;
+      }
+      for (const char character : *value) {
+        if (character < '0' || character > '9') {
+          std::cerr << "heyaki-relay: invalid --success-log-period value\n";
+          return std::nullopt;
+        }
+        period = period * 10U + static_cast<std::uint64_t>(character - '0');
+      }
+      if (period > 1000000U) {
+        std::cerr << "heyaki-relay: invalid --success-log-period value\n";
+        return std::nullopt;
+      }
+      output.success_log_period = static_cast<std::uint32_t>(period);
     } else {
       std::cerr << "heyaki-relay: unknown option: " << argument << "\n";
       return std::nullopt;
@@ -185,6 +218,12 @@ int main(int argc, char** argv) {
   if (parsed->health_path) {
     config.health_path = std::move(*parsed->health_path);
   }
+  if (parsed->metrics_path) {
+    config.metrics_path = std::move(*parsed->metrics_path);
+  }
+  if (parsed->success_log_period) {
+    config.success_log_period = *parsed->success_log_period;
+  }
 
   auto valid = heyaki::validate_relay_server_config(config);
   if (!valid) {
@@ -200,6 +239,12 @@ int main(int argc, char** argv) {
   executor::comm::PhaseGate server_events{"heyaki-relay-main"};
   config.on_state_changed = [&server_events] {
     (void)server_events.advance();
+  };
+  // Structured relay logs (M9-02) as JSON lines on stdout: lifecycle,
+  // security, and failure events in full; high-frequency successes sampled by
+  // success_log_period. endl flushes so operators tailing a pipe see events.
+  config.log_sink = [](const heyaki::RelayLogRecord& record) {
+    std::cout << heyaki::format_relay_log_json(record) << std::endl;
   };
 
   auto server = heyaki::RelayServer::create(std::move(config));

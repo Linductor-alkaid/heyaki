@@ -78,7 +78,6 @@ bool valid_health_path(std::string_view value) noexcept {
     return character == ' ' || character == '?' || character == '#';
   });
 }
-
 Result<bool> parse_bool(std::string_view text, const char* detail,
                         std::int64_t line) {
   if (text == "true" || text == "1") {
@@ -104,7 +103,12 @@ Result<void> validate_relay_server_config(const RelayServerConfig& config) {
       config.tls_certificate_file.empty() || config.tls_private_key_file.empty() ||
       config.database_file.empty() ||
       !valid_health_path(config.health_path) ||
-      config.health_path == relay_wss_control_path || config.max_connections == 0U ||
+      config.health_path == relay_wss_control_path ||
+      !valid_health_path(config.metrics_path) ||
+      config.metrics_path == relay_wss_control_path ||
+      config.metrics_path == config.health_path ||
+      config.success_log_period > 1000000U ||
+      config.max_connections == 0U ||
       config.max_connections > 65536U ||
       config.handshake_timeout.count() < 100 || config.handshake_timeout.count() > 60000 ||
       config.shutdown_timeout.count() < 100 || config.shutdown_timeout.count() > 60000 ||
@@ -165,6 +169,8 @@ Result<RelayServerConfig> load_relay_config_file(
   std::optional<std::filesystem::path> private_key_file;
   std::optional<std::filesystem::path> database_file;
   std::optional<std::string> health_path;
+  std::optional<std::string> metrics_path;
+  std::optional<std::uint32_t> success_log_period;
   std::optional<std::size_t> max_connections;
   std::optional<std::chrono::milliseconds> handshake_timeout;
   std::optional<std::chrono::milliseconds> shutdown_timeout;
@@ -273,6 +279,26 @@ Result<RelayServerConfig> load_relay_config_file(
       }
       config.health_path = std::string{value};
       health_path = config.health_path;
+    } else if (key == "metrics_path") {
+      if (metrics_path) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_duplicate_key", line_number));
+      }
+      config.metrics_path = std::string{value};
+      metrics_path = config.metrics_path;
+    } else if (key == "success_log_period") {
+      if (success_log_period) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_duplicate_key", line_number));
+      }
+      auto parsed =
+          parse_u64(value, "relay_config_success_log_period_invalid", line_number);
+      if (!parsed || *parsed.value_if() > 1000000U) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_success_log_period_invalid", line_number));
+      }
+      config.success_log_period = static_cast<std::uint32_t>(*parsed.value_if());
+      success_log_period = config.success_log_period;
     } else if (key == "max_connections") {
       if (max_connections) {
         return Result<RelayServerConfig>::failure(
