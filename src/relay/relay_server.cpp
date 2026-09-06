@@ -155,6 +155,30 @@ struct RelayServer::Impl : std::enable_shared_from_this<RelayServer::Impl> {
   // publish(); callers own snapshot flushes.
   void log_event(RelayLogEventKind kind, RelayLogLevel level,
                  std::string_view detail, const RelayLogContext& context = {});
+  // Context builders. Member assignment instead of partially-designated
+  // aggregate init, which the CI GCC builds reject (-Wmissing-field-initializers).
+  [[nodiscard]] static RelayLogContext log_context(const RelaySession* session) {
+    RelayLogContext context;
+    context.session = session;
+    return context;
+  }
+  [[nodiscard]] static RelayLogContext log_context(
+      const RelaySession* session, DeviceId device_id, EndpointId endpoint_id,
+      std::string tenant) {
+    RelayLogContext context;
+    context.session = session;
+    context.device_id = device_id;
+    context.endpoint_id = endpoint_id;
+    context.tenant = std::move(tenant);
+    return context;
+  }
+  [[nodiscard]] static RelayLogContext log_context(const RelaySession* session,
+                                                   RequestId request_id) {
+    RelayLogContext context;
+    context.session = session;
+    context.request_id = request_id;
+    return context;
+  }
   Result<void> admit_control_request(const RelaySession& session,
                                      std::string_view tenant = {},
                                      bool include_base_scopes = true,
@@ -903,7 +927,7 @@ void RelayServer::Impl::on_session_finished(
   if (erased == 0U) {
     return;
   }
-  const RelayLogContext context{.session = session.get()};
+  const RelayLogContext context = log_context(session.get());
   if (handshake_timeout) {
     ++current.handshake_timeouts;
     log_event(RelayLogEventKind::handshake_timeout, RelayLogLevel::warn,
@@ -978,7 +1002,7 @@ void RelayServer::Impl::log_event(RelayLogEventKind kind, RelayLogLevel level,
   record.kind = kind;
   record.level = level;
   record.timestamp_unix_milliseconds = unix_milliseconds_now();
-  record.detail = detail;
+  record.detail = std::string{detail};
   record.device_id = context.device_id;
   record.endpoint_id = context.endpoint_id;
   record.tenant = context.tenant;
@@ -1047,7 +1071,7 @@ Result<void> RelayServer::Impl::admit_control_request(
     ++current.control_rejected;
     log_event(RelayLogEventKind::rate_limited, RelayLogLevel::warn,
               admitted.error_if()->safe_detail(),
-              RelayLogContext{.session = &session});
+              log_context(&session));
   }
   publish();
   return admitted;
@@ -1151,7 +1175,7 @@ void RelayServer::Impl::session_handle_control(
       ++current.control_rejected;
       log_event(RelayLogEventKind::enrollment_rejected, RelayLogLevel::warn,
                 parsed.error_if()->safe_detail(),
-                RelayLogContext{.session = session.get()});
+                log_context(session.get()));
       publish();
       session->send_error(*parsed.error_if(), true);
       return;
@@ -1159,11 +1183,8 @@ void RelayServer::Impl::session_handle_control(
     // Claimed (not yet verified) identity still goes into rejected-enrollment
     // records: enrollment is rare and audit-relevant, and the identifiers are
     // opaque key-derived strings, not free-form input.
-    const RelayLogContext claimed{
-        .session = session.get(),
-        .device_id = parsed.value_if()->device_id,
-        .endpoint_id = parsed.value_if()->endpoint_id,
-        .tenant = parsed.value_if()->tenant};
+    const RelayLogContext claimed =
+        log_context(session.get(), parsed.value_if()->device_id, parsed.value_if()->endpoint_id, parsed.value_if()->tenant);
     if (session->challenge_kind != RelaySession::PendingChallengeKind::enrollment ||
         !session->control_challenge_nonce ||
         parsed.value_if()->challenge_nonce != *session->control_challenge_nonce) {
@@ -1215,10 +1236,7 @@ void RelayServer::Impl::session_handle_control(
     session->control_challenge_nonce.reset();
     ++current.enrollments_completed;
     log_event(RelayLogEventKind::enrollment_completed, RelayLogLevel::info, "",
-              RelayLogContext{.session = session.get(),
-                              .device_id = completed.value_if()->device_id,
-                              .endpoint_id = completed.value_if()->endpoint_id,
-                              .tenant = completed.value_if()->tenant});
+              log_context(session.get(), completed.value_if()->device_id, completed.value_if()->endpoint_id, completed.value_if()->tenant));
     current.database = database->cached_snapshot();
     current.enrollment = enrollment_service->diagnostics();
     publish();
@@ -1242,18 +1260,15 @@ void RelayServer::Impl::session_handle_control(
       ++current.control_rejected;
       log_event(RelayLogEventKind::login_rejected, RelayLogLevel::warn,
                 parsed.error_if()->safe_detail(),
-                RelayLogContext{.session = session.get()});
+                log_context(session.get()));
       publish();
       session->send_error(*parsed.error_if(), true);
       return;
     }
     // Claimed identity accompanies rejected-login records for the same audit
     // reasons as enrollment; identifiers are key-derived, not free-form.
-    const RelayLogContext claimed{
-        .session = session.get(),
-        .device_id = parsed.value_if()->device_id,
-        .endpoint_id = parsed.value_if()->endpoint_id,
-        .tenant = parsed.value_if()->tenant};
+    const RelayLogContext claimed =
+        log_context(session.get(), parsed.value_if()->device_id, parsed.value_if()->endpoint_id, parsed.value_if()->tenant);
     if (session->challenge_kind != RelaySession::PendingChallengeKind::login ||
         !session->control_challenge_nonce ||
         parsed.value_if()->challenge_nonce != *session->control_challenge_nonce) {
@@ -1298,10 +1313,7 @@ void RelayServer::Impl::session_handle_control(
         authenticated.value_if()->enrollment_generation;
     ++current.logins_completed;
     log_event(RelayLogEventKind::login_completed, RelayLogLevel::info, "",
-              RelayLogContext{.session = session.get(),
-                              .device_id = authenticated.value_if()->device_id,
-                              .endpoint_id = authenticated.value_if()->endpoint_id,
-                              .tenant = authenticated.value_if()->tenant});
+              log_context(session.get(), authenticated.value_if()->device_id, authenticated.value_if()->endpoint_id, authenticated.value_if()->tenant));
     online_endpoints[RelayLeaseKey{.device_id = *session->logged_in_device_id,
                                    .endpoint_id = *session->logged_in_endpoint_id}] =
         session;
@@ -1338,7 +1350,7 @@ void RelayServer::Impl::session_handle_control(
       ++current.control_rejected;
       log_event(RelayLogEventKind::policy_rejected, RelayLogLevel::warn,
                 "relay_logged_in_message_invalid",
-                RelayLogContext{.session = session.get()});
+                log_context(session.get()));
       publish();
       session->send_error(
           relay_error(ErrorCode::protocol, "relay_logged_in_message_invalid"), true);
@@ -1431,14 +1443,14 @@ void RelayServer::Impl::session_handle_signaling_send(
     ++current.signaling_rejected;
     log_event(RelayLogEventKind::signaling_rejected, RelayLogLevel::warn,
               parsed.error_if()->safe_detail(),
-              RelayLogContext{.session = session.get()});
+              log_context(session.get()));
     publish();
     session->send_error(*parsed.error_if(), true);
     return;
   }
   const auto& send = *parsed.value_if();
-  const RelayLogContext context{.session = session.get(),
-                                .request_id = send.request_id};
+  const RelayLogContext context =
+      log_context(session.get(), send.request_id);
   const auto kind = static_cast<LanSignalingMessageKind>(send.kind);
   const bool control_kind = kind == LanSignalingMessageKind::connect_request ||
                             kind == LanSignalingMessageKind::connect_accept ||
@@ -1617,7 +1629,7 @@ void RelayServer::Impl::session_handle_heartbeat(
   }
   ++current.heartbeats;
   log_event(RelayLogEventKind::heartbeat_refreshed, RelayLogLevel::info, "",
-            RelayLogContext{.session = session.get()});
+            log_context(session.get()));
   current.leases = lease_table->diagnostics();
   publish();
   if (!session->send_control(RelayWssControlType::heartbeat_ack,
@@ -1713,7 +1725,7 @@ void RelayServer::Impl::session_handle_endpoint_publish(
   }
   ++current.endpoint_publications;
   log_event(RelayLogEventKind::endpoint_published, RelayLogLevel::info, "",
-            RelayLogContext{.session = session.get()});
+            log_context(session.get()));
   current.endpoints = endpoint_directory->diagnostics();
   publish();
   if (!session->send_control(RelayWssControlType::endpoint_publish_ack,
@@ -1814,7 +1826,7 @@ void RelayServer::Impl::session_handle_endpoint_query(
     const std::string detail =
         "endpoints=" + std::to_string(result.endpoints.size());
     log_event(RelayLogEventKind::endpoint_query_served, RelayLogLevel::info,
-              detail, RelayLogContext{.session = session.get()});
+              detail, log_context(session.get()));
   }
   current.leases = lease_table->diagnostics();
   current.endpoints = endpoint_directory->diagnostics();
@@ -1830,7 +1842,7 @@ void RelayServer::Impl::session_reject_policy(
   ++current.protocol_rejected;
   ++current.websocket_accepted;
   log_event(RelayLogEventKind::policy_rejected, RelayLogLevel::warn,
-            "path_not_allowed", RelayLogContext{.session = session.get()});
+            "path_not_allowed", log_context(session.get()));
   publish();
   session->reject_policy();
 }

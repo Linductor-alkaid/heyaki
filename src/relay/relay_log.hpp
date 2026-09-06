@@ -48,8 +48,9 @@ struct RelayLogRecord {
   RelayLogLevel level{RelayLogLevel::info};
   std::uint64_t timestamp_unix_milliseconds{};
   // Stable machine-greppable detail (usually an Error safe_detail); never a
-  // free-form dump of remote input.
-  std::string_view detail;
+  // free-form dump of remote input. Owned copy: the producing handler's
+  // Error/locals die as soon as log_event returns, so sinks may store records.
+  std::string detail;
   std::string connection_id;
   std::optional<DeviceId> device_id;
   std::optional<EndpointId> endpoint_id;
