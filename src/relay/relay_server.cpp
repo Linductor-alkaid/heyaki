@@ -156,8 +156,9 @@ struct RelayServer::Impl : std::enable_shared_from_this<RelayServer::Impl> {
   void log_event(RelayLogEventKind kind, RelayLogLevel level,
                  std::string_view detail, const RelayLogContext& context = {});
   // Context builders. Member assignment instead of partially-designated
-  // aggregate init, which the CI GCC builds reject (-Wmissing-field-initializers).
-  [[nodiscard]] static RelayLogContext log_context(const RelaySession* session) {
+  // aggregate init, which the CI builds reject (-Wmissing-field-initializers).
+  [[nodiscard]] static RelayLogContext log_context(
+      const RelaySession* session) {
     RelayLogContext context;
     context.session = session;
     return context;
@@ -1184,7 +1185,8 @@ void RelayServer::Impl::session_handle_control(
     // records: enrollment is rare and audit-relevant, and the identifiers are
     // opaque key-derived strings, not free-form input.
     const RelayLogContext claimed =
-        log_context(session.get(), parsed.value_if()->device_id, parsed.value_if()->endpoint_id, parsed.value_if()->tenant);
+        log_context(session.get(), parsed.value_if()->device_id,
+                    parsed.value_if()->endpoint_id, parsed.value_if()->tenant);
     if (session->challenge_kind != RelaySession::PendingChallengeKind::enrollment ||
         !session->control_challenge_nonce ||
         parsed.value_if()->challenge_nonce != *session->control_challenge_nonce) {
@@ -1236,7 +1238,9 @@ void RelayServer::Impl::session_handle_control(
     session->control_challenge_nonce.reset();
     ++current.enrollments_completed;
     log_event(RelayLogEventKind::enrollment_completed, RelayLogLevel::info, "",
-              log_context(session.get(), completed.value_if()->device_id, completed.value_if()->endpoint_id, completed.value_if()->tenant));
+              log_context(session.get(), completed.value_if()->device_id,
+                          completed.value_if()->endpoint_id,
+                          completed.value_if()->tenant));
     current.database = database->cached_snapshot();
     current.enrollment = enrollment_service->diagnostics();
     publish();
@@ -1268,7 +1272,8 @@ void RelayServer::Impl::session_handle_control(
     // Claimed identity accompanies rejected-login records for the same audit
     // reasons as enrollment; identifiers are key-derived, not free-form.
     const RelayLogContext claimed =
-        log_context(session.get(), parsed.value_if()->device_id, parsed.value_if()->endpoint_id, parsed.value_if()->tenant);
+        log_context(session.get(), parsed.value_if()->device_id,
+                    parsed.value_if()->endpoint_id, parsed.value_if()->tenant);
     if (session->challenge_kind != RelaySession::PendingChallengeKind::login ||
         !session->control_challenge_nonce ||
         parsed.value_if()->challenge_nonce != *session->control_challenge_nonce) {
@@ -1313,7 +1318,9 @@ void RelayServer::Impl::session_handle_control(
         authenticated.value_if()->enrollment_generation;
     ++current.logins_completed;
     log_event(RelayLogEventKind::login_completed, RelayLogLevel::info, "",
-              log_context(session.get(), authenticated.value_if()->device_id, authenticated.value_if()->endpoint_id, authenticated.value_if()->tenant));
+              log_context(session.get(), authenticated.value_if()->device_id,
+                    authenticated.value_if()->endpoint_id,
+                    authenticated.value_if()->tenant));
     online_endpoints[RelayLeaseKey{.device_id = *session->logged_in_device_id,
                                    .endpoint_id = *session->logged_in_endpoint_id}] =
         session;
