@@ -179,7 +179,13 @@ overwrite/stale/lag）。
   无 WebSocket 计数）、结构化日志 e2e（登录审计字段、period=2 采样 2/3、
   generation 不符 login_rejected 携带声称身份、信令拒绝携带 request_id）、
   period=0 关闭采样、无 sink 计数器照常 + 经 /metrics 导出。本机 ctest
-  53/53 通过 + 3 环境门控跳过（coturn/matrix）。
+  53/53 通过 + 3 环境门控跳过（coturn/matrix）。CI 10/10 绿（提交链
+  eadf127→26add86→e2684f8）：首轮 CI 抓到两个本机未暴露的真实缺陷并已
+  修复——CI GCC/Clang `-Werror=missing-field-initializers` 拒绝部分指派
+  初始化（改 `log_context()` 工厂逐成员赋值），ASan 发现日志 record 的
+  `detail` string_view 悬垂于产生它的局部 Error（改为自有 `std::string`，
+  sink 可安全存档 record）；asan 的 usrsctp 泄漏与 gcc-Release 的 TUI
+  harness 超时为既有抖动，rerun 即绿。
 
 设计说明：
 
