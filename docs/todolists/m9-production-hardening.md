@@ -1,6 +1,6 @@
 # M9：生产加固与 v1 发布
 
-> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2 与 M9-02 Round 3 已交付，M9-03 起未开始，见文末实施记录）
+> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3 与 M9-03 Round 4 已交付，M9-04 起未开始，见文末实施记录）
 > - 所属计划：[Heyaki MVP 至 v1 实施 TODO 计划](heyaki-implementation-plan.md)
 > - 前置：M8 | 建议发布点：v1.0
 
@@ -8,7 +8,7 @@
 
 - [ ] `M9-01` 设备端导出架构第 13.2 节全部 LAN/relay/协议指标，并与 executor failure/status、comm stats 建立明确关联字段。（Round 1 交付 2026-09-05：`NodeMetrics` 统一聚合 + `Node::metrics()` 周期发布 + Prometheus 文本导出 `format_node_metrics_prometheus`；新增 pairing 审计计数器与连通性结果/时长计数器；executor 关联字段经内嵌 `RuntimeSnapshot`。Round 2 交付 2026-09-05：relay 注册/租约计数器、信令 winner/fallback 聚合、backend 字节 gauge 周期采样、TUI 队列/渲染诊断与 `metrics` 命令；丢包估计受 pinned libdatachannel API 限制，见实施记录。缺口见实施记录"剩余范围"。）
 - [x] `M9-02` relay 导出 Prometheus 指标、结构化日志、有限审计和可选 trace correlation；高频成功事件采样。（Round 3 交付 2026-09-06：`format_relay_metrics_prometheus` 全量导出 `RelayServerSnapshot` 七个诊断块；同端口 TLS 上的纯 HTTP `GET /metrics` 端点（无 WebSocket upgrade，`metrics_path` 可配置，非 GET 405）；`RelayLogRecord` JSON Lines 结构化日志（16 类事件，失败/安全/生命周期事件全量，心跳/信令转发/查询按 `success_log_period` 采样，0 关闭采样）；登录/注册完成与拒绝携带 device/endpoint/tenant 审计字段（拒绝含声称身份），信令事件携带 `RequestId` 关联字段，metrics instance 标签 = 证书 SHA-256 十六进制与日志流可 join；`heyaki-relay` main 默认把日志打到 stdout。OpenTelemetry 出口属于部署侧桥接，留 M9-04 工具链决策。见实施记录 Round 3。）
-- [ ] `M9-03` 为 registration、pairing、connection、session、operation 和 transfer 建立不含机密的 correlation ID。
+- [x] `M9-03` 为 registration、pairing、connection、session、operation 和 transfer 建立不含机密的 correlation ID。（Round 4 交付 2026-09-08：全部复用既有随机非机密 wire ID，无协议变更——pairing 审计事件携带 wire pairing RequestId + GrantId 并经 `Node::pairing_audit_records()` 暴露有界审计环；RPC 完成事件 `RpcCallOutcome.request_id` 自关联，准入失败 Error 携带 operation ID；shell 审计记录补 `shell_id`；connection/session 的 RequestId/SessionId 进入 TUI 会话视图（request=/session= 行，与 relay 信令日志同 ID 空间）；registration 因 v1 控制协议冻结无 wire ID，以快照墙钟锚点 `registration_started_unix_milliseconds`（TUI `since=`/指标 gauge）+ device+tenant join relay 日志；transfer 级 `TransferId` 在 API/事件/TUI 已全覆盖，本轮核对无缺口。见实施记录 Round 4。）
 - [ ] `M9-04` 定义 SLO dashboard 与告警：multicast/listener readiness、presence/handshake reject、登录失败、租约续期、直连率、TURN allocation、pairing 猜测、队列拒绝、RPC overload、文件 hash 和 worker failure。
 - [ ] `M9-05` 编写运维 runbook：证书/credential 轮换、设备吊销、relay/coturn 重启、数据库备份恢复、磁盘满、过载和版本回滚。
 
@@ -197,6 +197,57 @@ overwrite/stale/lag）。
 - `/metrics` 与控制面共用 TLS 监听：scraper 必须持证书信任（与 health
   端点同安全模型）；独立监听端口如 M9-04 dashboard 阶段有需求再加。
 
+### Round 4（2026-09-08）：M9-03 correlation ID
+
+交付物：
+
+- pairing：`PairingAuditEvent`（移入公共头 `pairing_protocol.hpp`）新增
+  `request_id`/`grant_id` 关联字段——evaluate 全路径（attempt/denied_*/granted）
+  携带 wire pairing RequestId，granted 额外携带签发的 GrantId；accept_grant 的
+  grant_accepted/rejected（binding/identity/signature/scope）携带请求与声称的
+  grant 双 ID；revoke_grant 携带 GrantId；批量轮换事件（无单一 ID）保持缺省。
+  `PairingServiceConfig.audit_sink` 由 Node 接线（此前为 nullptr，审计事件根本
+  不可达）：事件经 `Impl::pairing_audit_sink` 投递到 node strand 的有界环形
+  缓冲（容量 256，镜像 shell 审计模式），公开 `Node::pairing_audit_records()`
+  读取。注意 revoke/rotate 走公共 API 调用者线程，故 sink 必须投递而非就地
+  追加（evaluate/accept_grant 在 strand 上的会话回调里触发）。
+- operation：`RpcCallOutcome` 新增 `request_id`——全部终态（对端响应、
+  cancel、本地 deadline、session 丢失 outcome_unknown、retry 队列淘汰/中止）
+  自关联，session 丢失批量终结时无需调用方簿记；准入失败（编码/容量/ID 冲突/
+  发送失败）经 `attach_request_id` 把 wire RequestId 字节装入
+  `Error::operation_id`（§13.1 错误对象携带 operation ID；调用方传入零 ID 时
+  生成的 ID 只有 Error 能命名）。TUI rpc 视图 call 后打印 `op <req id>`。
+- shell：`ShellAuditRecord` 新增 `shell_id`，审计环与 ShellServiceEvent 流
+  可 join。
+- connection/session：`NodePeerSessionSnapshot` 的 RequestId/SessionId 进入
+  TUI SESSIONS 块（`request=`/`session=` 行，置于 candidate 之后——m4/m6
+  TUI harness 驱动正则钉死 device→endpoint→signaling 行邻接，本轮本地抓到
+  插行破坏契约后重新布局）。request ID 与 relay 日志（M9-02 signaling 事件
+  的 `request_id` 字段）同 ID 空间，可跨侧 grep。
+- registration：v1 控制协议（LoginResult/Heartbeat）无 per-cycle 请求 ID 且
+  冻结，不加 wire 字段。`RelayNodeSnapshot.registration_started_unix_milliseconds`
+  记录当前 connect+login 周期起始墙钟（周期序号 = 既有
+  `registration_attempts`），导出为
+  `heyaki_node_relay_registration_started_unix_milliseconds` gauge，TUI RELAY
+  行显示 `cycle=`/`since=`；与 relay 日志的 join 键保持 device identity +
+  tenant + 时间窗（relay 侧登录事件已携带）。
+- transfer：核对确认 `TransferId` 已覆盖 API（FileTransferEvent/Summary）、
+  TUI（transfer 命令打印与 pause/resume/cancel 入参）与文件服务内部记账，
+  无缺口，不改动。
+- 测试：`tests/unit/m9_correlation_test.cpp`（4 例：pairing 审计双 ID 与
+  计数器不变式、RPC 成功/session 丢失完成携带请求 ID、准入失败 Error 命名
+  操作、Node 审计环经公共 API 跨线程记录撤销）；m3b 两个重连测试断言锚点
+  非零且随周期推进；m9_metrics 钉死新 gauge；tui_setup 断言 request=/session=
+  行。本机 ctest 全绿 + 3 环境门控跳过（coturn/matrix，与基线一致）。
+
+设计说明：
+
+- 关联 ID 全部是 wire 上已有的随机 16 字节值（非机密、不可从凭证推导），
+  不新增 ID 空间、不做指标标签（基数）；与 relay 侧 M9-02 的
+  `request_id` 日志字段、证书 SHA-256 instance 标签构成同一 join 体系。
+- 无新增线程/队列：审计环投递复用 node strand（asio post，与
+  poke_relay_activity 同模式），无 executor ledger 条目。
+
 ### 剩余范围（M9-01 完成前）
 
 - ~~注册成功率/租约续期失败计数器、信令 fallback/winner 聚合、TUI 队列/渲染
@@ -204,7 +255,6 @@ overwrite/stale/lag）。
 - 丢包估计受 pinned libdatachannel API 限制（bytes/rtt 已聚合，packetsLost
   不存在）：升级依赖或在应用层推导的取舍留给 M9-10 基准测试结论后决定。
 - Prometheus 指标族语义评审（命名/标签/类型过一遍 scrape 消费视角）；
-  M9-03 correlation ID 与 instance 标签打通（instance 标签注入已支持，
-  operation/transfer 级关联待 M9-03）。
+  ~~M9-03 correlation ID 与 instance 标签打通~~：Round 4 已交付（见上）。
 - ~~M9-02 relay 侧导出~~：Round 3 已交付（见上）。M9-04/05 dashboard 与
   runbook 以 Round 1/2/3 指标族与日志事件为输入。

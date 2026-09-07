@@ -64,7 +64,13 @@ relay-side counterpart: a `GET /metrics` Prometheus endpoint on the TLS control 
 (~106 `heyaki_relay_` families, configurable `metrics_path`), JSON Lines structured logs
 (16 event kinds with identifier-class audit fields; high-frequency success events sampled
 via `success_log_period`), and scrape/log counters in the relay snapshot; the delivery round
-closed with CI 10/10 green. See the
+closed with CI 10/10 green. M9-03 (round 4, 2026-09-08) threads non-secret correlation
+ids through every lifecycle area: pairing audit events carry the wire pairing
+RequestId/GrantId into a bounded `Node::pairing_audit_records()` ring, RPC completions
+(and admission-failure errors) name their operation id, shell audit records carry
+`shell_id`, TUI session lines expose the signaling request id that joins relay signaling
+logs, and relay registration cycles expose a wall-clock anchor gauge (the frozen control
+protocol carries no per-cycle wire id). See the
 [M9 milestone file](docs/todolists/m9-production-hardening.md) for the round-by-round record.
 
 
@@ -80,7 +86,7 @@ closed with CI 10/10 green. See the
 | M6 | Message service and unary RPC | Done |
 | M7 | Remote events (best_effort_latest / reliable_live) and resumable file transfer | Done |
 | M8 | Remote shell (default-off, executor PTY worker, safe VT renderer, TUI shell view) | Done — production enable signed off (POSIX 2026-09-04; Windows unblocked 2026-09-05 after the F1/F3/F7 fixes, same listed-profile posture) |
-| M9 | Production hardening | In progress — M9-01 device metrics + Prometheus export and M9-02 relay `/metrics` + structured logs delivered; correlation/SLO/runbook and the hardening tracks remain |
+| M9 | Production hardening | In progress — M9-01 device metrics + Prometheus export, M9-02 relay `/metrics` + structured logs, and M9-03 correlation ids delivered; SLO/runbook and the hardening tracks remain |
 | M10 | Gateway proxy service (scoped L4 gateway over an authorized session, protocol 1.3) | Planned |
 | M11 | Android (NDK) port | Planned |
 
