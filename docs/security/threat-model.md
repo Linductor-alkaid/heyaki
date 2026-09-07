@@ -9,10 +9,18 @@
 > (delivered 2026-09-03, compiled but disabled by default) executes the "malicious
 > terminal data" row below with a locally configured profile boundary, an
 > executor-owned child-process worker with escalation and caps, a content-free audit
-> trail, and a safe-subset VT renderer; its production enablement (POSIX only — Windows
-> stays fail-closed pending the path-validation fix) was signed off on 2026-09-04 per
+> trail, and a safe-subset VT renderer; its production enablement (POSIX at sign-off time —
+> the Windows path-validation blocker P2-F1 was fixed on 2026-09-05, see §7) was signed off
+> on 2026-09-04 per
 > the independent security review recorded in `m8-remote-shell-security-review.md` and
-> the M8 milestone file.
+> the M8 milestone file. The M9 observability surfaces (delivered 2026-09-05/06) stay
+> inside this baseline: the device and relay Prometheus exports carry only counters/gauges
+> over identifier and operational values, the relay `/metrics` endpoint rides the TLS
+> control listener (certificate-trusted scrapers only; GET-only with non-GET rejected by
+> 405), and its JSON Lines structured logs carry identifier-class audit fields
+> (device/endpoint/tenant, claimed identity on rejects, wire `RequestId`) with
+> high-frequency success events sampled — no secret, token, password, verifier, payload,
+> or terminal-content class reaches metrics or logs.
 >
 > Scope: device library, LAN discovery/signaling, `heyaki-relay`, coturn integration, ProfileStore,
 > and TUI

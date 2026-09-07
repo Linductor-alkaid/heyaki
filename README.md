@@ -49,9 +49,23 @@ caps and bounded stdin, content-free audit records, a first-party safe-subset VT
 (OSC/clipboard/title and unknown sequences dropped, SGR degraded, UTF-8 validated), Node
 public APIs, and a TUI `shell` view. Production enablement on POSIX was signed off on
 2026-09-04 after the independent security review
-([report](docs/security/m8-remote-shell-security-review.md)); Windows stays fail-closed
-until the profile path-validation gap is fixed. See the
+([report](docs/security/m8-remote-shell-security-review.md)); the Windows blocker (P2-F1
+path validation, fixed together with P3-F3/P4-F7) landed on 2026-09-05, so Windows
+enablement follows the same explicitly-listed-profile posture. See the
 [M8 milestone file](docs/todolists/m8-remote-shell.md) for the delivery record.
+M9 (Production hardening) is in progress (opened 2026-09-05). The observability track has
+landed: M9-01 rounds 1-2 deliver a unified `NodeMetrics` aggregate published through
+`Node::metrics()` with Prometheus text export (~200 families across node, pairing,
+connectivity, transport, channels, services, and the executor runtime snapshot), pairing
+audit counters, connectivity outcome/duration counters, relay registration/lease counters,
+signaling route winner/fallback accounting, periodic backend byte/RTT sampling, and TUI
+queue/render diagnostics plus a `metrics` command. M9-02 (round 3, 2026-09-06) delivers the
+relay-side counterpart: a `GET /metrics` Prometheus endpoint on the TLS control listener
+(~106 `heyaki_relay_` families, configurable `metrics_path`), JSON Lines structured logs
+(16 event kinds with identifier-class audit fields; high-frequency success events sampled
+via `success_log_period`), and scrape/log counters in the relay snapshot; the delivery round
+closed with CI 10/10 green. See the
+[M9 milestone file](docs/todolists/m9-production-hardening.md) for the round-by-round record.
 
 
 | Milestone | Scope | State |
@@ -65,8 +79,8 @@ until the profile path-validation gap is fixed. See the
 | M5 | Session authorization, pairing/trust, channel scheduling, ByteStream | Done |
 | M6 | Message service and unary RPC | Done |
 | M7 | Remote events (best_effort_latest / reliable_live) and resumable file transfer | Done |
-| M8 | Remote shell (default-off, executor PTY worker, safe VT renderer, TUI shell view) | Done — production enable signed off (POSIX; Windows pending path-validation fix) |
-| M9 | Production hardening | Planned |
+| M8 | Remote shell (default-off, executor PTY worker, safe VT renderer, TUI shell view) | Done — production enable signed off (POSIX 2026-09-04; Windows unblocked 2026-09-05 after the F1/F3/F7 fixes, same listed-profile posture) |
+| M9 | Production hardening | In progress — M9-01 device metrics + Prometheus export and M9-02 relay `/metrics` + structured logs delivered; correlation/SLO/runbook and the hardening tracks remain |
 | M10 | Gateway proxy service (scoped L4 gateway over an authorized session, protocol 1.3) | Planned |
 | M11 | Android (NDK) port | Planned |
 
@@ -95,18 +109,23 @@ until the profile path-validation gap is fixed. See the
   child (process-tree termination escalation, idle/absolute/output caps, bounded stdin), a
   content-free audit trail, and a safe-subset VT renderer so remote bytes never reach the
   host terminal unfiltered.
+- Production observability: device-side `Node::metrics()` with Prometheus text export
+  (pairing, connectivity, transport, channel, service, and executor-runtime families) and a
+  TUI `metrics` command; relay-side `GET /metrics` on the TLS control listener plus sampled
+  JSON Lines structured logs carrying identifier-class audit fields.
 - Bounded backpressure and lifecycle observability through executor facilities.
 - An FTXUI diagnostics TUI showing endpoints by route, session state, RTT, buffered bytes,
-  structured failures, pairing/trust management, message/RPC, event/file, and shell views.
+  structured failures, pairing/trust management, message/RPC, event/file, and shell views,
+  plus queue/render diagnostics and a `metrics` command that dumps Prometheus text.
 
 ## Components
 
 | Target | Kind | Description |
 | --- | --- | --- |
-| `heyaki-relay` | App | Relay server: config, SQLite persistence, enrollment/login, leases, endpoint directory, rate limiting, TURN credentials, WSS signaling forwarding |
+| `heyaki-relay` | App | Relay server: config, SQLite persistence, enrollment/login, leases, endpoint directory, rate limiting, TURN credentials, WSS signaling forwarding, Prometheus `/metrics` endpoint, JSON Lines structured logs with success sampling |
 | `heyaki-tui` | App | FTXUI terminal client: profile setup, pairing/trust, device/endpoint/session/stream views, message and RPC views, `connect`/`close` REPL |
 | `heyaki-m2-profile-demo`, `heyaki-m3b-relay-demo`, `heyaki-m6-message-rpc-demo` | Apps | Small demos of the profile store, relay enrollment, and message/RPC semantics (admission vs. completion vs. ACK vs. `outcome_unknown`) |
-| `heyaki_core` | Library | Public types, wire protocol, canonical signing, signaling/session protocols, replay cache, identity, limits |
+| `heyaki_core` | Library | Public types, wire protocol, canonical signing, signaling/session protocols, replay cache, identity, limits, node-metrics model with Prometheus text export |
 | `heyaki_client` | Library | `heyaki::Node` connection assembly: discovery, signaling coordinator, `PeerSession`, LAN directory, relay enrollment, runtime, authorization/byte-stream, message/unary-RPC/event/file services, and the default-off remote shell service with its executor-managed PTY worker |
 | `heyaki_profile` | Library | `ProfileStore` (SQLite), Argon2id password hashing, secret backend |
 | `heyaki_transport_webrtc` | Library | `WebRtcTransportSession` wrapping pinned libdatachannel |
@@ -157,7 +176,8 @@ inventory and license manifest from the lock files.
 
 `ctest --preset <preset>` runs the unit and integration suites (signaling, session hello,
 peer session, WebRTC transport, relay route, path policy, TUI setup, per-milestone service
-suites including the M8 shell/PTY-lifecycle and VT-renderer tests) plus script harnesses
+suites including the M8 shell/PTY-lifecycle and VT-renderer tests and the M9
+metrics-export/relay-observability suites) plus script harnesses
 for network topologies, relay onboarding, TUI session establishment, and the pinned coturn
 deployment. coturn-dependent checks are skipped automatically when the required environment
 is not present. Performance tests include session-establishment P95 budgets.
