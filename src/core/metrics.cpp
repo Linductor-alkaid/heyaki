@@ -119,6 +119,12 @@ void write_node_section(MetricsWriter& writer, const NodeSnapshot& node) {
   writer.counter("heyaki_node_relay_registration_failures_total",
                  relay.registration_failures,
                  "Relay login cycles that ended before ready.");
+  // M9-03: the frozen control protocol carries no per-cycle request id, so
+  // this wall-clock anchor is the device-side half of the device/relay log
+  // join (device identity + tenant + time on the relay side).
+  writer.gauge("heyaki_node_relay_registration_started_unix_milliseconds",
+               relay.registration_started_unix_milliseconds,
+               "Wall clock (ms) when the current registration cycle started.");
   writer.counter("heyaki_node_relay_lease_refresh_failures_total",
                  relay.lease_refresh_failures,
                  "Heartbeat rounds whose lease ack was still missing at the next tick.");

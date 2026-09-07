@@ -63,6 +63,15 @@ void render_device_view(
            << (session.selected_candidate.empty() ? "none"
                                                   : session.selected_candidate)
            << '\n';
+    // Correlation ids (M9-03), after the pinned diagnostics block: the
+    // signaling request id joins relay signaling logs, the session id joins
+    // session-level narratives.
+    if (!session.request_id.is_zero()) {
+      output << "      request=" << to_string(session.request_id) << '\n';
+    }
+    if (!session.session_id.is_zero()) {
+      output << "      session=" << to_string(session.session_id) << '\n';
+    }
     if (session.error) {
       output << "      failure=";
       render_error(output, *session.error);

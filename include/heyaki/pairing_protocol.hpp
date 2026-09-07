@@ -112,4 +112,35 @@ class PairingRequestAdmission {
   std::size_t attempts_used_{};
 };
 
+// ---- Pairing audit events (M5 audit funnel, M9-03 correlation) ----
+// One event per evaluated pairing attempt and grant lifecycle transition on
+// the target (evaluate) or initiator (accept_grant) side.
+enum class PairingAuditKind : std::uint8_t {
+  attempt,
+  denied_password,
+  denied_policy,
+  denied_backoff,
+  granted,
+  grant_accepted,
+  grant_rejected,
+  grant_revoked,
+  password_rotated,
+  grants_revoked,
+};
+
+// Structured audit record; never contains the password, verifier, or grant
+// signature bytes. Correlation fields (M9-03): `request_id` echoes the wire
+// pairing RequestId (joining initiator and target narratives, and relay
+// signaling logs when the pairing session was relay-signaled); `grant_id`
+// identifies the TrustGrant on grant lifecycle events. Both are random
+// non-secret wire ids and stay unset on bulk events without a single id.
+struct PairingAuditEvent {
+  PairingAuditKind kind{PairingAuditKind::attempt};
+  DeviceId peer;
+  std::uint64_t unix_milliseconds{};
+  const char* detail{""};
+  std::optional<RequestId> request_id;
+  std::optional<GrantId> grant_id;
+};
+
 }  // namespace heyaki

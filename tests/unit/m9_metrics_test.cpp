@@ -98,6 +98,7 @@ NodeMetrics representative_metrics() {
   metrics.node.relay.registration_attempts = 9U;
   metrics.node.relay.registration_successes = 7U;
   metrics.node.relay.registration_failures = 2U;
+  metrics.node.relay.registration_started_unix_milliseconds = 1725500000000ULL;
   metrics.node.relay.lease_refresh_failures = 1U;
   metrics.node.relay.heartbeats_sent = 40U;
   metrics.node.session_coordinator.attempts_expired = 1U;
@@ -272,6 +273,10 @@ TEST_F(M9MetricsTest, PrometheusExportIsWellFormedAndPinsFormat) {
   EXPECT_NE(text.find("heyaki_node_relay_registration_failures_total 2\n"),
             std::string::npos);
   EXPECT_NE(text.find("heyaki_node_relay_lease_refresh_failures_total 1\n"),
+            std::string::npos);
+  // M9-03 registration correlation anchor: a gauge, not a counter.
+  EXPECT_NE(text.find("heyaki_node_relay_registration_started_unix_milliseconds "
+                      "1725500000000\n"),
             std::string::npos);
   EXPECT_NE(text.find("heyaki_connectivity_authenticated_total 6\n"), std::string::npos);
   EXPECT_NE(text.find("heyaki_connectivity_signaling_route_selected_lan_total 5\n"),

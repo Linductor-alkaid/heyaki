@@ -5,6 +5,7 @@
 #include <heyaki/file.hpp>
 #include <heyaki/lan_directory.hpp>
 #include <heyaki/message.hpp>
+#include <heyaki/pairing_protocol.hpp>
 #include <heyaki/profile_store.hpp>
 #include <heyaki/rpc.hpp>
 #include <heyaki/runtime.hpp>
@@ -261,6 +262,12 @@ struct RelayNodeSnapshot {
   std::uint64_t registration_successes{};
   std::uint64_t registration_failures{};
   std::uint64_t lease_refresh_failures{};
+  // M9-03 registration correlation: the frozen v1 control messages carry no
+  // per-cycle request id, so the device/relay join stays device identity +
+  // tenant (+ the cycle index above). This wall-clock anchor of the current
+  // cycle start aligns device-side failure narratives with relay log
+  // timestamps; it is not a secret-derived value.
+  std::uint64_t registration_started_unix_milliseconds{};
   std::uint64_t heartbeats_sent{};
   std::uint64_t heartbeats_missed{};
   std::uint64_t reconnect_count{};
@@ -624,6 +631,11 @@ class Node {
   [[nodiscard]] Result<void> pair_peer(DeviceEndpointKey peer, std::string_view password,
                                        std::vector<std::string> requested_scopes);
   void set_pairing_observer(NodePairingObserver observer);
+  // Bounded pairing audit history with correlation ids (M9-03): every
+  // evaluated pairing attempt and grant lifecycle event, carrying the wire
+  // pairing RequestId and GrantId so app logs join initiator/target
+  // narratives and relay signaling logs. Never the password or verifier.
+  [[nodiscard]] std::vector<PairingAuditEvent> pairing_audit_records() const;
   // Trust view data for the pairing & trust UI.
   [[nodiscard]] Result<std::vector<TrustGrantRecord>> trust_grants_for(
       const DeviceEndpointKey& peer) const;

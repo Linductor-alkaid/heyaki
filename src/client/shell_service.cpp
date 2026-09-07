@@ -1068,6 +1068,7 @@ void ShellService::emit_audit(ShellRecord& record) {
     return;
   }
   ShellAuditRecord audit;
+  audit.shell_id = record.id;
   audit.initiator = peer_.device_id;
   audit.profile = record.profile;
   audit.opened_at_ms = record.opened_at_ms;

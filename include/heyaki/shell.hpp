@@ -183,7 +183,9 @@ enum class ShellCloseReason : std::uint8_t {
 
 // Terminal audit record (M8-07): initiator device, profile, times, exit code,
 // byte counts, and close reason. Deliberately carries no terminal content.
+// `shell_id` (M9-03) joins the audit history with the shell event stream.
 struct ShellAuditRecord {
+  ShellId shell_id;
   DeviceId initiator;
   std::string profile;
   std::uint64_t opened_at_ms{0U};

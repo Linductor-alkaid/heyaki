@@ -205,10 +205,14 @@ struct RpcCallOptions {
 // failures like permission_denied and outcome_unknown) arrive as successful
 // Results carrying `status`; a failed Result means the call never started
 // (local admission rejection with a deterministic outcome).
+// `request_id` (M9-03) echoes the operation's wire id so completions are
+// self-correlating — essential when a session loss finalizes many pending
+// calls with outcome_unknown at once; the id is random and non-secret.
 struct RpcCallOutcome {
   StableStatus status{StableStatus::unspecified};
   std::string safe_detail;
   std::vector<std::byte> payload;
+  RequestId request_id;
 };
 
 // Counters for one RPC service (M6-07..M6-12): every rejection before the

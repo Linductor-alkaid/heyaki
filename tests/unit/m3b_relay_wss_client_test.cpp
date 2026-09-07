@@ -1344,12 +1344,15 @@ TEST(M3BRelayWssClientTest, NodeReconnectsWithBoundedBackoffAfterRelayOutage) {
     // M9-01: every dead-port cycle is one registration attempt that failed;
     // none can succeed while nothing listens on the port. A cycle may be
     // in flight when the snapshot is read, so attempts >= failures.
+    // M9-03: each cycle stamps a wall-clock anchor (the device-side half of
+    // the device/relay log join; the relay side logs device + tenant).
     const auto relay = node.value_if()->snapshot().relay;
     EXPECT_GE(relay.registration_attempts, 2U);
     EXPECT_GE(relay.registration_attempts, relay.registration_failures);
     EXPECT_GE(relay.registration_failures, 1U);
     EXPECT_EQ(relay.registration_successes, 0U);
     EXPECT_EQ(relay.lease_refresh_failures, 0U);
+    EXPECT_GT(relay.registration_started_unix_milliseconds, 0U);
   }
   const auto degraded = node.value_if()->snapshot().relay;
   EXPECT_GE(degraded.backoff.count(), 100);
@@ -1368,6 +1371,9 @@ TEST(M3BRelayWssClientTest, NodeReconnectsWithBoundedBackoffAfterRelayOutage) {
     const auto relay = node.value_if()->snapshot().relay;
     EXPECT_GT(relay.registration_attempts, relay.registration_failures);
     EXPECT_GE(relay.registration_successes, 1U);
+    // The successful cycle started no earlier than the dead-port one.
+    EXPECT_GE(relay.registration_started_unix_milliseconds,
+              degraded.registration_started_unix_milliseconds);
   }
   EXPECT_TRUE(node.value_if()->shutdown().stopped);
   EXPECT_TRUE(server.value_if()->shutdown().stopped);
@@ -1461,6 +1467,7 @@ TEST(M3BRelayWssClientTest, NodeReconnectsAfterRelayRestart) {
     EXPECT_GE(relay.registration_attempts, 1U);
     EXPECT_GE(relay.registration_successes, 1U);
     EXPECT_EQ(relay.registration_failures, 0U);
+    EXPECT_GT(relay.registration_started_unix_milliseconds, 0U);
   }
   ASSERT_TRUE(wait_until(
       [&] {

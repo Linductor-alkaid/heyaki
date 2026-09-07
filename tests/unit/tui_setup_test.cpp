@@ -188,6 +188,12 @@ TEST(TuiDeviceViewTest, RendersEndpointSourcesAndSessionDiagnostics) {
   EXPECT_NE(rendered.find("peer=" + to_string(peer.device_id)), std::string::npos);
   EXPECT_NE(rendered.find("operation=" + to_string(OperationId{operation_bytes})),
             std::string::npos);
+  // M9-03 correlation ids: the signaling request id joins relay signaling
+  // logs; the session id joins session narratives.
+  EXPECT_NE(rendered.find("request=" + to_string(RequestId{request_bytes})),
+            std::string::npos);
+  EXPECT_NE(rendered.find("session=" + to_string(SessionId{session_bytes})),
+            std::string::npos);
 }
 
 }  // namespace

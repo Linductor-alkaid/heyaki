@@ -1118,6 +1118,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     relay_challenge.reset();
     relay_client.reset();
     ++relay_registration_attempts;
+    relay_registration_started_unix_milliseconds = unix_milliseconds_now();
 
     RelayWssClientConfig config;
     config.url = relay_control_url(relay.relay_url);
@@ -1157,6 +1158,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     update_snapshot([&](NodeSnapshot& snapshot) {
       snapshot.relay.state = RelayNodeState::starting;
       snapshot.relay.registration_attempts = relay_registration_attempts;
+      snapshot.relay.registration_started_unix_milliseconds =
+          relay_registration_started_unix_milliseconds;
       snapshot.relay.last_error.reset();
     });
     schedule_relay_poll();
@@ -1355,6 +1358,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
             result.value_if()->enrollment_generation;
         snapshot.relay.lease_generation = relay_lease_generation;
         snapshot.relay.registration_attempts = relay_registration_attempts;
+        snapshot.relay.registration_started_unix_milliseconds =
+            relay_registration_started_unix_milliseconds;
         snapshot.relay.registration_successes = relay_registration_successes;
         snapshot.relay.registration_failures = relay_registration_failures;
         snapshot.relay.last_error.reset();
@@ -1483,6 +1488,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       update_snapshot([&](NodeSnapshot& snapshot) {
         snapshot.relay.state = RelayNodeState::failed;
         snapshot.relay.registration_attempts = relay_registration_attempts;
+        snapshot.relay.registration_started_unix_milliseconds =
+            relay_registration_started_unix_milliseconds;
         snapshot.relay.registration_successes = relay_registration_successes;
         snapshot.relay.registration_failures = relay_registration_failures;
         snapshot.relay.lease_refresh_failures = relay_lease_refresh_failures;
@@ -1496,6 +1503,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     update_snapshot([&](NodeSnapshot& snapshot) {
       snapshot.relay.state = RelayNodeState::degraded;
       snapshot.relay.registration_attempts = relay_registration_attempts;
+      snapshot.relay.registration_started_unix_milliseconds =
+          relay_registration_started_unix_milliseconds;
       snapshot.relay.registration_successes = relay_registration_successes;
       snapshot.relay.registration_failures = relay_registration_failures;
       snapshot.relay.lease_refresh_failures = relay_lease_refresh_failures;
@@ -3448,6 +3457,29 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     }
   }
 
+  static void pairing_audit_sink(void* context, const PairingAuditEvent& event) {
+    // evaluate/accept_grant fire from session callbacks on the node strand,
+    // but revoke/rotate are invoked on the public API caller's thread, so the
+    // ring append is always posted onto the strand (the shell audit sink only
+    // ever runs on the strand and can append in place).
+    auto& impl = *static_cast<Node::Impl*>(context);
+    auto weak = impl.weak_from_this();
+    PairingAuditEvent posted = event;
+    try {
+      boost::asio::post(impl.strand, [weak, posted] {
+        if (auto self = weak.lock()) {
+          constexpr std::size_t kPairingAuditCapacity = 256U;
+          self->pairing_audit_log.push_back(posted);
+          while (self->pairing_audit_log.size() > kPairingAuditCapacity) {
+            self->pairing_audit_log.pop_front();
+          }
+        }
+      });
+    } catch (...) {
+      // Posting failed (shutdown); the audit funnel counters still ran.
+    }
+  }
+
   // Attaches the message and RPC services to an authorized session. The
   // scope check consults the session's effective scopes live, so a grant
   // adjudicated at upgrade time governs every later frame.
@@ -3617,7 +3649,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
               queue.pop_front();
               if (evicted.completion) {
                 evicted.completion(peer, Result<RpcCallOutcome>::success(RpcCallOutcome{
-                    StableStatus::outcome_unknown, "retry_queue_capacity", {}}));
+                    StableStatus::outcome_unknown, "retry_queue_capacity", {},
+                    evicted.request.request_id}));
               }
             }
             queue.push_back(std::move(retryable));
@@ -3626,7 +3659,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
           for (auto& retryable : retryables) {
             if (retryable.completion) {
               retryable.completion(peer, Result<RpcCallOutcome>::success(RpcCallOutcome{
-                  StableStatus::outcome_unknown, "retry_aborted_shutdown", {}}));
+                  StableStatus::outcome_unknown, "retry_aborted_shutdown", {},
+                  retryable.request.request_id}));
             }
           }
         }
@@ -3984,7 +4018,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
             entry->completion(queue_entry->first, Result<RpcCallOutcome>::success(
                                                      RpcCallOutcome{
                                                          StableStatus::outcome_unknown,
-                                                         "retry_deadline_expired", {}}));
+                                                         "retry_deadline_expired", {},
+                                                         entry->request.request_id}));
           }
           entry = queue.erase(entry);
         } else {
@@ -5776,17 +5811,19 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       for (auto& retryable : service->take_retryable_calls()) {
         if (retryable.completion) {
           retryable.completion(peer, Result<RpcCallOutcome>::success(
-              RpcCallOutcome{StableStatus::outcome_unknown, "retry_aborted_shutdown", {}}));
+              RpcCallOutcome{StableStatus::outcome_unknown, "retry_aborted_shutdown", {},
+                             retryable.request.request_id}));
         }
       }
     }
     rpc_services.clear();
-    for (auto& [peer, queue] : rpc_retry_queue) {
+    for (const auto& [peer, queue] : rpc_retry_queue) {
       (void)peer;
       for (auto& retryable : queue) {
         if (retryable.completion) {
           retryable.completion(peer, Result<RpcCallOutcome>::success(
-              RpcCallOutcome{StableStatus::outcome_unknown, "retry_aborted_shutdown", {}}));
+              RpcCallOutcome{StableStatus::outcome_unknown, "retry_aborted_shutdown", {},
+                             retryable.request.request_id}));
         }
       }
     }
@@ -5923,6 +5960,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   std::uint64_t relay_heartbeats_missed{};
   // M9-01 registration lifecycle counters (see RelayNodeSnapshot).
   std::uint64_t relay_registration_attempts{};
+  std::uint64_t relay_registration_started_unix_milliseconds{};
   std::uint64_t relay_registration_successes{};
   std::uint64_t relay_registration_failures{};
   std::uint64_t relay_lease_refresh_failures{};
@@ -5986,6 +6024,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   std::shared_ptr<ShellPtyCoordinator> shell_pty{std::make_shared<ShellPtyCoordinator>()};
   NodeShellEventObserver shell_event_observer;
   std::deque<ShellAuditRecord> shell_audit_log;
+  // Bounded pairing audit history (M9-03); events carry the wire pairing
+  // RequestId and GrantId as correlation ids, never the password.
+  std::deque<PairingAuditEvent> pairing_audit_log;
   std::map<DeviceEndpointKey, std::shared_ptr<MessageService>> message_services;
   std::map<DeviceEndpointKey, std::shared_ptr<RpcService>> rpc_services;
   std::map<DeviceEndpointKey, std::deque<RpcService::RetryableCall>> rpc_retry_queue;
@@ -6156,7 +6197,11 @@ Result<Node> Node::create(NodeConfig config) {
                            : std::chrono::milliseconds{60000},
         .failure_table_capacity = 256U,
         .wall_clock = unix_milliseconds_now,
-        .audit_sink = nullptr};
+        .audit_sink = [impl_raw = impl.get()](const PairingAuditEvent& event) {
+          // The service is owned by this Impl, so the raw context outlives
+          // every funnel call.
+          Node::Impl::pairing_audit_sink(impl_raw, event);
+        }};
     impl->pairing_service = std::make_unique<PairingService>(std::move(pairing_config));
   }
   // M7 service configuration: zero values keep the service defaults; roots
@@ -7062,6 +7107,17 @@ std::vector<ShellAuditRecord> Node::shell_audit_records() const {
   std::vector<ShellAuditRecord> records;
   impl_->run_on_strandAndWait(
       [&](Impl& impl) { records.assign(impl.shell_audit_log.begin(), impl.shell_audit_log.end()); });
+  return records;
+}
+
+std::vector<PairingAuditEvent> Node::pairing_audit_records() const {
+  if (!impl_) {
+    return {};
+  }
+  std::vector<PairingAuditEvent> records;
+  impl_->run_on_strandAndWait([&](Impl& impl) {
+    records.assign(impl.pairing_audit_log.begin(), impl.pairing_audit_log.end());
+  });
   return records;
 }
 

@@ -28,27 +28,8 @@
 
 namespace heyaki {
 
-enum class PairingAuditKind : std::uint8_t {
-  attempt,
-  denied_password,
-  denied_policy,
-  denied_backoff,
-  granted,
-  grant_accepted,
-  grant_rejected,
-  grant_revoked,
-  password_rotated,
-  grants_revoked,
-};
-
-// Structured audit record; never contains the password, verifier, or grant
-// signature bytes.
-struct PairingAuditEvent {
-  PairingAuditKind kind{PairingAuditKind::attempt};
-  DeviceId peer;
-  std::uint64_t unix_milliseconds{};
-  const char* detail{""};
-};
+// Pairing audit kinds and the correlation-carrying PairingAuditEvent live in
+// the public pairing protocol header (Node exposes the audit history, M9-03).
 
 // Counters mirrored from the audit funnel (M9-01): every audit event bumps
 // exactly one counter regardless of whether an audit sink is configured, so
@@ -137,7 +118,9 @@ class PairingService {
   };
 
   [[nodiscard]] std::uint64_t now() const;
-  void audit(PairingAuditKind kind, const DeviceId& peer, const char* detail);
+  void audit(PairingAuditKind kind, const DeviceId& peer, const char* detail,
+             const RequestId* request_id = nullptr,
+             const GrantId* grant_id = nullptr);
   [[nodiscard]] bool backoff_blocks(const DeviceId& peer, std::uint64_t now_value) const;
   void record_failure(const DeviceId& peer, std::uint64_t now_value);
   void clear_failures(const DeviceId& peer);

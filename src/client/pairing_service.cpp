@@ -47,7 +47,8 @@ std::uint64_t PairingService::now() const {
 }
 
 void PairingService::audit(PairingAuditKind kind, const DeviceId& peer,
-                           const char* detail) {
+                           const char* detail, const RequestId* request_id,
+                           const GrantId* grant_id) {
   // Metrics counters increment even without an audit sink (M9-01): the
   // NodeMetrics pairing totals must not depend on observer configuration.
   switch (kind) {
@@ -83,10 +84,20 @@ void PairingService::audit(PairingAuditKind kind, const DeviceId& peer,
       break;
   }
   if (!config_.audit_sink) return;
-  config_.audit_sink(PairingAuditEvent{.kind = kind,
-                                       .peer = peer,
-                                       .unix_milliseconds = now(),
-                                       .detail = detail});
+  // Member-wise build: the pinned release compilers reject designated
+  // initializers that leave trailing members unset.
+  PairingAuditEvent event;
+  event.kind = kind;
+  event.peer = peer;
+  event.unix_milliseconds = now();
+  event.detail = detail;
+  if (request_id != nullptr) {
+    event.request_id = *request_id;
+  }
+  if (grant_id != nullptr) {
+    event.grant_id = *grant_id;
+  }
+  config_.audit_sink(event);
 }
 
 bool PairingService::backoff_blocks(const DeviceId& peer,
@@ -147,7 +158,7 @@ Result<PairingResultBody> PairingService::evaluate(
   result.request_id = request.request_id;
   auto deny = [&](StableStatus status, PairingAuditKind kind,
                   const char* audit_detail) -> Result<PairingResultBody> {
-    audit(kind, peer_device, audit_detail);
+    audit(kind, peer_device, audit_detail, &request.request_id);
     result.status = status;
     return Result<PairingResultBody>::success(result);
   };
@@ -166,7 +177,8 @@ Result<PairingResultBody> PairingService::evaluate(
     return deny(StableStatus::resource_exhausted, PairingAuditKind::denied_backoff,
                 "pairing_backoff");
   }
-  audit(PairingAuditKind::attempt, peer_device, "pairing_attempt");
+  audit(PairingAuditKind::attempt, peer_device, "pairing_attempt",
+        &request.request_id);
 
   auto verifier = config_.profile->password_verifier();
   if (!verifier) {
@@ -230,7 +242,8 @@ Result<PairingResultBody> PairingService::evaluate(
   if (!persisted) {
     return Result<PairingResultBody>::failure(*persisted.error_if());
   }
-  audit(PairingAuditKind::granted, peer_device, "grant_issued");
+  audit(PairingAuditKind::granted, peer_device, "grant_issued",
+        &request.request_id, &grant.grant_id);
   result.status = StableStatus::ok;
   result.grant = std::move(grant);
   return Result<PairingResultBody>::success(std::move(result));
@@ -246,18 +259,21 @@ Result<void> PairingService::accept_grant(
         pairing_service_error(ErrorCode::configuration, "profile_missing"));
   }
   if (!result.grant.has_value()) {
-    audit(PairingAuditKind::grant_rejected, issuer_device, "result_without_grant");
+    audit(PairingAuditKind::grant_rejected, issuer_device, "result_without_grant",
+          &result.request_id);
     return Result<void>::failure(
         pairing_service_error(ErrorCode::protocol, "result_without_grant"));
   }
   const auto& grant = *result.grant;
   if (result.request_id != pending_request_id || grant.nonce != pending_nonce) {
-    audit(PairingAuditKind::grant_rejected, issuer_device, "grant_binding_mismatch");
+    audit(PairingAuditKind::grant_rejected, issuer_device, "grant_binding_mismatch",
+          &result.request_id, &grant.grant_id);
     return Result<void>::failure(
         pairing_service_error(ErrorCode::authentication, "grant_binding_mismatch"));
   }
   if (grant.issuer != issuer_device || grant.subject != config_.profile->device_id()) {
-    audit(PairingAuditKind::grant_rejected, issuer_device, "grant_identity_mismatch");
+    audit(PairingAuditKind::grant_rejected, issuer_device, "grant_identity_mismatch",
+          &result.request_id, &grant.grant_id);
     return Result<void>::failure(
         pairing_service_error(ErrorCode::authentication, "grant_identity_mismatch"));
   }
@@ -268,14 +284,16 @@ Result<void> PairingService::accept_grant(
       std::span<const std::byte>{issuer_public_key.data(), issuer_public_key.size()},
       now());
   if (!verified) {
-    audit(PairingAuditKind::grant_rejected, issuer_device, "grant_signature_invalid");
+    audit(PairingAuditKind::grant_rejected, issuer_device, "grant_signature_invalid",
+          &result.request_id, &grant.grant_id);
     return Result<void>::failure(*verified.error_if());
   }
   // A grant may only carry scopes the initiator actually requested.
   for (const auto& scope : grant.granted_scopes) {
     if (std::find(requested_scopes.begin(), requested_scopes.end(), scope) ==
         requested_scopes.end()) {
-      audit(PairingAuditKind::grant_rejected, issuer_device, "grant_scope_overreach");
+      audit(PairingAuditKind::grant_rejected, issuer_device, "grant_scope_overreach",
+            &result.request_id, &grant.grant_id);
       return Result<void>::failure(
           pairing_service_error(ErrorCode::authentication, "grant_scope_overreach"));
     }
@@ -285,7 +303,8 @@ Result<void> PairingService::accept_grant(
   if (!persisted) {
     return Result<void>::failure(*persisted.error_if());
   }
-  audit(PairingAuditKind::grant_accepted, issuer_device, "grant_stored");
+  audit(PairingAuditKind::grant_accepted, issuer_device, "grant_stored",
+        &result.request_id, &grant.grant_id);
   return Result<void>::success();
 }
 
@@ -329,7 +348,8 @@ Result<void> PairingService::revoke_grant(const GrantId& grant_id) {
   }
   auto revoked = config_.profile->revoke_trust_grant(grant_id, now());
   if (!revoked) return revoked;
-  audit(PairingAuditKind::grant_revoked, DeviceId{}, "grant_revoked");
+  audit(PairingAuditKind::grant_revoked, DeviceId{}, "grant_revoked", nullptr,
+        &grant_id);
   return Result<void>::success();
 }
 

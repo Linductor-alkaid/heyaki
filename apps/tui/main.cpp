@@ -309,9 +309,15 @@ void render_relay(const heyaki::RelayNodeSnapshot& relay) {
             << "  tenant=" << relay.tenant
             << "  generation=" << relay.enrollment_generation
             << "  lease=" << relay.lease_generation
+            << "  cycle=" << relay.registration_attempts
             << "  heartbeat=" << relay.heartbeats_sent
             << "  missed=" << relay.heartbeats_missed
             << "  reconnect=" << relay.reconnect_count;
+  if (relay.registration_started_unix_milliseconds > 0U) {
+    // M9-03 registration correlation: wall-clock anchor of the current
+    // connect + login cycle, matching relay log timestamps.
+    std::cout << "  since=" << relay.registration_started_unix_milliseconds;
+  }
   if (relay.backoff.count() > 0) {
     std::cout << "  backoff=" << relay.backoff.count() << "ms";
   }
@@ -959,6 +965,7 @@ void run_rpc_view(const heyaki::DeviceEndpointKey& peer, heyaki::Node& node,
         continue;
       }
       pending = *started.value_if();
+      std::cout << "op " << heyaki::to_string(*started.value_if()) << "\n";
       auto outcome = wait_rpc_result(state, deadline);
       pending.reset();
       if (!outcome) {
