@@ -475,6 +475,23 @@ set_tests_properties(heyaki_m9_correlation PROPERTIES
   RESOURCE_LOCK heyaki_m3a_profile_state
   TIMEOUT 180)
 
+add_executable(heyaki_m9_slo_rules_tests unit/m9_slo_rules_test.cpp)
+heyaki_enable_executor_exception_adapter_source(unit/m9_slo_rules_test.cpp)
+target_link_libraries(heyaki_m9_slo_rules_tests PRIVATE
+  heyaki::client
+  heyaki::relay
+  executor::executor
+  GTest::gtest_main)
+target_compile_definitions(heyaki_m9_slo_rules_tests PRIVATE
+  "HEYAKI_M9_OBSERVABILITY_DIR=\"${PROJECT_SOURCE_DIR}/deploy/observability\""
+  "HEYAKI_M9_RUNBOOK_FILE=\"${PROJECT_SOURCE_DIR}/docs/operations/runbook.md\"")
+heyaki_configure_target(heyaki_m9_slo_rules_tests)
+heyaki_add_runtime_test(
+  heyaki_m9_slo_rules heyaki_m9_slo_rules_tests
+  "unit;metrics;m9;observability;slo")
+set_tests_properties(heyaki_m9_slo_rules PROPERTIES
+  TIMEOUT 60)
+
 add_executable(heyaki_m8_service_tests
   unit/m8_codec_test.cpp
   unit/m8_shell_test.cpp

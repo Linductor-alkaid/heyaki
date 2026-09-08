@@ -1,0 +1,31 @@
+# Heyaki Prometheus scrape configuration (M9-04).
+#
+# Merge this into the Prometheus `scrape_configs` of the monitoring stack.
+# Only the relay runs a resident /metrics endpoint today; see
+# deploy/observability/README.md for how device-side metrics can be ingested.
+
+scrape_configs:
+  # The relay serves Prometheus text on the same TLS listener as its WSS
+  # control plane. The scraper must trust the relay certificate; Prometheus
+  # performs standard TLS verification (no pinning) against ca_file.
+  - job_name: heyaki-relay
+    scheme: https
+    metrics_path: /metrics          # keep in sync with the relay metrics_path
+    scrape_interval: 30s
+    tls_config:
+      ca_file: /etc/prometheus/heyaki-relay-ca.pem
+      # server_name: heyaki-relay.internal   # set when scraping via a proxy/vip
+    static_configs:
+      - targets:
+          - relay.example.com:8443
+
+  # Device metrics (heyaki_node_*, heyaki_pairing_*, ...) have no resident
+  # HTTP endpoint: devices live behind NAT and the TUI `metrics` command plus
+  # Node::metrics() are local diagnostics surfaces. For infrastructure-hosted
+  # devices, export the text periodically into node_exporter's textfile
+  # collector directory, e.g. from a small service that calls the public API:
+  #
+  #   heyaki-device-export /var/lib/node_exporter/heyaki.prom
+  #
+  # and let the existing node job pick it up. Until such series exist the
+  # device-side recording rules and alerts stay empty and dormant by design.

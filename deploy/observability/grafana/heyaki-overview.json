@@ -1,0 +1,392 @@
+{
+  "title": "Heyaki Overview",
+  "uid": "heyaki-overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "prometheus",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0
+      },
+      {
+        "name": "relay",
+        "label": "Relay instance",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+        "query": "label_values(heyaki_relay_state, instance)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": {},
+        "hide": 0
+      },
+      {
+        "name": "device",
+        "label": "Device instance",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+        "query": "label_values(heyaki_node_local_initialized, instance)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": {},
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Relay up",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "targets": [
+        { "refId": "A", "expr": "up{job=\"heyaki-relay\"}", "legendFormat": "{{instance}}" }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Relay state",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "stopped", "color": "red" },
+                "1": { "text": "starting", "color": "orange" },
+                "2": { "text": "running", "color": "green" },
+                "3": { "text": "draining", "color": "orange" },
+                "4": { "text": "failed", "color": "red" }
+              }
+            }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [] }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "refId": "A", "expr": "heyaki_relay_state", "legendFormat": "{{instance}}" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Relay sessions and leases",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "targets": [
+        { "refId": "A", "expr": "heyaki_relay_active_sessions", "legendFormat": "active sessions {{instance}}" },
+        { "refId": "B", "expr": "heyaki_relay_connection_capacity", "legendFormat": "capacity {{instance}}" },
+        { "refId": "C", "expr": "heyaki_relay_lease_entries", "legendFormat": "leases {{instance}}" },
+        { "refId": "D", "expr": "heyaki_relay_lease_peak_entries", "legendFormat": "peak leases {{instance}}" }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Relay accepts and scrapes",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "rate(heyaki_relay_tcp_accepted_total[5m])", "legendFormat": "tcp {{instance}}" },
+        { "refId": "B", "expr": "rate(heyaki_relay_websocket_accepted_total[5m])", "legendFormat": "websocket {{instance}}" },
+        { "refId": "C", "expr": "rate(heyaki_relay_metrics_scrapes_total[5m])", "legendFormat": "metrics scrapes {{instance}}" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Relay login outcomes",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "rate(heyaki_relay_logins_completed_total[5m])", "legendFormat": "completed {{instance}}" },
+        { "refId": "B", "expr": "rate(heyaki_relay_login_audit_failed_total[5m])", "legendFormat": "failed {{instance}}" },
+        { "refId": "C", "expr": "rate(heyaki_relay_login_device_rejected_total[5m])", "legendFormat": "device rejected {{instance}}" },
+        { "refId": "D", "expr": "rate(heyaki_relay_login_validation_rejected_total[5m])", "legendFormat": "validation rejected {{instance}}" }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Relay login failure ratio",
+      "gridPos": { "x": 0, "y": 16, "w": 6, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "heyaki:slo:relay_login_failure_ratio5m", "legendFormat": "{{instance}}" }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Relay handshake failure ratio",
+      "gridPos": { "x": 6, "y": 16, "w": 6, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "heyaki:slo:relay_handshake_failure_ratio5m", "legendFormat": "{{instance}}" }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Relay signaling decisions",
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "rate(heyaki_relay_signaling_forwarded_total[5m])", "legendFormat": "forwarded {{instance}}" },
+        { "refId": "B", "expr": "rate(heyaki_relay_signaling_rejected_total[5m])", "legendFormat": "rejected {{instance}}" },
+        { "refId": "C", "expr": "rate(heyaki_relay_signaling_backpressure_dropped_total[5m])", "legendFormat": "backpressure dropped {{instance}}" }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Relay capacity and policy rejects",
+      "gridPos": { "x": 0, "y": 24, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "rate(heyaki_relay_capacity_rejected_total[5m])", "legendFormat": "capacity {{instance}}" },
+        { "refId": "B", "expr": "rate(heyaki_relay_control_rejected_total[5m])", "legendFormat": "control {{instance}}" },
+        { "refId": "C", "expr": "rate(heyaki_relay_lease_capacity_rejected_total[5m])", "legendFormat": "lease capacity {{instance}}" },
+        { "refId": "D", "expr": "rate(heyaki_relay_handshake_failed_total[5m])", "legendFormat": "handshake failed {{instance}}" },
+        { "refId": "E", "expr": "rate(heyaki_relay_handshake_timeouts_total[5m])", "legendFormat": "handshake timeouts {{instance}}" }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Relay rate-limit rejections by scope",
+      "gridPos": { "x": 12, "y": 24, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "rate(heyaki_relay_rate_limit_connection_rejected_total[5m])", "legendFormat": "connection {{instance}}" },
+        { "refId": "B", "expr": "rate(heyaki_relay_rate_limit_request_rejected_total[5m])", "legendFormat": "request {{instance}}" },
+        { "refId": "C", "expr": "rate(heyaki_relay_rate_limit_tenant_rejected_total[5m])", "legendFormat": "tenant {{instance}}" },
+        { "refId": "D", "expr": "rate(heyaki_relay_rate_limit_ip_rejected_total[5m])", "legendFormat": "ip {{instance}}" }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Device relay registration",
+      "gridPos": { "x": 0, "y": 32, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "description": "Device-side series; requires device metrics ingestion.",
+      "targets": [
+        { "refId": "A", "expr": "increase(heyaki_node_relay_registration_attempts_total[15m])", "legendFormat": "attempts {{instance}}" },
+        { "refId": "B", "expr": "increase(heyaki_node_relay_registration_successes_total[15m])", "legendFormat": "successes {{instance}}" },
+        { "refId": "C", "expr": "increase(heyaki_node_relay_registration_failures_total[15m])", "legendFormat": "failures {{instance}}" },
+        { "refId": "D", "expr": "increase(heyaki_node_relay_reconnects_total[15m])", "legendFormat": "reconnects {{instance}}" }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Device registration failure ratio",
+      "gridPos": { "x": 8, "y": 32, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "description": "Device-side series; requires device metrics ingestion.",
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "heyaki:slo:node_registration_failure_ratio5m", "legendFormat": "{{instance}}" }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Lease health",
+      "gridPos": { "x": 16, "y": 32, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "description": "Device refresh failures plus relay-side expiry/rejection.",
+      "targets": [
+        { "refId": "A", "expr": "increase(heyaki_node_relay_lease_refresh_failures_total[10m])", "legendFormat": "refresh failures {{instance}}" },
+        { "refId": "B", "expr": "increase(heyaki_node_relay_heartbeats_missed_total[10m])", "legendFormat": "missed heartbeats {{instance}}" },
+        { "refId": "C", "expr": "rate(heyaki_relay_lease_expired_total[5m])", "legendFormat": "relay expired {{instance}}" },
+        { "refId": "D", "expr": "rate(heyaki_relay_lease_per_device_rejected_total[5m])", "legendFormat": "relay per-device rejected {{instance}}" }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Data path mix (direct vs TURN)",
+      "gridPos": { "x": 0, "y": 40, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "description": "Device-side series; requires device metrics ingestion.",
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "heyaki:slo:node_direct_path_ratio5m", "legendFormat": "direct {{instance}}" },
+        { "refId": "B", "expr": "heyaki:slo:node_turn_path_ratio5m", "legendFormat": "turn {{instance}}" }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Device connect duration (average)",
+      "gridPos": { "x": 8, "y": 40, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "description": "Device-side series; requires device metrics ingestion.",
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(heyaki_connectivity_connect_duration_milliseconds_sum[10m]) / clamp_min(rate(heyaki_connectivity_connect_duration_samples[10m]), 1e-9)",
+          "legendFormat": "avg {{instance}}"
+        },
+        { "refId": "B", "expr": "rate(heyaki_connectivity_connect_duration_milliseconds_max[10m])", "legendFormat": "max {{instance}}" }
+      ]
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Device signaling routes",
+      "gridPos": { "x": 16, "y": 40, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "description": "Device-side series; requires device metrics ingestion.",
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "rate(heyaki_connectivity_signaling_route_selected_lan_total[5m])", "legendFormat": "lan selected {{instance}}" },
+        { "refId": "B", "expr": "rate(heyaki_connectivity_signaling_route_selected_relay_total[5m])", "legendFormat": "relay selected {{instance}}" },
+        { "refId": "C", "expr": "rate(heyaki_connectivity_signaling_route_fallbacks_total[5m])", "legendFormat": "fallbacks {{instance}}" }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Device LAN readiness",
+      "gridPos": { "x": 0, "y": 48, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "description": "lan_state: 0 disabled, 1 starting, 2 ready, 3 degraded, 4 failed, 5 stopped.",
+      "targets": [
+        { "refId": "A", "expr": "heyaki_node_lan_state", "legendFormat": "lan state {{instance}}" },
+        { "refId": "B", "expr": "heyaki_node_tls_listener_ready", "legendFormat": "tls listener ready {{instance}}" },
+        { "refId": "C", "expr": "heyaki_node_interfaces_joined", "legendFormat": "joined {{instance}}" },
+        { "refId": "D", "expr": "heyaki_node_interfaces_multicast_verified", "legendFormat": "verified {{instance}}" },
+        { "refId": "E", "expr": "heyaki_node_directory_entries", "legendFormat": "directory entries {{instance}}" }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Device LAN presence rejects",
+      "gridPos": { "x": 8, "y": 48, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "description": "Device-side series; requires device metrics ingestion.",
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "rate(heyaki_node_tls_hello_rejected_total[5m])", "legendFormat": "hello rejected {{instance}}" },
+        { "refId": "B", "expr": "rate(heyaki_node_tls_handshake_failed_total[5m])", "legendFormat": "handshake failed {{instance}}" },
+        { "refId": "C", "expr": "rate(heyaki_node_datagrams_rejected_total[5m])", "legendFormat": "datagrams rejected {{instance}}" },
+        { "refId": "D", "expr": "rate(heyaki_node_directory_replay_rejected_total[5m])", "legendFormat": "directory replay {{instance}}" }
+      ]
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Device pairing outcomes",
+      "gridPos": { "x": 16, "y": 48, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "description": "Device-side series; requires device metrics ingestion.",
+      "targets": [
+        { "refId": "A", "expr": "increase(heyaki_pairing_attempts_total[15m])", "legendFormat": "attempts {{instance}}" },
+        { "refId": "B", "expr": "increase(heyaki_pairing_granted_total[15m])", "legendFormat": "granted {{instance}}" },
+        { "refId": "C", "expr": "increase(heyaki_pairing_denied_password_total[15m])", "legendFormat": "wrong password {{instance}}" },
+        { "refId": "D", "expr": "increase(heyaki_pairing_denied_backoff_total[15m])", "legendFormat": "backoff {{instance}}" }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Device queue rejections",
+      "gridPos": { "x": 0, "y": 56, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "description": "Device-side series; requires device metrics ingestion.",
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "rate(heyaki_executor_submit_rejected_total[5m])", "legendFormat": "executor submit {{instance}}" },
+        { "refId": "B", "expr": "rate(heyaki_channel_rejected_frames_total[5m])", "legendFormat": "channel rejected {{instance}}" },
+        { "refId": "C", "expr": "rate(heyaki_channel_dropped_frames_total[5m])", "legendFormat": "channel dropped {{instance}}" },
+        { "refId": "D", "expr": "rate(heyaki_event_subscriber_drops_total[5m])", "legendFormat": "event drops {{instance}}" },
+        { "refId": "E", "expr": "rate(heyaki_runtime_callback_queue_dropped_total[5m])", "legendFormat": "callback dropped {{instance}}" }
+      ]
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Device RPC overload",
+      "gridPos": { "x": 8, "y": 56, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "description": "Device-side series; requires device metrics ingestion.",
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "heyaki:slo:node_rpc_admission_reject_ratio5m", "legendFormat": "reject ratio {{instance}}" },
+        { "refId": "B", "expr": "rate(heyaki_rpc_calls_admission_rejected_total[5m])", "legendFormat": "admission rejected {{instance}}" },
+        { "refId": "C", "expr": "rate(heyaki_rpc_concurrency_rejected_total[5m])", "legendFormat": "concurrency rejected {{instance}}" },
+        { "refId": "D", "expr": "rate(heyaki_rpc_handler_deadline_exceeded_total[5m])", "legendFormat": "handler deadline {{instance}}" }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Device file integrity",
+      "gridPos": { "x": 16, "y": 56, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "description": "Device-side series; requires device metrics ingestion.",
+      "targets": [
+        { "refId": "A", "expr": "increase(heyaki_file_chunk_hash_failures_total[1h])", "legendFormat": "hash failures {{instance}}" },
+        { "refId": "B", "expr": "increase(heyaki_file_commit_failures_total[1h])", "legendFormat": "commit failures {{instance}}" },
+        { "refId": "C", "expr": "increase(heyaki_file_write_failures_total[1h])", "legendFormat": "write failures {{instance}}" },
+        { "refId": "D", "expr": "increase(heyaki_file_read_failures_total[1h])", "legendFormat": "read failures {{instance}}" }
+      ]
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Device worker failures",
+      "gridPos": { "x": 0, "y": 64, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "description": "Device-side series; requires device metrics ingestion.",
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "rate(heyaki_executor_task_exceptions_total[5m])", "legendFormat": "executor exceptions {{instance}}" },
+        { "refId": "B", "expr": "rate(heyaki_runtime_handler_exceptions_total[5m])", "legendFormat": "runtime handler {{instance}}" },
+        { "refId": "C", "expr": "rate(heyaki_rpc_handler_exceptions_total[5m])", "legendFormat": "rpc handler {{instance}}" },
+        { "refId": "D", "expr": "rate(heyaki_message_handler_exceptions_total[5m])", "legendFormat": "message handler {{instance}}" },
+        { "refId": "E", "expr": "rate(heyaki_event_handler_exceptions_total[5m])", "legendFormat": "event handler {{instance}}" },
+        { "refId": "F", "expr": "rate(heyaki_shell_spawn_failures_total[5m])", "legendFormat": "shell spawn {{instance}}" }
+      ]
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "Relay log sampling health",
+      "gridPos": { "x": 12, "y": 64, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "description": "Emitted vs sampled-out structured log events; a collapse of emitted events with steady traffic suggests misconfiguration.",
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "rate(heyaki_relay_log_events_emitted_total[5m])", "legendFormat": "emitted {{instance}}" },
+        { "refId": "B", "expr": "rate(heyaki_relay_log_events_sampled_out_total[5m])", "legendFormat": "sampled out {{instance}}" }
+      ]
+    }
+  ]
+}

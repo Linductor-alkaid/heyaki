@@ -1,6 +1,6 @@
 # M9：生产加固与 v1 发布
 
-> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3 与 M9-03 Round 4 已交付，M9-04 起未开始，见文末实施记录）
+> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4 与 M9-04/05 Round 5 已交付，M9-06 起未开始，见文末实施记录）
 > - 所属计划：[Heyaki MVP 至 v1 实施 TODO 计划](heyaki-implementation-plan.md)
 > - 前置：M8 | 建议发布点：v1.0
 
@@ -9,8 +9,8 @@
 - [ ] `M9-01` 设备端导出架构第 13.2 节全部 LAN/relay/协议指标，并与 executor failure/status、comm stats 建立明确关联字段。（Round 1 交付 2026-09-05：`NodeMetrics` 统一聚合 + `Node::metrics()` 周期发布 + Prometheus 文本导出 `format_node_metrics_prometheus`；新增 pairing 审计计数器与连通性结果/时长计数器；executor 关联字段经内嵌 `RuntimeSnapshot`。Round 2 交付 2026-09-05：relay 注册/租约计数器、信令 winner/fallback 聚合、backend 字节 gauge 周期采样、TUI 队列/渲染诊断与 `metrics` 命令；丢包估计受 pinned libdatachannel API 限制，见实施记录。缺口见实施记录"剩余范围"。）
 - [x] `M9-02` relay 导出 Prometheus 指标、结构化日志、有限审计和可选 trace correlation；高频成功事件采样。（Round 3 交付 2026-09-06：`format_relay_metrics_prometheus` 全量导出 `RelayServerSnapshot` 七个诊断块；同端口 TLS 上的纯 HTTP `GET /metrics` 端点（无 WebSocket upgrade，`metrics_path` 可配置，非 GET 405）；`RelayLogRecord` JSON Lines 结构化日志（16 类事件，失败/安全/生命周期事件全量，心跳/信令转发/查询按 `success_log_period` 采样，0 关闭采样）；登录/注册完成与拒绝携带 device/endpoint/tenant 审计字段（拒绝含声称身份），信令事件携带 `RequestId` 关联字段，metrics instance 标签 = 证书 SHA-256 十六进制与日志流可 join；`heyaki-relay` main 默认把日志打到 stdout。OpenTelemetry 出口属于部署侧桥接，留 M9-04 工具链决策。见实施记录 Round 3。）
 - [x] `M9-03` 为 registration、pairing、connection、session、operation 和 transfer 建立不含机密的 correlation ID。（Round 4 交付 2026-09-08：全部复用既有随机非机密 wire ID，无协议变更——pairing 审计事件携带 wire pairing RequestId + GrantId 并经 `Node::pairing_audit_records()` 暴露有界审计环；RPC 完成事件 `RpcCallOutcome.request_id` 自关联，准入失败 Error 携带 operation ID；shell 审计记录补 `shell_id`；connection/session 的 RequestId/SessionId 进入 TUI 会话视图（request=/session= 行，与 relay 信令日志同 ID 空间）；registration 因 v1 控制协议冻结无 wire ID，以快照墙钟锚点 `registration_started_unix_milliseconds`（TUI `since=`/指标 gauge）+ device+tenant join relay 日志；transfer 级 `TransferId` 在 API/事件/TUI 已全覆盖，本轮核对无缺口。见实施记录 Round 4。）
-- [ ] `M9-04` 定义 SLO dashboard 与告警：multicast/listener readiness、presence/handshake reject、登录失败、租约续期、直连率、TURN allocation、pairing 猜测、队列拒绝、RPC overload、文件 hash 和 worker failure。
-- [ ] `M9-05` 编写运维 runbook：证书/credential 轮换、设备吊销、relay/coturn 重启、数据库备份恢复、磁盘满、过载和版本回滚。
+- [x] `M9-04` 定义 SLO dashboard 与告警：multicast/listener readiness、presence/handshake reject、登录失败、租约续期、直连率、TURN allocation、pairing 猜测、队列拒绝、RPC overload、文件 hash 和 worker failure。（Round 5 交付 2026-09-09：`deploy/observability/` 下 Prometheus recording rules（8 条 `heyaki:slo:*` 比率）+ alert rules（20 条，relay-fleet 与 device 两组，critical/warning 分级）+ Grafana dashboard（24 面板）+ scrape 配置示例与信号映射 README；`tests/unit/m9_slo_rules_test.cpp` 渲染两个导出器并强制规则/面板只引用真实指标族、告警结构完整、runbook 锚点有效。设备侧序列无通路时告警天然静默。OTel 决策：v1 不内建出口，部署侧用 otel-collector 的 Prometheus receiver 桥接。见实施记录 Round 5。）
+- [x] `M9-05` 编写运维 runbook：证书/credential 轮换、设备吊销、relay/coturn 重启、数据库备份恢复、磁盘满、过载和版本回滚。（Round 5 交付 2026-09-09：`docs/operations/runbook.md`——快速参考（CLI/config 键/端点/日志事件/状态枚举）、20 条告警逐条分诊（症状→首要动作→深入诊断）、7 类操作程序（含 relay 叶证书 pin 约束、TURN secret 四代窗口、SQL 级吊销镜像 `revoke_device` 语义、SQLite 回滚 journal 的备份次序、回滚前的 schema 检查）与已知运维缺口清单；告警 runbook_url 锚点由 m9_slo_rules 测试锁定。见实施记录 Round 5。）
 
 ## 可靠性、兼容性与性能
 
@@ -247,6 +247,64 @@ overwrite/stale/lag）。
   `request_id` 日志字段、证书 SHA-256 instance 标签构成同一 join 体系。
 - 无新增线程/队列：审计环投递复用 node strand（asio post，与
   poke_relay_activity 同模式），无 executor ledger 条目。
+
+### Round 5（2026-09-09）：M9-04 SLO dashboard/告警 + M9-05 runbook
+
+交付物：
+
+- `deploy/observability/`（新顶层部署物料目录，与 `deploy/coturn/` 并列）：
+  - `prometheus/heyaki-recording.yml`：8 条 `heyaki:slo:*` recording rules
+    （relay 登录失败/握手失败/信令拒绝比率 + device 注册失败/直连率/TURN
+    占比/pairing 密码拒绝/RPC 准入拒绝比率），比率一律 `clamp_min` 分母防
+    除零，30s 求值。
+  - `prometheus/heyaki-alerts.yml`：20 条告警，`heyaki-relay-slo`（8 条：
+    down/not-running/登录失败率/握手失败率/信令背压/容量/四 scope 限速/
+    租约表）与 `heyaki-node-slo`（12 条：LAN listener 未就绪/multicast 未
+    验证/presence 拒绝/注册失败/租约续期失败/pairing 猜测/队列拒绝/RPC
+    overload/文件完整性/executor 任务异常/worker 失败/TURN 主导）。分级：
+    critical = 可达性、注册塌方、数据完整性、executor 任务损失；warning =
+    退化趋势。比率类告警带流量门控（分母 rate > 0）避免低流量误报。
+  - `prometheus/heyaki-scrape.yml`：relay `/metrics` TLS scrape 示例
+    （job 名 `heyaki-relay` 与 `up` 告警对齐）+ 设备侧 textfile 接入约定。
+  - `grafana/heyaki-overview.json`：24 面板 dashboard（relay 健康/登录/
+    信令/容量/限速/采样健康 + device 注册/租约/路径构成/建连时长/LAN
+    就绪/pairing/队列/RPC/文件/worker），枚举 gauge 的数值映射写入面板
+    映射与描述。
+  - `README.md`：M9-04 枚举的 11 类信号 → 指标族 → 告警 → 面板映射表、
+    数据源边界（relay 常驻端点 vs 设备 opt-in 接入）、OTel 决策（v1 不内
+    建出口，桥接 = otel-collector Prometheus receiver，零代码变更）。
+- `docs/operations/runbook.md`：快速参考（CLI/config 键全集、端点、16 类
+  日志事件、状态枚举、DB schema）、20 条告警逐条分诊、7 类操作程序
+  （relay 证书轮换含 pin 约束、TURN secret 四代窗口、bootstrap token、
+  SQL 级设备吊销（镜像 `revoke_device` 的 generation 递增 + `device_revoked`
+  审计行）、relay/coturn 重启、SQLite 备份恢复（默认 rollback journal →
+  停机复制优先、在线 `.backup` 次之）、磁盘满、过载分层、版本回滚）、
+  已知运维缺口四条。
+- `tests/unit/m9_slo_rules_test.cpp`（4 例）+ tests/CMakeLists 注册
+  （`heyaki_m9_slo_rules_tests`，标签 unit;metrics;m9;observability;slo）：
+  - 渲染 `format_node_metrics_prometheus(NodeMetrics{})` 与
+    `format_relay_metrics_prometheus(RelayServerSnapshot{})`（导出器无条
+    件写全部族，零值渲染即完整面；钉 ≥190/≥95 族防解析漂移）；
+  - 受控格式 YAML 解析器（`- record:`/`- alert:`、单行与 `>`/`>-` 折叠
+    expr、for/severity/summary/runbook_url；折叠终止行回送主循环）；
+  - 断言全部 expr/模板 query 中的 `heyaki_*` token ∈ 导出器族集合、
+    `heyaki:slo:*` ∈ record 名集合（左边界排除 `"`，防 label 值
+    `job="heyaki-relay"` 误报）、告警结构完整、severity 取值合法、
+    runbook_url 锚点经 GFM 规则匹配 runbook 标题集合、dashboard JSON
+    括号配平且 ≥24 面板 ≥60 表达式。
+- 本地以 PyYAML/json 做了真实解析器交叉验证（3 个 YAML + dashboard JSON
+  合法、告警 20/录制 8 与钉死数一致）。
+
+设计说明：
+
+- 设备指标集中采集是部署侧约定而非代码：设备在 NAT 后且架构上无常驻
+  导出端点，dashboard/告警的 device 组查询定义完备、序列出现即生效，
+  无序列时表达式为空、告警天然静默（无需 absent 门控）。
+- 直连率/TURN 占比按"比率 + 趋势告警"设计（阈值随部署基线调整），不设
+  绝对 SLO 数值——网络环境差异使其无普适默认；最终验收数值由 M9-10
+  基准与 M9-11 参数冻结回收。
+- runbook 与告警的联动是可执行契约：重命名 runbook 标题或改告警名都会
+  被 m9_slo_rules 测试拦截，防止文档与告警漂移。
 
 ### 剩余范围（M9-01 完成前）
 

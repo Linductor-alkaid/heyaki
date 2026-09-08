@@ -1,0 +1,97 @@
+# Heyaki SLO recording rules (M9-04).
+#
+# Loads with:
+#   prometheus --rule-file=deploy/observability/prometheus/heyaki-recording.yml
+# or via rule_files in the main Prometheus configuration.
+#
+# Every metric referenced here must exist in the exporter surface
+# (heyaki-relay /metrics endpoint or format_node_metrics_prometheus output);
+# tests/unit/m9_slo_rules_test.cpp enforces this at CI time.
+#
+# Device-side rules (heyaki_node_*) only produce series once device metrics
+# are fed into Prometheus; until then the expressions evaluate to empty and
+# downstream alerts stay dormant by design.
+
+groups:
+  - name: heyaki-slo-relay
+    interval: 30s
+    rules:
+      # Login failures: rejected login attempts over all completed outcomes.
+      - record: heyaki:slo:relay_login_failure_ratio5m
+        expr: >
+          sum by (instance) (rate(heyaki_relay_login_audit_failed_total[5m]))
+          /
+          clamp_min(
+            sum by (instance) (rate(heyaki_relay_logins_completed_total[5m]))
+            + sum by (instance) (rate(heyaki_relay_login_audit_failed_total[5m])),
+            1e-9
+          )
+
+      # Presence/handshake rejects on the relay listener.
+      - record: heyaki:slo:relay_handshake_failure_ratio5m
+        expr: >
+          (
+            sum by (instance) (rate(heyaki_relay_handshake_failed_total[5m]))
+            + sum by (instance) (rate(heyaki_relay_handshake_timeouts_total[5m]))
+          )
+          /
+          clamp_min(sum by (instance) (rate(heyaki_relay_tcp_accepted_total[5m])), 1e-9)
+
+      # Signaling rejection ratio (policy/rate/capacity rejects per decision).
+      - record: heyaki:slo:relay_signaling_reject_ratio5m
+        expr: >
+          sum by (instance) (rate(heyaki_relay_signaling_rejected_total[5m]))
+          /
+          clamp_min(
+            sum by (instance) (rate(heyaki_relay_signaling_forwarded_total[5m]))
+            + sum by (instance) (rate(heyaki_relay_signaling_rejected_total[5m])),
+            1e-9
+          )
+
+  - name: heyaki-slo-node
+    interval: 30s
+    rules:
+      # Direct-connect rate: host/srflx data paths over authenticated sessions.
+      - record: heyaki:slo:node_direct_path_ratio5m
+        expr: >
+          sum by (instance) (
+            rate(heyaki_connectivity_data_path_direct_host_total[5m])
+            + rate(heyaki_connectivity_data_path_direct_srflx_total[5m])
+          )
+          /
+          clamp_min(sum by (instance) (rate(heyaki_connectivity_authenticated_total[5m])), 1e-9)
+
+      # TURN share of authenticated sessions, split across relay transports.
+      - record: heyaki:slo:node_turn_path_ratio5m
+        expr: >
+          sum by (instance) (
+            rate(heyaki_connectivity_data_path_turn_udp_total[5m])
+            + rate(heyaki_connectivity_data_path_turn_tcp_total[5m])
+            + rate(heyaki_connectivity_data_path_turn_tls_total[5m])
+          )
+          /
+          clamp_min(sum by (instance) (rate(heyaki_connectivity_authenticated_total[5m])), 1e-9)
+
+      # Registration failure ratio per attempt (device side).
+      - record: heyaki:slo:node_registration_failure_ratio5m
+        expr: >
+          sum by (instance) (rate(heyaki_node_relay_registration_failures_total[5m]))
+          /
+          clamp_min(sum by (instance) (rate(heyaki_node_relay_registration_attempts_total[5m])), 1e-9)
+
+      # Password-reject ratio per evaluated pairing attempt (guessing signal).
+      - record: heyaki:slo:node_pairing_password_reject_ratio5m
+        expr: >
+          sum by (instance) (rate(heyaki_pairing_denied_password_total[5m]))
+          /
+          clamp_min(sum by (instance) (rate(heyaki_pairing_attempts_total[5m])), 1e-9)
+
+      # RPC admission rejection ratio (overload signal).
+      - record: heyaki:slo:node_rpc_admission_reject_ratio5m
+        expr: >
+          sum by (instance) (
+            rate(heyaki_rpc_calls_admission_rejected_total[5m])
+            + rate(heyaki_rpc_concurrency_rejected_total[5m])
+          )
+          /
+          clamp_min(sum by (instance) (rate(heyaki_rpc_calls_started_total[5m])), 1e-9)

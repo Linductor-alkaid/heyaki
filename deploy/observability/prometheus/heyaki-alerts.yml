@@ -1,0 +1,242 @@
+# Heyaki SLO alert rules (M9-04).
+#
+# Loads together with heyaki-recording.yml. Every expression references
+# metrics that exist in the exporter surface; tests/unit/m9_slo_rules_test.cpp
+# verifies names and alert structure at CI time. runbook_url anchors point
+# into docs/operations/runbook.md and are covered by the same test.
+#
+# Device-side alerts (heyaki_node_*) fire only when device metrics are being
+# ingested; without those series the expressions stay empty and silent.
+
+groups:
+  - name: heyaki-relay-slo
+    interval: 30s
+    rules:
+      - alert: HeyakiRelayDown
+        expr: up{job="heyaki-relay"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "relay {{ $labels.instance }} failed scrapes for 2m"
+          runbook_url: docs/operations/runbook.md#heyakirelaydown
+
+      - alert: HeyakiRelayNotRunning
+        expr: heyaki_relay_state != 2
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "relay {{ $labels.instance }} not in running state for 5m"
+          runbook_url: docs/operations/runbook.md#heyakirelaynotrunning
+
+      - alert: HeyakiRelayLoginFailureRate
+        expr: >
+          heyaki:slo:relay_login_failure_ratio5m > 0.2
+          and sum by (instance) (rate(heyaki_relay_login_challenges_issued_total[10m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "relay {{ $labels.instance }} login failure ratio above 20% for 10m"
+          runbook_url: docs/operations/runbook.md#heyakirelayloginfailurerate
+
+      - alert: HeyakiRelayHandshakeFailures
+        expr: >
+          heyaki:slo:relay_handshake_failure_ratio5m > 0.1
+          and sum by (instance) (rate(heyaki_relay_tcp_accepted_total[10m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "relay {{ $labels.instance }} TLS/WSS handshake failure ratio above 10% for 10m"
+          runbook_url: docs/operations/runbook.md#heyakirelayhandshakefailures
+
+      - alert: HeyakiRelaySignalingBackpressure
+        expr: sum by (instance) (rate(heyaki_relay_signaling_backpressure_dropped_total[10m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "relay {{ $labels.instance }} drops queued signaling to sessions that stopped reading"
+          runbook_url: docs/operations/runbook.md#heyakirelaysignalingbackpressure
+
+      - alert: HeyakiRelayCapacityPressure
+        expr: >
+          sum by (instance) (
+            rate(heyaki_relay_capacity_rejected_total[10m])
+            + rate(heyaki_relay_control_rejected_total[10m])
+            + rate(heyaki_relay_lease_capacity_rejected_total[10m])
+          ) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "relay {{ $labels.instance }} rejects traffic on capacity limits for 15m"
+          runbook_url: docs/operations/runbook.md#heyakirelaycapacitypressure
+
+      - alert: HeyakiRelayRateLimited
+        expr: >
+          sum by (instance) (
+            rate(heyaki_relay_rate_limit_connection_rejected_total[10m])
+            + rate(heyaki_relay_rate_limit_request_rejected_total[10m])
+            + rate(heyaki_relay_rate_limit_tenant_rejected_total[10m])
+            + rate(heyaki_relay_rate_limit_ip_rejected_total[10m])
+          ) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "relay {{ $labels.instance }} sustains rate-limit rejections for 15m"
+          runbook_url: docs/operations/runbook.md#heyakirelayratelimited
+
+      - alert: HeyakiLeaseTablePressure
+        expr: sum by (instance) (increase(heyaki_relay_lease_capacity_rejected_total[1h])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "relay {{ $labels.instance }} rejected endpoint leases in the last hour"
+          runbook_url: docs/operations/runbook.md#heyakirelaycapacitypressure
+
+  - name: heyaki-node-slo
+    interval: 30s
+    rules:
+      - alert: HeyakiLanListenerNotReady
+        expr: heyaki_node_lan_enabled == 1 and heyaki_node_tls_listener_ready == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "device {{ $labels.instance }} has LAN enabled but no ready TLS listener"
+          runbook_url: docs/operations/runbook.md#heyakilanlistenernotready
+
+      - alert: HeyakiLanMulticastUnverified
+        expr: heyaki_node_interfaces_joined > 0 and heyaki_node_interfaces_multicast_verified < heyaki_node_interfaces_joined
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "device {{ $labels.instance }} joined multicast but verification is incomplete"
+          runbook_url: docs/operations/runbook.md#heyakilanlistenernotready
+
+      - alert: HeyakiLanPresenceRejects
+        expr: >
+          sum by (instance) (
+            rate(heyaki_node_tls_handshake_failed_total[15m])
+            + rate(heyaki_node_tls_hello_rejected_total[15m])
+            + rate(heyaki_node_directory_capacity_rejected_total[15m])
+            + rate(heyaki_node_directory_conflict_rejected_total[15m])
+            + rate(heyaki_node_directory_rate_rejected_total[15m])
+            + rate(heyaki_node_directory_replay_rejected_total[15m])
+            + rate(heyaki_node_datagrams_rejected_total[15m])
+          ) > 0.05
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "device {{ $labels.instance }} rejects LAN presence/handshake traffic continuously"
+          runbook_url: docs/operations/runbook.md#heyakilanpresencerejects
+
+      - alert: HeyakiNodeRegistrationFailing
+        expr: sum by (instance) (increase(heyaki_node_relay_registration_failures_total[15m])) > 3
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "device {{ $labels.instance }} fails relay registration repeatedly"
+          runbook_url: docs/operations/runbook.md#heyakinoderegistrationfailing
+
+      - alert: HeyakiLeaseRefreshFailures
+        expr: sum by (instance) (increase(heyaki_node_relay_lease_refresh_failures_total[10m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "device {{ $labels.instance }} misses relay lease refresh acknowledgements"
+          runbook_url: docs/operations/runbook.md#heyakileaserefreshfailures
+
+      - alert: HeyakiPairingPasswordGuessing
+        expr: sum by (instance) (increase(heyaki_pairing_denied_password_total[15m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "device {{ $labels.instance }} sees repeated wrong pairing passwords"
+          runbook_url: docs/operations/runbook.md#heyakipairingpasswordguessing
+
+      - alert: HeyakiQueueRejections
+        expr: >
+          sum by (instance) (
+            rate(heyaki_executor_submit_rejected_total[10m])
+            + rate(heyaki_channel_rejected_frames_total[10m])
+            + rate(heyaki_channel_dropped_frames_total[10m])
+            + rate(heyaki_event_subscriber_drops_total[10m])
+            + rate(heyaki_event_subscriber_overflows_total[10m])
+            + rate(heyaki_runtime_callback_queue_dropped_total[10m])
+          ) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "device {{ $labels.instance }} rejects or drops queued work for 10m"
+          runbook_url: docs/operations/runbook.md#heyakiqueuerejections
+
+      - alert: HeyakiRpcOverload
+        expr: >
+          heyaki:slo:node_rpc_admission_reject_ratio5m > 0.05
+          and sum by (instance) (rate(heyaki_rpc_calls_started_total[10m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "device {{ $labels.instance }} rejects RPC calls on admission/concurrency limits"
+          runbook_url: docs/operations/runbook.md#heyakirpcoverload
+
+      - alert: HeyakiFileIntegrityFailures
+        expr: >
+          sum by (instance) (
+            increase(heyaki_file_chunk_hash_failures_total[10m])
+            + increase(heyaki_file_commit_failures_total[10m])
+          ) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "device {{ $labels.instance }} reports file hash or commit failures"
+          runbook_url: docs/operations/runbook.md#heyakifileintegrityfailures
+
+      - alert: HeyakiExecutorTaskExceptions
+        expr: sum by (instance) (increase(heyaki_executor_task_exceptions_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "device {{ $labels.instance }} loses executor tasks to exceptions"
+          runbook_url: docs/operations/runbook.md#heyakiexecutortaskexceptions
+
+      - alert: HeyakiWorkerFailures
+        expr: >
+          sum by (instance) (
+            rate(heyaki_runtime_handler_exceptions_total[10m])
+            + rate(heyaki_runtime_callback_exceptions_total[10m])
+            + rate(heyaki_message_handler_exceptions_total[10m])
+            + rate(heyaki_rpc_handler_exceptions_total[10m])
+            + rate(heyaki_event_handler_exceptions_total[10m])
+            + rate(heyaki_shell_spawn_failures_total[10m])
+          ) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "device {{ $labels.instance }} service handlers or workers keep failing"
+          runbook_url: docs/operations/runbook.md#heyakiworkerfailures
+
+      - alert: HeyakiTurnFallbackDominant
+        expr: heyaki:slo:node_turn_path_ratio5m > 0.5
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "device {{ $labels.instance }} carries most sessions over TURN for 30m"
+          runbook_url: docs/operations/runbook.md#heyakiturnfallbackdominant

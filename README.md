@@ -70,7 +70,12 @@ RequestId/GrantId into a bounded `Node::pairing_audit_records()` ring, RPC compl
 (and admission-failure errors) name their operation id, shell audit records carry
 `shell_id`, TUI session lines expose the signaling request id that joins relay signaling
 logs, and relay registration cycles expose a wall-clock anchor gauge (the frozen control
-protocol carries no per-cycle wire id). See the
+protocol carries no per-cycle wire id). M9-04/M9-05 (round 5, 2026-09-09) define the SLO
+dashboard and alerting over those surfaces and the operating runbook: Prometheus
+recording/alert rule files plus a Grafana dashboard under `deploy/observability/` (8 SLO
+ratios, 20 alerts across relay-fleet and device groups), CI-enforced to reference only
+metrics the exporters actually emit, and `docs/operations/runbook.md` with per-alert triage
+and the rotation/revocation/restart/backup/overload/rollback procedures. See the
 [M9 milestone file](docs/todolists/m9-production-hardening.md) for the round-by-round record.
 
 
@@ -86,7 +91,7 @@ protocol carries no per-cycle wire id). See the
 | M6 | Message service and unary RPC | Done |
 | M7 | Remote events (best_effort_latest / reliable_live) and resumable file transfer | Done |
 | M8 | Remote shell (default-off, executor PTY worker, safe VT renderer, TUI shell view) | Done — production enable signed off (POSIX 2026-09-04; Windows unblocked 2026-09-05 after the F1/F3/F7 fixes, same listed-profile posture) |
-| M9 | Production hardening | In progress — M9-01 device metrics + Prometheus export, M9-02 relay `/metrics` + structured logs, and M9-03 correlation ids delivered; SLO/runbook and the hardening tracks remain |
+| M9 | Production hardening | In progress — M9-01 device metrics + Prometheus export, M9-02 relay `/metrics` + structured logs, M9-03 correlation ids, and M9-04/05 SLO dashboard + alerting + runbook delivered; the hardening tracks (M9-06..M9-18) remain |
 | M10 | Gateway proxy service (scoped L4 gateway over an authorized session, protocol 1.3) | Planned |
 | M11 | Android (NDK) port | Planned |
 
