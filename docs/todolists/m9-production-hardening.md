@@ -389,6 +389,13 @@ overwrite/stale/lag）。
   agent 仍可提名 host 类型本地候选，故 data_path 标签集为
   `direct_host,direct_srflx`（cone 类）/ 三标签（symmetric/cgnat）。
   规则次序在本机 userns 沙箱按 restricted 场景逐条复现验证。
+- 第三轮 CI（run 34390321528，2026-09-09）全绿（10/10，asan 首跑
+  m3b_relay_wss 计时断言抖动 rerun 即绿，与本轮改动无关）。NAT 矩阵
+  实测：full_cone 3/3 打洞直连（1070/2059/1060ms，P95 2059ms）、
+  restricted_cone 1078ms、port_restricted_cone 119ms、symmetric 3/3 经
+  TURN 中转（P95 1356ms）、hairpin 1060ms（direct_host 标签 = 打洞穿
+  NAT 后本地 host 候选被提名）、cgnat try1 255ms（双 NAT TURN 中转）；
+  全部场景 m6 消息+RPC 严格通过、m7 文件提交成功。
 
 ### 剩余范围（M9-01 完成前）
 
