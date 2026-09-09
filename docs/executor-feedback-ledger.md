@@ -17,6 +17,21 @@
 
 ---
 
+## 上游收敛状态（2026-09-09 pin 升级）
+
+executor 上游 master 前进至 `e2dc8ca`（PR #180–#184），heyaki pin 于 2026-09-09
+从 `4fd8e60` 升级。该范围只改动了 LockFree 后端公共头，facade 与 `executor::comm`
+头零改动，heyaki（默认 ThreadPool facade + comm 组件）为纯重编译升级：
+
+- **P1 线程池提交热路径重构**（futex 代次驻停、Task 全链路移动、退出守门）：heyaki
+  全部负载跑在默认 ThreadPool 上，直接受益；停机正确性同步加固。
+- **P-006/P-007 修复**：`ThreadPool::get_status()` 空闲饱和语义与 resizer 竞态修复，
+  M9 指标/SLO dashboard 读数更准。
+- **与 heyaki 无关**：P-001/P-002（LockFree/Realtime 停机竞态）、P-004（mlockall
+  租约）、P-008（Windows 处理器组）、P-003（heyaki 默认容量 1024 为 2 的幂）。
+- **门控不变**：T2（asio strand/外部 context adapter、与 IO 对象同 strand 的
+  timer）本批未交付，P1-1/P1-2 相关条目维持原判。
+
 ## 上游收敛状态（2026-08-31 第二轮回写）
 
 executor 上游 master 再次前进，heyaki pin 于 2026-08-31 从 `4e8e8eb` 升至
@@ -248,3 +263,7 @@ heyaki pin 于 2026-08-29 从 `077d854` 升至 `4e8e8eb`，PR #176/#177）：
   （LatestMailbox/MpscChannel）；relay stop 原子镜像删除；ServiceRegistry mutex、webrtc
   流控原子、runtime 生命周期原子记录为接受形态。全量测试 48/48 绿（3 项网络矩阵
   测试按环境跳过）。
+- 2026-09-09：pin 升至 `e2dc8ca`（上游 2026-09 性能收敛 P1/P2 + P-001..P-008 修复）。
+  无 API 变化（facade/comm 头零改动），heyaki 无代码改动；动机是 P1 线程池热路径
+  （heyaki 全负载所在）与 P-006 监控读数修复。本地 debug/release 各 55/55 绿
+  （3 项网络矩阵测试按环境跳过）。
