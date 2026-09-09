@@ -53,6 +53,24 @@ for `username = <expiry>:<tenant>:<DeviceId>`, verifies relayed data admission, 
 that coturn logs do not contain `static-auth-secret`. Set `HEYAKI_COTURN_ROOT` to an
 extracted `coturn/coturn:4.10.0-debian` rootfs to probe the pinned image binary directly.
 
+## NAT emulation matrix
+
+`run_network_matrix.sh` additionally runs the M4 connectivity scenarios
+(direct, forced TURN, TURN fallback with a P95 budget, UDP blocked, lossy,
+relay restart) between two client namespaces. `run_nat_matrix.sh` (M9-06)
+extends that to real address translation: the clients reach the relay and both
+coturn instances (which live in a public network namespace, each coturn with
+its own advertised address) only through nftables-emulated NATs — full cone,
+restricted cone, port-restricted cone, symmetric, hairpin, and double NAT
+(home full-cone gateway below a carrier symmetric NAT). Cone classes must
+hole-punch a `direct_srflx` session; symmetric and CGNAT must fall back to
+TURN within the P95 budget. `tests/network/nat_probe.py` queries both STUN
+servers from one socket before each scenario, so the emulated NAT class
+itself (mapping equality and the public alias) is verified independently of
+the Heyaki session outcome. Like the M4 matrix, the harness requires root and
+coturn, skips with exit 77 otherwise, and runs as root in the `coturn-topology`
+CI job.
+
 ## Run
 
 ```sh

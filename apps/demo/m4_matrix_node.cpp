@@ -251,6 +251,10 @@ struct RunOptions {
   std::optional<std::string> turn;
   std::string turn_secret;
   bool force_turn{false};
+  // NAT-matrix mode: keep server-reflexive candidates but exclude host
+  // candidates, so the session must hole-punch through the emulated NAT
+  // instead of shortcutting over directly routed private addresses.
+  bool srflx_only{false};
   std::chrono::milliseconds hold{500};
   std::chrono::milliseconds authenticate_budget{15000};
   unsigned retries{0U};
@@ -310,6 +314,9 @@ int run_node(const std::filesystem::path& database, std::string_view application
   policy.force_turn_data_path = options.force_turn;
   if (options.force_turn) {
     policy.allow_server_reflexive = false;
+    policy.allow_ipv4_host = false;
+  }
+  if (options.srflx_only) {
     policy.allow_ipv4_host = false;
   }
 
@@ -669,6 +676,7 @@ int usage() {
             << "  heyaki-m4-matrix-node run DB APP_ID RELAY_URL CA TENANT BUDGET_MS\n"
             << "      [--role initiator|responder] [--stun HOST:PORT]\n"
             << "      [--turn HOST:PORT] [--turn-secret SECRET] [--force-turn]\n"
+            << "      [--srflx-only]\n"
             << "      [--hold-ms N] [--authenticate-budget-ms N] [--connect-retries N]\n";
   return 2;
 }
@@ -820,6 +828,8 @@ int main(int argc, char** argv) {
         options.turn_secret = argv[++index];
       } else if (flag == "--force-turn") {
         options.force_turn = true;
+      } else if (flag == "--srflx-only") {
+        options.srflx_only = true;
       } else if (flag == "--hold-ms" && index + 1 < argc) {
         options.hold = std::chrono::milliseconds{parse_u64(argv[++index])};
       } else if (flag == "--authenticate-budget-ms" && index + 1 < argc) {

@@ -971,6 +971,18 @@ if(HEYAKI_BUILD_APPS)
     LABELS "relay;network;transport"
     SKIP_RETURN_CODE 77
     TIMEOUT 900)
+
+  add_test(
+    NAME heyaki_m9_nat_matrix
+    COMMAND "${HEYAKI_BASH_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../deploy/coturn/run_nat_matrix.sh"
+    --relay-bin "$<TARGET_FILE:heyaki-relay>"
+    --matrix-bin "$<TARGET_FILE:heyaki-m4-matrix-node>"
+    --demo-bin "$<TARGET_FILE:heyaki-m3b-relay-demo>")
+  set_tests_properties(heyaki_m9_nat_matrix PROPERTIES
+    LABELS "relay;network;nat;m9"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 1500)
 endif()
 
 add_test(

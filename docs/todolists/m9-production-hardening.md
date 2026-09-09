@@ -1,6 +1,6 @@
 # M9：生产加固与 v1 发布
 
-> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4 与 M9-04/05 Round 5 已交付，M9-06 起未开始，见文末实施记录）
+> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5 与 M9-06 Round 6 已交付，M9-07 起未开始，见文末实施记录）
 > - 所属计划：[Heyaki MVP 至 v1 实施 TODO 计划](heyaki-implementation-plan.md)
 > - 前置：M8 | 建议发布点：v1.0
 
@@ -14,7 +14,7 @@
 
 ## 可靠性、兼容性与性能
 
-- [ ] `M9-06` 完成 LAN/NAT 矩阵：same-bridge multicast、multicast blocked、multi-NIC/interface change、full-cone、restricted、port-restricted、symmetric、hairpin、CGNAT、IPv6-only 和 UDP blocked。
+- [x] `M9-06` 完成 LAN/NAT 矩阵：same-bridge multicast、multicast blocked、multi-NIC/interface change、full-cone、restricted、port-restricted、symmetric、hairpin、CGNAT、IPv6-only 和 UDP blocked。（Round 6 交付 2026-09-10：NAT 行由新 harness `deploy/coturn/run_nat_matrix.sh` 覆盖——root+coturn 门控的 netns/nftables 拓扑（双私网客户端经仿真 NAT 到公网 netns 的 relay+双 coturn），六场景 full_cone/restricted_cone/port_restricted_cone/symmetric/hairpin/cgnat，cone 类断言 direct_srflx 打洞直连、symmetric/CGNAT 断言 TURN fallback P95<5s；`tests/network/nat_probe.py` 在每个场景前用同一 socket 查双 STUN 服务器，先证明仿真 NAT 类别本身（EIM 端口一致 vs symmetric 端口相异、映射地址=公网别名）；matrix node 增加 `--srflx-only` 排除 host 候选防止绕过 NAT。same-bridge multicast/multicast blocked/multi-NIC/接口切换/IPv6-only 由既有 `heyaki_network_harness`（m3a，非特权 userns）覆盖，UDP blocked 由既有 `heyaki_m4_network_matrix` 覆盖。CI coturn-topology job 以 root 执行全部六 NAT 场景。见实施记录 Round 6。）
 - [ ] `M9-07` 在 Linux/Windows 双向组合验证 LAN-only、relay-signaled direct、TURN/UDP、TURN/TCP/TLS、Windows firewall/network profile、文件权限/命名和 PTY/ConPTY。
 - [ ] `M9-08` 完成 relay 重启、coturn 重启、网络切换、credential 过期、磁盘满、慢消费者和任意关闭点故障注入。
 - [ ] `M9-09` 执行 24/72 小时长稳、反复发现/过期/建连/断连和容量过载测试，证明内存、fd/handle、worker、session、endpoint directory 和 TTL/replay cache 有界。
@@ -305,6 +305,66 @@ overwrite/stale/lag）。
   基准与 M9-11 参数冻结回收。
 - runbook 与告警的联动是可执行契约：重命名 runbook 标题或改告警名都会
   被 m9_slo_rules 测试拦截，防止文档与告警漂移。
+
+### Round 6（2026-09-10）：M9-06 LAN/NAT 矩阵
+
+交付物：
+
+- `deploy/coturn/run_nat_matrix.sh`（root+coturn 门控，SKIP 77，CTest
+  `heyaki_m9_nat_matrix`，TIMEOUT 1500；CI 在 coturn-topology job 以 root
+  执行）：netns/nftables 拓扑 = 双私网客户端命名空间（10.78.0.0/24 与
+  10.78.1.0/24）经 host NAT 网关到达公网命名空间（203.0.113.0/24：relay
+  + 双 coturn 实例，各持独立广播地址 .2/.3，relayed<->relayed 候选对不
+  相互拒绝）；host 持映射别名 .10/.11/.20。六场景（架构 §"网络仿真"）：
+  - full_cone：静态 DNAT（任意端口入站）+ 端口保持 SNAT = EIM+EIF，
+    断言 `direct_srflx` 打洞直连（3 循环 P95<5s，首循环 M6 消息+RPC 严格）。
+  - restricted_cone：静态 DNAT + nft 动态集合记录出站目的 IP，入站仅放
+    行已联系 IP（地址相关过滤），断言 `direct_srflx`。
+  - port_restricted_cone：`(ip . port)` 拼接集合，入站仅放行已联系
+    ip:port（经典打洞），断言 `direct_srflx`。
+  - symmetric：无入站 DNAT + 按目的地不相交端口段 SNAT
+    （turn A→1xxxx、turn B→2xxxx、其余→3xxxx，`fully-random`），打洞必
+    败，断言 `turn_udp` fallback（3 循环 P95<5s）。
+  - hairpin：双客户端同一 bridge 同一 NAT（别名 .10/.11），`ct status dnat`
+    放行回环路由流量、丢弃其余同网段 UDP，断言 `direct_srflx`。
+  - cgnat：家端 full-cone NAT 命名空间（静态 DNAT+端口保持 SNAT）叠加
+    host 运营商 symmetric NAT（双级 NAT），断言 `turn_udp` fallback
+    （3 循环 P95<5s）；深层客户端网段在 host 加回程路由。
+- `tests/network/nat_probe.py`：RFC 5389 binding 探测，同一 UDP socket
+  先后查询双 STUN 服务器并打印两个 XOR-MAPPED-ADDRESS。每个场景在跑
+  heyaki 之前先验证仿真 NAT 类别：cone 类要求两映射完全一致且等于公网
+  别名（EIM+已应用 SNAT），symmetric 类要求端口相异（按目的地分段）。
+  NAT 类别验证与会话结果解耦：探测失败独立计 failure（防"拓扑没生效、
+  断言碰巧通过"）。
+- `apps/demo/m4_matrix_node.cpp`：`--srflx-only` 开关
+  （`allow_ipv4_host=false`、srflx 保持）——host 候选不进入交换，强制每
+  条候选对穿越仿真 NAT；对既有 M4 场景零行为变更。
+- `tests/CMakeLists.txt`：`heyaki_m9_nat_matrix` 注册（labels
+  relay;network;nat;m9）；`.github/workflows/ci.yml` coturn-topology job
+  增加 "Run M9 NAT matrix in namespaces" 步骤（timeout 30min）。
+- 矩阵行 → 覆盖面映射：same-bridge multicast / multicast blocked /
+  multi-NIC+接口切换 / IPv6-only(link-local) = `heyaki_network_harness`
+  （m3a，非特权 userns）；UDP blocked = 既有 `heyaki_m4_network_matrix`
+  的 udp_blocked 场景（TURN/UDP 阻断 → 有界显式失败）；六 NAT 行 = 本轮。
+
+设计说明：
+
+- host 既是 NAT 网关又是路由器：客户端 relay WSS 走 TCP 不做 NAT（地址
+  学习只来自 STUN/TURN），UDP 全部经 `inet heyaki_nat` 表（pre/out/flt
+  三链）转换；公网命名空间使 coturn/relay 观察到的是 SNAT 后的公网地
+  址，而非宿主机本地投递（宿主机上无 input 路径 SNAT）。
+- GitHub runner 的 Docker FORWARD DROP 策略用 iptables 显式 ACCEPT 对冲；
+  场景丢弃规则在独立 nft 表中仍然生效（同一 hook 上 ACCEPT 裁决不会绕过
+  其他 base chain）。
+- 本机验证：全部 nft 命令（含 `fully-random`、`(ip . port)` 拼接集合、
+  `update @set`、`ct status dnat`、家端 NAT 表）在非特权 userns 沙箱对
+  真实内核逐条通过；probe 对本地 STUN responder 端到端验证（同 socket
+  双查询、编解码往返）。坑：nft 链名 `fwd` 是保留字，必须改名（沙箱首
+  轮抓出，CI 前修复）；veth/namespace 名长 ≤15。
+- 直连 P95<3s 与 TURN<5s 的最终验收数值冻结留给 M9-10 基准与 M9-11
+  参数冻结；本轮 P95 门限 5s（与 M4 turn_fallback 同口径），全部样本
+  记录在日志 `*_P95_MS` 行。
+
 
 ### 剩余范围（M9-01 完成前）
 
