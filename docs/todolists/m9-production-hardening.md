@@ -376,6 +376,19 @@ overwrite/stale/lag）。
   `turn_udp,direct_srflx`（"必经中转"语义不变）。CGNAT 双 NAT 的
   attempt_expired 尾部（首轮 1 绿 2 红，现象同 M4 lossy 家族）按 M4 先例
   改为最多三对新鲜参与者的有界重试 + dump 增加 conntrack 输出待查。
+- 第二轮 CI（run 34388185805）probe 六场景全绿（EIM/symmetric 类别与
+  公网别名全部验证）、symmetric 3/3、cgnat try1 过；但 cone 类 STUN-only
+  全部 attempt_expired、hairpin 以 direct_host 认证。根因：**DNAT 在
+  prerouting 已把目的改写成对端私网地址，forward hook 上穿越 NAT 的打洞
+  包与 host 直连包地址不可区分**——防绕过网段互 drop 把打洞包一并杀掉
+  （hairpin 因已加 `ct status dnat accept` 而幸存）。修正：基础链只留
+  established accept，`client_bypass_drops`（10.78/10.79 两对网段）按场
+  景叠加且必须在 `cone_accept`（`ct status dnat accept`）与
+  restricted/port-restricted 的集合过滤之后。另一确认：`--srflx-only`
+  过滤的是候选通告面（对端只知 srflx 地址 → 任何成功对必穿 NAT），本地
+  agent 仍可提名 host 类型本地候选，故 data_path 标签集为
+  `direct_host,direct_srflx`（cone 类）/ 三标签（symmetric/cgnat）。
+  规则次序在本机 userns 沙箱按 restricted 场景逐条复现验证。
 
 ### 剩余范围（M9-01 完成前）
 

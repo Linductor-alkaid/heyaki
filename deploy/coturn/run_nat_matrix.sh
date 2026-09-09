@@ -351,17 +351,34 @@ nft_bootstrap() {
   nft add chain inet heyaki_nat flt \
     '{ type filter hook forward priority 0; policy accept; }'
   nft add rule inet heyaki_nat flt ct state established,related accept
-  # Host candidates between the two private client subnets must not bypass
-  # the emulated NAT through plain host routing.
+}
+
+# Blocks host-candidate traffic that would bypass the emulated NAT through
+# plain host routing. Must be added AFTER any per-scenario accept rules: a
+# DNAT'd packet already carries the peer's PRIVATE address at the forward
+# hook (DNAT runs in prerouting), so NAT-traversing traffic is
+# address-indistinguishable from a direct pair and needs an earlier accept
+# (ct status dnat) or its own filter chain in front of these drops.
+client_bypass_drops() {
   nft add rule inet heyaki_nat flt meta l4proto udp \
     ip saddr 10.78.0.0/24 ip daddr 10.78.1.0/24 drop
   nft add rule inet heyaki_nat flt meta l4proto udp \
     ip saddr 10.78.1.0/24 ip daddr 10.78.0.0/24 drop
+  nft add rule inet heyaki_nat flt meta l4proto udp \
+    ip saddr 10.79.0.0/24 ip daddr 10.79.1.0/24 drop
+  nft add rule inet heyaki_nat flt meta l4proto udp \
+    ip saddr 10.79.1.0/24 ip daddr 10.79.0.0/24 drop
 }
 
 # Static full-cone translation: inbound DNAT to the client for every UDP
 # destination port (endpoint-independent filtering), outbound port-preserving
-# SNAT to the alias (endpoint-independent mapping).
+# SNAT to the alias (endpoint-independent mapping). cone_accept must be
+# added before client_bypass_drops: every NAT-traversing packet is DNAT'd to
+# the peer's private address before the forward hook.
+cone_accept() {
+  nft add rule inet heyaki_nat flt meta l4proto udp ct status dnat accept
+}
+
 cone_static() {
   # client0 map0 client1 map1 excluded_subnet0 excluded_subnet1
   local c0=$1 m0=$2 c1=$3 m1=$4 s0=$5 s1=$6
@@ -648,27 +665,33 @@ for scenario in "${scenarios[@]}"; do
       nft_bootstrap
       cone_static "${client0}" "${map0}" "${client1}" "${map1}" \
         "10.78.0.0/24" "10.78.1.0/24"
+      cone_accept
+      client_bypass_drops
       probe_expect "${ns0}" eim "${map0}" || true
       probe_expect "${ns1}" eim "${map1}" || true
-      run_cycles fullcone 3 direct_srflx 5000 stun-only "${ns0}" "${ns1}"
+      run_cycles fullcone 3 direct_host,direct_srflx 5000 stun-only "${ns0}" "${ns1}"
       ;;
     restricted_cone)
       nft_bootstrap
       cone_static "${client0}" "${map0}" "${client1}" "${map1}" \
         "10.78.0.0/24" "10.78.1.0/24"
       restricted_filter "${client0}" "${client1}"
+      cone_accept
+      client_bypass_drops
       probe_expect "${ns0}" eim "${map0}" || true
       probe_expect "${ns1}" eim "${map1}" || true
-      run_cycles restricted 1 direct_srflx 5000 stun-only "${ns0}" "${ns1}"
+      run_cycles restricted 1 direct_host,direct_srflx 5000 stun-only "${ns0}" "${ns1}"
       ;;
     port_restricted_cone)
       nft_bootstrap
       cone_static "${client0}" "${map0}" "${client1}" "${map1}" \
         "10.78.0.0/24" "10.78.1.0/24"
       port_restricted_filter "${client0}" "${client1}"
+      cone_accept
+      client_bypass_drops
       probe_expect "${ns0}" eim "${map0}" || true
       probe_expect "${ns1}" eim "${map1}" || true
-      run_cycles portrestricted 1 direct_srflx 5000 stun-only "${ns0}" "${ns1}"
+      run_cycles portrestricted 1 direct_host,direct_srflx 5000 stun-only "${ns0}" "${ns1}"
       ;;
     symmetric)
       nft_bootstrap
@@ -676,9 +699,10 @@ for scenario in "${scenarios[@]}"; do
         10000-19999 20000-29999 30000-39999
       symmetric_ranges "${client1}" "${map1}" "10.78.1.0/24" \
         40000-49999 50000-59999 60000-64000
+      client_bypass_drops
       probe_expect "${ns0}" symmetric "${map0}" || true
       probe_expect "${ns1}" symmetric "${map1}" || true
-      run_cycles symmetric 3 turn_udp,direct_srflx 5000 turn "${ns0}" "${ns1}"
+      run_cycles symmetric 3 turn_udp,direct_srflx,direct_host 5000 turn "${ns0}" "${ns1}"
       ;;
     hairpin)
       nft_bootstrap
@@ -692,7 +716,7 @@ for scenario in "${scenarios[@]}"; do
         ip saddr 10.78.0.0/24 ip daddr 10.78.0.0/24 drop
       probe_expect "${ns0}" eim "${map0}" || true
       probe_expect "${ns0b}" eim "${map0b}" || true
-      run_cycles hairpin 1 direct_srflx 5000 stun-only "${ns0}" "${ns0b}"
+      run_cycles hairpin 1 direct_host,direct_srflx 5000 stun-only "${ns0}" "${ns0b}"
       ;;
     cgnat)
       nft_bootstrap
@@ -702,6 +726,7 @@ for scenario in "${scenarios[@]}"; do
         10000-19999 20000-29999 30000-39999
       symmetric_ranges "${gwb_wan}" "${map1}" "10.78.1.0/24" \
         40000-49999 50000-59999 60000-64000
+      client_bypass_drops
       probe_expect "${ns2}" symmetric "${map0}" || true
       probe_expect "${ns3}" symmetric "${map1}" || true
       # The double-NAT control/stun path rides the same runner-timing tail as
@@ -719,7 +744,8 @@ for scenario in "${scenarios[@]}"; do
         m6_message=$(result_field "${line}" m6_message_acked)
         m6_rpc=$(result_field "${line}" m6_rpc_status)
         if [[ "${authenticated}" == "1" &&
-              ("${data_path}" == "turn_udp" || "${data_path}" == "direct_srflx") &&
+              ("${data_path}" == "turn_udp" || "${data_path}" == "direct_srflx" ||
+               "${data_path}" == "direct_host") &&
               "${m6_message}" == "1" && "${m6_rpc}" == "1" ]]; then
           log "SCENARIO_OK cgnat (try ${cgnat_try}): ${line}"
           cgnat_accepted=1
