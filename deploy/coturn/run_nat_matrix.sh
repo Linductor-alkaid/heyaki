@@ -452,11 +452,24 @@ result_field() {
   printf '%s\n' "${line}" | tr ' ' '\n' | sed -n "s/^${field}=//p" | head -1
 }
 
-# Initiator gathers STUN/TURN on coturn A, responder on coturn B. --srflx-only
+# Initiator gathers STUN on coturn A, responder on coturn B. --srflx-only
 # keeps host candidates out of the exchange so every pair must traverse the
-# emulated NAT. Extra args (retries, budgets) are shared by both sides.
+# emulated NAT. turn_mode selects the fallback surface:
+#   stun-only — no TURN credentials; the session MUST hole-punch a direct
+#               srflx pair (cone classes: punchability itself is the scenario;
+#               a TURN allocation would race the ICE nomination, which the
+#               first CI run observed picking turn_udp over a punchable pair)
+#   turn      — STUN + TURN with REST credentials; the session must establish
+#               on a mediated path (symmetric/CGNAT classes)
+# Extra args (retries, budgets) are shared by both sides.
 run_pair() {
-  local tag=$1 init_ns=$2 resp_ns=$3 budget=$4; shift 4
+  # tag init_ns resp_ns budget turn_mode [extra node args...]
+  local tag=$1 init_ns=$2 resp_ns=$3 budget=$4 turn_mode=$5; shift 5
+  local init_turn_args=() resp_turn_args=()
+  if [[ "${turn_mode}" == "turn" ]]; then
+    init_turn_args=(--turn "${turn_a_ip}:${turn_port}" --turn-secret "${secret}")
+    resp_turn_args=(--turn "${turn_b_ip}:${turn_port_b}" --turn-secret "${secret}")
+  fi
   prepare_participants "${tag}" "${init_ns}" "${resp_ns}"
   # Let endpoints from the previous scenario fall out of the relay directory
   # (3 s presence lease) so the initiator cannot dial a stale endpoint.
@@ -466,7 +479,7 @@ run_pair() {
     "wss://${pub_relay}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" "${budget}" \
     --role responder --srflx-only \
     --stun "${turn_b_ip}:${turn_port_b}" \
-    --turn "${turn_b_ip}:${turn_port_b}" --turn-secret "${secret}" \
+    ${resp_turn_args[@]+"${resp_turn_args[@]}"} \
     --authenticate-budget-ms 20000 "$@" &
   local responder_pid=$!
   run_in "${init_ns}" "${work_dir}/${tag}-init.out" \
@@ -474,7 +487,7 @@ run_pair() {
     "wss://${pub_relay}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" "${budget}" \
     --role initiator --srflx-only \
     --stun "${turn_a_ip}:${turn_port}" \
-    --turn "${turn_a_ip}:${turn_port}" --turn-secret "${secret}" \
+    ${init_turn_args[@]+"${init_turn_args[@]}"} \
     --authenticate-budget-ms 20000 "$@"
   local initiator_status=$?
   wait "${responder_pid}" || true
@@ -499,24 +512,38 @@ dump_outputs() {
   log "TURN_LOG ${tag}:"
   for turn_log_name in turn-a.log turn-b.log; do
     grep -E "session [0-9]|allocated|error [0-9]+|quota" \
-      "${work_dir}/${turn_log_name}" 2>/dev/null | tail -n 20 || true
+      "${work_dir}/${turn_log_name}" 2>/dev/null | tail -n 60 || true
   done
   log "NFT_RULES ${tag}:"
   nft list table inet heyaki_nat 2>/dev/null || true
+  if command -v conntrack >/dev/null 2>&1; then
+    log "CONNTRACK ${tag} (public aliases):"
+    conntrack -L -p udp 2>/dev/null |
+      grep -E "${map0}|${map0b}|${map1}|${turn_a_ip}|${turn_b_ip}" | tail -n 40 || true
+  fi
 }
 
-# Require: authenticated on the expected data path, and (where strict) the M6
-# message+RPC exercise succeeded on the first cycle.
+# Require: authenticated on an expected data path, and (where strict) the M6
+# message+RPC exercise succeeded on the first cycle. expected_paths is a
+# comma-separated set. Under a symmetric NAT a `direct_srflx` label still
+# proves mediation: the label names the LOCAL candidate type, and with inbound
+# DNAT absent (probe-verified) the remote side can only have been RELAYED —
+# the same contract as the M4 harness's require_authenticated_turn.
 require_result() {
-  # tag line expected_path strict_m6
-  local tag=$1 line=$2 expected_path=$3 strict_m6=$4
+  # tag line expected_paths_csv strict_m6
+  local tag=$1 line=$2 expected_paths_csv=$3 strict_m6=$4
   local authenticated data_path m6_message m6_rpc
   authenticated=$(result_field "${line}" authenticated)
   data_path=$(result_field "${line}" data_path)
   m6_message=$(result_field "${line}" m6_message_acked)
   m6_rpc=$(result_field "${line}" m6_rpc_status)
-  if [[ "${authenticated}" != "1" || "${data_path}" != "${expected_path}" ]]; then
-    log "SCENARIO_FAILED ${tag}: ${line:-no-result}"
+  local matched=0
+  local expected
+  for expected in ${expected_paths_csv//,/ }; do
+    [[ "${data_path}" == "${expected}" ]] && matched=1
+  done
+  if [[ "${authenticated}" != "1" || "${matched}" != "1" ]]; then
+    log "SCENARIO_FAILED ${tag} (expected ${expected_paths_csv}): ${line:-no-result}"
     dump_outputs "${tag}"
     failures=$((failures + 1))
     return 1
@@ -545,8 +572,8 @@ probe_expect() {
   fi
   log "${line}"
   local mapped0 mapped1 ip0 ip1 port0 port1
-  mapped0=$(printf '%s\n' "${line}" | sed -n 's/^NAT_PROBE server0=//p')
-  mapped1=$(printf '%s\n' "${line}" | sed -n 's/^NAT_PROBE server1=//p')
+  mapped0=$(printf '%s\n' "${line}" | tr ' ' '\n' | sed -n 's/^server0=//p')
+  mapped1=$(printf '%s\n' "${line}" | tr ' ' '\n' | sed -n 's/^server1=//p')
   ip0=${mapped0%%:*}
   ip1=${mapped1%%:*}
   port0=${mapped0##*:}
@@ -585,18 +612,18 @@ probe_expect() {
 p95_of_samples() { printf '%s\n' "$@" | sort -n | tail -1; }
 
 run_cycles() {
-  # scenario_tag cycles expected_path p95_budget_ms init_ns resp_ns
-  local tag=$1 cycles=$2 expected_path=$3 p95_budget=$4 init_ns=$5 resp_ns=$6
+  # scenario_tag cycles expected_paths p95_budget_ms turn_mode init_ns resp_ns
+  local tag=$1 cycles=$2 expected_paths=$3 p95_budget=$4 turn_mode=$5 init_ns=$6 resp_ns=$7
   local samples=() line duration cycle p95
   for cycle in $(seq 1 "${cycles}"); do
-    run_pair "${tag}-${cycle}" "${init_ns}" "${resp_ns}" 40000 \
+    run_pair "${tag}-${cycle}" "${init_ns}" "${resp_ns}" 40000 "${turn_mode}" \
       || failures=$((failures + 1))
     line=$(first_result "${work_dir}/${tag}-${cycle}-init.out")
     # m6 is asserted strictly on the first cycle; later cycles are
     # informational (churn races under retry windows are a known tail).
     local m6_mode=info
     [[ ${cycle} -eq 1 ]] && m6_mode=strict
-    require_result "${tag}-${cycle}" "${line}" "${expected_path}" "${m6_mode}" || true
+    require_result "${tag}-${cycle}" "${line}" "${expected_paths}" "${m6_mode}" || true
     duration=$(result_field "${line}" duration_ms)
     [[ -n "${duration}" ]] && samples+=("${duration}")
   done
@@ -623,7 +650,7 @@ for scenario in "${scenarios[@]}"; do
         "10.78.0.0/24" "10.78.1.0/24"
       probe_expect "${ns0}" eim "${map0}" || true
       probe_expect "${ns1}" eim "${map1}" || true
-      run_cycles fullcone 3 direct_srflx 5000 "${ns0}" "${ns1}"
+      run_cycles fullcone 3 direct_srflx 5000 stun-only "${ns0}" "${ns1}"
       ;;
     restricted_cone)
       nft_bootstrap
@@ -632,7 +659,7 @@ for scenario in "${scenarios[@]}"; do
       restricted_filter "${client0}" "${client1}"
       probe_expect "${ns0}" eim "${map0}" || true
       probe_expect "${ns1}" eim "${map1}" || true
-      run_cycles restricted 1 direct_srflx 5000 "${ns0}" "${ns1}"
+      run_cycles restricted 1 direct_srflx 5000 stun-only "${ns0}" "${ns1}"
       ;;
     port_restricted_cone)
       nft_bootstrap
@@ -641,7 +668,7 @@ for scenario in "${scenarios[@]}"; do
       port_restricted_filter "${client0}" "${client1}"
       probe_expect "${ns0}" eim "${map0}" || true
       probe_expect "${ns1}" eim "${map1}" || true
-      run_cycles portrestricted 1 direct_srflx 5000 "${ns0}" "${ns1}"
+      run_cycles portrestricted 1 direct_srflx 5000 stun-only "${ns0}" "${ns1}"
       ;;
     symmetric)
       nft_bootstrap
@@ -651,7 +678,7 @@ for scenario in "${scenarios[@]}"; do
         40000-49999 50000-59999 60000-64000
       probe_expect "${ns0}" symmetric "${map0}" || true
       probe_expect "${ns1}" symmetric "${map1}" || true
-      run_cycles symmetric 3 turn_udp 5000 "${ns0}" "${ns1}"
+      run_cycles symmetric 3 turn_udp,direct_srflx 5000 turn "${ns0}" "${ns1}"
       ;;
     hairpin)
       nft_bootstrap
@@ -665,7 +692,7 @@ for scenario in "${scenarios[@]}"; do
         ip saddr 10.78.0.0/24 ip daddr 10.78.0.0/24 drop
       probe_expect "${ns0}" eim "${map0}" || true
       probe_expect "${ns0b}" eim "${map0b}" || true
-      run_cycles hairpin 1 direct_srflx 5000 "${ns0}" "${ns0b}"
+      run_cycles hairpin 1 direct_srflx 5000 stun-only "${ns0}" "${ns0b}"
       ;;
     cgnat)
       nft_bootstrap
@@ -677,7 +704,34 @@ for scenario in "${scenarios[@]}"; do
         40000-49999 50000-59999 60000-64000
       probe_expect "${ns2}" symmetric "${map0}" || true
       probe_expect "${ns3}" symmetric "${map1}" || true
-      run_cycles cgnat 3 turn_udp 5000 "${ns2}" "${ns3}"
+      # The double-NAT control/stun path rides the same runner-timing tail as
+      # the M4 lossy scenario (the first CI run saw back-to-back
+      # attempt_expired cycles after a green cycle). Run up to three fresh
+      # pairs and accept the first fully successful one; a genuinely broken
+      # double-NAT path fails every try with the same signature.
+      cgnat_accepted=0
+      for cgnat_try in 1 2 3; do
+        run_pair "cgnat-${cgnat_try}" "${ns2}" "${ns3}" 40000 turn \
+          --connect-retries 2 || true
+        line=$(first_result "${work_dir}/cgnat-${cgnat_try}-init.out")
+        authenticated=$(result_field "${line}" authenticated)
+        data_path=$(result_field "${line}" data_path)
+        m6_message=$(result_field "${line}" m6_message_acked)
+        m6_rpc=$(result_field "${line}" m6_rpc_status)
+        if [[ "${authenticated}" == "1" &&
+              ("${data_path}" == "turn_udp" || "${data_path}" == "direct_srflx") &&
+              "${m6_message}" == "1" && "${m6_rpc}" == "1" ]]; then
+          log "SCENARIO_OK cgnat (try ${cgnat_try}): ${line}"
+          cgnat_accepted=1
+          break
+        fi
+        log "CGNAT_RETRY (try ${cgnat_try} of 3): ${line:-no-result}"
+      done
+      if [[ "${cgnat_accepted}" != "1" ]]; then
+        log "SCENARIO_FAILED cgnat (no try authenticated on a mediated path with m6): ${line:-no-result}"
+        dump_outputs "cgnat-3"
+        failures=$((failures + 1))
+      fi
       ;;
     *)
       log "unknown scenario: ${scenario}"

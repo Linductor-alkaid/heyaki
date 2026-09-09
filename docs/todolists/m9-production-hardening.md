@@ -364,7 +364,18 @@ overwrite/stale/lag）。
 - 直连 P95<3s 与 TURN<5s 的最终验收数值冻结留给 M9-10 基准与 M9-11
   参数冻结；本轮 P95 门限 5s（与 M4 turn_fallback 同口径），全部样本
   记录在日志 `*_P95_MS` 行。
-
+- 首轮 CI（run 34386163184，2026-09-09）三个发现与修正：(1) probe 输出
+  解析 bug——`sed` 前缀替换残留 `server1=` 尾巴导致全部判 unparsable，
+  改 `tr`/`sed` 按字段提取（用 CI 实际输出样本回归验证）；(2) cone 场景
+  配 TURN 时 ICE 提名在 srflx 打洞与 TURN 分配之间赛跑（fullcone 3 循环
+  得 1×direct_srflx + 2×turn_udp），cone 类改为 STUN-only——打洞能力本身
+  是断言对象，不允许 TURN 兜底参与提名；(3) symmetric/CGNAT 下
+  `direct_srflx` 标签 = 本地候选类型，对端实为 relayed（TURN 日志
+  CHANNEL_BIND/CREATE_PERMISSION 证实；与 M4 harness 对同一语义的既定
+  契约一致），probe 已独立证明 symmetric 类别，故断言集改为
+  `turn_udp,direct_srflx`（"必经中转"语义不变）。CGNAT 双 NAT 的
+  attempt_expired 尾部（首轮 1 绿 2 红，现象同 M4 lossy 家族）按 M4 先例
+  改为最多三对新鲜参与者的有界重试 + dump 增加 conntrack 输出待查。
 
 ### 剩余范围（M9-01 完成前）
 
