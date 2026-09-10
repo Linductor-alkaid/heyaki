@@ -229,7 +229,11 @@ std::shared_future<Result<void>> RelayWssClient::Impl::begin_connect() {
   if (!connect_completion.valid()) {
     connect_completion = connect_promise.get_future().share();
   }
-  if (!connect_pending && current.state != RelayWssState::ready) {
+  // current is strand-owned state: never read it from the caller thread here.
+  // start_connect re-checks it on the strand and resolves the promise for
+  // every state, so posting unconditionally is equivalent to the old
+  // caller-side ready check and free of the race it had with on_read.
+  if (!connect_pending) {
     connect_pending = true;
     try {
       boost::asio::post(strand, [self = shared_from_this()] {
@@ -463,16 +467,13 @@ std::shared_future<Result<void>> RelayWssClient::Impl::begin_close() {
   if (!close_completion.valid()) {
     close_completion = close_promise.get_future().share();
   }
-  if (!close_pending && current.state == RelayWssState::disconnected) {
-    close_pending = true;
-    try {
-      close_promise.set_value(Result<void>::success());
-    } catch (...) {
-    }
-    return close_completion;
-  }
-  if (!close_pending && current.state != RelayWssState::disconnected &&
-      current.state != RelayWssState::failed) {
+  // current is strand-owned state: never read it from the caller thread here
+  // (ThreadSanitizer flagged the old disconnected/failed fast paths racing
+  // with on_read). do_close re-checks it on the strand: disconnected/failed
+  // resolve immediately, other states run the closing handshake. A failed
+  // session already resolved this promise in fail(), and do_close's second
+  // set_value lands in the catch — the future keeps fail()'s verdict.
+  if (!close_pending) {
     close_pending = true;
     try {
       boost::asio::post(strand, [self = shared_from_this()] {
