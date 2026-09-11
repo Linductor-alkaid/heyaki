@@ -35,6 +35,12 @@ $tenant = "matrix-tenant"
 $relayPort = 8443
 $turnPortA = 3480
 $turnPortB = 3481
+# Same-host ICE nomination race: with TURN configured the local agent may
+# nominate its server-reflexive candidate against the peer's relayed
+# candidate (the data still transits the peer's TURN allocation). Strict
+# both-relayed enforcement is a topology property of the Linux netns
+# matrix; on a single host this pair is a valid outcome.
+$turnPathLabels = @("turn_udp", "direct_srflx")
 
 function Skip-HeyakiMatrix {
   param([string]$Reason)
@@ -46,9 +52,18 @@ function Skip-HeyakiMatrix {
 }
 
 function Fail-HeyakiMatrix {
-  param([string]$Reason)
+  param([string]$Reason, [string]$Tag = "")
   Write-Host "MATRIX_FAILED: $Reason"
   $script:failures += 1
+  # Surface both participants' tails so CI failures carry the actual
+  # MATRIX_RESULT / node failure dump instead of only the assertion.
+  $pattern = if ($Tag -ne "") { "$Tag-*-run.log*" } else { "*-run.log*" }
+  foreach ($log in (Get-ChildItem -Path $script:workDir -Filter $pattern `
+      -ErrorAction SilentlyContinue | Sort-Object LastWriteTime)) {
+    Write-Host "----- $($log.Name) -----"
+    Get-Content -LiteralPath $log.FullName -ErrorAction SilentlyContinue |
+      Select-Object -Last 30
+  }
 }
 
 function Quote-Arg {
@@ -106,13 +121,9 @@ function Invoke-MatrixPair {
   $budget = [string](($BudgetSeconds - 5) * 1000)
   $firstOut = Join-Path $script:workDir "$Tag-first-run.log"
   $secondOut = Join-Path $script:workDir "$Tag-second-run.log"
-  $first = Start-Process -FilePath $MatrixBin `
-    -ArgumentList ((@("run", $firstDb, "matrix.first", $script:relayUrl, $script:relayCa,
-      $tenant, "40000", "--role", "initiator",
-      "--authenticate-budget-ms", $budget) + $InitiatorArgs |
-      ForEach-Object { Quote-Arg $_ }) -join " ") `
-    -RedirectStandardOutput $firstOut -RedirectStandardError "$firstOut.err" `
-    -NoNewWindow -PassThru
+  # The responder starts first so its announcements (and reverse discovery
+  # of the initiator) are live before the initiator dials; a first-shot
+  # denial from reverse-discovery lag still gets bounded retries below.
   $second = Start-Process -FilePath $MatrixBin `
     -ArgumentList ((@("run", $secondDb, "matrix.second", $script:relayUrl, $script:relayCa,
       $tenant, "40000", "--role", "responder",
@@ -120,10 +131,18 @@ function Invoke-MatrixPair {
       ForEach-Object { Quote-Arg $_ }) -join " ") `
     -RedirectStandardOutput $secondOut -RedirectStandardError "$secondOut.err" `
     -NoNewWindow -PassThru
+  Start-Sleep -Seconds 1
+  $first = Start-Process -FilePath $MatrixBin `
+    -ArgumentList ((@("run", $firstDb, "matrix.first", $script:relayUrl, $script:relayCa,
+      $tenant, "40000", "--role", "initiator",
+      "--authenticate-budget-ms", $budget, "--connect-retries", "3") + $InitiatorArgs |
+      ForEach-Object { Quote-Arg $_ }) -join " ") `
+    -RedirectStandardOutput $firstOut -RedirectStandardError "$firstOut.err" `
+    -NoNewWindow -PassThru
   foreach ($p in @($first, $second)) {
     if (-not $p.WaitForExit($BudgetSeconds * 1000)) {
       Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-      Fail-HeyakiMatrix "${Tag}: participant timed out after ${BudgetSeconds}s"
+      Fail-HeyakiMatrix "${Tag}: participant timed out after ${BudgetSeconds}s" $Tag
     }
   }
   return (Get-MatrixResult -Path $firstOut -Tag "$Tag-first")
@@ -156,23 +175,23 @@ function Assert-Exchange {
   param(
     [hashtable]$Result,
     [string]$Tag,
-    [string]$ExpectedPath,
+    [string[]]$ExpectedPaths,
     [bool]$StrictServices
   )
   if ($Result.Count -eq 0) { return }
   if ($Result["authenticated"] -ne "1") {
-    Fail-HeyakiMatrix "${Tag}: authenticated=$($Result['authenticated'])"
+    Fail-HeyakiMatrix "${Tag}: authenticated=$($Result['authenticated')" $Tag
     return
   }
-  if ($Result["data_path"] -ne $ExpectedPath) {
-    Fail-HeyakiMatrix "${Tag}: data_path=$($Result['data_path']) expected $ExpectedPath"
+  if ($Result["data_path"] -notin $ExpectedPaths) {
+    Fail-HeyakiMatrix "${Tag}: data_path=$($Result['data_path']) expected $($ExpectedPaths -join '|')" $Tag
     return
   }
   if ($StrictServices) {
     if ($Result["m6_message_acked"] -ne "1" -or
         [int]$Result["m6_rpc_status"] -lt 0 -or
         $Result["m7_file"] -ne "1") {
-      Fail-HeyakiMatrix "${Tag}: services message=$($Result['m6_message_acked']) rpc=$($Result['m6_rpc_status']) file=$($Result['m7_file'])"
+      Fail-HeyakiMatrix "${Tag}: services message=$($Result['m6_message_acked']) rpc=$($Result['m6_rpc_status']) file=$($Result['m7_file'])" $Tag
       return
     }
   }
@@ -189,6 +208,13 @@ foreach ($bin in @($MatrixBin, $RelayBin, $DemoBin, $TurnServerBin)) {
     Skip-HeyakiMatrix "required binary is unavailable: $bin"
   }
 }
+# Normalize to provider-native separators: New-NetFirewallRule -Program
+# rejects forward-slash paths, and CMake generator expressions may carry
+# them.
+$MatrixBin = (Resolve-Path -LiteralPath $MatrixBin).Path
+$RelayBin = (Resolve-Path -LiteralPath $RelayBin).Path
+$DemoBin = (Resolve-Path -LiteralPath $DemoBin).Path
+$TurnServerBin = (Resolve-Path -LiteralPath $TurnServerBin).Path
 if ($Scenario.Count -eq 0) {
   $Scenario = @("lan_only", "relay_direct", "turn_udp", "udp_blocked")
 }
@@ -343,29 +369,29 @@ try {
     Start-Sleep -Seconds 3
     $result = Invoke-MatrixPair -Tag "lan-only-1" `
       -InitiatorArgs @("--lan-only") -ResponderArgs @("--lan-only") -Enroll:$false
-    Assert-Exchange $result "lan_only/first-initiates" "direct_host" $true
+    Assert-Exchange $result "lan_only/first-initiates" @("direct_host") $true
     Start-Sleep -Seconds 3
     $result = Invoke-MatrixPair -Tag "lan-only-2" `
       -InitiatorArgs @("--lan-only") -ResponderArgs @("--lan-only") -Enroll:$false
-    Assert-Exchange $result "lan_only/second-initiates" "direct_host" $false
+    Assert-Exchange $result "lan_only/second-initiates" @("direct_host") $false
   }
 
   if ($Scenario -contains "relay_direct") {
     $result = Invoke-MatrixPair -Tag "relay-direct-1" `
       -InitiatorArgs @() -ResponderArgs @() -Enroll:$true
-    Assert-Exchange $result "relay_direct/first-initiates" "direct_host" $true
+    Assert-Exchange $result "relay_direct/first-initiates" @("direct_host") $true
     $result = Invoke-MatrixPair -Tag "relay-direct-2" `
       -InitiatorArgs @() -ResponderArgs @() -Enroll:$true
-    Assert-Exchange $result "relay_direct/second-initiates" "direct_host" $false
+    Assert-Exchange $result "relay_direct/second-initiates" @("direct_host") $false
   }
 
   if ($Scenario -contains "turn_udp") {
     $result = Invoke-MatrixPair -Tag "turn-udp-1" `
       -InitiatorArgs $turnArgs -ResponderArgs $turnArgsResponder -Enroll:$true
-    Assert-Exchange $result "turn_udp/first-initiates" "turn_udp" $true
+    Assert-Exchange $result "turn_udp/first-initiates" $turnPathLabels $true
     $result = Invoke-MatrixPair -Tag "turn-udp-2" `
       -InitiatorArgs $turnArgs -ResponderArgs $turnArgsResponder -Enroll:$true
-    Assert-Exchange $result "turn_udp/second-initiates" "turn_udp" $false
+    Assert-Exchange $result "turn_udp/second-initiates" $turnPathLabels $false
   }
 
   if ($Scenario -contains "udp_blocked") {
@@ -379,7 +405,7 @@ try {
         -InitiatorArgs $turnArgs -ResponderArgs $turnArgsResponder `
         -Enroll:$true -BudgetSeconds 45
       if ($result.Count -ne 0 -and $result["authenticated"] -ne "0") {
-        Fail-HeyakiMatrix "udp_blocked: unexpected session authenticated=$($result['authenticated'])"
+        Fail-HeyakiMatrix "udp_blocked: unexpected session authenticated=$($result['authenticated'])" "udp-blocked"
       } else {
         Write-Host "SCENARIO_OK udp_blocked (bounded explicit failure): authenticated=0"
       }

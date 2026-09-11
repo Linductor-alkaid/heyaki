@@ -9,7 +9,7 @@
 | --- | --- | --- |
 | LAN-only（发现 + 认证 + 会话 + 服务） | Windows CI 每 PR | `heyaki_windows_network_matrix` 场景 `lan_only`（双向发起）；LAN 会话建立另有 `m3a` 套件常驻 |
 | relay-signaled direct | Windows CI 每 PR | 同上场景 `relay_direct`（Windows relay + 双向发起） |
-| TURN/UDP | Windows CI 每 PR | 同上场景 `turn_udp`（`heyaki-test-turn-server` 内嵌 libjuice TURN，双向发起） |
+| TURN/UDP | Windows CI 每 PR | 同上场景 `turn_udp`（`heyaki-test-turn-server` 内嵌 libjuice TURN，双向发起）。注：单机矩阵接受 `turn_udp` 与 `direct_srflx` 两种提名标签——后者是本地 srflx 候选与对端 relayed 候选组对（数据仍经对端 TURN 中转），"双方都走中转"的严格断言是 Linux netns 拓扑的属性（M9-06），单机无法拓扑强制 |
 | UDP blocked（有界显式失败） | Windows CI 每 PR | 同上场景 `udp_blocked`（Windows 防火墙出站 UDP 阻断） |
 | Windows firewall/network profile | Windows CI 每 PR | `heyaki_windows_firewall_harness`：Public profile 阻断（负向）+ 程序级放行规则恢复发现（正向） |
 | 文件权限/命名 | Windows CI 每 PR | 全量单测在 Windows 上运行：`m7_codec`（Windows 保留名/尾点空格/反斜杠拒绝）、`m7_file`（CON 推送拒绝）、`m2_profile`（ProfileStore 权限，Windows 分支）；文件传输在矩阵每场景经 NTFS 落盘（`m7_file=1` 断言） |
@@ -142,7 +142,8 @@ Linux↔Windows 节点组合用上面的裸命令各方向跑一遍。）
 - 每个方向断言双侧 `MATRIX_RESULT authenticated=1`、发起侧
   `m6_message_acked=1 m6_rpc_status>=0 m7_file=1`；
 - `relay_direct` 场景 `data_path=direct_host`；强制 TURN 时
-  `data_path=turn_udp`；`duration_ms` 记入发布清单（M9-18）；
+  `data_path` ∈ {`turn_udp`, `direct_srflx`}（见上表注）；`duration_ms`
+  记入发布清单（M9-18）；
 - Windows 防火墙处于部署形态（Public + runbook 放行规则）时复跑
   `lan_only`，证明规则集在真实 profile 下足够；
 - 结果（日期、两机 OS 版本、每方向 duration/P95、原始输出）附在

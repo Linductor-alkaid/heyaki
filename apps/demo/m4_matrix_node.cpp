@@ -686,6 +686,38 @@ int run_node(const std::filesystem::path& database, std::string_view application
     }
   }
   const auto snapshot = node.value_if()->snapshot();
+  if (!authenticated) {
+    std::cerr << "HEYAKI_DEBUG failure_dump\n";
+    for (const auto& entry : node.value_if()->endpoints()) {
+      std::cerr << "  endpoint device=" << heyaki::to_string(entry.key.device_id)
+                << " trusted=" << (entry.trusted ? 1 : 0)
+                << " lan=" << (entry.lan.has_value() ? 1 : 0)
+                << " addr="
+                << (entry.lan.has_value()
+                        ? entry.lan->address + ":" +
+                              std::to_string(entry.lan->tls_signaling_port)
+                        : std::string{"-"})
+                << " relay=" << (entry.relay.has_value() ? 1 : 0) << '\n';
+    }
+    for (const auto& connection : node.value_if()->signaling_connections()) {
+      std::cerr << "  signaling state=" << static_cast<int>(connection.state)
+                << " inbound=" << (connection.inbound ? 1 : 0)
+                << " owner=" << (connection.local_offer_owner ? 1 : 0)
+                << " addr=" << connection.address << " error="
+                << (connection.error ? connection.error->safe_detail()
+                                     : std::string{"-"})
+                << '\n';
+    }
+    std::cerr << "  last_error="
+              << (snapshot.last_error ? snapshot.last_error->safe_detail()
+                                      : std::string{"-"})
+              << " lan_state=" << static_cast<int>(snapshot.lan_state)
+              << " tls_ready="
+              << (snapshot.tls.listener_ready ? 1 : 0)
+              << " tls_port=" << snapshot.tls.listen_port
+              << " pending_signaling="
+              << snapshot.resources.signaling_callbacks_in_flight << '\n';
+  }
   bool final_message_acked = false;
   int final_rpc_status = -1;
   bool final_event_received = false;
