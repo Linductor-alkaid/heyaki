@@ -81,6 +81,27 @@ try {
   if ($LASTEXITCODE -ne 0) {
     throw "M3A firewall rejection test failed with exit code $LASTEXITCODE"
   }
+
+  # M9-07 allow path: with program-scoped allow rules in place (the rule set
+  # the runbook prescribes for Public profiles), LAN discovery must work
+  # again on the same Public profile -- proving the blocked scenario above
+  # failed for the right reason and documenting the minimal rule pair.
+  Remove-NetFirewallRule -DisplayName "$rulePrefix-inbound" `
+    -ErrorAction SilentlyContinue | Out-Null
+  Remove-NetFirewallRule -DisplayName "$rulePrefix-outbound" `
+    -ErrorAction SilentlyContinue | Out-Null
+  New-NetFirewallRule -DisplayName "$rulePrefix-allow-in" `
+    -Direction Inbound -Action Allow -Enabled True -Profile Public `
+    -Program $resolvedBinary -Protocol UDP -LocalPort 49189 | Out-Null
+  New-NetFirewallRule -DisplayName "$rulePrefix-allow-out" `
+    -Direction Outbound -Action Allow -Enabled True -Profile Public `
+    -Program $resolvedBinary -Protocol UDP -RemotePort 49189 | Out-Null
+  Remove-Item Env:HEYAKI_EXPECT_MULTICAST_BLOCKED -ErrorAction SilentlyContinue
+  & $resolvedBinary `
+    "--gtest_filter=M3aNodeTest.TwoLanNodesDiscoverEachOtherWithoutRelay"
+  if ($LASTEXITCODE -ne 0) {
+    throw "M3A allow-path discovery test failed with exit code $LASTEXITCODE"
+  }
 } finally {
   if ($null -eq $savedBlockedExpectation) {
     Remove-Item Env:HEYAKI_EXPECT_MULTICAST_BLOCKED -ErrorAction SilentlyContinue
@@ -90,6 +111,10 @@ try {
   Remove-NetFirewallRule -DisplayName "$rulePrefix-inbound" `
     -ErrorAction SilentlyContinue | Out-Null
   Remove-NetFirewallRule -DisplayName "$rulePrefix-outbound" `
+    -ErrorAction SilentlyContinue | Out-Null
+  Remove-NetFirewallRule -DisplayName "$rulePrefix-allow-in" `
+    -ErrorAction SilentlyContinue | Out-Null
+  Remove-NetFirewallRule -DisplayName "$rulePrefix-allow-out" `
     -ErrorAction SilentlyContinue | Out-Null
   foreach ($profile in $originalProfiles) {
     try {
@@ -101,4 +126,4 @@ try {
   }
 }
 
-Write-Host "M3A Windows Public-profile firewall rejection scenario passed"
+Write-Host "M3A Windows Public-profile firewall rejection and allow-path scenarios passed"

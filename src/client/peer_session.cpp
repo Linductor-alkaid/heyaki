@@ -1047,10 +1047,17 @@ void PeerSession::ensure_physical_channel(session::ChannelDomain domain) {
   if (domain == session::ChannelDomain::control || physical_channels_.contains(domain)) {
     return;
   }
-  if (!config_.initiator && config_.initiator_owned_domains.contains(domain)) {
+  if (!opening_physical_channels_.contains(domain)) {
     // The initiator owns this domain's physical channel; the responder
     // adopts the peer's channel when the transport reports it open. Frames
     // enqueued before adoption drain in the pump triggered by adoption.
+    if (!config_.initiator && config_.initiator_owned_domains.contains(domain)) {
+      return;
+    }
+    opening_physical_channels_.insert(domain);
+  } else {
+    // An open for this domain is already in flight; its completion pumps
+    // every frame queued in the meantime.
     return;
   }
   transport::ChannelOptions options;
@@ -1078,6 +1085,7 @@ void PeerSession::ensure_physical_channel(session::ChannelDomain domain) {
       [weak, domain](Result<transport::TransportChannel*> result) {
         auto self = weak.lock();
         if (!self) return;
+        self->opening_physical_channels_.erase(domain);
         if (!result) {
           self->fail(*result.error_if());
           return;

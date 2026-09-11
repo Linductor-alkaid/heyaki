@@ -117,6 +117,7 @@ jobs:
         env:
           HEYAKI_REQUIRE_LAN_INTERFACES: "1"
           HEYAKI_REQUIRE_WINDOWS_FIREWALL_HARNESS: "1"
+          HEYAKI_REQUIRE_WINDOWS_NETWORK_MATRIX: "1"
           HEYAKI_M3A_STRESS_CYCLES: "16"
           HEYAKI_M3A_STRESS_EPOCHS: "2"
         run: ctest --test-dir build -C ${{ matrix.build_type }} --output-on-failure --no-tests=error

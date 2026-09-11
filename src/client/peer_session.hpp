@@ -271,6 +271,12 @@ class PeerSession final : public std::enable_shared_from_this<PeerSession> {
   std::unique_ptr<PairingRequestAdmission> pairing_admission_;
   transport::TransportChannel* control_{nullptr};
   std::map<session::ChannelDomain, transport::TransportChannel*> physical_channels_;
+  // Domains whose physical-channel open is in flight. `physical_channels_`
+  // is populated only at open completion, so without this guard two rapid
+  // send paths for the same domain (for example a service attach racing an
+  // application subscribe) would both call async_open_channel and the
+  // transport would reject the second as a duplicate.
+  std::set<session::ChannelDomain> opening_physical_channels_;
   std::map<std::uint32_t, BusinessFrameHandler> channel_handlers_;
   std::map<session::ChannelDomain, DomainFrameHandler> domain_handlers_;
   PeerSessionDiagnostics diagnostics_;

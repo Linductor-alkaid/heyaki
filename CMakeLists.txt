@@ -369,8 +369,17 @@ if(HEYAKI_BUILD_APPS)
   heyaki_configure_target(heyaki-m4-matrix-node)
   heyaki_enable_executor_exception_adapter_source(apps/demo/m4_matrix_node.cpp)
 
+  # M9-07: host-local TURN/UDP server (libjuice embedded TURN) for matrix
+  # scenarios on hosts without coturn (Windows CI, self-hosted cross-OS
+  # fleets). Static target: the helper must not drag the libjuice DLL
+  # dependency into every consumer of the install tree.
+  add_executable(heyaki-test-turn-server apps/demo/test_turn_server.cpp)
+  target_link_libraries(heyaki-test-turn-server PRIVATE LibJuice::LibJuiceStatic)
+  heyaki_configure_target(heyaki-test-turn-server)
+
   list(APPEND HEYAKI_INSTALL_TARGETS heyaki-relay heyaki-tui heyaki-m2-profile-demo
-       heyaki-m3b-relay-demo heyaki-m4-matrix-node heyaki-m7-data-demo)
+       heyaki-m3b-relay-demo heyaki-m4-matrix-node heyaki-test-turn-server
+       heyaki-m7-data-demo)
 endif()
 
 heyaki_add_developer_targets()

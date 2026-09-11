@@ -1,6 +1,6 @@
 # M9：生产加固与 v1 发布
 
-> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5 与 M9-06 Round 6 已交付，M9-07 起未开始，见文末实施记录）
+> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6 与 M9-07 Round 7 已交付，M9-08 起未开始，见文末实施记录）
 > - 所属计划：[Heyaki MVP 至 v1 实施 TODO 计划](heyaki-implementation-plan.md)
 > - 前置：M8 | 建议发布点：v1.0
 
@@ -15,7 +15,7 @@
 ## 可靠性、兼容性与性能
 
 - [x] `M9-06` 完成 LAN/NAT 矩阵：same-bridge multicast、multicast blocked、multi-NIC/interface change、full-cone、restricted、port-restricted、symmetric、hairpin、CGNAT、IPv6-only 和 UDP blocked。（Round 6 交付 2026-09-10：NAT 行由新 harness `deploy/coturn/run_nat_matrix.sh` 覆盖——root+coturn 门控的 netns/nftables 拓扑（双私网客户端经仿真 NAT 到公网 netns 的 relay+双 coturn），六场景 full_cone/restricted_cone/port_restricted_cone/symmetric/hairpin/cgnat，cone 类断言 direct_srflx 打洞直连、symmetric/CGNAT 断言 TURN fallback P95<5s；`tests/network/nat_probe.py` 在每个场景前用同一 socket 查双 STUN 服务器，先证明仿真 NAT 类别本身（EIM 端口一致 vs symmetric 端口相异、映射地址=公网别名）；matrix node 增加 `--srflx-only` 排除 host 候选防止绕过 NAT。same-bridge multicast/multicast blocked/multi-NIC/接口切换/IPv6-only 由既有 `heyaki_network_harness`（m3a，非特权 userns）覆盖，UDP blocked 由既有 `heyaki_m4_network_matrix` 覆盖。CI coturn-topology job 以 root 执行全部六 NAT 场景。见实施记录 Round 6。）
-- [ ] `M9-07` 在 Linux/Windows 双向组合验证 LAN-only、relay-signaled direct、TURN/UDP、TURN/TCP/TLS、Windows firewall/network profile、文件权限/命名和 PTY/ConPTY。
+- [x] `M9-07` 在 Linux/Windows 双向组合验证 LAN-only、relay-signaled direct、TURN/UDP、TURN/TCP/TLS、Windows firewall/network profile、文件权限/命名和 PTY/ConPTY。（Round 7 交付 2026-09-11：Linux↔Windows 真跨机组合在 GitHub 托管 runner 上被平台能力阻断（runner 互不可达、WSL2 长期损坏），按"每 OS 全组合 + 双向发起 + 平台特有行为"解构——Windows CI 新增 `heyaki_windows_network_matrix`（`tests/network/run_windows_network_matrix.ps1`：lan_only/relay_direct/turn_udp 三场景发起方互换、udp_blocked 防火墙出站 UDP 阻断有界失败；TURN 由新 `heyaki-test-turn-server`（libjuice 内嵌 TURN/UDP，静态凭据经 matrix node 新 `--turn-username/--turn-credential` 覆写）提供，Windows 无 coturn），防火墙 harness 增加程序级放行规则的正向场景，矩阵节点新增 `--lan-only` 模式；跨 OS 阻断结论、TURN/TCP/TLS 依赖限制（pinned libjuice 客户端 UDP-only）与自托管混合机队程序记录于 `docs/operations/cross-os-matrix.md`。文件命名/权限与 PTY/ConPTY 经 Windows CI 既有套件覆盖（映射表见跨 OS 文档）。本机发现并修复 PeerSession 同域二次 open 竞争杀会话的真实缺陷（LAN offer-owner 侧服务挂载竞争 `subscribe_events`）。见实施记录 Round 7。）
 - [ ] `M9-08` 完成 relay 重启、coturn 重启、网络切换、credential 过期、磁盘满、慢消费者和任意关闭点故障注入。
 - [ ] `M9-09` 执行 24/72 小时长稳、反复发现/过期/建连/断连和容量过载测试，证明内存、fd/handle、worker、session、endpoint directory 和 TTL/replay cache 有界。
 - [ ] `M9-10` 基准消息 latency、并发 RPC、事件 fan-out、单/多文件吞吐、Shell 竞争延迟、relay 内存和带宽。
@@ -396,6 +396,75 @@ overwrite/stale/lag）。
   TURN 中转（P95 1356ms）、hairpin 1060ms（direct_host 标签 = 打洞穿
   NAT 后本地 host 候选被提名）、cgnat try1 255ms（双 NAT TURN 中转）；
   全部场景 m6 消息+RPC 严格通过、m7 文件提交成功。
+
+### Round 7（2026-09-11）：M9-07 Linux/Windows 组合验证
+
+交付物：
+
+- `apps/demo/m4_matrix_node.cpp`：`--lan-only` 运行模式（lan.enabled +
+  lan_only 连通模式、200ms 通告节奏、无 relay_override、跳过 relay ready
+  等待与恢复宽限、发起方经组播目录 `entry.lan` 找对端并 `connect_lan`）；
+  `--turn-username/--turn-credential` 显式凭据覆写（绕过 REST 推导，供
+  libjuice 静态凭据测试 TURN server）；`--lan-only` 与
+  `--stun/--turn/--force-turn/--srflx-only` 互斥校验（lan_only 策略本就
+  禁 srflx/TURN/ICE server，矛盾 flag 提前报 usage）。
+- `apps/demo/test_turn_server.cpp` → `heyaki-test-turn-server`（链接
+  `LibJuice::LibJuiceStatic`，进入安装目标清单）：pinned libjuice 内嵌
+  TURN/UDP server 的最小封装，静态长期凭据 + relay 端口区间，stdout 打印
+  `TURN_SERVER_READY`。Windows 无 coturn，TURN/UDP 场景由它与客户端同一
+  ICE 栈对拍；本机实测单实例即可中转同机双端（relayed<->relayed），矩阵
+  仍按 Linux 先例双实例（A/B 各持不相交 relay 端口段）。
+- `tests/network/run_windows_network_matrix.ps1`（CTest
+  `heyaki_windows_network_matrix`，`HEYAKI_REQUIRE_WINDOWS_NETWORK_MATRIX=1`
+  门控，SKIP 77，TIMEOUT 900；CI windows job 常开）：四场景——
+  `lan_only`（无 relay，组播发现 + LAN TLS 信令 + 认证会话，双向发起，
+  首轮 m6 消息/RPC + m7 文件严格断言，`data_path=direct_host`）、
+  `relay_direct`（本机 `heyaki-relay.exe` + openssl 生成 CA/叶子证书
+  （SAN 127.0.0.1）+ seed-token + enroll，双向发起，`direct_host`）、
+  `turn_udp`（双 test-turn-server + force-turn，`turn_udp`）、
+  `udp_blocked`（`New-NetFirewallRule` 程序级出站 UDP 阻断 TURN 端口 →
+  断言 `authenticated=0` 有界显式失败，finally 删规则）。支持
+  `-RelayUrl/-RelayCaFile/-EnrollToken` 跨 OS 模式指向远端 Linux relay。
+- `tests/network/run_windows_firewall_harness.ps1`：增加放行正向场景——
+  Public profile 下按 runbook 加程序级 UDP 49189 入/出放行规则后，
+  `TwoLanNodesDiscoverEachOtherWithoutRelay` 必须通过（证明阻断场景失败
+  得其所，且文档化最小规则对）；TIMEOUT 90→180。
+- `docs/operations/cross-os-matrix.md`：组合→覆盖位置映射表（LAN-only/
+  relay direct/TURN UDP/udp blocked/防火墙/文件命名权限/PTY-ConPTY 各自
+  的 Windows CI 落点）、Linux↔Windows 真跨机在 GitHub 托管 runner 上的
+  阻断依据（runner 互不可达；windows-2025 WSL2 损坏 actions/runner-images
+  #11784/#11869；无嵌套虚拟化）、TURN/TCP/TLS 的 pinned 依赖限制
+  （libjuice TURN 客户端 UDP-only，`tcp_turn_backend_verified` 门控，
+  重估时点 M9-10 后）、自托管混合机队操作程序（Linux 侧 relay+TURN、
+  Windows 侧裸命令或 harness 跨 OS 模式、双向断言与留档要求）。
+- 缺陷修复（本机 lan-only 矩阵首跑即暴露）：`PeerSession` 新增
+  `opening_physical_channels_` 在途集合——`ensure_physical_channel` 此前
+  只以 `physical_channels_`（open 完成时才插入）防重，同域第二次请求
+  （服务挂载 vs `subscribe_events` 的 send_frame）会在首次 open pending
+  期重复 `async_open_channel`，transport 层把任何 pending 期二次 open 拒
+  为 `prepared_channel_options_mismatch`（选项相同也拒），`self->fail`
+  杀死已认证会话。relay 模式从未触发只因 subscribe 侧恰为非 offer
+  owner；LAN 模式 offer owner 由 ID 决胜决定，可与逻辑发起方相反。
+  回归测试 `M4PeerSession.SameDomainRequestsCoalesceWhilePhysicalOpenInFlight`
+  （m4_support 的 LoopbackTransportPair 增加 defer_opens/flush 与
+  open_request 计数，临时还原缺陷验证过测试确实变红）。
+
+本机验证（Linux）：lan_only（direct_host 1076ms，m6/m7 全过，修复前
+100% 复现会话被杀）、relay_direct（direct_host 2047ms）、turn_udp
+（turn_udp 1085ms，test-turn-server）三场景端到端绿；全量 ctest 串行
+两轮仅 m3a_lan 负载抖动（单跑绿，与基线一致；基线 stash 对照确认）；
+m4/m6 TUI harness 带改动 3/2 次全绿（一次并行负载失败为既有抖动家族）。
+Windows 侧 PS 矩阵由 CI 首跑验证。
+
+设计说明：
+
+- "双向组合"在 CI 内的可达语义 = 每 OS 全部传输路径 × 发起方互换 ×
+  平台特有行为（防火墙 profile、NTFS 命名/权限、ConPTY）；真·跨机
+  Linux↔Windows 留自托管程序 + 明确阻断结论（最终验收"或有明确阻断
+  结论"分支）。
+- TURN/TCP/TLS 不引入 executor ledger 条目（第三方依赖 API 面，与 M9-01
+  丢包估计缺口同类先例）；配置/wire/candidate 面已就绪，升级
+  libdatachannel 后只需后端验证 + 置 `tcp_turn_backend_verified`。
 
 ### 剩余范围（M9-01 完成前）
 

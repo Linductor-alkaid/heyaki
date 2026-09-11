@@ -937,7 +937,26 @@ if(WIN32)
   set_tests_properties(heyaki_windows_firewall_harness PROPERTIES
     LABELS "network;lan;security;windows"
     SKIP_RETURN_CODE 77
-    TIMEOUT 90)
+    TIMEOUT 180)
+  if(HEYAKI_BUILD_APPS)
+    # M9-07: Windows-side e2e connectivity matrix (LAN-only, relay-signaled
+    # direct, TURN/UDP via the libjuice test TURN server, firewall UDP
+    # block) with the initiator role swapped between the peers.
+    add_test(
+      NAME heyaki_windows_network_matrix
+      COMMAND "${HEYAKI_POWERSHELL_EXECUTABLE}"
+        -NoProfile
+        -ExecutionPolicy Bypass
+        -File "${CMAKE_CURRENT_SOURCE_DIR}/network/run_windows_network_matrix.ps1"
+        -MatrixBin "$<TARGET_FILE:heyaki-m4-matrix-node>"
+        -RelayBin "$<TARGET_FILE:heyaki-relay>"
+        -DemoBin "$<TARGET_FILE:heyaki-m3b-relay-demo>"
+        -TurnServerBin "$<TARGET_FILE:heyaki-test-turn-server>")
+    set_tests_properties(heyaki_windows_network_matrix PROPERTIES
+      LABELS "network;relay;windows;m9"
+      SKIP_RETURN_CODE 77
+      TIMEOUT 900)
+  endif()
 endif()
 
 add_test(

@@ -189,6 +189,106 @@ TEST(M4PeerSession, AuthenticatesControlHelloAndAllowsOnlyControlPing) {
                     heyaki::ConnectionStage::closed, "peer_session", "local_shutdown");
 }
 
+// M9-07 regression: on a LAN session the physical-channel offer owner can be
+// the opposite side of the logical connect. That side attaches its services
+// (each domain issues an async open) and an immediate same-domain request —
+// for example subscribe_events racing the event service attach — used to
+// issue a second async open for a kind whose first open was still in flight,
+// which the transport rejects as prepared_channel_options_mismatch, killing
+// the authenticated session. The second ensure must coalesce into the
+// in-flight open instead.
+TEST(M4PeerSession, SameDomainRequestsCoalesceWhilePhysicalOpenInFlight) {
+  auto left_identity = heyaki::create_identity();
+  auto right_identity = heyaki::create_identity();
+  ASSERT_TRUE(left_identity);
+  ASSERT_TRUE(right_identity);
+  const heyaki::DeviceEndpointKey left{left_identity.value_if()->device_id(),
+                                       filled<heyaki::EndpointId>(0x21U)};
+  const heyaki::DeviceEndpointKey right{right_identity.value_if()->device_id(),
+                                        filled<heyaki::EndpointId>(0x41U)};
+  const auto session_id = filled<heyaki::SessionId>(0x61U);
+  const auto initiator_nonce = filled_array<heyaki::signaling_nonce_bytes>(0x11U);
+  const auto responder_nonce = filled_array<heyaki::signaling_nonce_bytes>(0x31U);
+  const auto transcript =
+      filled_array<heyaki::signaling_transcript_sha256_bytes>(0x51U);
+  heyaki::test::LoopbackTransportPair pair;
+  pair.connect();
+  auto left_transport = std::shared_ptr<heyaki::transport::TransportSession>(
+      &pair.left(), [](heyaki::transport::TransportSession*) {});
+  auto right_transport = std::shared_ptr<heyaki::transport::TransportSession>(
+      &pair.right(), [](heyaki::transport::TransportSession*) {});
+  heyaki::VerifiedSessionBinding left_binding{
+      {right, left, session_id, 1U, initiator_nonce, responder_nonce, transcript},
+      {}, "peer-ufrag", true};
+  heyaki::VerifiedSessionBinding right_binding{
+      {left, right, session_id, 1U, initiator_nonce, responder_nonce, transcript},
+      {}, "peer-ufrag", false};
+  auto left_timeline = std::make_shared<heyaki::ConnectionAttemptTimeline>();
+  auto right_timeline = std::make_shared<heyaki::ConnectionAttemptTimeline>();
+  ASSERT_TRUE(left_timeline->transition(heyaki::ConnectionStage::resolving_endpoint,
+                                        "node", "endpoint_selected"));
+  ASSERT_TRUE(left_timeline->transition(heyaki::ConnectionStage::signaling,
+                                        "signaling", "attempt_accepted"));
+  ASSERT_TRUE(right_timeline->transition(heyaki::ConnectionStage::resolving_endpoint,
+                                         "node", "endpoint_selected"));
+  ASSERT_TRUE(right_timeline->transition(heyaki::ConnectionStage::signaling,
+                                         "signaling", "attempt_accepted"));
+  auto left_session = heyaki::PeerSession::create_verified(
+      {left_transport, left_binding, left_identity.value_if(),
+       right_identity.value_if()->public_key(), protocol(), 1'060'000U, 1'000'000U, {},
+       left_timeline, {}});
+  auto right_session = heyaki::PeerSession::create_verified(
+      {right_transport, right_binding, right_identity.value_if(),
+       left_identity.value_if()->public_key(), protocol(), 1'060'000U, 1'000'000U, {},
+       right_timeline, {}});
+  ASSERT_TRUE(left_session);
+  ASSERT_TRUE(right_session);
+  ASSERT_TRUE((*right_session.value_if())->start());
+
+  // Deliver the control channel from the right (responder side) so the left
+  // session can complete its hello handshake.
+  heyaki::transport::TransportChannel* right_control = nullptr;
+  pair.right().async_open_channel(
+      heyaki::transport::ChannelKind::control, {},
+      [&](heyaki::Result<heyaki::transport::TransportChannel*> opened) {
+        ASSERT_TRUE(opened);
+        right_control = *opened.value_if();
+      });
+  ASSERT_NE(right_control, nullptr);
+  ASSERT_TRUE((*left_session.value_if())->start());
+  pair.right().pump();
+  pair.left().pump();
+  ASSERT_TRUE((*left_session.value_if())->authenticated());
+  ASSERT_TRUE((*right_session.value_if())->authenticated());
+
+  // From here the opens on the left stay in flight until flushed, exactly
+  // like a real transport whose DataChannel opens complete on a later drain.
+  pair.left().set_defer_opens(true);
+  constexpr auto kEventFrames = 8U;
+  constexpr auto kEventBytes = 4096U;
+  auto opened = (*left_session.value_if())
+                    ->open_business_channel(heyaki::session::ChannelDomain::event,
+                                            heyaki::session::QueueFullPolicy::reject,
+                                            kEventFrames, kEventBytes, nullptr);
+  ASSERT_TRUE(opened);
+  // A second request on the same domain while the physical open is pending:
+  // the adopted (wire-announced) event channel requests the same transport.
+  auto adopted = (*left_session.value_if())
+                     ->adopt_business_channel(*opened.value_if() + 100U,
+                                              heyaki::session::ChannelDomain::event,
+                                              heyaki::session::QueueFullPolicy::reject,
+                                              kEventFrames, kEventBytes, nullptr);
+  ASSERT_TRUE(adopted);
+  // Exactly one transport-level open for the event kind, and the duplicate
+  // request did not fail the authenticated session.
+  EXPECT_EQ(pair.left().open_request_count(heyaki::transport::ChannelKind::event), 1U);
+  EXPECT_TRUE((*left_session.value_if())->authenticated());
+
+  pair.left().flush_deferred_opens();
+  EXPECT_TRUE((*left_session.value_if())->authenticated());
+  EXPECT_EQ(pair.left().open_request_count(heyaki::transport::ChannelKind::event), 1U);
+}
+
 TEST(M4PeerSession, TimelineRejectsRegressionsAndFullHistory) {
   heyaki::ConnectionAttemptTimeline timeline(2U);
   EXPECT_TRUE(timeline.transition(heyaki::ConnectionStage::resolving_endpoint,

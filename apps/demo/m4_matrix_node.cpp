@@ -250,11 +250,20 @@ struct RunOptions {
   std::optional<std::string> stun;
   std::optional<std::string> turn;
   std::string turn_secret;
+  // M9-07: explicit TURN credentials bypass the REST API derivation so a
+  // libjuice static-credential test TURN server (Windows has no coturn) can
+  // serve the turn_udp scenario.
+  std::string turn_username;
+  std::string turn_credential;
   bool force_turn{false};
   // NAT-matrix mode: keep server-reflexive candidates but exclude host
   // candidates, so the session must hole-punch through the emulated NAT
   // instead of shortcutting over directly routed private addresses.
   bool srflx_only{false};
+  // M9-07: run without any relay — discovery and signaling stay on LAN
+  // multicast + provisional TLS (the Windows matrix exercises the LAN-only
+  // combination without relay infrastructure).
+  bool lan_only{false};
   std::chrono::milliseconds hold{500};
   std::chrono::milliseconds authenticate_budget{15000};
   unsigned retries{0U};
@@ -289,11 +298,27 @@ int run_node(const std::filesystem::path& database, std::string_view application
   // semantics stay covered by NodeReconnectsWithBoundedBackoffAfterRelayOutage.
   relay.minimum_backoff = std::chrono::milliseconds{1000};
   relay.maximum_backoff = std::chrono::milliseconds{5000};
+  if (options.lan_only) {
+    // Same cadence the m3a LAN tests use: fast announcements keep the
+    // discovery phase well inside the scenario budgets on a quiet link.
+    lan.enabled = true;
+    lan.discoverable = true;
+    lan.connectivity_mode = heyaki::ConnectivityMode::lan_only;
+    lan.announcement_interval = std::chrono::milliseconds{200};
+    lan.announcement_jitter = std::chrono::milliseconds{0};
+    lan.presence_lease = std::chrono::milliseconds{2000};
+  }
 
   auto profiled = profile.value_if();
   const auto device_id = profiled->device_id();
   heyaki::PeerPathPolicy policy;
   policy.allow_ipv6_host = false;
+  if (options.lan_only) {
+    // lan_only sessions must not carry reflexive candidates, TURN servers,
+    // or a forced path (Node rejects such policies); host candidates only.
+    policy.allow_server_reflexive = false;
+    policy.allow_turn_udp = false;
+  }
   if (options.stun.has_value()) {
     const auto separator = options.stun->rfind(':');
     heyaki::NodeIceServer server;
@@ -305,10 +330,20 @@ int run_node(const std::filesystem::path& database, std::string_view application
   }
   if (options.turn.has_value()) {
     const auto separator = options.turn->rfind(':');
-    heyaki::NodeIceServer server = turn_server(
-        options.turn->substr(0U, separator),
-        static_cast<std::uint16_t>(parse_u64(options.turn->substr(separator + 1U))),
-        options.turn_secret, tenant, device_id);
+    heyaki::NodeIceServer server;
+    if (!options.turn_username.empty() && !options.turn_credential.empty()) {
+      server.kind = heyaki::NodeIceServerKind::turn_udp;
+      server.hostname = options.turn->substr(0U, separator);
+      server.port = static_cast<std::uint16_t>(
+          parse_u64(options.turn->substr(separator + 1U)));
+      server.username = options.turn_username;
+      server.credential = options.turn_credential;
+    } else {
+      server = turn_server(
+          options.turn->substr(0U, separator),
+          static_cast<std::uint16_t>(parse_u64(options.turn->substr(separator + 1U))),
+          options.turn_secret, tenant, device_id);
+    }
     policy.ice_servers.push_back(std::move(server));
   }
   policy.force_turn_data_path = options.force_turn;
@@ -340,7 +375,9 @@ int run_node(const std::filesystem::path& database, std::string_view application
   config.profile = profiled;
   config.application_id = std::string{application_id};
   config.lan_override = lan;
-  config.relay_override = relay;
+  if (!options.lan_only) {
+    config.relay_override = relay;
+  }
   config.path_policy_override = policy;
   config.file_receive_roots = {m7_root};
   auto node = heyaki::Node::create(std::move(config));
@@ -350,19 +387,21 @@ int run_node(const std::filesystem::path& database, std::string_view application
   }
 
   std::cout << "MATRIX_PHASE node-created\n";
-  const auto relay_ready = wait_until(
-      [&] {
-        return node.value_if()->snapshot().relay.state ==
-               heyaki::RelayNodeState::ready;
-      },
-      std::min(total_budget, std::chrono::milliseconds{10000}));
-  if (!relay_ready) {
-    const auto snapshot = node.value_if()->snapshot();
-    std::cout << "MATRIX_RESULT authenticated=0 data_path=none duration_ms=0"
-              << " relay_state="
-              << heyaki::relay_node_state_name(snapshot.relay.state) << '\n';
-    (void)node.value_if()->shutdown();
-    return 0;
+  if (!options.lan_only) {
+    const auto relay_ready = wait_until(
+        [&] {
+          return node.value_if()->snapshot().relay.state ==
+                 heyaki::RelayNodeState::ready;
+        },
+        std::min(total_budget, std::chrono::milliseconds{10000}));
+    if (!relay_ready) {
+      const auto snapshot = node.value_if()->snapshot();
+      std::cout << "MATRIX_RESULT authenticated=0 data_path=none duration_ms=0"
+                << " relay_state="
+                << heyaki::relay_node_state_name(snapshot.relay.state) << '\n';
+      (void)node.value_if()->shutdown();
+      return 0;
+    }
   }
 
   const auto local_key = heyaki::DeviceEndpointKey{
@@ -416,6 +455,13 @@ int run_node(const std::filesystem::path& database, std::string_view application
       });
   const auto begin = std::chrono::steady_clock::now();
   bool attempted = false;
+  // LAN-only discovery surfaces the peer through the multicast directory
+  // (entry.lan); relay-mode discovery through the relay endpoint directory
+  // (entry.relay).
+  const auto peer_has_endpoint = [lan_only = options.lan_only](
+                                     const auto& entry) {
+    return lan_only ? entry.lan.has_value() : entry.relay.has_value();
+  };
   if (options.role == "initiator") {
     const auto peer_endpoint = wait_until(
         [&] {
@@ -423,7 +469,7 @@ int run_node(const std::filesystem::path& database, std::string_view application
           return std::any_of(entries.begin(), entries.end(),
                              [&](const auto& entry) {
                                return entry.key != local_key &&
-                                      entry.relay.has_value();
+                                      peer_has_endpoint(entry);
                              });
         },
         std::chrono::milliseconds{10000});
@@ -437,9 +483,11 @@ int run_node(const std::filesystem::path& database, std::string_view application
     const auto peer = std::find_if(entries.begin(), entries.end(),
                                    [&](const auto& entry) {
                                      return entry.key != local_key &&
-                                            entry.relay.has_value();
+                                            peer_has_endpoint(entry);
                                    });
-    const auto connected = node.value_if()->connect(peer->key);
+    const auto connected = options.lan_only
+                               ? node.value_if()->connect_lan(peer->key)
+                               : node.value_if()->connect(peer->key);
     attempted = (bool)connected;
     if (!connected) {
       std::cout << "MATRIX_RESULT authenticated=0 data_path=none duration_ms=0"
@@ -480,13 +528,14 @@ int run_node(const std::filesystem::path& database, std::string_view application
         const auto peer = std::find_if(entries.begin(), entries.end(),
                                        [&](const auto& entry) {
                                          return entry.key != local_key &&
-                                                entry.relay.has_value();
+                                                peer_has_endpoint(entry);
                                        });
         if (peer == entries.end()) {
           return false;
         }
         --connect_retries;
-        return (bool)node.value_if()->connect(peer->key);
+        return (bool)(options.lan_only ? node.value_if()->connect_lan(peer->key)
+                                       : node.value_if()->connect(peer->key));
       });
   // Responder side: subscribe to the telemetry root so the initiator's
   // event publish has a matching subscription (publisher-direct model).
@@ -624,13 +673,16 @@ int run_node(const std::filesystem::path& database, std::string_view application
     // re-login. Give the recovery a bounded grace to reach ready before
     // sampling, so relay_state reports the recovery outcome instead of the
     // exit instant; a genuinely broken re-login still surfaces as degraded.
-    const auto grace_deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds{8};
-    while (node.value_if()->snapshot().relay.state !=
-               heyaki::RelayNodeState::ready &&
-           std::chrono::steady_clock::now() < grace_deadline) {
-      executor::comm::PhaseGate grace{"heyaki-m4-matrix-grace"};
-      (void)grace.wait_for(1U, std::chrono::milliseconds{100});
+    // LAN-only runs have no relay to recover — skip the grace entirely.
+    if (!options.lan_only) {
+      const auto grace_deadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds{8};
+      while (node.value_if()->snapshot().relay.state !=
+                 heyaki::RelayNodeState::ready &&
+             std::chrono::steady_clock::now() < grace_deadline) {
+        executor::comm::PhaseGate grace{"heyaki-m4-matrix-grace"};
+        (void)grace.wait_for(1U, std::chrono::milliseconds{100});
+      }
     }
   }
   const auto snapshot = node.value_if()->snapshot();
@@ -676,7 +728,8 @@ int usage() {
             << "  heyaki-m4-matrix-node run DB APP_ID RELAY_URL CA TENANT BUDGET_MS\n"
             << "      [--role initiator|responder] [--stun HOST:PORT]\n"
             << "      [--turn HOST:PORT] [--turn-secret SECRET] [--force-turn]\n"
-            << "      [--srflx-only]\n"
+            << "      [--turn-username NAME --turn-credential SECRET]\n"
+            << "      [--srflx-only] [--lan-only]\n"
             << "      [--hold-ms N] [--authenticate-budget-ms N] [--connect-retries N]\n";
   return 2;
 }
@@ -826,10 +879,16 @@ int main(int argc, char** argv) {
         options.turn = argv[++index];
       } else if (flag == "--turn-secret" && index + 1 < argc) {
         options.turn_secret = argv[++index];
+      } else if (flag == "--turn-username" && index + 1 < argc) {
+        options.turn_username = argv[++index];
+      } else if (flag == "--turn-credential" && index + 1 < argc) {
+        options.turn_credential = argv[++index];
       } else if (flag == "--force-turn") {
         options.force_turn = true;
       } else if (flag == "--srflx-only") {
         options.srflx_only = true;
+      } else if (flag == "--lan-only") {
+        options.lan_only = true;
       } else if (flag == "--hold-ms" && index + 1 < argc) {
         options.hold = std::chrono::milliseconds{parse_u64(argv[++index])};
       } else if (flag == "--authenticate-budget-ms" && index + 1 < argc) {
@@ -839,6 +898,15 @@ int main(int argc, char** argv) {
       } else {
         return usage();
       }
+    }
+    // lan_only sessions carry host candidates only; contradictory transport
+    // flags would only surface later as a Node policy rejection.
+    if (options.lan_only &&
+        (options.stun.has_value() || options.turn.has_value() ||
+         options.force_turn || options.srflx_only)) {
+      std::cerr << "--lan-only cannot be combined with --stun/--turn/"
+                   "--force-turn/--srflx-only\n";
+      return usage();
     }
     return run_node(argv[2], argv[3], argv[4], std::filesystem::path{argv[5]},
                     argv[6], std::chrono::milliseconds{parse_u64(argv[7])}, options);

@@ -11,9 +11,11 @@
 #include <cstddef>
 #include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <span>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -149,15 +151,21 @@ class LoopbackSession : public transport::TransportSession {
 
   void async_open_channel(transport::ChannelKind kind, transport::ChannelOptions options,
                           OpenCompletion completion) override {
+    ++open_requests_[kind];
     if (state_.state != transport::TransportState::connected) {
       completion(Result<transport::TransportChannel*>::failure(
           Error{ErrorCode::transport, "loopback", "session_not_connected"}));
       return;
     }
-    auto channel = std::make_unique<LoopbackChannel>(kind, options);
-    channel->attach_peer_inbound(&peer()->inbound_);
-    channels_.push_back(std::move(channel));
-    completion(Result<transport::TransportChannel*>::success(channels_.back().get()));
+    if (defer_opens_) {
+      // Holds the completion back until flush_deferred_opens() so a test can
+      // reproduce callers that race a second domain request against an open
+      // that has not completed yet (the real transport completes opens on a
+      // callback drain, never inline).
+      deferred_opens_.emplace_back(kind, options, std::move(completion));
+      return;
+    }
+    complete_open(kind, options, std::move(completion));
   }
 
   void set_message_handler(MessageHandler handler) override {
@@ -221,6 +229,22 @@ class LoopbackSession : public transport::TransportSession {
 
   [[nodiscard]] std::size_t channel_count() const noexcept { return channels_.size(); }
 
+  [[nodiscard]] std::size_t open_request_count(
+      transport::ChannelKind kind) const noexcept {
+    const auto found = open_requests_.find(kind);
+    return found == open_requests_.end() ? 0U : found->second;
+  }
+
+  void set_defer_opens(bool defer) noexcept { defer_opens_ = defer; }
+
+  void flush_deferred_opens() {
+    auto pending = std::move(deferred_opens_);
+    deferred_opens_.clear();
+    for (auto& [kind, options, completion] : pending) {
+      complete_open(kind, options, std::move(completion));
+    }
+  }
+
   [[nodiscard]] std::size_t buffered_amount() const noexcept {
     std::size_t total = 0U;
     for (const auto& channel : channels_) {
@@ -232,6 +256,14 @@ class LoopbackSession : public transport::TransportSession {
  private:
   [[nodiscard]] LoopbackSession* peer() noexcept;
 
+  void complete_open(transport::ChannelKind kind, transport::ChannelOptions options,
+                     OpenCompletion completion) {
+    auto channel = std::make_unique<LoopbackChannel>(kind, options);
+    channel->attach_peer_inbound(&peer()->inbound_);
+    channels_.push_back(std::move(channel));
+    completion(Result<transport::TransportChannel*>::success(channels_.back().get()));
+  }
+
   LoopbackTransportPair* pair_;
   transport::TransportSessionSnapshot state_;
   std::optional<transport::CloseReason> last_close_reason_;
@@ -240,6 +272,10 @@ class LoopbackSession : public transport::TransportSession {
   ChannelHandler channel_handler_;
   std::deque<LoopbackChannel::PendingMessage> inbound_;
   std::vector<std::unique_ptr<LoopbackChannel>> channels_;
+  std::map<transport::ChannelKind, std::size_t> open_requests_;
+  std::vector<std::tuple<transport::ChannelKind, transport::ChannelOptions, OpenCompletion>>
+      deferred_opens_;
+  bool defer_opens_{false};
 };
 
 class LoopbackTransportPair {
