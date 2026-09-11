@@ -180,7 +180,7 @@ function Assert-Exchange {
   )
   if ($Result.Count -eq 0) { return }
   if ($Result["authenticated"] -ne "1") {
-    Fail-HeyakiMatrix "${Tag}: authenticated=$($Result['authenticated')" $Tag
+    Fail-HeyakiMatrix "${Tag}: authenticated=$($Result['authenticated'])" $Tag
     return
   }
   if ($Result["data_path"] -notin $ExpectedPaths) {
