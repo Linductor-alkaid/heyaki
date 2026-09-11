@@ -454,7 +454,19 @@ overwrite/stale/lag）。
 （turn_udp 1085ms，test-turn-server）三场景端到端绿；全量 ctest 串行
 两轮仅 m3a_lan 负载抖动（单跑绿，与基线一致；基线 stash 对照确认）；
 m4/m6 TUI harness 带改动 3/2 次全绿（一次并行负载失败为既有抖动家族）。
-Windows 侧 PS 矩阵由 CI 首跑验证。
+CI 迭代三轮收敛（提交链 7d40f9e→4ca91fa→31ac97e→8d2525e，终态 run
+34562937220 10/10 绿，asan m3b endpoint_queries 计时抖动 rerun 即绿）：
+首轮实证矩阵真实可跑（lan_only 首轮/relay_direct 双向/turn_udp 首轮绿）
+并暴露三个问题——New-NetFirewallRule -Program 拒正斜杠路径（前置
+Resolve-Path 规范化）、场景第二轮可输给反向发现滞后首轮拒绝（responder
+先启 1s + 发起方 --connect-retries 3，与 M4 lossy 家族同因）、单机 TURN
+配额下提名可为本地 srflx×对端 relayed 半中转对（接受 turn_udp|
+direct_srflx 标签集，"双中转"严格断言是 Linux netns 拓扑属性）；次轮
+脚本编辑引入 PS 解析错误（缺 `]`）被 CI 0.48s 抓出；第三轮发现 WFP
+豁免 loopback——本地 udp_blocked 场景移除（Linux CI iptables 场景继续
+承担该契约），跨 OS 模式保留并参数化远端 TURN（-TurnEndpoint 等）。
+Windows 双构建最终实测：lan_only 581/1083ms、relay_direct 84/67ms、
+turn_udp 110/121ms（Debug，双向）。
 
 设计说明：
 
