@@ -1,13 +1,17 @@
 # M9-07 Windows network matrix: exercises the connectivity combinations that
 # are reachable on a single Windows host -- LAN-only discovery/signaling,
-# relay-signaled direct, forced TURN/UDP through the libjuice test TURN
-# server, and a Windows-firewall UDP block that must fail bounded -- with the
-# initiator role swapped between the two peers ("both directions").
+# relay-signaled direct, and forced TURN/UDP through the libjuice test TURN
+# server -- with the initiator role swapped between the two peers ("both
+# directions").
 #
 # CI (HEYAKI_REQUIRE_WINDOWS_NETWORK_MATRIX=1) runs every scenario against a
 # local relay. A self-hosted mixed fleet can instead point the peers at a
 # relay (+ coturn or heyaki-test-turn-server) on a reachable Linux host via
-# -RelayUrl/-RelayCaFile/-EnrollToken; see docs/operations/cross-os-matrix.md.
+# -RelayUrl/-RelayCaFile/-EnrollToken (-TurnEndpoint/-TurnUsername/
+# -TurnCredential for TURN); cross-OS mode also unlocks the udp_blocked
+# scenario, because Windows Firewall exempts loopback traffic and a local
+# block rule can never reach the same-host TURN server. See
+# docs/operations/cross-os-matrix.md.
 #
 # Exit codes: 0 pass, 1 failure, 77 skip (prerequisites absent).
 
@@ -26,7 +30,13 @@ param(
   # -RelayCaFile and -EnrollToken together with -RelayUrl.
   [string]$RelayUrl = "",
   [string]$RelayCaFile = "",
-  [string]$EnrollToken = ""
+  [string]$EnrollToken = "",
+  # Cross-OS TURN: remote HOST:PORT + credentials (the Linux side runs
+  # heyaki-test-turn-server or coturn). Required in cross-OS mode whenever
+  # a turn scenario is selected.
+  [string]$TurnEndpoint = "",
+  [string]$TurnUsername = "",
+  [string]$TurnCredential = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -215,8 +225,26 @@ $MatrixBin = (Resolve-Path -LiteralPath $MatrixBin).Path
 $RelayBin = (Resolve-Path -LiteralPath $RelayBin).Path
 $DemoBin = (Resolve-Path -LiteralPath $DemoBin).Path
 $TurnServerBin = (Resolve-Path -LiteralPath $TurnServerBin).Path
+$crossOs = ($RelayUrl -ne "")
+if ($crossOs -and ($RelayCaFile -eq "" -or $EnrollToken -eq "")) {
+  Skip-HeyakiMatrix "cross-OS mode requires -RelayCaFile and -EnrollToken with -RelayUrl"
+}
 if ($Scenario.Count -eq 0) {
-  $Scenario = @("lan_only", "relay_direct", "turn_udp", "udp_blocked")
+  # udp_blocked is only meaningful in cross-OS mode: Windows Firewall (WFP)
+  # exempts loopback traffic, so a program rule cannot block the same-host
+  # TURN server and the scenario would silently pass instead of failing
+  # bounded. The local-OS udp-blocked contract is enforced by the Linux CI
+  # matrix (iptables drop on a real network path).
+  if ($crossOs) {
+    $Scenario = @("lan_only", "relay_direct", "turn_udp", "udp_blocked")
+  } else {
+    $Scenario = @("lan_only", "relay_direct", "turn_udp")
+  }
+}
+if (($Scenario -contains "udp_blocked") -and -not $crossOs) {
+  throw "udp_blocked requires cross-OS mode (-RelayUrl): Windows Firewall " +
+    "exempts loopback traffic, so the block rule cannot reach a same-host " +
+    "TURN server and the scenario cannot fail as designed"
 }
 $needsFirewall = $Scenario -contains "udp_blocked"
 if ($needsFirewall) {
@@ -231,11 +259,6 @@ if ($needsFirewall) {
       [Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Skip-HeyakiMatrix "udp_blocked requires administrator privileges"
   }
-}
-
-$crossOs = ($RelayUrl -ne "")
-if ($crossOs -and ($RelayCaFile -eq "" -or $EnrollToken -eq "")) {
-  Skip-HeyakiMatrix "cross-OS mode requires -RelayCaFile and -EnrollToken with -RelayUrl"
 }
 
 # ---- work directory ------------------------------------------------------
@@ -321,9 +344,14 @@ try {
   }
 
   # ---- TURN servers (libjuice embedded; one per side, disjoint relay
-  # ranges, mirroring the coturn A/B topology of the Linux matrix) ---------
+  # ranges, mirroring the coturn A/B topology of the Linux matrix).
+  # Cross-OS mode uses the remote TURN endpoint instead and starts nothing.
   $turnNeeded = ($Scenario -contains "turn_udp") -or ($Scenario -contains "udp_blocked")
-  if ($turnNeeded) {
+  if ($turnNeeded -and $crossOs -and $TurnEndpoint -eq "") {
+    throw "cross-OS mode with turn scenarios requires -TurnEndpoint HOST:PORT " +
+      "(-TurnUsername/-TurnCredential) pointing at the remote TURN server"
+  }
+  if ($turnNeeded -and -not $crossOs) {
     $script:turnServers = @()
     foreach ($spec in @(
         @{Port = $turnPortA; User = "init-side"; Pass = "m9-turn-a";
@@ -354,12 +382,22 @@ try {
     Write-Host "TURN_SERVERS_READY a=${turnPortA} b=${turnPortB}"
   }
 
-  $turnArgs = @("--turn", "127.0.0.1:${turnPortA}",
-    "--turn-username", "init-side", "--turn-credential", "m9-turn-a",
-    "--force-turn")
-  $turnArgsResponder = @("--turn", "127.0.0.1:${turnPortB}",
-    "--turn-username", "resp-side", "--turn-credential", "m9-turn-b",
-    "--force-turn")
+  if ($crossOs) {
+    # One remote TURN server serves both sides (each side gets its own
+    # allocation pair; see docs/operations/cross-os-matrix.md).
+    $turnArgs = @("--turn", $TurnEndpoint,
+      "--turn-username", $TurnUsername, "--turn-credential", $TurnCredential,
+      "--force-turn")
+    $turnArgsResponder = $turnArgs
+    if ($turnNeeded) { Write-Host "REMOTE_TURN endpoint=$TurnEndpoint" }
+  } else {
+    $turnArgs = @("--turn", "127.0.0.1:${turnPortA}",
+      "--turn-username", "init-side", "--turn-credential", "m9-turn-a",
+      "--force-turn")
+    $turnArgsResponder = @("--turn", "127.0.0.1:${turnPortB}",
+      "--turn-username", "resp-side", "--turn-credential", "m9-turn-b",
+      "--force-turn")
+  }
 
   if ($Scenario -contains "lan_only") {
     # LAN-only: no relay, discovery and signaling on multicast + provisional
@@ -395,10 +433,18 @@ try {
   }
 
   if ($Scenario -contains "udp_blocked") {
+    # Block the matrix program's outbound UDP to the TURN ports on a real
+    # network path (cross-OS mode: the remote TURN endpoint's port; local
+    # mode never reaches here -- WFP exempts loopback).
+    if ($crossOs) {
+      $blockPorts = @($TurnEndpoint.Split(':')[-1])
+    } else {
+      $blockPorts = @($turnPortA, $turnPortB)
+    }
     $prefix = "Heyaki-M9-$PID"
     New-NetFirewallRule -DisplayName "$prefix-turn-udp-block" `
       -Direction Outbound -Action Block -Enabled True -Profile Any `
-      -Program $MatrixBin -Protocol UDP -RemotePort $turnPortA, $turnPortB | Out-Null
+      -Program $MatrixBin -Protocol UDP -RemotePort $blockPorts | Out-Null
     $script:firewallRules += "$prefix-turn-udp-block"
     try {
       $result = Invoke-MatrixPair -Tag "udp-blocked" `
