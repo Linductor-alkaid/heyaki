@@ -398,6 +398,64 @@ device-side service concurrency budgets and queue capacities. Change one
 lever at a time and confirm against M9-10 benchmarks before making it
 permanent; record the new defaults (M9-11 owns the re-freeze).
 
+### Run a soak (long-stability) test
+
+The M9-09 soak harness drives three boundedness proofs on one loopback
+machine: session churn (a long-lived initiator cycling
+dial/authenticate/message+RPC+file/disconnect against a SIGKILL-respawned
+responder), discovery churn (short-lived distinct devices enrolling and
+exiting against a long-lived relay), and capacity overload (a second relay
+with tight `max_connections`/`endpoint_directory_capacity` limits driven past
+them). The CI slice runs it on every push (`heyaki_m9_soak`, gated by
+`HEYAKI_REQUIRE_M9_SOAK=1`).
+
+Command form (from a configured build with apps built):
+
+```bash
+HEYAKI_REQUIRE_M9_SOAK=1 \
+HEYAKI_SOAK_SESSION_CYCLES=<cycles> \
+HEYAKI_SOAK_CHURN_PARTICIPANTS=<devices> \
+HEYAKI_SOAK_OVERLOAD_PARTICIPANTS=<concurrent> \
+HEYAKI_SOAK_WORK_DIR=/var/tmp/heyaki-soak-$(date +%Y%m%d-%H%M) \
+tests/network/run_m9_soak_harness.sh \
+  --relay-bin build/heyaki-relay \
+  --matrix-bin build/heyaki-m4-matrix-node \
+  --demo-bin build/heyaki-m3b-relay-demo
+```
+
+For the 24/72h acceptance runs, scale cycles so the harness runs the wanted
+duration (measure the CI slice's `SOAK_SUMMARY duration_ms` per cycle and
+multiply; a cycle is typically 5–20 s) — for example
+`HEYAKI_SOAK_SESSION_CYCLES=12000` with `HEYAKI_SOAK_CHURN_PARTICIPANTS=500`
+approximates 24 h. Keep `HEYAKI_SOAK_WORK_DIR` on a disk with a few hundred
+MiB free (per-cycle inbox files accumulate by design; prune between runs).
+Artifacts: the work dir (kept on failure), `SOAK_CYCLE`/`SOAK_SUMMARY` lines
+from the initiator log, and the `SOAK_RELAY_SAMPLE` series from the harness
+stdout — keep all three with the run record.
+
+Pass criteria (the CI slice enforces the first block; the 24/72h analysis
+adds the slopes):
+
+- Every cycle completes its work and reaches a terminal session state;
+  `SOAK_SUMMARY sessions_final=0` and `tasks_active_final=0`.
+- Initiator: `fds_last ≤ fds_first + 24`, `rss_last ≤ rss_first + 32 MiB`,
+  `replay_peak ≤ 256` (the per-peer replay-guard capacity).
+- Relay (both instances): `active_sessions`, endpoint/lease/challenge table
+  gauges within the harness bounds at every sample; RSS/fd growth gates;
+  overload rejections counted (`heyaki_relay_capacity_rejected_total`,
+  endpoint directory rejections) and a full drain to zero afterwards.
+- 24/72h: split `SOAK_CYCLE rss_kb` and `SOAK_RELAY_SAMPLE relay_rss_kb`
+  into first/second half; the median of the second half must stay within the
+  same growth gates over the whole run (a leak slower than that is an M9-11
+  input, not a pass).
+
+A failing soak is triaged from the failing gate: fd growth → descriptor or
+executor-backend leak on the participant; RSS growth → session/transport
+book or allocator retention (compare `replay=` and `sessions=` fields);
+relay-table growth → lease/endpoint TTL eviction. Re-run the failing phase
+with a larger `HEYAKI_SOAK_SESSION_CYCLES` to confirm the slope before
+filing.
+
 ### Roll back a version
 
 Rollback order: relay binary first (devices tolerate an older relay

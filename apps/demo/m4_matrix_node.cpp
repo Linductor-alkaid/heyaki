@@ -35,10 +35,14 @@
 // Crash-reporter plumbing: POSIX signals plus glibc backtraces. The coturn
 // harness runs on Linux only; Windows keeps a no-op installer below.
 #include <csignal>
+#include <dirent.h>
 #include <execinfo.h>
 #include <fcntl.h>
+#include <limits>
 #include <ucontext.h>
 #include <unistd.h>
+#else
+#include <limits>
 #endif
 
 namespace {
@@ -180,6 +184,44 @@ bool wait_until(const std::function<bool()>& predicate,
   return predicate();
 }
 
+// M9-09 soak sampling: process-level footprint read from /proc where
+// available (the soak harness runs on Linux). Other platforms report zeros
+// and the harness treats the fields as informational only. The fd count is
+// approximate (the opendir handle itself is included); cross-cycle deltas
+// against a slack bound are the leak signal, not the absolute value.
+struct ProcessSample {
+  std::uint64_t rss_kb{};
+  std::size_t open_fds{};
+};
+
+ProcessSample sample_process() {
+  ProcessSample sample{};
+#ifndef _WIN32
+  {
+    std::ifstream status("/proc/self/status");
+    std::string key;
+    while (status >> key) {
+      if (key == "VmRSS:") {
+        status >> sample.rss_kb;
+        break;
+      }
+      status.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+    }
+  }
+  if (DIR* directory = ::opendir("/proc/self/fd")) {
+    struct dirent* entry = nullptr;
+    while ((entry = ::readdir(directory)) != nullptr) {
+      const std::string_view name{entry->d_name};
+      if (name != "." && name != "..") {
+        ++sample.open_fds;
+      }
+    }
+    ::closedir(directory);
+  }
+#endif
+  return sample;
+}
+
 heyaki::Result<heyaki::ProfileStore> initialized_profile(
     const std::filesystem::path& database, std::string_view application_id) {
   heyaki::ProfileOpenOptions options;
@@ -291,6 +333,11 @@ struct RunOptions {
   std::chrono::milliseconds m7_pause_hold{0};
   std::chrono::milliseconds m7_wait{15'000};
   std::chrono::milliseconds turn_expiry_offset{0};
+  // M9-09 soak: the initiator loops connect/authenticate/exercise/disconnect
+  // cycles in one process so per-cycle resource deltas expose leaks. The
+  // harness SIGKILLs the responder after each cycle's work-done marker and
+  // respawns it with the same profile (re-login republishes the endpoint).
+  unsigned soak_cycles{0U};
 };
 
 int run_node(const std::filesystem::path& database, std::string_view application_id,
@@ -504,6 +551,411 @@ int run_node(const std::filesystem::path& database, std::string_view application
                                      const auto& entry) {
     return lan_only ? entry.lan.has_value() : entry.relay.has_value();
   };
+  const auto find_peer = [&]() -> std::optional<heyaki::DeviceEndpointKey> {
+    const auto entries = node.value_if()->endpoints();
+    const auto peer = std::find_if(entries.begin(), entries.end(),
+                                   [&](const auto& entry) {
+                                     return entry.key != local_key &&
+                                            peer_has_endpoint(entry);
+                                   });
+    if (peer == entries.end()) {
+      return std::nullopt;
+    }
+    return peer->key;
+  };
+
+  struct ServiceExerciseOutcome {
+    bool message_acked{false};
+    int rpc_status{-1};
+    bool event_received{false};
+    bool file_committed{false};
+  };
+  // M6+M7 service exercise on the authenticated session (initiator side),
+  // shared verbatim by the one-shot flow and every soak cycle. The mailbox
+  // observers remain the one-shot flow's source of truth; soak callers read
+  // the returned fields instead.
+  const auto exercise_initiator_services =
+      [&](const heyaki::DeviceEndpointKey& peer_key,
+          const std::string& m7_destination) -> ServiceExerciseOutcome {
+    ServiceExerciseOutcome outcome;
+    if (peer_key.device_id.is_zero() ||
+        !wait_until(
+            [&] {
+              const auto services = node.value_if()->service_diagnostics();
+              return services.message_sessions > 0U && services.rpc_sessions > 0U;
+            },
+            std::chrono::milliseconds{5000})) {
+      return outcome;
+    }
+    {
+      std::cout << "MATRIX_PHASE m6-exercise-begin\n";
+      heyaki::MessageEnvelope envelope;
+      envelope.type = "matrix.m6";
+      envelope.delivery_mode = heyaki::MessageDeliveryMode::peer_acked;
+      envelope.ttl_milliseconds = 20'000U;
+      envelope.payload = {std::byte{0x6D}, std::byte{0x36}};
+      (void)node.value_if()->send_message(peer_key, std::move(envelope));
+      (void)node.value_if()->call_rpc(
+          peer_key, "heyaki.matrix", "echo", {std::byte{0x2A}},
+          heyaki::RpcCallOptions{},
+          [&m6_rpc_status](const heyaki::DeviceEndpointKey&,
+                           heyaki::Result<heyaki::RpcCallOutcome> result) {
+            if (result) {
+              (void)m6_rpc_status.try_publish(
+                  static_cast<int>((*result.value_if()).status));
+            } else if (result.error_if()->code() == heyaki::ErrorCode::peer_offline) {
+              // Session churn under netem: the call was rejected before it
+              // left the device — a deterministic, never-executed outcome.
+              (void)m6_rpc_status.try_publish(-2);
+            } else {
+              // Any other local admission failure: encode the error code so
+              // the matrix result line names it (e.g. -124 = internal).
+              (void)m6_rpc_status.try_publish(
+                  -100 - static_cast<int>(result.error_if()->code()));
+            }
+          });
+      (void)wait_until(
+          [&] {
+            (void)m6_message_acked.try_load(outcome.message_acked);
+            (void)m6_rpc_status.try_load(outcome.rpc_status);
+            return outcome.message_acked && outcome.rpc_status >= 0;
+          },
+          std::chrono::milliseconds{8000});
+      std::cout << "MATRIX_PHASE m6-exercise-end message="
+                << (outcome.message_acked ? 1 : 0)
+                << " rpc=" << outcome.rpc_status << "\n";
+    }
+    if (!wait_until(
+            [&] {
+              const auto services = node.value_if()->service_diagnostics();
+              return services.event_sessions > 0U && services.file_sessions > 0U;
+            },
+            std::chrono::milliseconds{5000})) {
+      return outcome;
+    }
+    {
+      std::cout << "MATRIX_PHASE m7-exercise-begin\n";
+      const std::string text = "matrix m7 load";
+      std::vector<std::byte> payload;
+      for (const char value : text) {
+        payload.push_back(static_cast<std::byte>(value));
+      }
+      (void)node.value_if()->publish_event(peer_key, "telemetry.matrix.load",
+                                           std::move(payload), 1U);
+      const auto pushed =
+          node.value_if()->push_file(peer_key, "inbox", m7_destination, m7_source);
+      if (pushed && options.m7_pause_hold.count() > 0) {
+        // M9-08 fault window: pause at the first transferring event so the
+        // orchestrator can kill a dependency (relay, coturn) at a
+        // deterministic mid-transfer point, then resume across the fault.
+        bool transferring = false;
+        (void)wait_until(
+            [&] {
+              (void)m7_transferring.try_load(transferring);
+              return transferring;
+            },
+            std::chrono::milliseconds{5000});
+        if (transferring) {
+          std::cout << "MATRIX_PHASE m7-paused\n";
+          const auto paused = node.value_if()->pause_file_transfer(
+              peer_key, *pushed.value_if());
+          if (!paused) {
+            std::cout << "MATRIX_PHASE m7-pause-error="
+                      << paused.error_if()->safe_detail() << "\n";
+          }
+          executor::comm::PhaseGate pause_hold{"heyaki-m4-matrix-m7-pause"};
+          (void)pause_hold.wait_for(1U, options.m7_pause_hold);
+          const auto resumed = node.value_if()->resume_file_transfer(
+              peer_key, *pushed.value_if());
+          std::cout << "MATRIX_PHASE m7-resumed"
+                    << (resumed
+                            ? std::string{}
+                            : " resume_error=" +
+                                  std::string{resumed.error_if()->safe_detail()})
+                    << "\n";
+        }
+      } else if (!pushed) {
+        std::cout << "MATRIX_PHASE m7-push-error="
+                  << pushed.error_if()->safe_detail() << "\n";
+      }
+      (void)wait_until(
+          [&] {
+            (void)m7_event_received.try_load(outcome.event_received);
+            (void)m7_file_committed.try_load(outcome.file_committed);
+            return outcome.file_committed;  // events are best-effort: file is the gate
+          },
+          options.m7_wait);
+      std::cout << "MATRIX_PHASE m7-exercise-end event="
+                << (outcome.event_received ? 1 : 0)
+                << " file=" << (outcome.file_committed ? 1 : 0) << "\n";
+    }
+    return outcome;
+  };
+
+  if (options.soak_cycles > 0U) {
+    // M9-09 session-churn soak: bounded cycles of dial/authenticate/exercise
+    // in this one process while the harness SIGKills and respawns the peer
+    // after every cycle (tests/network/run_m9_soak_harness.sh). Per-cycle
+    // RSS/fd/session/replay/worker samples make growth visible; the gates
+    // ride SOAK_SUMMARY. Everything below returns; the one-shot flow that
+    // follows is untouched.
+    const auto soak_begin = std::chrono::steady_clock::now();
+    struct CycleOutcome {
+      bool work_done{false};
+      bool closed_cleanly{false};
+      bool message_acked{false};
+      int rpc_status{-1};
+      bool file_committed{false};
+      std::uint64_t work_rss_kb{};
+      std::uint64_t closed_rss_kb{};
+      std::size_t work_fds{};
+      std::size_t closed_fds{};
+      std::string data_path{"none"};
+    };
+    std::vector<CycleOutcome> cycles;
+    std::size_t replay_peak = 0U;
+    for (unsigned cycle_index = 1U; cycle_index <= options.soak_cycles;
+         ++cycle_index) {
+      CycleOutcome cycle;
+      // The respawned peer republishes its endpoint after re-login. A stale
+      // record from the previous cycle can outlive the kill until its lease
+      // expires, so the bounded re-dials below (not this wait) absorb a dial
+      // against a dead record.
+      if (!wait_until([&] { return find_peer().has_value(); },
+                      std::chrono::milliseconds{20000})) {
+        std::cout << "SOAK_CYCLE idx=" << cycle_index << " state=no-peer\n";
+        break;
+      }
+      const auto peer_key = *find_peer();
+      std::cout << "MATRIX_PHASE connecting\n";
+      const auto first_dial = options.lan_only
+                                  ? node.value_if()->connect_lan(peer_key)
+                                  : node.value_if()->connect(peer_key);
+      bool dialed = (bool)first_dial;
+      if (!dialed) {
+        // Synchronous admission failure (for example coordinator capacity):
+        // give the respawned peer a moment to republish, then try once more
+        // before the bounded authenticated wait.
+        executor::comm::PhaseGate redial_gap{"heyaki-m4-matrix-redial"};
+        (void)redial_gap.wait_for(1U, std::chrono::milliseconds{500});
+        const auto peer_retry = find_peer();
+        if (peer_retry.has_value()) {
+          dialed = (bool)(options.lan_only
+                              ? node.value_if()->connect_lan(*peer_retry)
+                              : node.value_if()->connect(*peer_retry));
+        }
+      }
+      unsigned dial_retries = options.retries + 2U;
+      const bool authenticated = dialed && wait_until(
+          [&] {
+            const auto sessions = node.value_if()->peer_sessions();
+            return std::any_of(sessions.begin(), sessions.end(),
+                               [](const auto& session) {
+                                 return session.state ==
+                                        heyaki::NodePeerSessionState::authenticated;
+                               });
+          },
+          options.authenticate_budget,
+          [&] {
+            // Re-dial when the previous attempt terminated without a
+            // session; the respawned peer may not have republished when the
+            // first dial landed on its stale directory record.
+            if (dial_retries == 0U) {
+              return false;
+            }
+            const auto sessions = node.value_if()->peer_sessions();
+            const bool terminal_without_session = std::all_of(
+                sessions.begin(), sessions.end(), [](const auto& session) {
+                  return session.state == heyaki::NodePeerSessionState::closed;
+                });
+            if (!terminal_without_session || sessions.empty()) {
+              return false;
+            }
+            const auto peer = find_peer();
+            if (!peer.has_value()) {
+              return false;
+            }
+            --dial_retries;
+            return (bool)(options.lan_only ? node.value_if()->connect_lan(*peer)
+                                           : node.value_if()->connect(*peer));
+          });
+      if (!authenticated) {
+        std::cout << "SOAK_CYCLE idx=" << cycle_index
+                  << " state=never-authenticated\n";
+        break;
+      }
+      {
+        const auto sessions = node.value_if()->peer_sessions();
+        const auto session = std::find_if(
+            sessions.begin(), sessions.end(), [](const auto& candidate) {
+              return candidate.state ==
+                     heyaki::NodePeerSessionState::authenticated;
+            });
+        if (session != sessions.end()) {
+          cycle.data_path =
+              std::string{heyaki::node_data_path_kind_name(session->data_path)};
+        }
+      }
+      // Fresh latest-value state per cycle (the mailboxes otherwise keep the
+      // previous cycle's outcomes).
+      (void)m6_message_acked.try_publish(false);
+      (void)m6_rpc_status.try_publish(-1);
+      (void)m7_event_received.try_publish(false);
+      (void)m7_file_committed.try_publish(false);
+      const auto outcome = exercise_initiator_services(
+          peer_key, "matrix/soak-" + std::to_string(cycle_index) + ".bin");
+      cycle.message_acked = outcome.message_acked;
+      cycle.rpc_status = outcome.rpc_status;
+      cycle.file_committed = outcome.file_committed;
+      cycle.work_done =
+          cycle.message_acked && cycle.rpc_status >= 0 && cycle.file_committed;
+      const auto work_sample = sample_process();
+      const auto work_metrics = node.value_if()->metrics();
+      cycle.work_rss_kb = work_sample.rss_kb;
+      cycle.work_fds = work_sample.open_fds;
+      replay_peak = std::max(
+          replay_peak, work_metrics.node.session_coordinator.replay_peak_entries);
+      std::cout << "SOAK_CYCLE idx=" << cycle_index << " state=work-done"
+                << " m6=" << (cycle.message_acked ? 1 : 0)
+                << " rpc=" << cycle.rpc_status
+                << " m7=" << (cycle.file_committed ? 1 : 0)
+                << " rss_kb=" << work_sample.rss_kb
+                << " fds=" << work_sample.open_fds
+                << " sessions=" << node.value_if()->peer_sessions().size()
+                << " replay="
+                << work_metrics.node.session_coordinator.replay_current_entries
+                << " tasks_active="
+                << work_metrics.runtime.executor_active_task_count
+                << " tasks_queued="
+                << work_metrics.runtime.executor_queued_task_count
+                << " data_path=" << cycle.data_path << '\n';
+      if (!cycle.work_done) {
+        break;
+      }
+      // The harness kills the responder once the work-done line is out; the
+      // authenticated session must reach a terminal state within the ICE
+      // consent window (RFC 7675, 30s on the pinned dependency) plus margin.
+      const bool closed = wait_until(
+          [&] {
+            const auto sessions = node.value_if()->peer_sessions();
+            return sessions.empty() ||
+                   std::all_of(sessions.begin(), sessions.end(),
+                               [](const auto& session) {
+                                 return session.state ==
+                                        heyaki::NodePeerSessionState::closed;
+                               });
+          },
+          std::chrono::milliseconds{45000});
+      cycle.closed_cleanly = closed;
+      const auto closed_sample = sample_process();
+      cycle.closed_rss_kb = closed_sample.rss_kb;
+      cycle.closed_fds = closed_sample.open_fds;
+      std::cout << "SOAK_CYCLE idx=" << cycle_index << " state=closed"
+                << " ok=" << (closed ? 1 : 0)
+                << " rss_kb=" << closed_sample.rss_kb
+                << " fds=" << closed_sample.open_fds
+                << " sessions=" << node.value_if()->peer_sessions().size()
+                << '\n';
+      cycles.push_back(cycle);
+      if (!closed) {
+        break;
+      }
+    }
+    // Closed sessions retire into the bounded diagnostic history
+    // (finished_peer_sessions, capacity = lan.diagnostic_capacity) by
+    // design; the drain gate is "no live session remains", not an empty
+    // peer_sessions() listing.
+    const auto live_peer_sessions = [&] {
+      std::size_t live = 0U;
+      for (const auto& session : node.value_if()->peer_sessions()) {
+        if (session.state != heyaki::NodePeerSessionState::closed) {
+          ++live;
+        }
+      }
+      return live;
+    };
+    (void)wait_until([&] { return live_peer_sessions() == 0U; },
+                     std::chrono::milliseconds{5000});
+    std::size_t work_done_count = 0U;
+    std::size_t closed_ok_count = 0U;
+    std::uint64_t rss_first = 0U;
+    std::uint64_t rss_last = 0U;
+    std::uint64_t rss_max = 0U;
+    std::size_t fds_first = 0U;
+    std::size_t fds_last = 0U;
+    std::size_t fds_max = 0U;
+    bool all_message_acked = !cycles.empty();
+    int last_rpc_status = -1;
+    bool all_files_committed = !cycles.empty();
+    for (const auto& cycle : cycles) {
+      work_done_count += cycle.work_done ? 1U : 0U;
+      closed_ok_count += cycle.closed_cleanly ? 1U : 0U;
+      all_message_acked = all_message_acked && cycle.message_acked;
+      last_rpc_status = cycle.rpc_status;
+      all_files_committed = all_files_committed && cycle.file_committed;
+      if (rss_first == 0U) {
+        rss_first = cycle.work_rss_kb;
+      }
+      if (cycle.closed_rss_kb != 0U) {
+        rss_last = cycle.closed_rss_kb;
+      }
+      rss_max = std::max({rss_max, cycle.work_rss_kb, cycle.closed_rss_kb});
+      if (fds_first == 0U) {
+        fds_first = cycle.work_fds;
+      }
+      if (cycle.closed_fds != 0U) {
+        fds_last = cycle.closed_fds;
+      }
+      fds_max = std::max({fds_max, cycle.work_fds, cycle.closed_fds});
+    }
+    const auto final_metrics = node.value_if()->metrics();
+    const auto soak_elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - soak_begin)
+            .count();
+    std::cout << "SOAK_SUMMARY cycles=" << cycles.size()
+              << "/" << options.soak_cycles << " work_done=" << work_done_count
+              << " closed_ok=" << closed_ok_count
+              << " rss_first_kb=" << rss_first << " rss_last_kb=" << rss_last
+              << " rss_max_kb=" << rss_max << " fds_first=" << fds_first
+              << " fds_last=" << fds_last << " fds_max=" << fds_max
+              << " replay_peak=" << replay_peak
+              << " sessions_final=" << node.value_if()->peer_sessions().size()
+              << " sessions_live_final=" << live_peer_sessions()
+              << " tasks_active_final="
+              << final_metrics.runtime.executor_active_task_count
+              << " duration_ms=" << soak_elapsed << '\n';
+    const bool soak_ok = cycles.size() == options.soak_cycles &&
+                         work_done_count == options.soak_cycles &&
+                         closed_ok_count == options.soak_cycles &&
+                         live_peer_sessions() == 0U;
+    std::cout << "MATRIX_RESULT authenticated=" << (soak_ok ? 1 : 0)
+              << " data_path="
+              << (cycles.empty() ? std::string{"none"} : cycles.back().data_path)
+              << " duration_ms=" << soak_elapsed << " attempted=1"
+              << " state=closed stage=none session_error=-"
+              << " m6_message_acked=" << (all_message_acked ? 1 : 0)
+              << " m6_rpc_status=" << last_rpc_status
+              << " m7_event=1 m7_file=" << (all_files_committed ? 1 : 0)
+              << " relay_state="
+              << heyaki::relay_node_state_name(final_metrics.node.relay.state)
+              << " coordinator_attempts="
+              << final_metrics.node.session_coordinator.current_attempts
+              << " relay_reconnects="
+              << final_metrics.node.relay.reconnect_count
+              << " heartbeats_missed="
+              << final_metrics.node.relay.heartbeats_missed
+              << " endpoints_seen=" << node.value_if()->endpoints().size()
+              << '\n';
+    std::cout << "MATRIX_PHASE shutting-down\n";
+    const auto soak_shutdown = node.value_if()->shutdown();
+    if (!soak_shutdown.stopped) {
+      std::cerr << "node shutdown did not drain\n";
+      return 1;
+    }
+    return 0;
+  }
+
   if (options.role == "initiator") {
     const auto peer_endpoint = wait_until(
         [&] {
@@ -630,119 +1082,13 @@ int run_node(const std::filesystem::path& database, std::string_view application
           break;
         }
       }
-      if (!peer_key.device_id.is_zero() &&
-          wait_until(
-              [&] {
-                const auto services = node.value_if()->service_diagnostics();
-                return services.message_sessions > 0U && services.rpc_sessions > 0U;
-              },
-              std::chrono::milliseconds{5000})) {
-        std::cout << "MATRIX_PHASE m6-exercise-begin\n";
-        heyaki::MessageEnvelope envelope;
-        envelope.type = "matrix.m6";
-        envelope.delivery_mode = heyaki::MessageDeliveryMode::peer_acked;
-        envelope.ttl_milliseconds = 20'000U;
-        envelope.payload = {std::byte{0x6D}, std::byte{0x36}};
-        (void)node.value_if()->send_message(peer_key, std::move(envelope));
-        (void)node.value_if()->call_rpc(
-            peer_key, "heyaki.matrix", "echo", {std::byte{0x2A}},
-            heyaki::RpcCallOptions{},
-            [&m6_rpc_status](const heyaki::DeviceEndpointKey&,
-                             heyaki::Result<heyaki::RpcCallOutcome> outcome) {
-              if (outcome) {
-                (void)m6_rpc_status.try_publish(
-                    static_cast<int>((*outcome.value_if()).status));
-              } else if (outcome.error_if()->code() == heyaki::ErrorCode::peer_offline) {
-                // Session churn under netem: the call was rejected before it
-                // left the device — a deterministic, never-executed outcome.
-                (void)m6_rpc_status.try_publish(-2);
-              } else {
-                // Any other local admission failure: encode the error code so
-                // the matrix result line names it (e.g. -124 = internal).
-                (void)m6_rpc_status.try_publish(
-                    -100 - static_cast<int>(outcome.error_if()->code()));
-              }
-            });
-        bool message_acked = false;
-        int rpc_status = -1;
-        (void)wait_until(
-            [&] {
-              (void)m6_message_acked.try_load(message_acked);
-              (void)m6_rpc_status.try_load(rpc_status);
-              return message_acked && rpc_status >= 0;
-            },
-            std::chrono::milliseconds{8000});
-        std::cout << "MATRIX_PHASE m6-exercise-end message="
-                  << (message_acked ? 1 : 0)
-                  << " rpc=" << rpc_status << "\n";
-      }
-      // M7: events and a file push ride the same session on every topology
-      // (the responder subscribes to the telemetry root; both directions
-      // carry file scopes).
-      if (!peer_key.device_id.is_zero() &&
-          wait_until(
-              [&] {
-                const auto services = node.value_if()->service_diagnostics();
-                return services.event_sessions > 0U && services.file_sessions > 0U;
-              },
-              std::chrono::milliseconds{5000})) {
-        std::cout << "MATRIX_PHASE m7-exercise-begin\n";
-        const std::string text = "matrix m7 load";
-        std::vector<std::byte> payload;
-        for (const char value : text) {
-          payload.push_back(static_cast<std::byte>(value));
-        }
-        (void)node.value_if()->publish_event(peer_key, "telemetry.matrix.load",
-                                             std::move(payload), 1U);
-        const auto pushed =
-            node.value_if()->push_file(peer_key, "inbox", "matrix/m7.bin", m7_source);
-        if (pushed && options.m7_pause_hold.count() > 0) {
-          // M9-08 fault window: pause at the first transferring event so the
-          // orchestrator can kill a dependency (relay, coturn) at a
-          // deterministic mid-transfer point, then resume across the fault.
-          bool transferring = false;
-          (void)wait_until(
-              [&] {
-                (void)m7_transferring.try_load(transferring);
-                return transferring;
-              },
-              std::chrono::milliseconds{5000});
-          if (transferring) {
-            std::cout << "MATRIX_PHASE m7-paused\n";
-            const auto paused = node.value_if()->pause_file_transfer(
-                peer_key, *pushed.value_if());
-            if (!paused) {
-              std::cout << "MATRIX_PHASE m7-pause-error="
-                        << paused.error_if()->safe_detail() << "\n";
-            }
-            executor::comm::PhaseGate pause_hold{"heyaki-m4-matrix-m7-pause"};
-            (void)pause_hold.wait_for(1U, options.m7_pause_hold);
-            const auto resumed = node.value_if()->resume_file_transfer(
-                peer_key, *pushed.value_if());
-            std::cout << "MATRIX_PHASE m7-resumed"
-                      << (resumed
-                              ? std::string{}
-                              : " resume_error=" +
-                                    std::string{resumed.error_if()->safe_detail()})
-                      << "\n";
-          }
-        } else if (!pushed) {
-          std::cout << "MATRIX_PHASE m7-push-error="
-                    << pushed.error_if()->safe_detail() << "\n";
-        }
-        bool event_received = false;
-        bool file_committed = false;
-        (void)wait_until(
-            [&] {
-              (void)m7_event_received.try_load(event_received);
-              (void)m7_file_committed.try_load(file_committed);
-              return file_committed;  // events are best-effort: file is the gate
-            },
-            options.m7_wait);
-        std::cout << "MATRIX_PHASE m7-exercise-end event="
-                  << (event_received ? 1 : 0)
-                  << " file=" << (file_committed ? 1 : 0) << "\n";
-      }
+      // M6 message+RPC and the M7 event+file push ride the authenticated
+      // session on every topology (the responder subscribes to the telemetry
+      // root; both directions carry file scopes). A relay-restart churn
+      // scenario may drop the session mid-exercise, which reports as
+      // m6=0/-1 rather than a topology failure. The mailbox loads below the
+      // block carry the outcomes into the result line.
+      (void)exercise_initiator_services(peer_key, "matrix/m7.bin");
     }
     executor::comm::PhaseGate hold{"heyaki-m4-matrix-hold"};
     (void)hold.wait_for(1U, options.hold);
@@ -841,7 +1187,8 @@ int usage() {
             << "      [--srflx-only] [--lan-only]\n"
             << "      [--hold-ms N] [--authenticate-budget-ms N] [--connect-retries N]\n"
             << "      [--m7-bytes N] [--m7-pause-hold-ms N] [--m7-wait-ms N]\n"
-            << "      [--turn-credential-expiry-offset-ms N]\n";
+            << "      [--turn-credential-expiry-offset-ms N]\n"
+            << "      [--soak-cycles N]  (initiator only; M9-09 soak)\n";
   return 2;
 }
 
@@ -1016,9 +1363,17 @@ int main(int argc, char** argv) {
       } else if (flag == "--turn-credential-expiry-offset-ms" && index + 1 < argc) {
         options.turn_expiry_offset =
             std::chrono::milliseconds{parse_i64(argv[++index])};
+      } else if (flag == "--soak-cycles" && index + 1 < argc) {
+        options.soak_cycles = static_cast<unsigned>(parse_u64(argv[++index]));
       } else {
         return usage();
       }
+    }
+    // The soak loop dials, exercises, and waits for the peer's death per
+    // cycle; it has no responder-side variant.
+    if (options.soak_cycles > 0U && options.role != "initiator") {
+      std::cerr << "--soak-cycles requires --role initiator\n";
+      return usage();
     }
     // lan_only sessions carry host candidates only; contradictory transport
     // flags would only surface later as a Node policy rejection.

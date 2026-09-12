@@ -1047,12 +1047,31 @@ if(HEYAKI_BUILD_APPS)
   add_test(
     NAME heyaki_m9_fault_matrix
     COMMAND "${HEYAKI_BASH_EXECUTABLE}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../deploy/coturn/run_fault_matrix.sh"
-    --relay-bin "$<TARGET_FILE:heyaki-relay>"
-    --matrix-bin "$<TARGET_FILE:heyaki-m4-matrix-node>"
-    --demo-bin "$<TARGET_FILE:heyaki-m3b-relay-demo>")
+      "${CMAKE_CURRENT_SOURCE_DIR}/../deploy/coturn/run_fault_matrix.sh"
+      --relay-bin "$<TARGET_FILE:heyaki-relay>"
+      --matrix-bin "$<TARGET_FILE:heyaki-m4-matrix-node>"
+      --demo-bin "$<TARGET_FILE:heyaki-m3b-relay-demo>")
   set_tests_properties(heyaki_m9_fault_matrix PROPERTIES
     LABELS "relay;network;fault;m9"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 1500)
+
+  # M9-09 soak harness: session churn with per-cycle RSS/fd/session/replay
+  # samples on a long-lived initiator, distinct-device discovery churn against
+  # a long-lived relay, and capacity overload on a tight second relay. Runs on
+  # loopback (no root, no coturn); gated by HEYAKI_REQUIRE_M9_SOAK so default
+  # suites and sanitizer presets stay fast. Longer (24/72h) runs scale the
+  # HEYAKI_SOAK_* knobs documented in docs/operations/runbook.md.
+  add_test(
+    NAME heyaki_m9_soak
+    COMMAND "${HEYAKI_BASH_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/network/run_m9_soak_harness.sh"
+      --relay-bin "$<TARGET_FILE:heyaki-relay>"
+      --matrix-bin "$<TARGET_FILE:heyaki-m4-matrix-node>"
+      --demo-bin "$<TARGET_FILE:heyaki-m3b-relay-demo>"
+      --work-dir "${HEYAKI_TEST_STATE_DIR}/m9-soak")
+  set_tests_properties(heyaki_m9_soak PROPERTIES
+    LABELS "network;relay;soak;m9"
     SKIP_RETURN_CODE 77
     TIMEOUT 1500)
 endif()

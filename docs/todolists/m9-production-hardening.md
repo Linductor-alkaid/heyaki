@@ -1,6 +1,6 @@
 # M9：生产加固与 v1 发布
 
-> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6、M9-07 Round 7 与 M9-08 Round 8 已交付，M9-09 起未开始，见文末实施记录）
+> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6、M9-07 Round 7、M9-08 Round 8 与 M9-09 Round 9 已交付，M9-10 起未开始，见文末实施记录）
 > - 所属计划：[Heyaki MVP 至 v1 实施 TODO 计划](heyaki-implementation-plan.md)
 > - 前置：M8 | 建议发布点：v1.0
 
@@ -17,7 +17,7 @@
 - [x] `M9-06` 完成 LAN/NAT 矩阵：same-bridge multicast、multicast blocked、multi-NIC/interface change、full-cone、restricted、port-restricted、symmetric、hairpin、CGNAT、IPv6-only 和 UDP blocked。（Round 6 交付 2026-09-10：NAT 行由新 harness `deploy/coturn/run_nat_matrix.sh` 覆盖——root+coturn 门控的 netns/nftables 拓扑（双私网客户端经仿真 NAT 到公网 netns 的 relay+双 coturn），六场景 full_cone/restricted_cone/port_restricted_cone/symmetric/hairpin/cgnat，cone 类断言 direct_srflx 打洞直连、symmetric/CGNAT 断言 TURN fallback P95<5s；`tests/network/nat_probe.py` 在每个场景前用同一 socket 查双 STUN 服务器，先证明仿真 NAT 类别本身（EIM 端口一致 vs symmetric 端口相异、映射地址=公网别名）；matrix node 增加 `--srflx-only` 排除 host 候选防止绕过 NAT。same-bridge multicast/multicast blocked/multi-NIC/接口切换/IPv6-only 由既有 `heyaki_network_harness`（m3a，非特权 userns）覆盖，UDP blocked 由既有 `heyaki_m4_network_matrix` 覆盖。CI coturn-topology job 以 root 执行全部六 NAT 场景。见实施记录 Round 6。）
 - [x] `M9-07` 在 Linux/Windows 双向组合验证 LAN-only、relay-signaled direct、TURN/UDP、TURN/TCP/TLS、Windows firewall/network profile、文件权限/命名和 PTY/ConPTY。（Round 7 交付 2026-09-11：Linux↔Windows 真跨机组合在 GitHub 托管 runner 上被平台能力阻断（runner 互不可达、WSL2 长期损坏），按"每 OS 全组合 + 双向发起 + 平台特有行为"解构——Windows CI 新增 `heyaki_windows_network_matrix`（`tests/network/run_windows_network_matrix.ps1`：lan_only/relay_direct/turn_udp 三场景发起方互换；TURN 由新 `heyaki-test-turn-server`（libjuice 内嵌 TURN/UDP，静态凭据经 matrix node 新 `--turn-username/--turn-credential` 覆写）提供，Windows 无 coturn。udp_blocked 在 Windows 单机不可仿真——WFP 豁免 loopback，程序级阻断规则碰不到同机 TURN server（CI 首跑实证），故由 Linux CI 的 m4 矩阵 iptables 场景覆盖、跨 OS 模式下 harness 显式支持），防火墙 harness 增加程序级放行规则的正向场景，矩阵节点新增 `--lan-only` 模式；跨 OS 阻断结论、TURN/TCP/TLS 依赖限制（pinned libjuice 客户端 UDP-only）与自托管混合机队程序记录于 `docs/operations/cross-os-matrix.md`。文件命名/权限与 PTY/ConPTY 经 Windows CI 既有套件覆盖（映射表见跨 OS 文档）。本机发现并修复 PeerSession 同域二次 open 竞争杀会话的真实缺陷（LAN offer-owner 侧服务挂载竞争 `subscribe_events`）。见实施记录 Round 7。）
 - [x] `M9-08` 完成 relay 重启、coturn 重启、网络切换、credential 过期、磁盘满、慢消费者和任意关闭点故障注入。（Round 8 交付 2026-09-12：三面合成——进程级故障矩阵 `deploy/coturn/run_fault_matrix.sh`（CTest `heyaki_m9_fault_matrix`，root+coturn 门控 SKIP 77，CI coturn-topology job 执行）六场景：relay_restart_transfer（m7 传输在首个 transferring 相位确定性暂停→杀 relay→重启→恢复提交，直连数据面不依赖信令 relay）、turn_restart（双 coturn 杀死→已认证 TURN 会话经 ICE consent（RFC 7675，pinned libjuice 30s）显式关闭→coturn 重启后新参与者经 TURN 重建）、path_switch（同一对设备在 direct→blocked(TURN)→direct 三段网络条件下重建正确路径）、lease_expiry（SIGSTOP 冻结 responder 越过 3s 租约→endpoint 被逐出→解冻后 heartbeat 重插租约、新发起方可达）、slow_receiver（2 MiB 推入 4mbit/50ms 整形链路，限内有界完成）、stale_turn_credential（过期 REST 凭据→coturn 拒绝分配→有界显式失败）；matrix node 新增 `--m7-bytes/--m7-pause-hold-ms/--m7-wait-ms/--turn-credential-expiry-offset-ms`。磁盘满：`RLIMIT_FSIZE` 模式（EFBIG 为 ENOSPC 的可移植替身）两例单测——m7 接收方中途写失败→命名错误+无最终文件+staging 清理+sender 收到终态+限额恢复后重推字节一致；relay SQLite 写满→显式 storage 错误+已提交行保留+失败事务回滚+重开完好。任意关闭点：ProfileStore 崩溃矩阵模式克隆到文件服务——test-only 编译 `heyaki_file_fault_injection`（`HEYAKI_FILE_FAULT_POINT` 命中即 `_Exit(86)`）在 file_store 六个盘上边界（staging.after_create/chunk.after_write/state.after_write/commit.before_rename/commit.after_rename/commit.after_cleanup；state 写入经 thread_local 深度标记与 chunk 写区分）注入进程死亡，`tests/file/file_crash_probe.cpp` + `RunFileCrashTest.cmake` 驱动（CTest `heyaki_m9_file_crash_recovery`）：rename 前任意崩溃点最终文件不可见（原子性）、崩溃后同内容新传输提交且字节一致、残留 staging 不阻塞不毒化。既有覆盖映射：relay outage/backoff/进程级 relay_restart（m3b + M4 矩阵）、TURN 凭据/租约/token/grant 过期单测（fake clock 全绿）、同 transfer id 会话丢失恢复（m7 SessionLossPauses）、接口切换发现层（m3a HEYAKI_SWITCH_INTERFACE）、慢订阅者背压（m5/m6/m7 队列上限族）。见实施记录 Round 8。）
-- [ ] `M9-09` 执行 24/72 小时长稳、反复发现/过期/建连/断连和容量过载测试，证明内存、fd/handle、worker、session、endpoint directory 和 TTL/replay cache 有界。
+- [x] `M9-09` 执行 24/72 小时长稳、反复发现/过期/建连/断连和容量过载测试，证明内存、fd/handle、worker、session、endpoint directory 和 TTL/replay cache 有界。（Round 9 交付 2026-09-12：`tests/network/run_m9_soak_harness.sh`（CTest `heyaki_m9_soak`，`HEYAKI_REQUIRE_M9_SOAK=1` 门控 SKIP 77，CI coturn-topology job 以 Release 构建直跑）三相位——Phase A 会话 churn：matrix node 新 `--soak-cycles N` 让长存 initiator 在单进程内循环 dial/authenticate/m6+m7 演练/SIGKILL 断连（harness 每循环杀并重生 responder，同 profile 重登录重发布），每循环采样 RSS/fd/会话表/replay 深度/executor 任务 gauge（`SOAK_CYCLE` 行），`SOAK_SUMMARY` 携带门（work_done/closed_ok 全循环达成、live 会话排空、fds_first→last ≤ +24、RSS 增长 ≤ 32MiB、replay_peak ≤ per-peer 256）；Phase B 设备 churn：K 个短生命周期全新设备对同一长存 relay 顺序 enroll/login/publish/exit，每迭代 scrape `/metrics` 采样五个 gauge 族 + relay RSS/fd 门；Phase C 容量过载：第二个 tight relay（max_connections=3、endpoint_directory_capacity=2）承受 5 并发参与者，断言连接容量与目录容量拒绝计数器点燃、幸存者仍可登录、优雅退出后 lease/endpoint 表排空、RSS/fd 有界。CI 片段经 runbook 的"长稳（soak）测试"程序放大为 24/72h 运行（含验收门与斜率分析）。既有确定性单测映射：TTL 表容量/过期（m3b_relay_ttl）、endpoint directory 容量/代际/租户冲突（m3b_relay_endpoint）、replay cache 全局/per-peer/TTL（m4_signaling M4ReplayCache）、连接容量拒绝（m3b_relay ConnectionCapacityRejectsAboveBound）、限速四 scope（m3b_relay_wss_client/rate_limiter）、队列上限与慢消费者（m5/m6/m7 overflow 族）。关键发现：closed 会话进入 `finished_peer_sessions` 有界诊断史环（容量 1024）是设计行为——soak 门是"无 live 会话 + 总数随循环数有界"，不是"列表归零"。见实施记录 Round 9。）
 - [ ] `M9-10` 基准消息 latency、并发 RPC、事件 fan-out、单/多文件吞吐、Shell 竞争延迟、relay 内存和带宽。
 - [ ] `M9-11` 基于结果重新冻结默认容量、水位、timeout 和重试参数；默认值必须有测量依据和硬上限。
 - [ ] `M9-12` 完成 schema N-1/N 兼容、rolling relay upgrade 和新旧设备互通；不兼容行为必须在握手期拒绝。
@@ -600,6 +600,106 @@ trap，静默退出无现场）；裸 `--stun ":PORT"` 不经 run_pair 地址展
 - 磁盘满单测 POSIX-only（RLIMIT_FSIZE）；Windows 无对应机制，ENOSPC 面
   由 CI Windows 既有套件的路径/权限拒绝场景部分覆盖，完整 Windows 磁盘
   满仿真留自托管程序（cross-os-matrix.md 先例）。
+
+### Round 9（2026-09-12）：M9-09 长稳与容量过载
+
+交付物：
+
+- `apps/demo/m4_matrix_node.cpp` soak 模式：`--soak-cycles N`（仅 initiator，
+  与 responder 角色组合直接 usage 拒绝）。单进程循环：对端目录条目就绪
+  （20s 上限；stale 记录由有界重拨吸收，`options.retries + 2` 次）→ dial →
+  认证 → m6 消息+RPC 与 m7 事件+文件演练（从一次性流程逐字抽出的
+  `exercise_initiator_services` lambda，每循环独立目标文件名
+  `matrix/soak-<i>.bin`，LatestMailbox 每循环重置）→ 打印
+  `SOAK_CYCLE idx=i state=work-done`（含 rss_kb/fds/sessions/replay/
+  tasks_active/tasks_queued/data_path）→ 等 harness 杀掉 responder 后会话
+  进入终态（45s，覆盖 pinned libjuice RFC 7675 consent 30s）→ 打印
+  `state=closed` 采样。终态 `SOAK_SUMMARY`：cycles=N/N、work_done、
+  closed_ok、rss first/last/max、fds first/last/max、replay_peak、
+  sessions_final（含诊断史）与 sessions_live_final、tasks_active_final、
+  duration。进程采样走 /proc/self（`VmRSS` + /proc/self/fd 计数，fd 数含
+  opendir 句柄近似——跨循环 delta 才是信号）；非 Linux 平台报 0 仅为编
+  译兼容。一次性流程的行为与输出 marker 保持逐字不变（fault/nat matrix
+  轮询的 `MATRIX_PHASE m7-paused` 等不受影响）。
+- `tests/network/run_m9_soak_harness.sh`（CTest `heyaki_m9_soak`，labels
+  network;relay;soak;m9，TIMEOUT 1500；`HEYAKI_REQUIRE_M9_SOAK=1` 门控
+  SKIP 77，与 Windows 矩阵同模式，避免拖慢默认套件与 sanitizer 预设；
+  CI coturn-topology job 在 fault matrix 之后以非 root 直跑）：
+  - Phase A 会话 churn：长存 initiator `--soak-cycles` + responder 每循环
+    SIGKILL + 同 profile 重生（harness 轮询 work-done 行得到确定性故障
+    窗口，与 fault matrix 的 MATRIX_PHASE 编排同法）。门：SOAK_SUMMARY
+    全循环 work_done/closed_ok、sessions_live_final==0、sessions_total ≤
+    4×cycles+16（有界史环核算）、tasks_active_final==0、fds_last ≤
+    fds_first+HEYAKI_SOAK_FD_SLACK(24)、rss_last ≤ rss_first+
+    HEYAKI_SOAK_RSS_GROWTH_KB(32768) 且 rss_max ≤ 4×增长门、
+    replay_peak ≤ 256（ReplayCachePolicy per-peer 默认容量）、
+    MATRIX_RESULT authenticated=1 m7_file=1。
+  - Phase B 设备 churn：K 个全新 profile（全新 DeviceId）顺序
+    init/enroll/login/publish/exit，每迭代 scrape 长存 relay 的
+    `/metrics`（`heyaki_relay_active_sessions`、
+    `heyaki_relay_endpoint_table_entries`、`heyaki_relay_lease_entries`、
+    login/enrollment challenge 表 entries）+ `/proc` RSS/fd；终态门：五个
+    gauge 族 ≤ 有界值（4/8/4/8/8）、relay RSS 增长 ≤ 2×增长门、fd ≤
+    baseline+32。
+  - Phase C 容量过载：第二 relay 实例 max_connections=3 +
+    endpoint_directory_capacity=2，5 并发参与者。门：连接容量拒绝
+    （`heyaki_relay_capacity_rejected_total`）≥1、目录容量拒绝
+    （endpoints/endpoint_table 两族）≥1、全部参与者有界退出、≥3 个
+    relay_state=ready（过载拒绝不杀伤登录能力）、优雅退出 4s 后
+    lease/endpoint 表归零且 active_sessions 回到 scrape-only 基线
+    （=1，metrics 抓取自身持有唯一存活 TLS 连接——baseline 同值）、
+    tight relay 自身 RSS/fd 有界。
+  - scrape 实现：python3 + `ssl.create_default_context(cafile)` 以
+    HTTP/1.0 GET `/metrics`（无 chunked，read-to-EOF），归一化去 label。
+    生成的 CA 必须带 basicConstraints/keyUsage 扩展（python TLS 栈比
+    C++ 客户端默认严格，裸自签 CA 报 "CA cert does not include key
+    usage extension"）。
+  - env 旋钮：`HEYAKI_SOAK_SESSION_CYCLES`(6)/`HEYAKI_SOAK_CHURN_PARTICIPANTS`(8)/
+    `HEYAKI_SOAK_OVERLOAD_PARTICIPANTS`(5)/`HEYAKI_SOAK_RSS_GROWTH_KB`(32768)/
+    `HEYAKI_SOAK_FD_SLACK`(24)/`HEYAKI_SOAK_WORK_DIR`；失败时保留 work dir
+    并 dump relay/participant/日志尾部与最后一次 metrics scrape。
+- `docs/operations/runbook.md` 新程序"Run a soak (long-stability) test"：
+  命令模板、24/72h 放大方法（按 CI 片段的 per-cycle duration_ms 折算
+  cycles，磁盘预算提醒）、三段工件保留要求（work dir、SOAK_CYCLE/
+  SOAK_SUMMARY、SOAK_RELAY_SAMPLE 序列）、通过标准（CI 片段强制门 +
+  24/72h 的一/后半中位斜率分析）与按失败门的分诊路径。
+- `.github/workflows/ci.yml`：coturn-topology job 新步骤
+  "Run M9 soak harness (loopback churn + overload)"（timeout 30min，
+  非 root，复用该 job 已构建的 relay/matrix/demo 三个二进制）。
+
+既有覆盖映射（本轮核对，不重复建设）：TTL 表容量拒绝/过期/重插
+（m3b_relay_ttl_test）、endpoint directory 容量/代际回退/租户冲突
+（m3b_relay_endpoint_test）、replay cache 全局+per-peer 容量拒绝与 TTL
+保留（m4_signaling_test M4ReplayCache 三例）、连接容量满拒绝与握手超时
+释放槽位（m3b_relay_test）、限速四 scope（m3b_relay_wss_client +
+rate_limiter）、控制面写队列水位（config `control_write_queue_*`）、
+设备侧队列上限/慢消费者/反饥饿（m5 channels、m6/m7 pending/overflow 族）。
+
+本机验证（Linux debug 构建）：三相位端到端绿（4 cycles/4 churn/5
+overload：initiator RSS 25.2→26.6MiB、fds 23→23、replay_peak 8、
+sessions_live_final 0；relay#1 RSS 17.7→19.0MiB、gauge 全程有界；tight
+relay 容量拒绝 3 连接 + 23 目录、排空归零）；一次性路径（无 soak flag
+的 initiator+responder 对）重构后回归验证 authenticated=1/m6/m7 全过；
+全量 ctest（含新 heyaki_m9_soak 注册，未设 env 时 SKIP 77）。CI 首验
+在 coturn-topology job（Release 构建）。
+
+关键设计事实（后续长稳运行与 M9-11 的输入）：
+
+- closed 会话按设计进入 `finished_peer_sessions` 有界诊断史环
+  （容量 = `lan.diagnostic_capacity`，默认 1024），`peer_sessions()`
+  在流量后不归零——"排空"的正确断言是 live 会话为零 + 总数随循环数
+  有界增长。24/72h 运行超过 1024 循环后该环封顶（pop_front），
+  sessions_final 门在放大运行时按 1024 封顶值解读。
+- SIGKILL 的 responder 由重生登录的 lease/endpoint 替换语义清理
+  （`lease_removed_total`/`endpoints_removed_total` 计数，60s TTL 兜底
+  不必等）；relay `active_sessions` gauge 含 scrape 自身的 TLS 连接，
+  排空断言口径为"回到 scrape-only 基线"。
+- 一次重拨可落在 stale 目录记录上（endpoint 60s TTL 内），表现为
+  有界 attempt_expired/handshake_failed 噪声，重拨预算内收敛——
+  soak 门不把这些计为失败（work_done/closed_ok 才是循环成败）。
+- 24/72h 验收语义：CI 片段证明门机制与短时有界性；小时级运行由
+  runbook 程序执行（按片段 per-cycle 时长折算 cycles），一/后半
+  RSS 中位斜率是判据，慢于此的泄漏记 M9-11 输入。
 
 ### 剩余范围（M9-01 完成前）
 

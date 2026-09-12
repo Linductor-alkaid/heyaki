@@ -185,6 +185,15 @@ jobs:
           --relay-bin "$PWD/build/heyaki-relay"
           --matrix-bin "$PWD/build/heyaki-m4-matrix-node"
           --demo-bin "$PWD/build/heyaki-m3b-relay-demo"
+      - name: Run M9 soak harness (loopback churn + overload)
+        timeout-minutes: 30
+        env:
+          HEYAKI_REQUIRE_M9_SOAK: "1"
+        run: >-
+          tests/network/run_m9_soak_harness.sh
+          --relay-bin "$PWD/build/heyaki-relay"
+          --matrix-bin "$PWD/build/heyaki-m4-matrix-node"
+          --demo-bin "$PWD/build/heyaki-m3b-relay-demo"
 
   sanitizer:
     runs-on: ubuntu-24.04
