@@ -492,11 +492,14 @@ turn_udp 110/121ms（Debug，双向）。
     （TERM→KILL）并重启；断言恢复后传输经 resume 提交（m7_file=1，
     commit 自带 BLAKE3 门）、relay_state=ready、data_path 直连。直连数据
     面不依赖信令 relay 存活由本场景证明；一次有界重试容忍 runner 计时。
-  - `turn_restart`：TURN 中转会话认证并持握后杀双 coturn；pinned
-    libjuice 实现 RFC 7675 consent freshness（CONSENT_TIMEOUT 30s），断言
-    会话在持握期内显式关闭（state=closed 且 session_error 命名原因）、
-    relay 不受影响；重启 coturn 后新参与者必须再经 TURN 认证成功
-    （coturn 真正回到服务）。
+  - `turn_restart`：TURN 中转会话认证并持握后杀双 coturn；断言参与者有界存活
+    （预算内退出、结果行产出、无挂起）且 relay 控制面不受影响；重启 coturn 后
+    新参与者必须再经 TURN 认证成功（coturn 真正回到服务）。**已证伪的假设**：
+    pinned libjuice 虽实现 RFC 7675 consent freshness（CONSENT_TIMEOUT 30s），
+    但 TURN 服务器死亡并不经 consent 在 40-70s 窗口内传导为会话关闭——CI
+    run 34684217306 与本机嵌入式 TURN server 复现均持握 state=authenticated
+    到退出；会话级关联丢失终止契约由 m4 shutdown 矩阵承担，该缺口记录为
+    已知限制（升级 libdatachannel 后重估，同 TURN/TCP 先例类别）。
   - `path_switch`：同一对已注册设备连续三段网络条件——直连（direct）→
     封锁 inter-client 转发（mediated/TURN）→ 恢复直连——每段重建会话并
     断言数据面选择正确；证明设备在网络切换后无陈旧状态毒化。
@@ -576,9 +579,13 @@ trap，静默退出无现场）；裸 `--stun ":PORT"` 不经 run_pair 地址展
   恢复的契约由 m7 SessionLossPauses（会话丢失、sender 存活）承担，两路径
   互补。孤儿 staging（进程死亡残留）今日无自动清理，靠 root 配额兜底——
   已知缺口记录于此，清理器留 M9-11 参数冻结时评估。
-- turn_restart 的会话终止依赖 libjuice consent（30s），断言窗口 hold 40s
-  覆盖；若 CI 显示 consent 关闭晚于持握期，将断言降级为"有界退出+原因
-  命名"并把严格关闭契约挪到 tcp 层场景。
+- turn_restart 的会话终止：首版假设 libjuice consent（RFC 7675，30s）会在
+  持握期内关闭会话——CI 与本机复现双双证伪（TURN 死后会话以
+  state=authenticated 存活至 70s 持握期末）。断言已收敛到系统的真实保证：
+  有界存活 + relay 不受影响 + coturn 恢复服务；缺口为 pinned 依赖行为
+  （非 executor 限制，不入 executor ledger），升级 libdatachannel 后重估。
+  本机复现方法：heyaki-test-turn-server 单 netns 同机中继 + kill -9，73s
+  观察窗。
 - 磁盘满单测 POSIX-only（RLIMIT_FSIZE）；Windows 无对应机制，ENOSPC 面
   由 CI Windows 既有套件的路径/权限拒绝场景部分覆盖，完整 Windows 磁盘
   满仿真留自托管程序（cross-os-matrix.md 先例）。
