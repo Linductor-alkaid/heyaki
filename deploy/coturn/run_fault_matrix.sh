@@ -634,6 +634,11 @@ for scenario in "${scenarios[@]}"; do
       # REST credentials derived one hour in the past: coturn must refuse
       # the allocation and the attempt must terminate explicitly (the same
       # bounded-failure contract as udp_blocked, on the credential axis).
+      # The initiator is TURN-forced so its only candidate rides the stale
+      # allocation — otherwise a host x peer-relayed pair authenticates
+      # without ever exercising the rejected credential. The 401 in the
+      # coturn log pins the failure to the credential, not the documented
+      # forced-turn nomination stall.
       prepare_participants "stale" || true
       sleep 4
       run_in "${ns1}" run "${work_dir}/stale-second.sqlite" matrix.second \
@@ -645,18 +650,20 @@ for scenario in "${scenarios[@]}"; do
         "wss://${host0}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" 40000 \
         --role initiator --stun "${host0}:${turn_port}" \
         --turn "${host0}:${turn_port}" --turn-secret "${secret}" \
-        --turn-credential-expiry-offset-ms -3600000 \
+        --turn-credential-expiry-offset-ms -3600000 --force-turn \
         --authenticate-budget-ms 30000 || true
       wait "${responder_pid}" || true
       line=$(first_result)
+      turn_rejections=$(grep -c "error 401" "${work_dir}/turn-a.log" 2>/dev/null || true)
       if [[ "$(field_of_first "${line}" authenticated)" != "0" ||
             "$(field_of_first "${line}" state)" != closed ||
-            "$(field_of_first "${line}" session_error)" == "-" ]]; then
-        log "SCENARIO_FAILED stale_turn_credential: ${line}"
+            "$(field_of_first "${line}" session_error)" == "-" ||
+            "${turn_rejections}" == "0" ]]; then
+        log "SCENARIO_FAILED stale_turn_credential (turn_401=${turn_rejections}): ${line}"
         dump_outputs stale_turn_credential
         failures=$((failures + 1))
       else
-        log "SCENARIO_OK stale_turn_credential (bounded explicit failure): ${line}"
+        log "SCENARIO_OK stale_turn_credential (bounded explicit failure, coturn 401 x${turn_rejections}): ${line}"
       fi
       ;;
     *)

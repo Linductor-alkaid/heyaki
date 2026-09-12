@@ -512,8 +512,11 @@ turn_udp 110/121ms（Debug，双向）。
     的接收方链路（实测有效 SCTP 吞吐约 1 mbit，4 MiB 会越过 25s 等待，
     载荷定为 2 MiB）；断言会话不死、m6 正常、传输在等待预算内有界完成。
   - `stale_turn_credential`：发起方以 `--turn-credential-expiry-offset-ms
-    -3600000` 推导过期 REST 凭据，coturn 拒绝分配；断言与 udp_blocked
-    同形的有界显式失败（authenticated=0 + closed + 命名错误）。
+    -3600000` 推导过期 REST 凭据并以 `--force-turn` 强制其唯一候选 ride 该
+    分配（否则 host×对端 relayed 半中继对会绕开过期凭据照常认证——CI 第二
+    轮实证）；coturn 以 401 拒绝分配，断言与 udp_blocked 同形的有界显式
+    失败（authenticated=0 + closed + 命名错误）且 turn 日志含 401（把失败
+    钉死在凭据而非 forced-turn 提名 stall）。
 - `apps/demo/m4_matrix_node.cpp` 四个 fault-matrix flag：
   `--m7-bytes N`（尺寸化载荷）、`--m7-pause-hold-ms N`（transferring
   相位暂停→hold→resume，公共 pause/resume API）、`--m7-wait-ms N`（m7
