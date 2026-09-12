@@ -19,6 +19,13 @@
 #include <string>
 #include <string_view>
 
+#ifndef _WIN32
+// M9-08 disk-full fault injection lowers RLIMIT_FSIZE (writes beyond the
+// limit fail with EFBIG, the portable stand-in for ENOSPC).
+#include <csignal>
+#include <sys/resource.h>
+#endif
+
 namespace heyaki {
 namespace {
 
@@ -372,6 +379,93 @@ TEST(M3BRelayDatabaseTest, ConcurrentConsumptionAllowsExactlyOneWinner) {
 
   (void)executor.shutdown(true);
 }
+
+#ifndef _WIN32
+// M9-08 disk-full fault injection: when SQLite cannot grow its files
+// (RLIMIT_FSIZE stands in for a full disk), writes fail with an explicit
+// storage error instead of corrupting state — every accepted row stays, the
+// failed transaction rolls back, and the database reopens cleanly.
+TEST(M3BRelayDatabaseTest, DiskFullFailsWritesExplicitlyAndPreservesEarlierData) {
+  TemporaryDirectory directory{"m3b-relay-disk-full"};
+  const auto database_path = directory.path() / "relay.sqlite";
+  const std::string token = "TEST-ONLY-disk-full-token-0123456789";
+  const auto now = now_milliseconds();
+  DeviceId::Storage device_bytes{};
+  device_bytes[0] = std::byte{0x9CU};
+
+  auto database = RelayDatabase::open(database_path);
+  ASSERT_TRUE(database) << database.error_if()->safe_detail();
+  auto created = database.value_if()->create_bootstrap_token(
+      "tenant-a", token, now + 60U * 1000U, 2U);
+  ASSERT_TRUE(created) << created.error_if()->safe_detail();
+  auto consumed = database.value_if()->consume_bootstrap_token(
+      token, "tenant-a", std::nullopt, now + 1U);
+  ASSERT_TRUE(consumed) << consumed.error_if()->safe_detail();
+  const auto audits_before = database.value_if()->snapshot().device_audit_count;
+  ASSERT_GE(audits_before, 1U);
+
+  struct rlimit original_limit {};
+  if (::getrlimit(RLIMIT_FSIZE, &original_limit) != 0) {
+    GTEST_SKIP() << "RLIMIT_FSIZE unavailable";
+  }
+  struct sigaction original_signal {};
+  struct sigaction ignore_signal {};
+  ignore_signal.sa_handler = SIG_IGN;
+  sigemptyset(&ignore_signal.sa_mask);
+  if (::sigaction(SIGXFSZ, &ignore_signal, &original_signal) != 0) {
+    GTEST_SKIP() << "SIGXFSZ control unavailable";
+  }
+  // Cap growth just above the current footprint; enough small audit rows
+  // eventually cross the cap no matter which file (db or journal) grows.
+  std::error_code size_error;
+  const auto database_size = std::filesystem::file_size(database_path, size_error);
+  ASSERT_FALSE(size_error) << size_error.message();
+  const auto journal_path = database_path.string() + "-wal";
+  std::uintmax_t journal_size = 0U;
+  if (std::filesystem::exists(journal_path, size_error) && !size_error) {
+    journal_size = std::filesystem::file_size(journal_path, size_error);
+    ASSERT_FALSE(size_error) << size_error.message();
+  }
+  struct rlimit limited = original_limit;
+  limited.rlim_cur = std::min<rlim_t>(
+      original_limit.rlim_max, database_size + journal_size + 24U * 1024U);
+  if (::setrlimit(RLIMIT_FSIZE, &limited) != 0) {
+    (void)::sigaction(SIGXFSZ, &original_signal, nullptr);
+    GTEST_SKIP() << "RLIMIT_FSIZE cannot be lowered";
+  }
+  std::size_t accepted = 0U;
+  std::optional<Error> storage_failure;
+  for (std::size_t round = 0U; round < 512U && !storage_failure.has_value(); ++round) {
+    auto audit = database.value_if()->record_device_audit(
+        DeviceId{device_bytes}, "login_rejected", now + 2U + round,
+        "disk-full probe");
+    if (audit) {
+      ++accepted;
+    } else {
+      storage_failure = *audit.error_if();
+    }
+  }
+  const int limit_restored = ::setrlimit(RLIMIT_FSIZE, &original_limit);
+  const int signal_restored = ::sigaction(SIGXFSZ, &original_signal, nullptr);
+  ASSERT_EQ(limit_restored, 0);
+  ASSERT_EQ(signal_restored, 0);
+  ASSERT_TRUE(storage_failure.has_value())
+      << accepted << " audit rows never crossed the size cap";
+  EXPECT_EQ(storage_failure->code(), ErrorCode::storage);
+
+  database = Result<RelayDatabase>::failure(
+      Error{ErrorCode::internal, "test", "release_database"});
+  auto reopened = RelayDatabase::open(database_path);
+  ASSERT_TRUE(reopened) << reopened.error_if()->safe_detail();
+  const auto snapshot = reopened.value_if()->snapshot();
+  EXPECT_EQ(snapshot.device_audit_count, audits_before + accepted);
+  // The rolled-back consumption left the token with its remaining use.
+  auto retry = reopened.value_if()->consume_bootstrap_token(
+      token, "tenant-a", std::nullopt, now + 30'000U);
+  ASSERT_TRUE(retry) << retry.error_if()->safe_detail();
+  EXPECT_EQ(retry.value_if()->remaining_uses_before, 1U);
+}
+#endif
 
 }  // namespace
 }  // namespace heyaki

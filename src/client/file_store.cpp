@@ -10,9 +10,11 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <system_error>
 
 #ifdef _WIN32
@@ -25,6 +27,40 @@
 
 namespace heyaki::file_store {
 namespace {
+
+// M9-08 crash-matrix fault injection (test-only compile, mirrors the
+// ProfileStore pattern): when HEYAKI_FILE_FAULT_POINT names the point being
+// passed, the process terminates immediately — no unwinding, no cleanup, the
+// on-disk state is exactly what a power loss would leave behind.
+#ifdef HEYAKI_FILE_FAULT_INJECTION
+void file_fault_injection_point(std::string_view point) noexcept {
+  const char* requested = std::getenv("HEYAKI_FILE_FAULT_POINT");
+  if (requested != nullptr && point == requested) {
+    std::_Exit(86);
+  }
+}
+// write_resume_state rides write_staging_at via write_small_file; the depth
+// marker lets the chunk point fire only for transfer payload writes so the
+// state sidecar gets its own dedicated crash windows.
+thread_local int file_fault_state_write_depth = 0;
+struct FileFaultStateWriteScope {
+  FileFaultStateWriteScope() noexcept { ++file_fault_state_write_depth; }
+  ~FileFaultStateWriteScope() { --file_fault_state_write_depth; }
+};
+void file_fault_chunk_point() noexcept {
+  if (file_fault_state_write_depth == 0) {
+    file_fault_injection_point("chunk.after_write");
+  }
+}
+void file_fault_state_point() noexcept {
+  file_fault_injection_point("state.after_write");
+}
+#else
+void file_fault_injection_point(std::string_view) noexcept {}
+void file_fault_chunk_point() noexcept {}
+void file_fault_state_point() noexcept {}
+struct FileFaultStateWriteScope {};
+#endif
 
 Error store_error(ErrorCode code, std::string_view detail) {
   return Error{code, "file_store", std::string{detail}};
@@ -301,6 +337,7 @@ Result<StagingFile> create_staging(const std::filesystem::path& root_directory,
   staging.temp_path += ".heyaki-" + std::string{transfer_hex} + ".part";
   staging.state_path = staging.final_path;
   staging.state_path += ".heyaki-" + std::string{transfer_hex} + ".state";
+  file_fault_injection_point("staging.after_create");
   return Result<StagingFile>::success(std::move(staging));
 }
 
@@ -336,6 +373,7 @@ Result<void> write_staging_at(const std::filesystem::path& temp_path, std::uint6
     position.QuadPart += static_cast<LONG64>(chunk);
   }
   CloseHandle(file);
+  file_fault_chunk_point();
   return Result<void>::success();
 #else
   // O_CREAT (never O_TRUNC): a resumed transfer keeps earlier chunk ranges;
@@ -356,6 +394,7 @@ Result<void> write_staging_at(const std::filesystem::path& temp_path, std::uint6
     done += static_cast<std::size_t>(put);
   }
   ::close(fd);
+  file_fault_chunk_point();
   return Result<void>::success();
 #endif
 }
@@ -375,6 +414,7 @@ Result<void> remove_quietly(const std::filesystem::path& path) {
 
 Result<void> commit_staging(const StagingFile& staging) {
 #ifdef _WIN32
+  file_fault_injection_point("commit.before_rename");
   bool moved = false;
   for (int tries = 0; tries < 10 && !moved; ++tries) {
     moved = MoveFileExW(wide_of(staging.temp_path).c_str(),
@@ -390,7 +430,9 @@ Result<void> commit_staging(const StagingFile& staging) {
   if (!moved) {
     return Result<void>::failure(store_error(ErrorCode::internal, "commit_rename_failed"));
   }
+  file_fault_injection_point("commit.after_rename");
 #else
+  file_fault_injection_point("commit.before_rename");
   std::error_code ec;
   // rename() over an existing target is atomic on POSIX; the temp file lives
   // in the same directory so the rename cannot cross filesystems.
@@ -398,6 +440,7 @@ Result<void> commit_staging(const StagingFile& staging) {
   if (ec) {
     return Result<void>::failure(store_error(ErrorCode::internal, "commit_rename_failed"));
   }
+  file_fault_injection_point("commit.after_rename");
   const int dir_fd = ::open(staging.final_path.parent_path().string().c_str(),
                             O_RDONLY | O_DIRECTORY | O_CLOEXEC);
   if (dir_fd >= 0) {
@@ -405,7 +448,9 @@ Result<void> commit_staging(const StagingFile& staging) {
     ::close(dir_fd);
   }
 #endif
-  return remove_quietly(staging.state_path);
+  const auto state_removed = remove_quietly(staging.state_path);
+  file_fault_injection_point("commit.after_cleanup");
+  return state_removed;
 }
 
 Result<void> discard_staging(const StagingFile& staging) {
@@ -506,6 +551,7 @@ Result<std::vector<std::byte>> read_small_file(const std::filesystem::path& path
 
 Result<void> write_small_file(const std::filesystem::path& path,
                               std::span<const std::byte> data) {
+  FileFaultStateWriteScope state_write_scope;
 #ifdef _WIN32
   // OPEN_ALWAYS in write_staging_at never truncates, so remove first to keep
   // state rewrites exact.
@@ -520,6 +566,7 @@ Result<void> write_small_file(const std::filesystem::path& path,
     return written;
   }
 #ifdef _WIN32
+  file_fault_state_point();
   return Result<void>::success();
 #else
   // Truncate to the exact state length on resume rewrites, durably.
@@ -532,6 +579,7 @@ Result<void> write_small_file(const std::filesystem::path& path,
     ::fsync(fd);
     ::close(fd);
   }
+  file_fault_state_point();
   return Result<void>::success();
 #endif
 }

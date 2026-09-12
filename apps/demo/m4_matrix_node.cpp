@@ -152,6 +152,17 @@ std::uint64_t parse_u64(std::string_view text) {
   return value;
 }
 
+// Signed variant for offset-style flags (negative = in the past).
+std::int64_t parse_i64(std::string_view text) {
+  const bool negative = !text.empty() && text.front() == '-';
+  if (negative) {
+    text.remove_prefix(1U);
+  }
+  const auto magnitude = parse_u64(text);
+  const auto signed_value = static_cast<std::int64_t>(magnitude);
+  return negative ? -signed_value : signed_value;
+}
+
 bool wait_until(const std::function<bool()>& predicate,
                 std::chrono::milliseconds timeout,
                 const std::function<bool()>& on_poll = {}) {
@@ -223,11 +234,16 @@ std::string base64(const unsigned char* data, std::size_t size) {
 heyaki::NodeIceServer turn_server(const std::string& host, std::uint16_t port,
                                   const std::string& secret,
                                   const std::string& tenant,
-                                  const heyaki::DeviceId& device_id) {
+                                  const heyaki::DeviceId& device_id,
+                                  std::chrono::milliseconds expiry_offset = {}) {
+  // M9-08: a negative offset derives already-stale REST credentials so the
+  // fault matrix can prove coturn rejects expired allocations explicitly.
   const auto expiry = std::chrono::duration_cast<std::chrono::seconds>(
                           std::chrono::system_clock::now().time_since_epoch())
                           .count() +
-                      600;
+                      600 + std::chrono::duration_cast<std::chrono::seconds>(
+                                expiry_offset)
+                                .count();
   const std::string username =
       std::to_string(expiry) + ":" + tenant + ":" + heyaki::to_string(device_id);
   unsigned char mac[EVP_MAX_MD_SIZE]{};
@@ -267,6 +283,14 @@ struct RunOptions {
   std::chrono::milliseconds hold{500};
   std::chrono::milliseconds authenticate_budget{15000};
   unsigned retries{0U};
+  // M9-08 fault-matrix hooks: a sized m7 payload (slow-receiver scenarios),
+  // a bounded pause mid-transfer giving the orchestrator a deterministic
+  // fault window, a REST-credential expiry offset (negative = stale), and a
+  // m7 completion-wait override for shaped links.
+  std::uint64_t m7_bytes{0U};
+  std::chrono::milliseconds m7_pause_hold{0};
+  std::chrono::milliseconds m7_wait{15'000};
+  std::chrono::milliseconds turn_expiry_offset{0};
 };
 
 int run_node(const std::filesystem::path& database, std::string_view application_id,
@@ -342,7 +366,7 @@ int run_node(const std::filesystem::path& database, std::string_view application
       server = turn_server(
           options.turn->substr(0U, separator),
           static_cast<std::uint16_t>(parse_u64(options.turn->substr(separator + 1U))),
-          options.turn_secret, tenant, device_id);
+          options.turn_secret, tenant, device_id, options.turn_expiry_offset);
     }
     policy.ice_servers.push_back(std::move(server));
   }
@@ -361,10 +385,23 @@ int run_node(const std::filesystem::path& database, std::string_view application
   std::error_code m7_dir_ec;
   std::filesystem::create_directories(m7_state_dir, m7_dir_ec);
   const auto m7_source = m7_state_dir / "matrix-source.bin";
-  {
+  if (options.m7_bytes == 0U) {
     std::ofstream out(m7_source, std::ios::binary | std::ios::trunc);
     for (int index = 0; index < 6000; ++index) {
       out << "m7 matrix payload " << index << '\n';
+    }
+  } else {
+    // Sized deterministic payload for slow-receiver scenarios: the repeating
+    // pattern keeps the file compressible in memory but the wire still
+    // carries every chunk (no compression on the file channel).
+    std::ofstream out(m7_source, std::ios::binary | std::ios::trunc);
+    const std::string pattern = "m7 matrix payload 0123456789abcdef\n";
+    std::uint64_t written = 0U;
+    while (written < options.m7_bytes) {
+      const auto chunk = std::min<std::uint64_t>(pattern.size(),
+                                                 options.m7_bytes - written);
+      out.write(pattern.data(), static_cast<std::streamsize>(chunk));
+      written += chunk;
     }
   }
   heyaki::FileRootConfig m7_root;
@@ -415,10 +452,12 @@ int run_node(const std::filesystem::path& database, std::string_view application
   executor::comm::LatestMailbox<int> m6_rpc_status{"heyaki-m4-matrix-rpc-status"};
   executor::comm::LatestMailbox<bool> m7_event_received{"heyaki-m4-matrix-m7-event"};
   executor::comm::LatestMailbox<bool> m7_file_committed{"heyaki-m4-matrix-m7-file"};
+  executor::comm::LatestMailbox<bool> m7_transferring{"heyaki-m4-matrix-m7-transferring"};
   (void)m6_message_acked.try_publish(false);
   (void)m6_rpc_status.try_publish(-1);
   (void)m7_event_received.try_publish(false);
   (void)m7_file_committed.try_publish(false);
+  (void)m7_transferring.try_publish(false);
   {
     heyaki::RpcMethodDescriptor echo;
     echo.service = "heyaki.matrix";
@@ -447,10 +486,13 @@ int run_node(const std::filesystem::path& database, std::string_view application
         (void)m7_event_received.try_publish(true);
       });
   node.value_if()->set_file_event_observer(
-      [&m7_file_committed](const heyaki::DeviceEndpointKey&,
-                           const heyaki::FileTransferEvent& event) {
+      [&m7_file_committed, &m7_transferring](
+          const heyaki::DeviceEndpointKey&,
+          const heyaki::FileTransferEvent& event) {
         if (event.phase == heyaki::FileTransferPhase::committed) {
           (void)m7_file_committed.try_publish(true);
+        } else if (event.phase == heyaki::FileTransferPhase::transferring) {
+          (void)m7_transferring.try_publish(true);
         }
       });
   const auto begin = std::chrono::steady_clock::now();
@@ -652,7 +694,42 @@ int run_node(const std::filesystem::path& database, std::string_view application
         }
         (void)node.value_if()->publish_event(peer_key, "telemetry.matrix.load",
                                              std::move(payload), 1U);
-        (void)node.value_if()->push_file(peer_key, "inbox", "matrix/m7.bin", m7_source);
+        const auto pushed =
+            node.value_if()->push_file(peer_key, "inbox", "matrix/m7.bin", m7_source);
+        if (pushed && options.m7_pause_hold.count() > 0) {
+          // M9-08 fault window: pause at the first transferring event so the
+          // orchestrator can kill a dependency (relay, coturn) at a
+          // deterministic mid-transfer point, then resume across the fault.
+          bool transferring = false;
+          (void)wait_until(
+              [&] {
+                (void)m7_transferring.try_load(transferring);
+                return transferring;
+              },
+              std::chrono::milliseconds{5000});
+          if (transferring) {
+            std::cout << "MATRIX_PHASE m7-paused\n";
+            const auto paused = node.value_if()->pause_file_transfer(
+                peer_key, *pushed.value_if());
+            if (!paused) {
+              std::cout << "MATRIX_PHASE m7-pause-error="
+                        << paused.error_if()->safe_detail() << "\n";
+            }
+            executor::comm::PhaseGate pause_hold{"heyaki-m4-matrix-m7-pause"};
+            (void)pause_hold.wait_for(1U, options.m7_pause_hold);
+            const auto resumed = node.value_if()->resume_file_transfer(
+                peer_key, *pushed.value_if());
+            std::cout << "MATRIX_PHASE m7-resumed"
+                      << (resumed
+                              ? std::string{}
+                              : " resume_error=" +
+                                    std::string{resumed.error_if()->safe_detail()})
+                      << "\n";
+          }
+        } else if (!pushed) {
+          std::cout << "MATRIX_PHASE m7-push-error="
+                    << pushed.error_if()->safe_detail() << "\n";
+        }
         bool event_received = false;
         bool file_committed = false;
         (void)wait_until(
@@ -661,7 +738,7 @@ int run_node(const std::filesystem::path& database, std::string_view application
               (void)m7_file_committed.try_load(file_committed);
               return file_committed;  // events are best-effort: file is the gate
             },
-            std::chrono::milliseconds{15'000});
+            options.m7_wait);
         std::cout << "MATRIX_PHASE m7-exercise-end event="
                   << (event_received ? 1 : 0)
                   << " file=" << (file_committed ? 1 : 0) << "\n";
@@ -762,7 +839,9 @@ int usage() {
             << "      [--turn HOST:PORT] [--turn-secret SECRET] [--force-turn]\n"
             << "      [--turn-username NAME --turn-credential SECRET]\n"
             << "      [--srflx-only] [--lan-only]\n"
-            << "      [--hold-ms N] [--authenticate-budget-ms N] [--connect-retries N]\n";
+            << "      [--hold-ms N] [--authenticate-budget-ms N] [--connect-retries N]\n"
+            << "      [--m7-bytes N] [--m7-pause-hold-ms N] [--m7-wait-ms N]\n"
+            << "      [--turn-credential-expiry-offset-ms N]\n";
   return 2;
 }
 
@@ -927,6 +1006,16 @@ int main(int argc, char** argv) {
         options.authenticate_budget = std::chrono::milliseconds{parse_u64(argv[++index])};
       } else if (flag == "--connect-retries" && index + 1 < argc) {
         options.retries = static_cast<unsigned>(parse_u64(argv[++index]));
+      } else if (flag == "--m7-bytes" && index + 1 < argc) {
+        options.m7_bytes = parse_u64(argv[++index]);
+      } else if (flag == "--m7-pause-hold-ms" && index + 1 < argc) {
+        options.m7_pause_hold =
+            std::chrono::milliseconds{parse_u64(argv[++index])};
+      } else if (flag == "--m7-wait-ms" && index + 1 < argc) {
+        options.m7_wait = std::chrono::milliseconds{parse_u64(argv[++index])};
+      } else if (flag == "--turn-credential-expiry-offset-ms" && index + 1 < argc) {
+        options.turn_expiry_offset =
+            std::chrono::milliseconds{parse_i64(argv[++index])};
       } else {
         return usage();
       }

@@ -15,6 +15,13 @@
 #include <string>
 #include <vector>
 
+#ifndef _WIN32
+// M9-08 disk-full fault injection lowers RLIMIT_FSIZE (writes beyond the
+// limit fail with EFBIG, the portable stand-in for ENOSPC mid-file).
+#include <csignal>
+#include <sys/resource.h>
+#endif
+
 namespace heyaki {
 namespace {
 
@@ -525,6 +532,89 @@ TEST(M7FileService, TransferSummariesExposePhases) {
   EXPECT_EQ(committed->bytes_total, 20'000U);
   EXPECT_EQ(committed->bytes_done, 20'000U);
 }
+
+#ifndef _WIN32
+namespace {
+std::size_t staging_leftovers(const std::filesystem::path& root) {
+  std::size_t leftovers = 0U;
+  for (const auto& entry :
+       std::filesystem::recursive_directory_iterator(root)) {
+    const auto name = entry.path().filename().string();
+    if (name.find(".heyaki-") != std::string::npos) {
+      ++leftovers;
+    }
+  }
+  return leftovers;
+}
+}  // namespace
+
+// M9-08: a receiver hitting the file-size limit mid-transfer (the portable
+// stand-in for a full disk) must fail the transfer explicitly — named error,
+// no final file, staging sidecars cleaned up, sender told the verdict — and
+// the same content must commit on a fresh transfer once space returns.
+TEST(M7FileService, DiskFullFailsReceiveExplicitlyAndRecoversAfterSpace) {
+  M7ServicePair harness(file_options());
+  FileEventLog right_log;
+  install_right_log(harness, right_log);
+
+  // Three 256 KiB chunks; a 200 KiB limit fails the first chunk partway.
+  const auto source = M7ServicePair::make_source_file(
+      harness.left_root_dir.path, "disk-full.bin", 600'000U, 0x7AU);
+  auto pushed = harness.left_files->push_file("inbox", "disk/full.bin", source);
+  ASSERT_TRUE(pushed);
+  const auto id = *pushed.value_if();
+
+  struct rlimit original_limit {};
+  if (::getrlimit(RLIMIT_FSIZE, &original_limit) != 0) {
+    GTEST_SKIP() << "RLIMIT_FSIZE unavailable";
+  }
+  struct sigaction original_signal {};
+  struct sigaction ignore_signal {};
+  ignore_signal.sa_handler = SIG_IGN;
+  sigemptyset(&ignore_signal.sa_mask);
+  if (::sigaction(SIGXFSZ, &ignore_signal, &original_signal) != 0) {
+    GTEST_SKIP() << "SIGXFSZ control unavailable";
+  }
+  struct rlimit limited = original_limit;
+  limited.rlim_cur = std::min<rlim_t>(original_limit.rlim_max, 200U * 1024U);
+  if (::setrlimit(RLIMIT_FSIZE, &limited) != 0) {
+    (void)::sigaction(SIGXFSZ, &original_signal, nullptr);
+    GTEST_SKIP() << "RLIMIT_FSIZE cannot be lowered";
+  }
+  harness.cycle(128);
+  const int limit_restored = ::setrlimit(RLIMIT_FSIZE, &original_limit);
+  const int signal_restored = ::sigaction(SIGXFSZ, &original_signal, nullptr);
+  ASSERT_EQ(limit_restored, 0);
+  ASSERT_EQ(signal_restored, 0);
+
+  const auto final_path = harness.right_root_dir.path / "inbox" / "disk" / "full.bin";
+  EXPECT_FALSE(std::filesystem::exists(final_path));
+  const auto right_stats = harness.right_files->stats();
+  if (right_stats.write_failures == 0U) {
+    dump_transfer_stats("DISKFULL-LEFT", harness.left_files->stats());
+    dump_transfer_stats("DISKFULL-RIGHT", harness.right_files->stats());
+  }
+  EXPECT_GE(right_stats.write_failures, 1U);
+  EXPECT_GE(right_stats.partial_cleanups, 1U);
+  const auto failure = right_log.last_of(id, FileTransferPhase::failed);
+  ASSERT_TRUE(failure.has_value());
+  ASSERT_TRUE(failure->error.has_value());
+  EXPECT_EQ(failure->error->safe_detail(), "write_failed");
+  // The abort verdict reached the sender.
+  EXPECT_GE(harness.left_files->stats().sender_failed, 1U);
+  // Cleanup discarded the staging sidecars.
+  EXPECT_EQ(staging_leftovers(harness.right_root_dir.path), 0U);
+
+  // Space returns: the same content commits on a fresh transfer id.
+  auto retry = harness.left_files->push_file("inbox", "disk/full.bin", source);
+  ASSERT_TRUE(retry) << retry.error_if()->safe_detail();
+  harness.cycle(128);
+  ASSERT_TRUE(std::filesystem::exists(final_path));
+  EXPECT_EQ(M7ServicePair::read_file_bytes(final_path),
+            M7ServicePair::read_file_bytes(source));
+  EXPECT_EQ(staging_leftovers(harness.right_root_dir.path), 0U);
+}
+#endif
 
 }  // namespace
 }  // namespace heyaki

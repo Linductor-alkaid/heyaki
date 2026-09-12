@@ -1,6 +1,6 @@
 # M9：生产加固与 v1 发布
 
-> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6 与 M9-07 Round 7 已交付，M9-08 起未开始，见文末实施记录）
+> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6、M9-07 Round 7 与 M9-08 Round 8 已交付，M9-09 起未开始，见文末实施记录）
 > - 所属计划：[Heyaki MVP 至 v1 实施 TODO 计划](heyaki-implementation-plan.md)
 > - 前置：M8 | 建议发布点：v1.0
 
@@ -16,7 +16,7 @@
 
 - [x] `M9-06` 完成 LAN/NAT 矩阵：same-bridge multicast、multicast blocked、multi-NIC/interface change、full-cone、restricted、port-restricted、symmetric、hairpin、CGNAT、IPv6-only 和 UDP blocked。（Round 6 交付 2026-09-10：NAT 行由新 harness `deploy/coturn/run_nat_matrix.sh` 覆盖——root+coturn 门控的 netns/nftables 拓扑（双私网客户端经仿真 NAT 到公网 netns 的 relay+双 coturn），六场景 full_cone/restricted_cone/port_restricted_cone/symmetric/hairpin/cgnat，cone 类断言 direct_srflx 打洞直连、symmetric/CGNAT 断言 TURN fallback P95<5s；`tests/network/nat_probe.py` 在每个场景前用同一 socket 查双 STUN 服务器，先证明仿真 NAT 类别本身（EIM 端口一致 vs symmetric 端口相异、映射地址=公网别名）；matrix node 增加 `--srflx-only` 排除 host 候选防止绕过 NAT。same-bridge multicast/multicast blocked/multi-NIC/接口切换/IPv6-only 由既有 `heyaki_network_harness`（m3a，非特权 userns）覆盖，UDP blocked 由既有 `heyaki_m4_network_matrix` 覆盖。CI coturn-topology job 以 root 执行全部六 NAT 场景。见实施记录 Round 6。）
 - [x] `M9-07` 在 Linux/Windows 双向组合验证 LAN-only、relay-signaled direct、TURN/UDP、TURN/TCP/TLS、Windows firewall/network profile、文件权限/命名和 PTY/ConPTY。（Round 7 交付 2026-09-11：Linux↔Windows 真跨机组合在 GitHub 托管 runner 上被平台能力阻断（runner 互不可达、WSL2 长期损坏），按"每 OS 全组合 + 双向发起 + 平台特有行为"解构——Windows CI 新增 `heyaki_windows_network_matrix`（`tests/network/run_windows_network_matrix.ps1`：lan_only/relay_direct/turn_udp 三场景发起方互换；TURN 由新 `heyaki-test-turn-server`（libjuice 内嵌 TURN/UDP，静态凭据经 matrix node 新 `--turn-username/--turn-credential` 覆写）提供，Windows 无 coturn。udp_blocked 在 Windows 单机不可仿真——WFP 豁免 loopback，程序级阻断规则碰不到同机 TURN server（CI 首跑实证），故由 Linux CI 的 m4 矩阵 iptables 场景覆盖、跨 OS 模式下 harness 显式支持），防火墙 harness 增加程序级放行规则的正向场景，矩阵节点新增 `--lan-only` 模式；跨 OS 阻断结论、TURN/TCP/TLS 依赖限制（pinned libjuice 客户端 UDP-only）与自托管混合机队程序记录于 `docs/operations/cross-os-matrix.md`。文件命名/权限与 PTY/ConPTY 经 Windows CI 既有套件覆盖（映射表见跨 OS 文档）。本机发现并修复 PeerSession 同域二次 open 竞争杀会话的真实缺陷（LAN offer-owner 侧服务挂载竞争 `subscribe_events`）。见实施记录 Round 7。）
-- [ ] `M9-08` 完成 relay 重启、coturn 重启、网络切换、credential 过期、磁盘满、慢消费者和任意关闭点故障注入。
+- [x] `M9-08` 完成 relay 重启、coturn 重启、网络切换、credential 过期、磁盘满、慢消费者和任意关闭点故障注入。（Round 8 交付 2026-09-12：三面合成——进程级故障矩阵 `deploy/coturn/run_fault_matrix.sh`（CTest `heyaki_m9_fault_matrix`，root+coturn 门控 SKIP 77，CI coturn-topology job 执行）六场景：relay_restart_transfer（m7 传输在首个 transferring 相位确定性暂停→杀 relay→重启→恢复提交，直连数据面不依赖信令 relay）、turn_restart（双 coturn 杀死→已认证 TURN 会话经 ICE consent（RFC 7675，pinned libjuice 30s）显式关闭→coturn 重启后新参与者经 TURN 重建）、path_switch（同一对设备在 direct→blocked(TURN)→direct 三段网络条件下重建正确路径）、lease_expiry（SIGSTOP 冻结 responder 越过 3s 租约→endpoint 被逐出→解冻后 heartbeat 重插租约、新发起方可达）、slow_receiver（2 MiB 推入 4mbit/50ms 整形链路，限内有界完成）、stale_turn_credential（过期 REST 凭据→coturn 拒绝分配→有界显式失败）；matrix node 新增 `--m7-bytes/--m7-pause-hold-ms/--m7-wait-ms/--turn-credential-expiry-offset-ms`。磁盘满：`RLIMIT_FSIZE` 模式（EFBIG 为 ENOSPC 的可移植替身）两例单测——m7 接收方中途写失败→命名错误+无最终文件+staging 清理+sender 收到终态+限额恢复后重推字节一致；relay SQLite 写满→显式 storage 错误+已提交行保留+失败事务回滚+重开完好。任意关闭点：ProfileStore 崩溃矩阵模式克隆到文件服务——test-only 编译 `heyaki_file_fault_injection`（`HEYAKI_FILE_FAULT_POINT` 命中即 `_Exit(86)`）在 file_store 六个盘上边界（staging.after_create/chunk.after_write/state.after_write/commit.before_rename/commit.after_rename/commit.after_cleanup；state 写入经 thread_local 深度标记与 chunk 写区分）注入进程死亡，`tests/file/file_crash_probe.cpp` + `RunFileCrashTest.cmake` 驱动（CTest `heyaki_m9_file_crash_recovery`）：rename 前任意崩溃点最终文件不可见（原子性）、崩溃后同内容新传输提交且字节一致、残留 staging 不阻塞不毒化。既有覆盖映射：relay outage/backoff/进程级 relay_restart（m3b + M4 矩阵）、TURN 凭据/租约/token/grant 过期单测（fake clock 全绿）、同 transfer id 会话丢失恢复（m7 SessionLossPauses）、接口切换发现层（m3a HEYAKI_SWITCH_INTERFACE）、慢订阅者背压（m5/m6/m7 队列上限族）。见实施记录 Round 8。）
 - [ ] `M9-09` 执行 24/72 小时长稳、反复发现/过期/建连/断连和容量过载测试，证明内存、fd/handle、worker、session、endpoint directory 和 TTL/replay cache 有界。
 - [ ] `M9-10` 基准消息 latency、并发 RPC、事件 fan-out、单/多文件吞吐、Shell 竞争延迟、relay 内存和带宽。
 - [ ] `M9-11` 基于结果重新冻结默认容量、水位、timeout 和重试参数；默认值必须有测量依据和硬上限。
@@ -477,6 +477,111 @@ turn_udp 110/121ms（Debug，双向）。
 - TURN/TCP/TLS 不引入 executor ledger 条目（第三方依赖 API 面，与 M9-01
   丢包估计缺口同类先例）；配置/wire/candidate 面已就绪，升级
   libdatachannel 后只需后端验证 + 置 `tcp_turn_backend_verified`。
+
+### Round 8（2026-09-12）：M9-08 故障注入
+
+交付物：
+
+- `deploy/coturn/run_fault_matrix.sh`（root+coturn 门控，SKIP 77，CTest
+  `heyaki_m9_fault_matrix`，TIMEOUT 1500，labels relay;network;fault;m9；
+  CI coturn-topology job 增加 "Run M9 fault matrix in namespaces" 步骤）：
+  复用 M4 矩阵拓扑（双客户端 netns + host relay + 双 coturn），六场景：
+  - `relay_restart_transfer`：发起方经 `--m7-pause-hold-ms` 在首个
+    transferring 相位暂停文件传输（stdout 无缓冲，脚本轮询
+    `MATRIX_PHASE m7-paused` 得到确定性故障窗口），窗口内杀 relay
+    （TERM→KILL）并重启；断言恢复后传输经 resume 提交（m7_file=1，
+    commit 自带 BLAKE3 门）、relay_state=ready、data_path 直连。直连数据
+    面不依赖信令 relay 存活由本场景证明；一次有界重试容忍 runner 计时。
+  - `turn_restart`：TURN 中转会话认证并持握后杀双 coturn；pinned
+    libjuice 实现 RFC 7675 consent freshness（CONSENT_TIMEOUT 30s），断言
+    会话在持握期内显式关闭（state=closed 且 session_error 命名原因）、
+    relay 不受影响；重启 coturn 后新参与者必须再经 TURN 认证成功
+    （coturn 真正回到服务）。
+  - `path_switch`：同一对已注册设备连续三段网络条件——直连（direct）→
+    封锁 inter-client 转发（mediated/TURN）→ 恢复直连——每段重建会话并
+    断言数据面选择正确；证明设备在网络切换后无陈旧状态毒化。
+  - `lease_expiry`：responder 以 1s 心跳/3s 租约运行，SIGSTOP 冻结 9s
+    越过租约 TTL（relay 按 heartbeat 请求值裁定租约），endpoint 被逐出；
+    解冻后 heartbeat 重新插入租约（round2 发起方认证成功）且 responder
+    relay_state=ready。本机实测走"TCP 存活+租约重插"分支（reconnect
+    分支由 relay_restart 覆盖）。
+  - `slow_receiver`：2 MiB 文件推入 `netem rate 4mbit delay 50ms` 整形
+    的接收方链路（实测有效 SCTP 吞吐约 1 mbit，4 MiB 会越过 25s 等待，
+    载荷定为 2 MiB）；断言会话不死、m6 正常、传输在等待预算内有界完成。
+  - `stale_turn_credential`：发起方以 `--turn-credential-expiry-offset-ms
+    -3600000` 推导过期 REST 凭据，coturn 拒绝分配；断言与 udp_blocked
+    同形的有界显式失败（authenticated=0 + closed + 命名错误）。
+- `apps/demo/m4_matrix_node.cpp` 四个 fault-matrix flag：
+  `--m7-bytes N`（尺寸化载荷）、`--m7-pause-hold-ms N`（transferring
+  相位暂停→hold→resume，公共 pause/resume API）、`--m7-wait-ms N`（m7
+  完成等待覆写，默认 15000）、`--turn-credential-expiry-offset-ms N`
+  （带符号，REST username 时间戳偏移）。
+- 磁盘满（POSIX `RLIMIT_FSIZE`+忽略 SIGXFSZ，EFBIG 为 ENOSPC 可移植替身，
+  克隆 m2 DiskFull 模式）：
+  - `tests/unit/m7_file_test.cpp`
+    `DiskFullFailsReceiveExplicitlyAndRecoversAfterSpace`：接收方首个
+    256KiB 块中途写失败→failed 事件携带 "write_failed"、最终文件不存在、
+    staging sidecar 经 blocking 清理（无 .heyaki- 残留）、sender 收到
+    abort 终态（sender_failed≥1）；限额恢复后同内容新传输提交且字节
+    一致。
+  - `tests/unit/m3b_relay_database_test.cpp`
+    `DiskFullFailsWritesExplicitlyAndPreservesEarlierData`：token
+    create/consume 建立基线后，cap 在当前 db+journal 足迹+24KiB，循环
+    audit 行直至越限；断言显式 `ErrorCode::storage`、重开后 audit 计数
+    == 基线+成功行数（失败事务回滚）、token 剩余使用次数保留。
+- 文件服务任意关闭点崩溃矩阵（ProfileStore 崩溃矩阵模式的第二实例）：
+  - `src/client/file_store.cpp`：`HEYAKI_FILE_FAULT_INJECTION` test-only
+    编译注入 `file_fault_injection_point`（env `HEYAKI_FILE_FAULT_POINT`
+    命中即 `std::_Exit(86)`，生产编译为无条件调用的 no-op，同 profile
+    模式）；六个点：`staging.after_create`、`chunk.after_write`、
+    `state.after_write`、`commit.before_rename`、`commit.after_rename`、
+    `commit.after_cleanup`。`write_resume_state` 经 `write_small_file`
+    复用 `write_staging_at`——thread_local 深度标记让 chunk 点只对传输
+    载荷写触发，state sidecar 拥有独立窗口。Windows/POSIX 两分支均置点。
+  - `tests/file/file_crash_probe.cpp`（`heyaki_m9_file_crash_probe`）：
+    push 模式跑真实 M7 loopback 对直至死于指定点（NO_CRASH=失败）；
+    verify 模式新进程断言：rename 前崩溃点最终文件不可见（原子性——
+    最终路径只能由 rename 创建）、rename 后崩溃点最终文件字节一致、
+    崩溃后同内容新传输提交字节一致且残留 staging 计数不变（不阻塞、
+    不毒化）。probe 直接调用 `file_store::blake3_file` 以在归档解析中
+    先于 `heyaki::client` 拉入 fault 注入对象（否则生产 file_store.o
+    补位、故障点永不触发——首跑 NO_CRASH 即此坑）。
+  - `tests/file/RunFileCrashTest.cmake` + CTest
+    `heyaki_m9_file_crash_recovery`（labels integration;file;m9;
+    reliability，sanitizer ptrace 跳过规则与 profile 崩溃矩阵同）。
+- 既有覆盖映射（本轮核对，不重复建设）：relay outage/backoff/重启重登
+  （m3b 单测 + M4 矩阵 relay_restart）、TURN/租约/bootstrap token/grant/
+  pairing 时限的过期单测（fake clock 全绿）、同 transfer id 的会话丢失
+  恢复（m7 SessionLossPausesAndNextSessionResumes——sender book 存活路径，
+  与本轮进程死亡路径互补）、接口切换发现层（m3a
+  RefreshesSocketsAfterInterfaceSwitch + run_harness.sh
+  HEYAKI_SWITCH_INTERFACE）、慢订阅者/队列上限/公平性（m5 channels、
+  m6/m7 pending/overflow/anti-starvation 族）。
+
+本机验证（Linux 非特权 userns 沙箱，coturn 以只绑端口的桩替身——不答
+STUN/TURN，直连主机候选仍可认证）：relay_restart_transfer
+（direct_host 2020ms，m7_file=1，relay_reconnects=2）、lease_expiry 三段、
+slow_receiver（2MiB 整形链路提交）全绿；turn_restart/path_switch/
+stale_turn_credential 依赖真 coturn，CI 首验。全量 ctest + 崩溃矩阵六点
+本机绿。坑：netem `rate 4mbit delay 50ms` 下有效 SCTP 吞吐约 1 mbit
+（非 4mbit），4MiB 载荷 25s 内只到 77.6%——载荷与等待预算必须按有效吞吐
+定；场景体内参与者调用必须 `|| true` 守卫（函数内 set -e 失败不触发 ERR
+trap，静默退出无现场）；裸 `--stun ":PORT"` 不经 run_pair 地址展开会得到
+空 hostname（ice_server_fields_invalid）。
+
+设计说明：
+
+- 进程级文件崩溃矩阵的恢复语义是"新传输提交字节一致"，不是"同 transfer
+  id 续传"——进程死亡同时消灭 sender book，同 id 重.offer 无从发生；同 id
+  恢复的契约由 m7 SessionLossPauses（会话丢失、sender 存活）承担，两路径
+  互补。孤儿 staging（进程死亡残留）今日无自动清理，靠 root 配额兜底——
+  已知缺口记录于此，清理器留 M9-11 参数冻结时评估。
+- turn_restart 的会话终止依赖 libjuice consent（30s），断言窗口 hold 40s
+  覆盖；若 CI 显示 consent 关闭晚于持握期，将断言降级为"有界退出+原因
+  命名"并把严格关闭契约挪到 tcp 层场景。
+- 磁盘满单测 POSIX-only（RLIMIT_FSIZE）；Windows 无对应机制，ENOSPC 面
+  由 CI Windows 既有套件的路径/权限拒绝场景部分覆盖，完整 Windows 磁盘
+  满仿真留自托管程序（cross-os-matrix.md 先例）。
 
 ### 剩余范围（M9-01 完成前）
 

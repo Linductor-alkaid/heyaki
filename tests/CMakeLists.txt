@@ -255,6 +255,47 @@ if(NOT HEYAKI_SANITIZER STREQUAL "none" AND
       "LeakSanitizer does not work under ptrace;ThreadSanitizer: unexpected memory mapping")
 endif()
 
+# M9-08 file-service crash matrix: a second test-only compile of the file
+# store with named _Exit(86) fault points (same pattern as the ProfileStore
+# crash suite). The probe links this variant ahead of heyaki::client so its
+# file_store object wins symbol resolution; production code carries no-ops.
+add_library(heyaki_file_fault_injection STATIC
+  ../src/client/file_store.cpp)
+target_compile_definitions(heyaki_file_fault_injection PRIVATE
+  HEYAKI_FILE_FAULT_INJECTION=1)
+target_link_libraries(heyaki_file_fault_injection
+  PUBLIC heyaki::core
+  PRIVATE heyaki::blake3)
+heyaki_configure_target(heyaki_file_fault_injection)
+
+add_executable(heyaki_m9_file_crash_probe file/file_crash_probe.cpp)
+target_link_libraries(heyaki_m9_file_crash_probe PRIVATE
+  heyaki_file_fault_injection
+  heyaki::client
+  heyaki::core
+  heyaki::blake3
+  executor::executor
+  GTest::gtest)
+target_include_directories(heyaki_m9_file_crash_probe PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/client"
+  "${CMAKE_CURRENT_SOURCE_DIR}/unit")
+heyaki_configure_target(heyaki_m9_file_crash_probe)
+add_test(
+  NAME heyaki_m9_file_crash_recovery
+  COMMAND "${CMAKE_COMMAND}"
+    "-DHEYAKI_FILE_CRASH_PROBE=$<TARGET_FILE:heyaki_m9_file_crash_probe>"
+    "-DHEYAKI_FILE_CRASH_STATE_DIR=${HEYAKI_TEST_STATE_DIR}/file-crash"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/file/RunFileCrashTest.cmake")
+set_tests_properties(heyaki_m9_file_crash_recovery PROPERTIES
+  LABELS "integration;file;m9;reliability")
+if(NOT HEYAKI_SANITIZER STREQUAL "none" AND
+   NOT HEYAKI_REQUIRE_SANITIZER_RUNTIME)
+  set_tests_properties(heyaki_m9_file_crash_recovery PROPERTIES
+    SKIP_REGULAR_EXPRESSION
+      "LeakSanitizer does not work under ptrace;ThreadSanitizer: unexpected memory mapping")
+endif()
+
 add_executable(heyaki_m2_runtime_tests unit/m2_runtime_test.cpp)
 target_link_libraries(heyaki_m2_runtime_tests PRIVATE
   heyaki::client
@@ -1000,6 +1041,18 @@ if(HEYAKI_BUILD_APPS)
     --demo-bin "$<TARGET_FILE:heyaki-m3b-relay-demo>")
   set_tests_properties(heyaki_m9_nat_matrix PROPERTIES
     LABELS "relay;network;nat;m9"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 1500)
+
+  add_test(
+    NAME heyaki_m9_fault_matrix
+    COMMAND "${HEYAKI_BASH_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../deploy/coturn/run_fault_matrix.sh"
+    --relay-bin "$<TARGET_FILE:heyaki-relay>"
+    --matrix-bin "$<TARGET_FILE:heyaki-m4-matrix-node>"
+    --demo-bin "$<TARGET_FILE:heyaki-m3b-relay-demo>")
+  set_tests_properties(heyaki_m9_fault_matrix PROPERTIES
+    LABELS "relay;network;fault;m9"
     SKIP_RETURN_CODE 77
     TIMEOUT 1500)
 endif()

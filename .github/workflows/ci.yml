@@ -178,6 +178,13 @@ jobs:
           --relay-bin "$PWD/build/heyaki-relay"
           --matrix-bin "$PWD/build/heyaki-m4-matrix-node"
           --demo-bin "$PWD/build/heyaki-m3b-relay-demo"
+      - name: Run M9 fault matrix in namespaces
+        timeout-minutes: 25
+        run: >-
+          sudo deploy/coturn/run_fault_matrix.sh
+          --relay-bin "$PWD/build/heyaki-relay"
+          --matrix-bin "$PWD/build/heyaki-m4-matrix-node"
+          --demo-bin "$PWD/build/heyaki-m3b-relay-demo"
 
   sanitizer:
     runs-on: ubuntu-24.04
