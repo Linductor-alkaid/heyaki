@@ -568,8 +568,16 @@ turn_udp 110/121ms（Debug，双向）。
 STUN/TURN，直连主机候选仍可认证）：relay_restart_transfer
 （direct_host 2020ms，m7_file=1，relay_reconnects=2）、lease_expiry 三段、
 slow_receiver（2MiB 整形链路提交）全绿；turn_restart/path_switch/
-stale_turn_credential 依赖真 coturn，CI 首验。全量 ctest + 崩溃矩阵六点
-本机绿。坑：netem `rate 4mbit delay 50ms` 下有效 SCTP 吞吐约 1 mbit
+stale_turn_credential 依赖真 coturn，CI 验证。全量 ctest（58/58 + 5 环境
+门控跳过）+ 崩溃矩阵六点本机绿。CI 三轮收敛（提交链 d400ff4→aa31f90→
+6180209→b55b905，终态 run 34686617215 十 job 全绿，windows Release 首跑
+m3b ConnectsWithTlsPin 抖动 rerun 即绿——既有家族，与本轮无关）：首轮
+编译错（生产编译里空 RAII 守卫结构被 GCC -Werror=unused-variable 拒绝，
+本机构建未开 warnings-as-errors 故未现，加 [[maybe_unused]]）；次轮两个
+场景级发现——turn_restart 的 consent 假设证伪（见上）与 stale 场景裸
+--stun ":PORT" 空 hostname；第三轮 stale 场景再修（host×对端 relayed 半
+中继对绕开过期凭据照常认证，发起方加 --force-turn 强制唯一候选 ride
+过期分配 + turn 日志 401 断言钉死凭据拒绝）。坑：netem `rate 4mbit delay 50ms` 下有效 SCTP 吞吐约 1 mbit
 （非 4mbit），4MiB 载荷 25s 内只到 77.6%——载荷与等待预算必须按有效吞吐
 定；场景体内参与者调用必须 `|| true` 守卫（函数内 set -e 失败不触发 ERR
 trap，静默退出无现场）；裸 `--stun ":PORT"` 不经 run_pair 地址展开会得到
