@@ -551,7 +551,9 @@ Result<std::vector<std::byte>> read_small_file(const std::filesystem::path& path
 
 Result<void> write_small_file(const std::filesystem::path& path,
                               std::span<const std::byte> data) {
-  FileFaultStateWriteScope state_write_scope;
+  // The scope marker is only live in the fault-injected compile; the
+  // production no-op guard still needs an instance for uniform structure.
+  [[maybe_unused]] FileFaultStateWriteScope state_write_scope;
 #ifdef _WIN32
   // OPEN_ALWAYS in write_staging_at never truncates, so remove first to keep
   // state rewrites exact.
