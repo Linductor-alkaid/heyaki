@@ -678,10 +678,16 @@ rate_limiter）、控制面写队列水位（config `control_write_queue_*`）�
 本机验证（Linux debug 构建）：三相位端到端绿（4 cycles/4 churn/5
 overload：initiator RSS 25.2→26.6MiB、fds 23→23、replay_peak 8、
 sessions_live_final 0；relay#1 RSS 17.7→19.0MiB、gauge 全程有界；tight
-relay 容量拒绝 3 连接 + 23 目录、排空归零）；一次性路径（无 soak flag
-的 initiator+responder 对）重构后回归验证 authenticated=1/m6/m7 全过；
-全量 ctest（含新 heyaki_m9_soak 注册，未设 env 时 SKIP 77）。CI 首验
-在 coturn-topology job（Release 构建）。
+relay 容量拒绝 3 连接 + 23 目录、排空归零）；CI 规模默认旋钮（6/8/5）
+全绿 3m52s；一次性路径（无 soak flag 的 initiator+responder 对）重构后
+回归验证 authenticated=1/m6/m7 全过；全量 ctest（含新 heyaki_m9_soak
+注册，未设 env 时 SKIP 77）。CI 终态 run 34698025758 十 job 全绿：
+soak 步骤在 coturn-topology job（Release）首跑即绿（initiator RSS
+21.4→22.5MiB、fds 18→15、replay_peak 12，全程 ~4min）；首跑 Windows
+Debug 的 windows_network_matrix lan_only/first-initiates 出现 file=0
+首轮抖动（message=1 rpc=1，其余五场景全绿；与上一 docs-only run 的
+turn_udp/first-initiates 首轮抖动同属 Windows runner 负载下的首轮家族，
+与本轮改动无关），rerun 即绿。
 
 关键设计事实（后续长稳运行与 M9-11 的输入）：
 
