@@ -45,7 +45,12 @@ TURN 客户端（vendored `deps/libjuice` 的 `juice_create` 只绑 UDP socket�
 `m4_webrtc_transport_test`）。协议面（wire 标签、candidate policy、
 IceServerKind::turn_tcp/turn_tls）已就绪，升级依赖后只需验证后端并把
 标记置真。与 M9-01 的丢包估计缺口同类（第三方依赖 API 面，非 executor
-限制，不进 executor ledger）；重估时点：M9-10 基准之后。
+限制，不进 executor ledger）；重估时点：M9-10 基准之后。2026-09-13
+已立项解除：方案调研与交付计划见
+[docs/todolists/m9-production-hardening.md](../todolists/m9-production-hardening.md)
+的 `M9-19`（主路径 = libdatachannel 切换 libnice ICE 后端，官方文档
+唯一支持 TURN/TCP+TLS 的路径；GLib 依赖对 Windows/Android 的移植代价
+为独立决策点）。
 
 ## 自托管跨 OS 程序
 

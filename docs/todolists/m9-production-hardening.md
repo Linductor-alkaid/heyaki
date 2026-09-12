@@ -21,6 +21,12 @@
 - [ ] `M9-10` 基准消息 latency、并发 RPC、事件 fan-out、单/多文件吞吐、Shell 竞争延迟、relay 内存和带宽。
 - [ ] `M9-11` 基于结果重新冻结默认容量、水位、timeout 和重试参数；默认值必须有测量依据和硬上限。
 - [ ] `M9-12` 完成 schema N-1/N 兼容、rolling relay upgrade 和新旧设备互通；不兼容行为必须在握手期拒绝。
+- [ ] `M9-19` 解除 TURN/TCP 与 TURN/TLS 的 pinned 依赖阻断，交付 v1 的 TURN/TCP/TLS 连通能力。（立项 2026-09-13，方案调研结论如下；交付语义 = M9-07 遗留的 udp_blocked-with-TURN-unreachable 场景可经 TURN/TCP（及 TLS）建立 DataChannel 并通过 m6/m7 端到端演练。）
+  - **缺口**：pinned libdatachannel v0.23.2 默认 ICE 后端 libjuice 的 TURN 客户端仅 UDP（`juice_create` 只绑 UDP socket，上游 README 明示 RFC 6544/TCP 不支持，issue #104 无实现计划），`allow_turn_tcp/allow_turn_tls` 因此被 `WebRtcTransportConfig::tcp_turn_backend_verified=false` 门控拒绝。协议面（wire 标签、candidate policy、`IceServerKind::turn_tcp/turn_tls`）已就绪。
+  - **选定方案 A（主路径）**：将 pinned libdatachannel 切换/双构建到 **libnice ICE 后端**（libdatachannel 构建选项 `USE_JUICE=OFF`，vendored 依赖升级）。这是唯一有官方文档支持的 TURN/TCP+TLS 路径（libdatachannel reference：TCP/TLS 仅 libnice 后端可用）。语义确认：TCP/TLS 只承载 TURN 控制连接，中继数据仍以 UDP 风格分包在隧道内传输——对"UDP 被墙、仅放行 TCP/443 类流量"的 v1 目标场景足够。工作量：第三方 pin 升级 + libnice/GLib 依赖引入 + ICE 行为回归（consent、candidate 提名、M4 矩阵/NAT 矩阵全量重跑）+ 验证后置 `tcp_turn_backend_verified=true` + coturn 侧补 `listening-ip/tcp/443` 与 `cert/tls-listening-port` 配置 + NAT/故障矩阵新增 udp_blocked→turn_tcp/turn_tls 场景。
+  - **方案 B（备选，不推荐为 v1 主路径）**：等待或上游贡献 libjuice TURN/TCP（RFC 6062，issue #104）——无时间表，v1 不可依赖。
+  - **方案 C（备选）**：自研最小 TURN/TCP 客户端（复用既有 REST 凭据推导）或把 relay WSS 扩展为数据中继——均为数月级自研面，且与"pinned 依赖为权威"的既有原则冲突，仅在方案 A 的可移植性代价不可接受时重估。
+  - **主要风险与联动**：libnice 拖入 GLib 依赖，直接影响 Windows 交付与 M11 Android 移植（Android 无官方 GLib 支持，需静态打包或评估方案 C）；建议先在 Linux CI（coturn-topology job）打通并冻结验收，Windows/Android 的后端选择作为独立决策点记录。M9-10 基准需在切换后重测（ICE 后端行为差异影响 P95 口径）。不进 executor feedback ledger（第三方依赖 API 面，与 M9-01 同类，见 `docs/operations/cross-os-matrix.md`）。
 
 ## 安全与发布工程
 
