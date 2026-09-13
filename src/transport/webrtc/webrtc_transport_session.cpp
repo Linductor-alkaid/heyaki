@@ -563,15 +563,23 @@ class WebRtcTransportSession::Impl
     // synchronously re-points (channel_handler_ below) before it dies.
     std::shared_ptr<Channel> retired;
     const auto duplicate = duplicates_.find(event.channel->kind());
-    if (duplicate != duplicates_.end() && duplicate->second.get() == event.channel.get()) {
+    if (duplicate != duplicates_.end() &&
+        duplicate->second.first.get() == event.channel.get()) {
+      const bool promotable = duplicate->second.second;
       duplicates_.erase(duplicate);
-      const auto registered = channels_.find(event.channel->kind());
-      if (registered != channels_.end()) {
-        retired = std::move(registered->second);
-        retired->close(transport::CloseReason::peer_closed);
-        channels_.erase(registered);
+      if (promotable) {
+        const auto registered = channels_.find(event.channel->kind());
+        if (registered != channels_.end()) {
+          retired = std::move(registered->second);
+          retired->close(transport::CloseReason::peer_closed);
+          channels_.erase(registered);
+        }
+        channels_.emplace(event.channel->kind(), event.channel);
+      } else {
+        // The offerer-rejected duplicate opened before its close took
+        // effect: drop it; the registered stream keeps the kind.
+        return;
       }
-      channels_.emplace(event.channel->kind(), event.channel);
     }
     // Only the channel registered for this kind may resolve a pending open
     // or surface for adoption. Anything else is a stray wrapper that owns no
@@ -600,7 +608,8 @@ class WebRtcTransportSession::Impl
     // failure must not fail the registered channel's pending open or the
     // whole session.
     const auto duplicate = duplicates_.find(event.channel->kind());
-    if (duplicate != duplicates_.end() && duplicate->second.get() == event.channel.get()) {
+    if (duplicate != duplicates_.end() &&
+        duplicate->second.first.get() == event.channel.get()) {
       duplicates_.erase(duplicate);
       return;
     }
@@ -610,7 +619,8 @@ class WebRtcTransportSession::Impl
   }
   void handle(ChannelClosedEvent& event) {
     const auto duplicate = duplicates_.find(event.channel->kind());
-    if (duplicate != duplicates_.end() && duplicate->second.get() == event.channel.get()) {
+    if (duplicate != duplicates_.end() &&
+        duplicate->second.first.get() == event.channel.get()) {
       duplicates_.erase(duplicate);
       return;
     }
@@ -641,15 +651,20 @@ class WebRtcTransportSession::Impl
     // completion and the storage would die with the event variant
     // (heap-use-after-free; found by the M9-10 bench harness under ASan).
     if (channels_.contains(kind)) {
-      if (config_.offerer) {
-        ++channels_rejected_;
-        rtc_channel->close();
-        return nullptr;
-      }
+      // Both roles keep the wrapper alive in duplicates_ and NEITHER closes
+      // the peer's stream here: closing remotely would kill the peer's own
+      // registered stream mid-handshake (its pending open then fails with
+      // channel_closed_before_open — the ASan-first CI find). Convergence
+      // is one-sided and owner-driven: the answerer's duplicate is
+      // promotable (its OpenEvent promotes it over our own stream and we
+      // close OUR retired stream ourselves); the offerer's duplicate is
+      // merely tracked so the close that eventually arrives from the
+      // answerer's retirement is ignored instead of failing the kind.
+      ++channels_rejected_;
       auto duplicate = std::make_shared<Channel>(weak_from_this(), kind,
                                                  std::move(options), std::move(rtc_channel));
       register_channel_callbacks(duplicate);
-      duplicates_[kind] = std::move(duplicate);
+      duplicates_[kind] = {std::move(duplicate), !config_.offerer};
       return nullptr;
     }
     auto channel = std::make_shared<Channel>(weak_from_this(), kind, std::move(options),
@@ -875,9 +890,12 @@ class WebRtcTransportSession::Impl
   executor::comm::MpscChannel<Event> events_;
   executor::comm::DoubleBuffer<TransportSessionSnapshot> snapshots_;
   std::map<ChannelKind, std::shared_ptr<Channel>> channels_;
-  // Answerer-side duplicate wrappers (the offerer's stream for a kind we
-  // already created) held alive until their OpenEvent promotes them.
-  std::map<ChannelKind, std::shared_ptr<Channel>> duplicates_;
+  // Duplicate wrappers for a kind we already registered: the answerer holds
+  // the offerer's stream (promotable — its OpenEvent converges the sides),
+  // the offerer tracks the stream it rejected (not promotable; kept only so
+  // the close's own onClosed is recognized). Either way the wrapper stays
+  // owned until its terminal event drains.
+  std::map<ChannelKind, std::pair<std::shared_ptr<Channel>, bool>> duplicates_;
   std::map<ChannelKind, OpenCompletion> pending_opens_;
   MessageHandler message_handler_;
   StateHandler state_handler_;
