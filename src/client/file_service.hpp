@@ -200,6 +200,16 @@ class FileService : public std::enable_shared_from_this<FileService> {
     bool probe_in_flight{false};
     bool read_in_flight{false};
     bool complete_sent{false};
+    // FILE_COMPLETE admission failed with would_block (the bulk channel
+    // queue was full — concurrent sends interleave on one channel).
+    // complete_sent is already latched, so prune() must retry the frame or
+    // the receiver never issues its verdict and both sides stall.
+    bool complete_deferred{false};
+    // Reads whose digest completed and whose chunk is staged/admitted.
+    // next_read_chunk counts DISPATCHES, so "next_read >= chunk_count" is
+    // true while the last chunk's hash is still pending; firing FILE_COMPLETE
+    // there sends a verdict request one chunk early (complete_early).
+    std::uint64_t chunks_hashed{0U};
     bool paused{false};
     bool terminal{false};
     std::shared_ptr<ProbeRecord> probe;
@@ -278,7 +288,9 @@ class FileService : public std::enable_shared_from_this<FileService> {
   void emit_event(FileTransferEvent event);
   void send_manifest(const SenderState& sender);
   void send_abort(const TransferId& id, StableStatus status, std::string_view safe_detail);
-  void send_complete(const TransferId& id, StableStatus status, std::string_view safe_detail);
+  // Returns true when the frame was admitted; false means would_block and
+  // the caller must defer (sender side retries via prune).
+  bool send_complete(const TransferId& id, StableStatus status, std::string_view safe_detail);
   [[nodiscard]] SenderState* sender_of(const TransferId& id);
   [[nodiscard]] ReceiverState* receiver_of(const TransferId& id);
   [[nodiscard]] const FileRootConfig* root_config(std::string_view root) const;

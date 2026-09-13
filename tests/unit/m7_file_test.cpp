@@ -144,8 +144,66 @@ TEST(M7FileService, PushCommitsWithBlake3AndAtomicRename) {
   EXPECT_TRUE(harness.left_files->stats().sender_committed == 1U);
 }
 
-TEST(M7FileService, MultiChunkPushCommitsInOrder) {
+TEST(M7FileService, PruneWhileProbingFiresNoZeroByteComplete) {
+  // M9-10 regression: prune() drains every non-terminal sender, including
+  // one whose blocking probe has not finished (empty manifest, chunk_count
+  // 0). "0 >= 0" used to fire a zero-byte FILE_COMPLETE there; the receiver
+  // ignores it as an unknown transfer, complete_sent latches, and the real
+  // verdict request is never sent — both sides stall with every byte on
+  // disk. The manifest guard makes the spurious complete impossible.
   M7ServicePair harness(file_options());
+  FileEventLog right_log;
+  install_right_log(harness, right_log);
+
+  const auto source = M7ServicePair::make_source_file(
+      harness.left_root_dir.path, "probe-race.bin", 400'000U, 0x51U);
+  auto pushed = harness.left_files->push_file("inbox", "race/one.bin", source);
+  ASSERT_TRUE(pushed);
+
+  // The probe is still queued on the blocking worker: a maintenance tick
+  // landing here must not complete the transfer.
+  harness.left_files->prune();
+  EXPECT_EQ(harness.left_files->stats().completes_sent, 0U);
+  EXPECT_EQ(harness.right_files->stats().manifests_received, 0U);
+
+  harness.cycle(256);
+  const auto final_path = harness.right_root_dir.path / "inbox" / "race" / "one.bin";
+  ASSERT_TRUE(std::filesystem::exists(final_path));
+  EXPECT_EQ(M7ServicePair::read_file_bytes(final_path),
+            M7ServicePair::read_file_bytes(source));
+  EXPECT_EQ(harness.left_files->stats().sender_committed, 1U);
+  EXPECT_EQ(harness.right_files->stats().committed, 1U);
+}
+
+TEST(M7FileService, ConcurrentSendsOfSameSourceBothCommit) {
+  M7ServicePair harness(file_options());
+  FileEventLog right_log;
+  install_right_log(harness, right_log);
+
+  const auto source = M7ServicePair::make_source_file(
+      harness.left_root_dir.path, "shared.bin", 900'000U, 0x77U);
+  auto first = harness.left_files->push_file("inbox", "pair/a.bin", source);
+  auto second = harness.left_files->push_file("inbox", "pair/b.bin", source);
+  ASSERT_TRUE(first);
+  ASSERT_TRUE(second);
+  // A prune between admission and the first pump round is exactly the CI
+  // interleaving the bench exposed.
+  harness.left_files->prune();
+  harness.cycle(512);
+
+  const auto path_a = harness.right_root_dir.path / "inbox" / "pair" / "a.bin";
+  const auto path_b = harness.right_root_dir.path / "inbox" / "pair" / "b.bin";
+  ASSERT_TRUE(std::filesystem::exists(path_a));
+  ASSERT_TRUE(std::filesystem::exists(path_b));
+  EXPECT_EQ(M7ServicePair::read_file_bytes(path_a),
+            M7ServicePair::read_file_bytes(source));
+  EXPECT_EQ(M7ServicePair::read_file_bytes(path_b),
+            M7ServicePair::read_file_bytes(source));
+  EXPECT_EQ(harness.left_files->stats().sender_committed, 2U);
+  EXPECT_EQ(harness.right_files->stats().committed, 2U);
+}
+
+TEST(M7FileService, MultiChunkPushCommitsInOrder) {  M7ServicePair harness(file_options());
   FileEventLog right_log;
   install_right_log(harness, right_log);
   // 600 KiB over 256 KiB chunks forces the multi-chunk window/read/write

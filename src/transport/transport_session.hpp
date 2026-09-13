@@ -159,6 +159,13 @@ class TransportSession {
 
   virtual ~TransportSession() = default;
 
+  // Starts opening (or returns the already-open) channel for `kind`. For a
+  // kind both peers may open on demand (shell/stream), the association
+  // converges on the OFFERER's stream: the offerer closes the peer's
+  // duplicate stream, and the answerer's own stream is retired in favor of
+  // the offerer's — the surviving channel then re-surfaces through the
+  // channel handler. Callers that keep the completion's pointer must also
+  // install a channel handler and re-point when the same kind re-surfaces.
   virtual void async_open_channel(ChannelKind kind, ChannelOptions options,
                                   OpenCompletion completion) = 0;
   virtual void set_message_handler(MessageHandler handler) = 0;

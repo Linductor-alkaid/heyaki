@@ -372,6 +372,11 @@ void FileService::prune() {
     if (!sender.terminal && !sender.paused) {
       drain_window(sender);
       start_next_read(sender);
+      if (sender.complete_deferred) {
+        // The verdict request lost its race with concurrent bulk traffic;
+        // with the window now drained there is queue room again.
+        sender.complete_deferred = !send_complete(id, StableStatus::ok, "");
+      }
     }
   }
 }
@@ -737,6 +742,7 @@ void FileService::finish_send_hash(const TransferId& id, std::uint64_t offset,
   if (sender == nullptr || sender->terminal) {
     return;
   }
+  ++sender->chunks_hashed;
   FileChunkHeader header;
   header.transfer_id = id;
   header.offset = offset;
@@ -775,12 +781,17 @@ void FileService::drain_window(SenderState& sender) {
     sender.bytes_admitted += data_bytes;
     ++stats_.chunks_sent;
   }
-  if (sender.next_read_chunk >= sender.chunk_count && !sender.complete_sent &&
-      !sender.terminal) {
+  if (sender.manifest.size != 0U && sender.chunks_hashed >= sender.chunk_count &&
+      !sender.complete_sent && !sender.terminal) {
     // Every chunk is admitted into the transport queue: the receiver's
-    // FILE_COMPLETE verdict is the terminal commit answer.
+    // FILE_COMPLETE verdict is the terminal commit answer. The manifest
+    // guard is load-bearing: prune() drains senders that are still probing
+    // (empty manifest, chunk_count 0), where "0 >= 0" would otherwise fire
+    // a zero-byte complete within the first tick — the receiver ignores it
+    // as an unknown transfer, complete_sent latches, and the real verdict
+    // request is never sent (found by the M9-10 bench under probe latency).
     sender.complete_sent = true;
-    send_complete(sender.transfer_id, StableStatus::ok, "");
+    sender.complete_deferred = !send_complete(sender.transfer_id, StableStatus::ok, "");
     ++stats_.completes_sent;
     auto entry = book_->mutable_entries().find(sender.transfer_id);
     if (entry != book_->mutable_entries().end()) {
@@ -1478,7 +1489,7 @@ void FileService::send_abort(const TransferId& id, StableStatus status,
   (void)session_.send_frame(channel_id_, session::FrameClass::bulk, std::move(frame));
 }
 
-void FileService::send_complete(const TransferId& id, StableStatus status,
+bool FileService::send_complete(const TransferId& id, StableStatus status,
                                 std::string_view safe_detail) {
   FileCompleteBody complete;
   complete.transfer_id = id;
@@ -1488,15 +1499,19 @@ void FileService::send_complete(const TransferId& id, StableStatus status,
   }
   auto encoded = encode_file_complete(complete);
   if (!encoded) {
-    return;
+    return false;
   }
   Frame frame;
   frame.type = static_cast<std::uint8_t>(FrameType::file_complete);
   frame.channel_id = channel_id_;
   frame.payload = std::move(*encoded.value_if());
   // Bulk class: this frame may follow queued chunks and must never preempt
-  // them (the weighted scheduler sends standard ahead of bulk).
-  (void)session_.send_frame(channel_id_, session::FrameClass::bulk, std::move(frame));
+  // them (the weighted scheduler sends standard ahead of bulk). Admission
+  // failure is the caller's to defer: a silently dropped verdict request
+  // stalls the receiver with every byte already on disk (found by the
+  // M9-10 bench with two concurrent sends saturating the bulk queue).
+  return static_cast<bool>(
+      session_.send_frame(channel_id_, session::FrameClass::bulk, std::move(frame)));
 }
 
 FileService::SenderState* FileService::sender_of(const TransferId& id) {

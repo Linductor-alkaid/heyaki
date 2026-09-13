@@ -406,4 +406,174 @@ TEST(M4WebRtcTransport, PropagatesHighAndLowWaterBackpressure) {
   EXPECT_EQ(shutdown.final_phase, heyaki::RuntimePhase::stopped);
 }
 
+TEST(M4WebRtcTransport, SimultaneousSameKindOpensResolveToRegisteredChannel) {
+  // M9-10 regression: both peers opening the same channel kind while the
+  // association is up means each side also receives the peer's duplicate
+  // stream as an incoming channel of the same kind. The duplicate wrapper
+  // must be rejected and the pending open must resolve to the registered
+  // channel — the old code handed the unregistered duplicate's pointer to
+  // the completion, and that storage died with the drain event variant
+  // (heap-use-after-free on the next send, found by the bench harness).
+  auto runtime = heyaki::Runtime::create_owned();
+  ASSERT_TRUE(runtime) << runtime.error_if()->safe_detail();
+  auto context = runtime.value_if()->create_context(
+      heyaki::RuntimeContextKind::peer_session, "m4-webrtc-duplicate-kind");
+  ASSERT_TRUE(context) << context.error_if()->safe_detail();
+
+  executor::comm::PhaseGate left_connected("m4-dup-left-connected");
+  executor::comm::PhaseGate right_connected("m4-dup-right-connected");
+  executor::comm::PhaseGate left_open("m4-dup-left-open");
+  executor::comm::PhaseGate right_open("m4-dup-right-open");
+  executor::comm::PhaseGate left_received("m4-dup-left-received");
+  executor::comm::PhaseGate right_received("m4-dup-right-received");
+  executor::comm::PhaseGate sessions_closed("m4-dup-closed");
+
+  std::shared_ptr<WebRtcTransportSession> left;
+  std::shared_ptr<WebRtcTransportSession> right;
+  WebRtcTransportConfig left_config;
+  left_config.offerer = true;
+  left_config.ice_servers.clear();
+  left_config.candidates.allow_server_reflexive = false;
+  left_config.candidates.allow_turn_udp = false;
+  WebRtcTransportConfig right_config = left_config;
+  right_config.offerer = false;
+
+  heyaki::transport::webrtc::WebRtcSignalingHandler left_signaling;
+  left_signaling.on_local_description =
+      [&](std::vector<std::byte> sdp, std::string type, heyaki::DtlsFingerprint) {
+        ASSERT_TRUE(right);
+        EXPECT_TRUE(right->set_remote_description(sdp, type).has_value());
+      };
+  left_signaling.on_local_candidate = [&](std::vector<std::byte> candidate) {
+    ASSERT_TRUE(right);
+    EXPECT_TRUE(right->add_remote_candidate(candidate).has_value());
+  };
+  heyaki::transport::webrtc::WebRtcSignalingHandler right_signaling;
+  right_signaling.on_local_description =
+      [&](std::vector<std::byte> sdp, std::string type, heyaki::DtlsFingerprint) {
+        ASSERT_TRUE(left);
+        EXPECT_TRUE(left->set_remote_description(sdp, type).has_value());
+      };
+  right_signaling.on_local_candidate = [&](std::vector<std::byte> candidate) {
+    ASSERT_TRUE(left);
+    EXPECT_TRUE(left->add_remote_candidate(candidate).has_value());
+  };
+
+  auto created_left = WebRtcTransportSession::create(
+      left_config, runtime_dispatcher(*context.value_if()), std::move(left_signaling));
+  ASSERT_TRUE(created_left) << created_left.error_if()->safe_detail();
+  left = *created_left.value_if();
+  auto created_right = WebRtcTransportSession::create(
+      right_config, runtime_dispatcher(*context.value_if()), std::move(right_signaling));
+  ASSERT_TRUE(created_right) << created_right.error_if()->safe_detail();
+  right = *created_right.value_if();
+
+  left->set_state_handler([&](const heyaki::transport::TransportSessionSnapshot& snapshot) {
+    if (snapshot.state == TransportState::connected) (void)left_connected.advance_to(1U);
+  });
+  right->set_state_handler([&](const heyaki::transport::TransportSessionSnapshot& snapshot) {
+    if (snapshot.state == TransportState::connected) (void)right_connected.advance_to(1U);
+  });
+  left->set_message_handler(
+      [&](TransportChannel&, std::vector<std::byte>) { (void)left_received.advance_to(1U); });
+  right->set_message_handler(
+      [&](TransportChannel&, std::vector<std::byte>) { (void)right_received.advance_to(1U); });
+
+  // A pre-start channel is required for the initial SDP; use the control
+  // kind so the file kind below is created by both sides only after the
+  // association is up — that is the duplicate-stream race under test.
+  ChannelOptions control_options;
+  control_options.send_queue_bytes = 64U * 1024U;
+  control_options.max_message_bytes = 64U * 1024U;
+  ASSERT_TRUE(left->prepare_channel(ChannelKind::control, control_options));
+
+  const auto started = left->start();
+  ASSERT_TRUE(started) << started.error_if()->safe_detail();
+  ASSERT_TRUE(left_connected.wait_for(1U, 10s));
+  ASSERT_TRUE(right_connected.wait_for(1U, 10s));
+
+  std::atomic<TransportChannel*> left_channel{nullptr};
+  std::atomic<TransportChannel*> right_channel{nullptr};
+  // The session-side convergence contract: when the answerer's own stream is
+  // retired in favor of the offerer's, the surviving channel re-surfaces
+  // through the channel handler and callers re-point. The completion pointer
+  // alone is not stable for a kind both sides opened.
+  right->set_channel_handler([&](ChannelKind kind, TransportChannel& channel) {
+    if (kind == ChannelKind::file) {
+      right_channel.store(&channel, std::memory_order_release);
+    }
+  });
+  ChannelOptions options;
+  options.send_queue_bytes = 64U * 1024U;
+  options.max_message_bytes = 64U * 1024U;
+  auto right_open_dispatched = runtime_dispatcher(*context.value_if())(
+      "m4.dup.open-right", [&] {
+        right->async_open_channel(
+            ChannelKind::file, options,
+            [&](heyaki::Result<TransportChannel*> opened) {
+              ASSERT_TRUE(opened) << opened.error_if()->safe_detail();
+              right_channel.store(*opened.value_if(), std::memory_order_release);
+              (void)right_open.advance_to(1U);
+            });
+        return heyaki::Result<void>::success();
+      });
+  ASSERT_TRUE(right_open_dispatched) << right_open_dispatched.error_if()->safe_detail();
+  auto left_open_dispatched = runtime_dispatcher(*context.value_if())(
+      "m4.dup.open-left", [&] {
+        left->async_open_channel(
+            ChannelKind::file, options,
+            [&](heyaki::Result<TransportChannel*> opened) {
+              ASSERT_TRUE(opened) << opened.error_if()->safe_detail();
+              left_channel.store(*opened.value_if(), std::memory_order_release);
+              (void)left_open.advance_to(1U);
+            });
+        return heyaki::Result<void>::success();
+      });
+  ASSERT_TRUE(left_open_dispatched) << left_open_dispatched.error_if()->safe_detail();
+
+  ASSERT_TRUE(left_open.wait_for(1U, 10s));
+  ASSERT_TRUE(right_open.wait_for(1U, 10s));
+  ASSERT_NE(left_channel.load(std::memory_order_acquire), nullptr);
+  ASSERT_NE(right_channel.load(std::memory_order_acquire), nullptr);
+
+  // The offerer (left) rejects the answerer's duplicate stream; the answerer
+  // (right) promotes the offerer's stream over its own instead. Both sides
+  // end up on the offerer's stream.
+  const auto wait_rejections = [&](WebRtcTransportSession& session) {
+    for (int attempt = 0; attempt < 200; ++attempt) {
+      if (session.diagnostics().channels_rejected >= 1U) return true;
+      executor::comm::PhaseGate poll{"m4-dup-reject-poll"};
+      (void)poll.wait_for(1U, 50ms);
+    }
+    return false;
+  };
+  EXPECT_TRUE(wait_rejections(*left));
+
+  // Round trips through the pointers the completions handed out: under the
+  // old duplicate handoff this touches storage already freed with the drain
+  // event variant (ASan preset turns that red immediately).
+  const std::vector<std::byte> probe(512U, std::byte{0xC3U});
+  auto roundtrip_dispatched = runtime_dispatcher(*context.value_if())(
+      "m4.dup.roundtrip", [&] {
+        EXPECT_TRUE(left_channel.load(std::memory_order_acquire)->send(probe).has_value());
+        EXPECT_TRUE(right_channel.load(std::memory_order_acquire)->send(probe).has_value());
+        return heyaki::Result<void>::success();
+      });
+  ASSERT_TRUE(roundtrip_dispatched) << roundtrip_dispatched.error_if()->safe_detail();
+  ASSERT_TRUE(left_received.wait_for(1U, 10s));
+  ASSERT_TRUE(right_received.wait_for(1U, 10s));
+
+  auto close_dispatched = runtime_dispatcher(*context.value_if())(
+      "m4.dup.close", [&] {
+        left->close(heyaki::transport::CloseReason::local_shutdown);
+        right->close(heyaki::transport::CloseReason::local_shutdown);
+        (void)sessions_closed.advance_to(1U);
+        return heyaki::Result<void>::success();
+      });
+  ASSERT_TRUE(close_dispatched) << close_dispatched.error_if()->safe_detail();
+  ASSERT_TRUE(sessions_closed.wait_for(1U, 5s));
+  const auto shutdown = runtime.value_if()->shutdown();
+  EXPECT_EQ(shutdown.final_phase, heyaki::RuntimePhase::stopped);
+}
+
 }  // namespace

@@ -1026,10 +1026,15 @@ transport::TransportChannel* PeerSession::physical_channel_for_domain(
 void PeerSession::adopt_physical_channel(transport::ChannelKind kind,
                                          transport::TransportChannel& channel) {
   const auto domain = physical_domain_for_kind(kind);
-  // The control channel has its own ownership path (`control_`); only
-  // business domains are adoptable here.
+  // Shell/stream physical channels are created on demand by either side;
+  // when both sides raced, the transport converged on the OFFERER's stream
+  // (whoever that is — the offer owner is decided by id tiebreak and can be
+  // either peer regardless of who dialed) and hands the surviving channel to
+  // the answerer here even though its own wrapper was already stored.
+  // Replace it: the answerer's own stream is retired.
+  const bool replaceable = !config_.initiator_owned_domains.contains(*domain);
   if (!domain.has_value() || *domain == session::ChannelDomain::control ||
-      physical_channels_.contains(*domain)) {
+      (!replaceable && physical_channels_.contains(*domain))) {
     return;
   }
   if (!channel.writable()) {

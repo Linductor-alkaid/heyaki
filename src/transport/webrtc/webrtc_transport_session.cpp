@@ -556,6 +556,31 @@ class WebRtcTransportSession::Impl
   void handle(OpenEvent& event) {
     ++channels_opened_;
     event.channel->note_negotiated_message_size();
+    // An answerer-side duplicate (the offerer's stream for a kind we already
+    // created ourselves) promotes over our own stream: converge both
+    // endpoints on the offerer's stream. The retired wrapper stays alive
+    // until the end of this handler so anything still holding its pointer
+    // synchronously re-points (channel_handler_ below) before it dies.
+    std::shared_ptr<Channel> retired;
+    const auto duplicate = duplicates_.find(event.channel->kind());
+    if (duplicate != duplicates_.end() && duplicate->second.get() == event.channel.get()) {
+      duplicates_.erase(duplicate);
+      const auto registered = channels_.find(event.channel->kind());
+      if (registered != channels_.end()) {
+        retired = std::move(registered->second);
+        retired->close(transport::CloseReason::peer_closed);
+        channels_.erase(registered);
+      }
+      channels_.emplace(event.channel->kind(), event.channel);
+    }
+    // Only the channel registered for this kind may resolve a pending open
+    // or surface for adoption. Anything else is a stray wrapper that owns no
+    // channels_ entry; handing its pointer out would leave the caller with
+    // storage that dies as soon as the event variant is destroyed.
+    const auto registered = channels_.find(event.channel->kind());
+    if (registered == channels_.end() || registered->second.get() != event.channel.get()) {
+      return;
+    }
     const auto pending = pending_opens_.find(event.channel->kind());
     if (pending != pending_opens_.end()) {
       auto completion = std::move(pending->second);
@@ -571,11 +596,24 @@ class WebRtcTransportSession::Impl
     if (message_handler_) message_handler_(*event.channel, std::move(event.payload));
   }
   void handle(ChannelErrorEvent& event) {
+    // A duplicate that dies before promotion never owned the kind; its
+    // failure must not fail the registered channel's pending open or the
+    // whole session.
+    const auto duplicate = duplicates_.find(event.channel->kind());
+    if (duplicate != duplicates_.end() && duplicate->second.get() == event.channel.get()) {
+      duplicates_.erase(duplicate);
+      return;
+    }
     fail_pending_open(event.channel->kind(), ErrorCode::transport,
                       "channel_open_failed");
     fail(Error{ErrorCode::transport, "webrtc_data_channel", event.detail});
   }
   void handle(ChannelClosedEvent& event) {
+    const auto duplicate = duplicates_.find(event.channel->kind());
+    if (duplicate != duplicates_.end() && duplicate->second.get() == event.channel.get()) {
+      duplicates_.erase(duplicate);
+      return;
+    }
     fail_pending_open(event.channel->kind(), ErrorCode::cancelled,
                       "channel_closed_before_open");
     event.channel->buffered_low();
@@ -591,8 +629,40 @@ class WebRtcTransportSession::Impl
 
   std::shared_ptr<Channel> attach_channel(ChannelKind kind, ChannelOptions options,
                                           std::shared_ptr<rtc::DataChannel> rtc_channel) {
+    // One ChannelKind maps to exactly one SCTP stream per association. When
+    // both peers open the same kind (shell/stream channels are created on
+    // demand by either side), two streams exist and the sides must converge
+    // deterministically: the OFFERER's stream wins. The offerer closes the
+    // peer's duplicate stream outright; the answerer keeps the duplicate
+    // wrapper alive (unregistered, in duplicates_) so its OpenEvent can
+    // promote it over the answerer's own stream — converging both endpoints
+    // on the offerer's stream. Without the ownership below, the duplicate
+    // wrapper's OpenEvent could hand its pointer to a pending open
+    // completion and the storage would die with the event variant
+    // (heap-use-after-free; found by the M9-10 bench harness under ASan).
+    if (channels_.contains(kind)) {
+      if (config_.offerer) {
+        ++channels_rejected_;
+        rtc_channel->close();
+        return nullptr;
+      }
+      auto duplicate = std::make_shared<Channel>(weak_from_this(), kind,
+                                                 std::move(options), std::move(rtc_channel));
+      register_channel_callbacks(duplicate);
+      duplicates_[kind] = std::move(duplicate);
+      return nullptr;
+    }
     auto channel = std::make_shared<Channel>(weak_from_this(), kind, std::move(options),
                                              std::move(rtc_channel));
+    register_channel_callbacks(channel);
+    channels_.emplace(kind, channel);
+    return channel;
+  }
+
+  // Installs the rtc-level callbacks that translate stream activity into
+  // queued Impl events. Shared by the registered path and the answerer-side
+  // duplicate wrapper that later promotes over our own stream.
+  void register_channel_callbacks(const std::shared_ptr<Channel>& channel) {
     auto weak = weak_from_this();
     std::weak_ptr<Channel> weak_channel = channel;
     const auto low_water = std::min(config_.buffered_amount_low_water,
@@ -645,8 +715,6 @@ class WebRtcTransportSession::Impl
         }
       }
     });
-    channels_.emplace(kind, channel);
-    return channel;
   }
 
   // Resamples the backend link stats on the drain context: RTT and byte
@@ -807,6 +875,9 @@ class WebRtcTransportSession::Impl
   executor::comm::MpscChannel<Event> events_;
   executor::comm::DoubleBuffer<TransportSessionSnapshot> snapshots_;
   std::map<ChannelKind, std::shared_ptr<Channel>> channels_;
+  // Answerer-side duplicate wrappers (the offerer's stream for a kind we
+  // already created) held alive until their OpenEvent promotes them.
+  std::map<ChannelKind, std::shared_ptr<Channel>> duplicates_;
   std::map<ChannelKind, OpenCompletion> pending_opens_;
   MessageHandler message_handler_;
   StateHandler state_handler_;
