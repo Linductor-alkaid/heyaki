@@ -1,6 +1,6 @@
 # M9：生产加固与 v1 发布
 
-> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6、M9-07 Round 7、M9-08 Round 8 与 M9-09 Round 9 已交付，M9-10 起未开始，见文末实施记录）
+> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6、M9-07 Round 7、M9-08 Round 8、M9-09 Round 9 与 M9-10 Round 10（基准 harness + 同 kind 双流 UAF 修复）已交付，M9-11 起未开始，见文末实施记录）
 > - 所属计划：[Heyaki MVP 至 v1 实施 TODO 计划](heyaki-implementation-plan.md)
 > - 前置：M8 | 建议发布点：v1.0
 
@@ -18,7 +18,7 @@
 - [x] `M9-07` 在 Linux/Windows 双向组合验证 LAN-only、relay-signaled direct、TURN/UDP、TURN/TCP/TLS、Windows firewall/network profile、文件权限/命名和 PTY/ConPTY。（Round 7 交付 2026-09-11：Linux↔Windows 真跨机组合在 GitHub 托管 runner 上被平台能力阻断（runner 互不可达、WSL2 长期损坏），按"每 OS 全组合 + 双向发起 + 平台特有行为"解构——Windows CI 新增 `heyaki_windows_network_matrix`（`tests/network/run_windows_network_matrix.ps1`：lan_only/relay_direct/turn_udp 三场景发起方互换；TURN 由新 `heyaki-test-turn-server`（libjuice 内嵌 TURN/UDP，静态凭据经 matrix node 新 `--turn-username/--turn-credential` 覆写）提供，Windows 无 coturn。udp_blocked 在 Windows 单机不可仿真——WFP 豁免 loopback，程序级阻断规则碰不到同机 TURN server（CI 首跑实证），故由 Linux CI 的 m4 矩阵 iptables 场景覆盖、跨 OS 模式下 harness 显式支持），防火墙 harness 增加程序级放行规则的正向场景，矩阵节点新增 `--lan-only` 模式；跨 OS 阻断结论、TURN/TCP/TLS 依赖限制（pinned libjuice 客户端 UDP-only）与自托管混合机队程序记录于 `docs/operations/cross-os-matrix.md`。文件命名/权限与 PTY/ConPTY 经 Windows CI 既有套件覆盖（映射表见跨 OS 文档）。本机发现并修复 PeerSession 同域二次 open 竞争杀会话的真实缺陷（LAN offer-owner 侧服务挂载竞争 `subscribe_events`）。见实施记录 Round 7。）
 - [x] `M9-08` 完成 relay 重启、coturn 重启、网络切换、credential 过期、磁盘满、慢消费者和任意关闭点故障注入。（Round 8 交付 2026-09-12：三面合成——进程级故障矩阵 `deploy/coturn/run_fault_matrix.sh`（CTest `heyaki_m9_fault_matrix`，root+coturn 门控 SKIP 77，CI coturn-topology job 执行）六场景：relay_restart_transfer（m7 传输在首个 transferring 相位确定性暂停→杀 relay→重启→恢复提交，直连数据面不依赖信令 relay）、turn_restart（双 coturn 杀死→已认证 TURN 会话经 ICE consent（RFC 7675，pinned libjuice 30s）显式关闭→coturn 重启后新参与者经 TURN 重建）、path_switch（同一对设备在 direct→blocked(TURN)→direct 三段网络条件下重建正确路径）、lease_expiry（SIGSTOP 冻结 responder 越过 3s 租约→endpoint 被逐出→解冻后 heartbeat 重插租约、新发起方可达）、slow_receiver（2 MiB 推入 4mbit/50ms 整形链路，限内有界完成）、stale_turn_credential（过期 REST 凭据→coturn 拒绝分配→有界显式失败）；matrix node 新增 `--m7-bytes/--m7-pause-hold-ms/--m7-wait-ms/--turn-credential-expiry-offset-ms`。磁盘满：`RLIMIT_FSIZE` 模式（EFBIG 为 ENOSPC 的可移植替身）两例单测——m7 接收方中途写失败→命名错误+无最终文件+staging 清理+sender 收到终态+限额恢复后重推字节一致；relay SQLite 写满→显式 storage 错误+已提交行保留+失败事务回滚+重开完好。任意关闭点：ProfileStore 崩溃矩阵模式克隆到文件服务——test-only 编译 `heyaki_file_fault_injection`（`HEYAKI_FILE_FAULT_POINT` 命中即 `_Exit(86)`）在 file_store 六个盘上边界（staging.after_create/chunk.after_write/state.after_write/commit.before_rename/commit.after_rename/commit.after_cleanup；state 写入经 thread_local 深度标记与 chunk 写区分）注入进程死亡，`tests/file/file_crash_probe.cpp` + `RunFileCrashTest.cmake` 驱动（CTest `heyaki_m9_file_crash_recovery`）：rename 前任意崩溃点最终文件不可见（原子性）、崩溃后同内容新传输提交且字节一致、残留 staging 不阻塞不毒化。既有覆盖映射：relay outage/backoff/进程级 relay_restart（m3b + M4 矩阵）、TURN 凭据/租约/token/grant 过期单测（fake clock 全绿）、同 transfer id 会话丢失恢复（m7 SessionLossPauses）、接口切换发现层（m3a HEYAKI_SWITCH_INTERFACE）、慢订阅者背压（m5/m6/m7 队列上限族）。见实施记录 Round 8。）
 - [x] `M9-09` 执行 24/72 小时长稳、反复发现/过期/建连/断连和容量过载测试，证明内存、fd/handle、worker、session、endpoint directory 和 TTL/replay cache 有界。（Round 9 交付 2026-09-12：`tests/network/run_m9_soak_harness.sh`（CTest `heyaki_m9_soak`，`HEYAKI_REQUIRE_M9_SOAK=1` 门控 SKIP 77，CI coturn-topology job 以 Release 构建直跑）三相位——Phase A 会话 churn：matrix node 新 `--soak-cycles N` 让长存 initiator 在单进程内循环 dial/authenticate/m6+m7 演练/SIGKILL 断连（harness 每循环杀并重生 responder，同 profile 重登录重发布），每循环采样 RSS/fd/会话表/replay 深度/executor 任务 gauge（`SOAK_CYCLE` 行），`SOAK_SUMMARY` 携带门（work_done/closed_ok 全循环达成、live 会话排空、fds_first→last ≤ +24、RSS 增长 ≤ 32MiB、replay_peak ≤ per-peer 256）；Phase B 设备 churn：K 个短生命周期全新设备对同一长存 relay 顺序 enroll/login/publish/exit，每迭代 scrape `/metrics` 采样五个 gauge 族 + relay RSS/fd 门；Phase C 容量过载：第二个 tight relay（max_connections=3、endpoint_directory_capacity=2）承受 5 并发参与者，断言连接容量与目录容量拒绝计数器点燃、幸存者仍可登录、优雅退出后 lease/endpoint 表排空、RSS/fd 有界。CI 片段经 runbook 的"长稳（soak）测试"程序放大为 24/72h 运行（含验收门与斜率分析）。既有确定性单测映射：TTL 表容量/过期（m3b_relay_ttl）、endpoint directory 容量/代际/租户冲突（m3b_relay_endpoint）、replay cache 全局/per-peer/TTL（m4_signaling M4ReplayCache）、连接容量拒绝（m3b_relay ConnectionCapacityRejectsAboveBound）、限速四 scope（m3b_relay_wss_client/rate_limiter）、队列上限与慢消费者（m5/m6/m7 overflow 族）。关键发现：closed 会话进入 `finished_peer_sessions` 有界诊断史环（容量 1024）是设计行为——soak 门是"无 live 会话 + 总数随循环数有界"，不是"列表归零"。见实施记录 Round 9。）
-- [ ] `M9-10` 基准消息 latency、并发 RPC、事件 fan-out、单/多文件吞吐、Shell 竞争延迟、relay 内存和带宽。
+- [x] `M9-10` 基准消息 latency、并发 RPC、事件 fan-out、单/多文件吞吐、Shell 竞争延迟、relay 内存和带宽。（Round 10 交付 2026-09-13：`tests/network/run_m9_bench_harness.sh`（CTest `heyaki_m9_bench`，`HEYAKI_REQUIRE_M9_BENCH=1` 门控 SKIP 77，CI coturn-topology job Release 直跑）三相位——Phase R 注册+直连 P95（fresh 进程对 ×N 循环，endpoint 表排空后下一轮），Phase T TURN fallback P95（双 `heyaki-test-turn-server` 静态凭据 + `--force-turn`，标签契约与 Windows 矩阵一致接受 `turn_udp|direct_srflx` 半中转对），Phase L 长存套件（matrix node 新 `--bench-initiator/--bench-responder/--bench-shell/--bench-connect-only` 模式：消息 RTT（顺序单在途 1KiB、终态事件采样、发送前 drain）、顺序/并发 RPC（16 窗口 × N 完成、按 wire RequestId 匹配、MpscChannel 交付）、事件 fan-out（N 订阅者 × 可靠 QoS × 时间戳载荷、逐订阅者 delivered/P95 门）、单文件/双并发文件吞吐、shell 敲键→回显延迟空闲 vs 2MiB 推送竞争下）；门 = v1 验收数值（登录 P95<2s/直连 P95<3s/TURN P95<5s）+ 零失败 + fan-out 全量送达 + 文件全部提交；`BENCH_METRIC`/`BENCH_THROUGHPUT`/`M9_BENCH_OK` 行即测量交付物（M9-11 输入）。runbook 新程序"Run a performance benchmark"。基准首跑与收敛过程抓出并修复 **三个真缺陷**（M4 同 kind 双流 UAF、m7 零字节伪 complete、m7 提前 complete，见 Round 10 记录）：双方同时为同一 ChannelKind 建流时，入站重复流的包装对象不在 transport `channels_` map 里，其 OpenEvent 把悬垂指针交给 pending open 完成——堆 UAF（ASan 钉死）；修复 = transport 级确定性收敛（offerer 的流胜出：offerer 拒绝重复流，answerer 在重复流 OpenEvent 时 promote 并退役自己的流；重复包装对象由 `duplicates_` map 持有；关闭/错误事件对重复流不传导为会话失败）+ 会话级 `adopt_physical_channel` 对非 initiator-owned 域（shell/stream）允许替换 + `TransportSession::async_open_channel` 契约文档化（answerer 竞争时 completion 指针需经 channel handler 修正）；回归测试 `M4WebRtcTransport.SimultaneousSameKindOpensResolveToRegisteredChannel`（真双侧 SCTP，offerer 拒绝 + answerer promote + 双向 roundtrip）。本机实测（debug/loopback）：登录 P95 22ms、直连 P95 1021ms、TURN P95 1077ms、消息 P95 2.7ms、RPC P95 2.3ms、并发 RPC P95 8.5ms、单文件 8MiB/s、双并发 9MiB/s、shell ping p50≈300ms（PTY 输出 500ms 维护 tick 的设计行为，M9-11 输入）、fan-out 三订阅者 10/10 送达。见实施记录 Round 10。）
 - [ ] `M9-11` 基于结果重新冻结默认容量、水位、timeout 和重试参数；默认值必须有测量依据和硬上限。
 - [ ] `M9-12` 完成 schema N-1/N 兼容、rolling relay upgrade 和新旧设备互通；不兼容行为必须在握手期拒绝。
 - [ ] `M9-19` 解除 TURN/TCP 与 TURN/TLS 的 pinned 依赖阻断，交付 v1 的 TURN/TCP/TLS 连通能力。（立项 2026-09-13，方案调研结论如下；交付语义 = M9-07 遗留的 udp_blocked-with-TURN-unreachable 场景可经 TURN/TCP（及 TLS）建立 DataChannel 并通过 m6/m7 端到端演练。）
@@ -712,6 +712,162 @@ turn_udp/first-initiates 首轮抖动同属 Windows runner 负载下的首轮家
 - 24/72h 验收语义：CI 片段证明门机制与短时有界性；小时级运行由
   runbook 程序执行（按片段 per-cycle 时长折算 cycles），一/后半
   RSS 中位斜率是判据，慢于此的泄漏记 M9-11 输入。
+
+### Round 10（2026-09-13）：M9-10 基准测试 + 同 kind 双流 UAF 修复
+
+交付物：
+
+- `apps/demo/m4_matrix_node.cpp` bench 模式：
+  - `--bench-initiator`（替代一次性 m6/m7 演练）：拨号全部已发现 peer
+    （fan-out 订阅者即 peer，拨号间隔 300ms——loopback 上所有身份共享
+    relay 的 per-IP 限速 scope（32/s），同时多拨的信令突发会触发
+    `rate_limited` 并把两个参与方的控制连接打掉重连）；`BENCH_CONNECT`
+    （dial→authenticated + data_path + peers 计数）。
+  - 套件段（各段独立计数、`--bench-connect-only` 全跳过）：消息 RTT
+    （顺序单在途 1KiB peer_acked；ack 观察者只发布终态事件——`queued`
+    是中间态，初版把它当失败发布导致样本全废；每次发送前 drain 通道防
+    上一轮超时残值串账；等待窗 > TTL 20s）；顺序 RPC（echo 1KiB、drain
+    前置）；并发 RPC（窗口 16——服务端 max_concurrent_calls=16 / 客户端
+    pending 上限 64 之下，窗口超限直接 usage 拒绝；完成回调经
+    `MpscChannel<BenchRpcDone>` 按 wire RequestId 匹配发送时间戳；准入
+    拒绝计数不混入延迟总体）；事件 fan-out（发布侧逐 peer
+    `publish_event`，载荷 8B steady 微秒 + 4B 序号，订阅者打印
+    `BENCH_FANOUT_RX seq= rtt_us=` 由 harness 聚合；reliable_live QoS
+    使"全量送达"门有意义）；文件段（单路 / 双并发（默认每会话发送上限
+    2）/ shell 竞争下一路；文件事件经容量 1024 的通道 + 终态登记表，
+    等待他路传输时先落谁的终态都不会丢）；shell 竞争（open_shell →
+    active；空闲 ping 基线；2MiB 推送期间 ping；token 匹配在累计输出
+    流上做——PTY 回显使 token 出现即输入帧→PTY→输出帧往返）。
+  - `--bench-responder`：认证后附加订阅 `bench.fanout`（reliable_live）
+    + 逐事件 RTT 打印。`--bench-shell`：服务侧暴露固定 "bench" profile
+    （POSIX `/bin/sh`，TERM=dumb，无 wire 可执行覆写面）。`seed-trust`
+    新增可选 seed 基数参数（见下坑 2）。relay-ready 处打印
+    `MATRIX_PHASE relay-ready login_ms=`（进程启动→登录接受的注册时长，
+    Phase R/T 的样本源）。
+  - 生命周期纪律：全部 bench 通信端点（ack/rpc/rpc 并发/文件通道、shell
+    mailbox）声明在 run_node 作用域——`shutdown()` 排水期的迟到回调仍可
+    能发布，per-section 局部通道首版即因此 UAF（见缺陷 1 的发现过程）。
+- `tests/network/run_m9_bench_harness.sh`（CTest `heyaki_m9_bench`，
+  labels network;relay;bench;m9，TIMEOUT 1500，SKIP 77 门控；CI
+  coturn-topology job 在 soak 步骤后非 root 直跑，构建目标补
+  `heyaki-test-turn-server`）：
+  - Phase R：共享已注册 profile 对、每轮 fresh 进程对（干净节点状态），
+    轮间等 relay endpoint 表排空（租约自然过期），采集双方 login_ms 与
+    initiator connect_ms；门：登录 P95≤2000ms、直连 P95≤3000ms、全部
+    `direct_host`。
+  - Phase T：同循环 + 双 test-turn-server（不相交 relay 端口段，静态凭
+    据 `--turn-username/--turn-credential` 覆写）+ `--force-turn`；门：
+    P95≤5000ms、标签 ∈ {turn_udp, direct_srflx}（单机 TURN 提名可为
+    本地 srflx×对端 relayed 半中转对，与 M9-07 Windows 矩阵契约一致）。
+  - Phase L：3 个 bench responder（shell+fanout）+ 1 个 bench
+    initiator 全套件；门：`BENCH_CONNECT peers==订阅者数`、各延迟总体
+    failures==0 且 P95≤500ms 保守界、顺序 RPC n==N、fan-out 每订阅者
+    delivered==published 且 P95≤1s、三个文件段全部提交、shell ping 无
+    失败；末尾 relay 足迹门（endpoint/lease 表归零、RSS ≤ baseline+
+    64MiB、fd ≤ baseline+64，信令转发计数差为带宽代行指标——relay 无
+    控制面字节计数器导出，记录为已知导出缺口，与 M9-01 丢包估计同类）。
+  - env 旋钮：`HEYAKI_BENCH_CYCLES/SUBSCRIBERS/MSG_N/RPC_N/RPC_CONC_N/
+    FANOUT_N/FILE_BYTES/FILE_MULTI_BYTES` + 各 P95 门限 + WORK_DIR。
+- `docs/operations/runbook.md` 新程序 "Run a performance benchmark
+  (M9-10)"：命令模板、门语义（loopback 数字 = 跨提交趋势基线与验收下
+    界，拓扑真实 P95 仍在 NAT 矩阵）、读数指引（shell ping 含 ~500ms
+  PTY drain tick 设计行为）、工件归档要求（BENCH_METRIC/THROUGHPUT/
+  M9_BENCH_OK 行 = M9-11 参数冻结输入）。
+
+**缺陷 1（真缺陷，M4 期潜伏，基准首跑抓出，ASan 钉死）**：双方同时为
+同一 `ChannelKind` 建流（shell/stream 域按设计双侧按需创建；
+`initiator_owned_domains` 只含 event/file/message/rpc）时，transport 的
+`attach_channel` 对已注册 kind 的 `channels_.emplace` **静默失败**——
+入站重复流的包装对象不在 map 中，但其 rtc 回调照常入队事件；其
+OpenEvent 到达时把**未持有所有权的指针**交给该 kind 的 pending open 完
+成回调，事件 variant 在 drain 循环下一次赋值时析构 shared_ptr → 通道对
+象释放 → `PeerSession::physical_channels_` 悬垂 → 下一次 `send_frame →
+pump → physical->send` 堆 UAF（表现为 `pure virtual method called` 或
+SIGSEGV，1-in-N 时序依赖，故 M4-M9 九轮 CI 未暴露；基准的 shell 段 +
+多订阅者压力把窗口踩热）。修复（`src/transport/webrtc/
+webrtc_transport_session.cpp` + `src/client/peer_session.cpp`）：
+  - transport 级确定性收敛——**offerer 的流胜出**：offerer 对重复入站流
+    直接关闭拒绝；answerer 把重复包装对象存入 `duplicates_` map 保活，
+    其 OpenEvent 到达时 promote（退役自己的流、`channels_[kind]` 换成
+    offerer 的流、退役对象活到 handler 末尾让 channel handler 同步改
+    指针）；重复流的 Closed/Error 事件不再传导为 pending open 失败或
+    整会话 fail。
+  - 会话级 `adopt_physical_channel` 对非 initiator-owned 域允许替换
+    （初版错用 `config_.initiator` 判替换——offer owner 由 ID 决胜可与
+    逻辑发起方相反，ASan 二轮复现钉死该角色错配；正确判据是域是否
+    initiator-owned）。
+  - `handle(OpenEvent)` 只允许**已注册**通道解决 pending/进入 adoption
+    （纵深防御）。
+  - `TransportSession::async_open_channel` 契约文档化：双侧可开的 kind
+    上 answerer 的 completion 指针不稳定，须装 channel handler 重定向。
+  - 回归测试 `M4WebRtcTransport.SimultaneousSameKindOpensResolveTo
+    RegisteredChannel`：真双侧 SCTP 同时开 file kind；断言 offerer 拒
+    绝计数、双方 open 成功、双向 roundtrip 经 completion/handler 指针
+    存活（旧代码 ASan 下必红）；裸跑 8/8 稳定。
+
+**缺陷 2（真缺陷，m7，基准稳定性排查钉死）**：`FileService::prune()` 对
+仍在 probing 的 sender（manifest 为空、chunk_count=0）调 `drain_window`，
+完成条件 `next_read_chunk(0) >= chunk_count(0)` 空真——探测未在首个
+500ms 维护 tick 内完成就发出零字节 FILE_COMPLETE（`complete_sent` 锁
+死），接收方按未知 transfer id 静默忽略，真发完后不再补发裁决请求 →
+双方永等（接收方全量字节在手）。负载下 probe 慢于一个 tick 即触发
+（3 订阅者/ASan 必现，单对空闲不复现——九轮 CI 未暴露的原因）。修
+复 = complete 条件加 `manifest.size != 0` 守卫；回归测试
+`M7FileService.PruneWhileProbingFiresNoZeroByteComplete`（临时还原缺
+陷验证过变红）。
+
+**缺陷 3（真缺陷，m7，缺陷 2 修复后余留快失败暴露）**：
+`next_read_chunk` 在读取**派发**时自增——最后一个读的哈希未落
+staging 时 `next_read >= chunk_count` 已真、window 恰空，FILE_COMPLETE
+抢跑（实测缺 61380 字节 ≈1 个 negotiated chunk）→ 接收方
+`complete_early` 协议拒绝 → 发送方 peer_rejected 终止。修复 =
+`SenderState.chunks_hashed`（finish_send_hash 递增）替代派发计数作
+complete 条件；回归测试 `M7FileService.ConcurrentSendsOfSameSourceBothCommit`
+（同源双并发 + prune 穿插，即 CI 暴露的交错）。
+
+本机验证：m4 受影响族（webrtc/peer_session/topology/shutdown/session）
+全绿；崩溃独立复现场景（bench initiator+responder + shell 段）ASan 构
+建 3/3 零报告（修复前 1-in-2 崩）；debug 全量 ctest（见 CI 记录）；基
+准 harness 三相位端到端绿（3 订阅者、双循环，终态连续 4/4 全绿）。
+
+坑（后续轮避免）：
+
+1. `steady_clock` 时戳锚点用函数内 static 首调求值会撞表达式求值顺序
+   （操作数求值未指定 → 下溢 18446744073709551）；进程锚点必须用命名空
+   间级常量。
+2. `seed-trust` 的 GrantId 由固定 id_seed 派生：同一 profile 顺序对多个
+   peer 播种信任时，同 ID grant 后写覆盖前写（put_trust_grant 按
+   GrantId upsert）→ 只有最后一对保持信任；新可选 seed 基数参数，每对
+   用互异基数。
+3. awk 数组 1 基索引 vs 0 基最近秩下标：单样本文件 percentile 返回空串
+   且 `(( <= gate ))` 算术上下文把空串当 0 静默通过——百分位辅助必须
+   自测单样本。
+4. bash `set -e` 下 `grep -qv ... && fail` 模式在 grep 无匹配（退出 1）
+   时整语句失败直接杀脚本——否定断言必须写 `if grep ...; then fail; fi`。
+5. relay 四 scope 限速中 per-IP（32/s）在 loopback 上由全部身份共享：
+   多节点+多拨号突发会 `rate_limited` 且被拒心跳引发连接重建（基准观测
+   到 conn 14/17 → 18/20 重连链）。基准以 300ms 拨号间隔规避；生产部署
+   每设备独立 IP 不受影响，但"拒绝后客户端重连"行为记为 M9-11 观察项。
+6. relay 控制面无字节计数器导出（`RelayServerSnapshot` 不含 WSS 字节），
+   "relay 带宽"以 `signaling_forwarded_total` 差值为代行指标；字节级导
+   出缺口与 M9-01 packetsLost 同类记录。
+7. `set -o pipefail` 下 `grep`（零匹配退出 1）在管道里会杀整条赋值
+   语句——`unique=$(grep|sed|wc)` 类"零命中=合法缺失"的收集必须
+   `{ grep ... || true; } | ...` 守卫，否则失败被静默吞掉且现场不保
+   留（本轮 harness 三次静默退出均此因）。
+8. 基准套件的多 peer 采样必须等满期望数量（首个会话认证即采样会漏
+   掉 staggered dial 的后来者——fan-out 订阅者静默缺席）；harness 侧
+   `peers==订阅者数` 门与套件侧 20s 等满双向锁死。
+9. 无断言的 python 文本补丁会静默不匹配（本轮 peers 门首次"添加成
+   功"实未落盘）——脚本类补丁必须 assert 锚点或事后 grep 验证。
+10. relay.conf 内的路径按 config 文件位置解析：`--work-dir` 必须传绝
+    对路径（CTest 注册传的是绝对路径，手动调用传相对路径会让 relay
+    报 certificate_missing）。
+11. shell 交互延迟实测 p50≈300ms：PTY 输出在 500ms 维护 tick
+   （`prune_peer_services` 里的 `shell_pty->drain()`）上排空是 M8-04
+   设计行为——"交互优先级"通道的输出侧不走事件驱动。若 M9-11 冻结交互
+   延迟目标，需评估 drain 触发点（输出即排或缩短 tick），这是参数/产品
+   决策而非基准轮改动。
 
 ### 剩余范围（M9-01 完成前）
 

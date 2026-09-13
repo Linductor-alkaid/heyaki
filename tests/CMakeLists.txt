@@ -1074,6 +1074,26 @@ if(HEYAKI_BUILD_APPS)
     LABELS "network;relay;soak;m9"
     SKIP_RETURN_CODE 77
     TIMEOUT 1500)
+
+  # M9-10 benchmark harness: registration/direct-connect/TURN P95 loops plus
+  # the long-lived latency suite (message RTT, sequential/concurrent RPC,
+  # event fan-out, single/concurrent file throughput, shell ping latency idle
+  # and under a bulk push) with relay footprint scrapes. Loopback like the
+  # soak harness; gated by HEYAKI_REQUIRE_M9_BENCH. The measured numbers feed
+  # the M9-11 parameter freeze and the v1 acceptance record.
+  add_test(
+    NAME heyaki_m9_bench
+    COMMAND "${HEYAKI_BASH_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/network/run_m9_bench_harness.sh"
+      --relay-bin "$<TARGET_FILE:heyaki-relay>"
+      --matrix-bin "$<TARGET_FILE:heyaki-m4-matrix-node>"
+      --demo-bin "$<TARGET_FILE:heyaki-m3b-relay-demo>"
+      --turn-bin "$<TARGET_FILE:heyaki-test-turn-server>"
+      --work-dir "${HEYAKI_TEST_STATE_DIR}/m9-bench")
+  set_tests_properties(heyaki_m9_bench PROPERTIES
+    LABELS "network;relay;bench;m9"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 1500)
 endif()
 
 add_test(

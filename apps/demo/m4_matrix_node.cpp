@@ -222,6 +222,105 @@ ProcessSample sample_process() {
   return sample;
 }
 
+// M9-10 bench clock: steady microseconds. Steady-clock epoch is machine-wide
+// on the bench platforms (CLOCK_MONOTONIC / QPC), so cross-process deltas
+// (fan-out publisher→subscriber) are meaningful inside one harness run.
+std::uint64_t steady_micros_now() {
+  return static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+
+// Process start for the registration-latency marker (BENCH_LOGIN); captured
+// at static initialization, before any node work begins. A function-local
+// static would initialize at its first evaluation site — inside the marker
+// expression itself, whose operand order is unspecified — so this must be a
+// namespace-scope constant.
+const std::uint64_t g_process_start_micros = steady_micros_now();
+std::uint64_t process_start_micros() { return g_process_start_micros; }
+
+struct LatencyReport {
+  std::uint64_t p50{};
+  std::uint64_t p95{};
+  std::uint64_t p99{};
+  std::uint64_t max{};
+};
+
+LatencyReport summarize_latencies(std::vector<std::uint64_t> samples) {
+  LatencyReport report;
+  if (samples.empty()) {
+    return report;
+  }
+  std::sort(samples.begin(), samples.end());
+  const auto at = [&samples](std::size_t total, double fraction) {
+    const std::size_t index = static_cast<std::size_t>(
+        fraction * static_cast<double>(total - 1U));
+    return samples[std::min(index, total - 1U)];
+  };
+  const std::size_t total = samples.size();
+  report.p50 = at(total, 0.50);
+  report.p95 = at(total, 0.95);
+  report.p99 = at(total, 0.99);
+  report.max = samples.back();
+  return report;
+}
+
+// One BENCH_METRIC line per latency population; n excludes failures so the
+// harness can gate on both shape and completeness.
+void print_bench_metric(std::string_view name, const std::vector<std::uint64_t>& samples,
+                        std::size_t failures) {
+  const auto report = summarize_latencies(samples);
+  std::cout << "BENCH_METRIC name=" << name << " n=" << samples.size()
+            << " failures=" << failures << " p50_us=" << report.p50
+            << " p95_us=" << report.p95 << " p99_us=" << report.p99
+            << " max_us=" << report.max << '\n';
+}
+
+// Discards anything still queued on a bench channel. The sequential
+// single-outstanding sections drain before each send so a straggler from a
+// previous (timed-out) operation can never be misattributed to the next one.
+template <typename T>
+void drain_channel(executor::comm::MpscChannel<T>& channel) {
+  T value{};
+  while (channel.try_receive(value)) {
+  }
+}
+
+// Fan-out probe payload: 8 bytes big-endian steady micros + 4 bytes
+// big-endian sequence, so each subscriber can timestamp delivery without any
+// per-event bookkeeping beyond parsing.
+std::vector<std::byte> encode_fanout_payload(std::uint64_t micros, std::uint32_t sequence) {
+  std::vector<std::byte> payload(12U, std::byte{0});
+  for (int index = 7; index >= 0; --index) {
+    payload[static_cast<std::size_t>(7 - index)] =
+        static_cast<std::byte>((micros >> (8 * index)) & 0xFFU);
+  }
+  payload[8] = static_cast<std::byte>((sequence >> 24U) & 0xFFU);
+  payload[9] = static_cast<std::byte>((sequence >> 16U) & 0xFFU);
+  payload[10] = static_cast<std::byte>((sequence >> 8U) & 0xFFU);
+  payload[11] = static_cast<std::byte>(sequence & 0xFFU);
+  return payload;
+}
+
+bool decode_fanout_payload(const std::vector<std::byte>& payload, std::uint64_t& micros,
+                           std::uint32_t& sequence) {
+  if (payload.size() != 12U) {
+    return false;
+  }
+  micros = 0U;
+  for (std::size_t index = 0U; index < 8U; ++index) {
+    micros = (micros << 8U) |
+             static_cast<std::uint64_t>(payload[index] & std::byte{0xFFU});
+  }
+  sequence = 0U;
+  for (std::size_t index = 8U; index < 12U; ++index) {
+    sequence = (sequence << 8U) |
+               static_cast<std::uint32_t>(payload[index] & std::byte{0xFFU});
+  }
+  return true;
+}
+
 heyaki::Result<heyaki::ProfileStore> initialized_profile(
     const std::filesystem::path& database, std::string_view application_id) {
   heyaki::ProfileOpenOptions options;
@@ -338,6 +437,25 @@ struct RunOptions {
   // harness SIGKILLs the responder after each cycle's work-done marker and
   // respawns it with the same profile (re-login republishes the endpoint).
   unsigned soak_cycles{0U};
+  // M9-10 bench: the initiator runs the latency/throughput suite on the
+  // authenticated session(s) instead of the one-shot m6/m7 exercise, and the
+  // responder additionally subscribes the bench.fanout topic (reliable QoS)
+  // and can serve a PTY shell profile for the contention measurement.
+  // --bench-connect-only strips the suite down to dial→authenticate timing
+  // for the registration/connect/TURN P95 loops.
+  bool bench_initiator{false};
+  bool bench_responder{false};
+  bool bench_shell{false};
+  bool bench_connect_only{false};
+  std::size_t bench_peers{1U};
+  std::size_t bench_msg_n{200U};
+  std::size_t bench_rpc_n{200U};
+  std::size_t bench_rpc_concurrent_n{300U};
+  std::size_t bench_rpc_window{16U};
+  std::size_t bench_fanout_n{0U};
+  std::uint64_t bench_file_bytes{0U};
+  std::uint64_t bench_file_multi_bytes{8U * 1024U * 1024U};
+  std::size_t bench_shell_pings{20U};
 };
 
 int run_node(const std::filesystem::path& database, std::string_view application_id,
@@ -432,7 +550,13 @@ int run_node(const std::filesystem::path& database, std::string_view application
   std::error_code m7_dir_ec;
   std::filesystem::create_directories(m7_state_dir, m7_dir_ec);
   const auto m7_source = m7_state_dir / "matrix-source.bin";
-  if (options.m7_bytes == 0U) {
+  // M9-10: bench file sections reuse the m7 source pipeline — a sized bench
+  // payload is just a sized m7 source.
+  const auto m7_source_bytes =
+      options.bench_initiator && options.bench_file_bytes > 0U && options.m7_bytes == 0U
+          ? options.bench_file_bytes
+          : options.m7_bytes;
+  if (m7_source_bytes == 0U) {
     std::ofstream out(m7_source, std::ios::binary | std::ios::trunc);
     for (int index = 0; index < 6000; ++index) {
       out << "m7 matrix payload " << index << '\n';
@@ -444,9 +568,9 @@ int run_node(const std::filesystem::path& database, std::string_view application
     std::ofstream out(m7_source, std::ios::binary | std::ios::trunc);
     const std::string pattern = "m7 matrix payload 0123456789abcdef\n";
     std::uint64_t written = 0U;
-    while (written < options.m7_bytes) {
-      const auto chunk = std::min<std::uint64_t>(pattern.size(),
-                                                 options.m7_bytes - written);
+    while (written < m7_source_bytes) {
+      const auto chunk =
+          std::min<std::uint64_t>(pattern.size(), m7_source_bytes - written);
       out.write(pattern.data(), static_cast<std::streamsize>(chunk));
       written += chunk;
     }
@@ -464,6 +588,25 @@ int run_node(const std::filesystem::path& database, std::string_view application
   }
   config.path_policy_override = policy;
   config.file_receive_roots = {m7_root};
+  if (options.bench_shell) {
+    // M9-10 shell contention: the serving side exposes one fixed interactive
+    // shell profile; the wire carries no executable override (M8-01), so the
+    // program choice here is the whole attack surface.
+    heyaki::ShellProfileConfig bench_shell;
+    bench_shell.name = "bench";
+#if defined(_WIN32)
+    bench_shell.argv = {"C:\\Windows\\System32\\cmd.exe"};
+#else
+    bench_shell.argv = {"/bin/sh"};
+#endif
+    bench_shell.working_directory = "/tmp";
+    bench_shell.environment = {
+        {"PATH", std::nullopt}, {"HOME", std::string{"/tmp"}}, {"TERM", std::string{"dumb"}}};
+    bench_shell.max_concurrent_sessions = 2U;
+    bench_shell.idle_timeout = std::chrono::milliseconds{600000};
+    bench_shell.absolute_timeout = std::chrono::milliseconds{3600000};
+    config.shell_profiles = {std::move(bench_shell)};
+  }
   auto node = heyaki::Node::create(std::move(config));
   if (!node) {
     std::cerr << "node create failed: " << node.error_if()->safe_detail() << '\n';
@@ -478,6 +621,14 @@ int run_node(const std::filesystem::path& database, std::string_view application
                  heyaki::RelayNodeState::ready;
         },
         std::min(total_budget, std::chrono::milliseconds{10000}));
+    if (relay_ready) {
+      // M9-10 registration marker: process start → relay login accepted. The
+      // steady-clock duration covers TLS connect + challenge/login only;
+      // enrollment is a separate one-time command.
+      std::cout << "MATRIX_PHASE relay-ready"
+                << " login_ms="
+                << (steady_micros_now() - process_start_micros()) / 1000U << '\n';
+    }
     if (!relay_ready) {
       const auto snapshot = node.value_if()->snapshot();
       std::cout << "MATRIX_RESULT authenticated=0 data_path=none duration_ms=0"
@@ -528,14 +679,36 @@ int run_node(const std::filesystem::path& database, std::string_view application
         }
       });
   node.value_if()->set_event_inbound_handler(
-      [&m7_event_received](const heyaki::DeviceEndpointKey&, std::string_view,
-                           const heyaki::EventItemBody&) {
+      [&m7_event_received, bench_responder = options.bench_responder](
+          const heyaki::DeviceEndpointKey&, std::string_view pattern,
+          const heyaki::EventItemBody& item) {
         (void)m7_event_received.try_publish(true);
+        if (bench_responder && pattern.find("bench.fanout") != std::string_view::npos) {
+          std::uint64_t sent_micros = 0U;
+          std::uint32_t sequence = 0U;
+          if (decode_fanout_payload(item.payload, sent_micros, sequence)) {
+            const auto now = steady_micros_now();
+            std::cout << "BENCH_FANOUT_RX seq=" << sequence << " rtt_us="
+                      << (now > sent_micros ? now - sent_micros : 0U) << '\n';
+          }
+        }
       });
   node.value_if()->set_file_event_observer(
-      [&m7_file_committed, &m7_transferring](
+      [&m7_file_committed, &m7_transferring,
+       bench_responder = options.bench_responder](
           const heyaki::DeviceEndpointKey&,
           const heyaki::FileTransferEvent& event) {
+        if (bench_responder) {
+          const auto phase = static_cast<int>(event.phase);
+          if (phase >= static_cast<int>(heyaki::FileTransferPhase::verifying)) {
+            std::cout << "BENCH_FILE_EVENT_RX phase=" << phase
+                      << " name=" << event.logical_name
+                      << " done=" << event.bytes_done << " total=" << event.bytes_total
+                      << " err="
+                      << (event.error ? event.error->safe_detail() : std::string{"-"})
+                      << '\n';
+          }
+        }
         if (event.phase == heyaki::FileTransferPhase::committed) {
           (void)m7_file_committed.try_publish(true);
         } else if (event.phase == heyaki::FileTransferPhase::transferring) {
@@ -690,6 +863,615 @@ int run_node(const std::filesystem::path& database, std::string_view application
                 << " file=" << (outcome.file_committed ? 1 : 0) << "\n";
     }
     return outcome;
+  };
+
+  // M9-10 bench suite (initiator only): latency and throughput populations on
+  // the authenticated session(s). Sections are independently sized by their
+  // counters (--bench-connect-only skips them all) and every population
+  // prints one BENCH_METRIC/BENCH_THROUGHPUT line; BENCH_SUMMARY carries the
+  // headline numbers the harness gates on. Completion callbacks run on the
+  // node's strand and cross into this loop through executor comm components
+  // (bounded channel for id-matched populations, latest-value for
+  // single-outstanding waits) — no ad hoc shared state.
+  // M9-10 dial anchor: set by the initiator dial block below, read by the
+  // bench suite for the dial→authenticated duration (BENCH_CONNECT).
+  std::uint64_t bench_dial_begin_us = 0U;
+  struct BenchOutcome {
+    bool connect_ok{false};
+    std::uint64_t connect_ms{0U};
+    std::string data_path{"none"};
+    std::size_t message_failures{0U};
+    std::size_t rpc_failures{0U};
+    std::size_t rpc_admission_rejects{0U};
+    std::size_t fanout_publish_failures{0U};
+    std::size_t fanout_matched_min{0U};
+    std::size_t fanout_matched_max{0U};
+    bool file_single_ok{false};
+    bool file_multi_ok{false};
+    bool shell_ok{false};
+    std::uint64_t message_p95{0U};
+    std::uint64_t rpc_p95{0U};
+    std::uint64_t rpc_concurrent_p95{0U};
+    std::uint64_t shell_idle_p95{0U};
+    std::uint64_t shell_contended_p95{0U};
+    double file_single_mib_s{0.0};
+    double file_multi_mib_s{0.0};
+  };
+  const auto channel_options = [](std::string name) {
+    executor::comm::ChannelOptions options;
+    options.capacity = 64U;
+    options.name = std::move(name);
+    return options;
+  };
+  // Bench comm endpoints live at run_node scope deliberately: node shutdown
+  // drains pending completions, and those late callbacks may still publish
+  // into these endpoints after the suite has returned. Per-section locals
+  // caused a use-after-free in the first local run (a late RPC completion
+  // fired after its section's channel had been destroyed). The endpoints are
+  // torn down only after shutdown() has returned.
+  executor::comm::MpscChannel<std::int64_t> bench_ack_channel{
+      channel_options("heyaki-bench-msg-ack")};
+  executor::comm::MpscChannel<std::int64_t> bench_rpc_channel{
+      channel_options("heyaki-bench-rpc-done")};
+  struct BenchRpcDone {
+    heyaki::RequestId request;
+    std::uint64_t done_micros{};
+    bool ok{};
+  };
+  executor::comm::MpscChannel<BenchRpcDone> bench_rpc_concurrent_channel{
+      channel_options("heyaki-bench-rpc-concurrent-done")};
+  struct BenchFileEvent {
+    heyaki::TransferId transfer;
+    int phase{0};
+    std::uint64_t done_micros{};
+  };
+  executor::comm::ChannelOptions bench_file_channel_options;
+  bench_file_channel_options.capacity = 1024U;  // never drop a committed event
+  bench_file_channel_options.name = "heyaki-bench-file-events";
+  executor::comm::MpscChannel<BenchFileEvent> bench_file_channel{
+      bench_file_channel_options};
+  executor::comm::LatestMailbox<std::string> bench_shell_output{
+      "heyaki-bench-shell-output"};
+  executor::comm::LatestMailbox<int> bench_shell_phase{"heyaki-bench-shell-phase"};
+  // Appended on the node strand only (shell observer); published as copies
+  // through bench_shell_output for the caller thread.
+  std::string bench_shell_accumulated;
+  const auto run_bench_suite = [&]() -> BenchOutcome {
+    BenchOutcome bench;
+    std::vector<heyaki::DeviceEndpointKey> bench_peer_keys;
+    // Wait for every expected peer: staggered dials mean the last session
+    // can authenticate more than a second after the first; sampling on the
+    // first authentication silently drops fan-out subscribers.
+    (void)wait_until(
+        [&] {
+          bench_peer_keys.clear();
+          for (const auto& session : node.value_if()->peer_sessions()) {
+            if (session.state == heyaki::NodePeerSessionState::authenticated) {
+              bench_peer_keys.push_back(session.peer);
+            }
+          }
+          return bench_peer_keys.size() >= options.bench_peers;
+        },
+        std::chrono::milliseconds{20000});
+    bench.connect_ok = !bench_peer_keys.empty();
+    for (const auto& session : node.value_if()->peer_sessions()) {
+      if (session.state == heyaki::NodePeerSessionState::authenticated) {
+        bench.data_path =
+            std::string{heyaki::node_data_path_kind_name(session.data_path)};
+        break;
+      }
+    }
+    if (bench_dial_begin_us != 0U) {
+      bench.connect_ms = (steady_micros_now() - bench_dial_begin_us) / 1000U;
+    }
+    std::cout << "BENCH_CONNECT duration_ms=" << bench.connect_ms
+              << " data_path=" << bench.data_path
+              << " peers=" << bench_peer_keys.size() << '\n';
+    if (!bench.connect_ok || options.bench_connect_only) {
+      std::cout << "BENCH_SUMMARY ok=" << (bench.connect_ok ? 1 : 0)
+                << " connect_ms=" << bench.connect_ms
+                << " data_path=" << bench.data_path << '\n';
+      return bench;
+    }
+    const auto peer_key0 = bench_peer_keys.front();
+    // Services attach asynchronously after authorization (same contract as
+    // the one-shot exercise); the latency sections need them in place.
+    if (!wait_until(
+            [&] {
+              const auto services = node.value_if()->service_diagnostics();
+              return services.message_sessions > 0U && services.rpc_sessions > 0U;
+            },
+            std::chrono::milliseconds{5000})) {
+      std::cout << "BENCH_SUMMARY ok=0 error=services-not-attached message_sessions="
+                << node.value_if()->service_diagnostics().message_sessions
+                << " rpc_sessions="
+                << node.value_if()->service_diagnostics().rpc_sessions << '\n';
+      return bench;
+    }
+
+    // ---- message latency: sequential peer_acked messages, one outstanding,
+    // so each sample is a clean device-to-device round trip. The observer
+    // publishes terminal events only (`queued` is an intermediate state) and
+    // each send is preceded by a drain so stragglers cannot be misattributed.
+    // ----
+    if (options.bench_msg_n > 0U) {
+      node.value_if()->set_message_ack_observer(
+          [&bench_ack_channel](const heyaki::DeviceEndpointKey&, const heyaki::MessageId&,
+                              heyaki::MessageDeliveryEvent event, std::optional<Error>) {
+            if (event == heyaki::MessageDeliveryEvent::queued) {
+              return;  // intermediate: the frame merely entered the queue
+            }
+            // Positive = ack monotonic micros; negative = terminal non-ack.
+            (void)bench_ack_channel.try_send(
+                event == heyaki::MessageDeliveryEvent::acked
+                    ? static_cast<std::int64_t>(steady_micros_now())
+                    : std::int64_t{-1});
+          });
+      std::vector<std::byte> payload(1024U, std::byte{0x5A});
+      std::vector<std::uint64_t> samples;
+      for (std::size_t index = 0U; index < options.bench_msg_n; ++index) {
+        drain_channel(bench_ack_channel);
+        const auto t0 = steady_micros_now();
+        heyaki::MessageEnvelope envelope;
+        envelope.type = "bench.message";
+        envelope.delivery_mode = heyaki::MessageDeliveryMode::peer_acked;
+        envelope.ttl_milliseconds = 20'000U;
+        envelope.payload = payload;
+        const auto sent = node.value_if()->send_message(peer_key0, std::move(envelope));
+        if (!sent) {
+          ++bench.message_failures;
+          continue;
+        }
+        std::int64_t done = 0;
+        // The wait covers the 20s TTL so a terminal event is never split
+        // from its sample by the receive timeout.
+        const auto received =
+            bench_ack_channel.receive_for(done, std::chrono::seconds{25});
+        if (!received || done < 0) {
+          ++bench.message_failures;
+          continue;
+        }
+        samples.push_back(static_cast<std::uint64_t>(done) - t0);
+      }
+      bench.message_p95 = summarize_latencies(samples).p95;
+      print_bench_metric("message_rtt", samples, bench.message_failures);
+    }
+
+    // ---- RPC latency: sequential echo calls, one outstanding, drain before
+    // each call. ----
+    if (options.bench_rpc_n > 0U) {
+      const auto publish_done =
+          [&bench_rpc_channel](const heyaki::Result<heyaki::RpcCallOutcome>& result) {
+            std::int64_t value = -1;
+            if (result && (*result.value_if()).status == heyaki::StableStatus::ok) {
+              value = static_cast<std::int64_t>(steady_micros_now());
+            }
+            (void)bench_rpc_channel.try_send(value);
+          };
+      std::vector<std::byte> payload(1024U, std::byte{0x2A});
+      std::vector<std::uint64_t> samples;
+      for (std::size_t index = 0U; index < options.bench_rpc_n; ++index) {
+        drain_channel(bench_rpc_channel);
+        const auto t0 = steady_micros_now();
+        const auto started = node.value_if()->call_rpc(
+            peer_key0, "heyaki.matrix", "echo", payload, heyaki::RpcCallOptions{},
+            [&publish_done](const heyaki::DeviceEndpointKey&,
+                            heyaki::Result<heyaki::RpcCallOutcome> result) {
+              publish_done(result);
+            });
+        if (!started) {
+          ++bench.rpc_failures;
+          continue;
+        }
+        std::int64_t done = 0;
+        const auto received =
+            bench_rpc_channel.receive_for(done, std::chrono::seconds{35});
+        if (!received || done < 0) {
+          ++bench.rpc_failures;
+          continue;
+        }
+        samples.push_back(static_cast<std::uint64_t>(done) - t0);
+      }
+      bench.rpc_p95 = summarize_latencies(samples).p95;
+      print_bench_metric("rpc_latency", samples, bench.rpc_failures);
+    }
+
+    // ---- concurrent RPC: fixed in-flight window over N completions; the
+    // per-request completion record crosses via bounded channel and matches
+    // the caller-side send timestamp by wire request id. ----
+    if (options.bench_rpc_concurrent_n > 0U) {
+      std::map<heyaki::RequestId, std::uint64_t> in_flight;  // caller thread only
+      std::vector<std::byte> payload(1024U, std::byte{0x2B});
+      std::vector<std::uint64_t> samples;
+      const auto fire_one = [&]() {
+        const auto started = node.value_if()->call_rpc(
+            peer_key0, "heyaki.matrix", "echo", payload, heyaki::RpcCallOptions{},
+            [&bench_rpc_concurrent_channel](
+                const heyaki::DeviceEndpointKey&,
+                heyaki::Result<heyaki::RpcCallOutcome> result) {
+              BenchRpcDone record;
+              record.done_micros = steady_micros_now();
+              if (result) {
+                record.request = (*result.value_if()).request_id;
+                record.ok = (*result.value_if()).status == heyaki::StableStatus::ok;
+              }
+              (void)bench_rpc_concurrent_channel.try_send(std::move(record));
+            });
+        if (!started) {
+          ++bench.rpc_admission_rejects;
+          return false;
+        }
+        in_flight[*started.value_if()] = steady_micros_now();
+        return true;
+      };
+      const auto suite_begin = steady_micros_now();
+      while (samples.size() + bench.rpc_failures < options.bench_rpc_concurrent_n) {
+        while (in_flight.size() < options.bench_rpc_window &&
+               samples.size() + bench.rpc_failures + in_flight.size() <
+                   options.bench_rpc_concurrent_n) {
+          if (!fire_one()) {
+            // Admission is closed (queue/capacity): stop pressing and let the
+            // outstanding window drain so the population stays bounded.
+            break;
+          }
+        }
+        if (in_flight.empty()) {
+          break;
+        }
+        BenchRpcDone record;
+        if (!bench_rpc_concurrent_channel.receive_for(record, std::chrono::seconds{15})) {
+          bench.rpc_failures += in_flight.size();
+          break;
+        }
+        const auto pending = in_flight.find(record.request);
+        if (pending == in_flight.end()) {
+          continue;  // stale completion for a request already accounted
+        }
+        const auto sent_micros = pending->second;
+        in_flight.erase(pending);
+        if (record.ok) {
+          samples.push_back(record.done_micros - sent_micros);
+        } else {
+          ++bench.rpc_failures;
+        }
+      }
+      const auto suite_duration = steady_micros_now() - suite_begin;
+      bench.rpc_concurrent_p95 = summarize_latencies(samples).p95;
+      print_bench_metric("rpc_concurrent_latency", samples, bench.rpc_failures);
+      const double ops_per_s = suite_duration == 0U
+                                   ? 0.0
+                                   : static_cast<double>(samples.size()) * 1'000'000.0 /
+                                         static_cast<double>(suite_duration);
+      std::cout << "BENCH_THROUGHPUT name=rpc_concurrent ops_per_s=" << ops_per_s
+                << " window=" << options.bench_rpc_window
+                << " admission_rejects=" << bench.rpc_admission_rejects << '\n';
+    }
+
+    // ---- event fan-out: publish to every authenticated subscriber's
+    // bench.fanout subscription; subscribers print their own delivery RTT
+    // (BENCH_FANOUT_RX) which the harness aggregates per subscriber. ----
+    if (options.bench_fanout_n > 0U) {
+      const auto subscriptions_attached = [&] {
+        const auto services = node.value_if()->service_diagnostics();
+        return services.event_sessions >= bench_peer_keys.size();
+      };
+      if (wait_until(subscriptions_attached, std::chrono::milliseconds{8000})) {
+        std::size_t matched_min = std::numeric_limits<std::size_t>::max();
+        std::size_t matched_max = 0U;
+        for (std::size_t sequence = 0U; sequence < options.bench_fanout_n;
+             ++sequence) {
+          const auto payload =
+              encode_fanout_payload(steady_micros_now(),
+                                    static_cast<std::uint32_t>(sequence));
+          for (const auto& peer : bench_peer_keys) {
+            const auto published = node.value_if()->publish_event(
+                peer, "bench.fanout", payload, 1U);
+            if (!published) {
+              ++bench.fanout_publish_failures;
+              continue;
+            }
+            matched_min = std::min(matched_min, *published.value_if());
+            matched_max = std::max(matched_max, *published.value_if());
+          }
+          executor::comm::PhaseGate pace{"heyaki-bench-fanout-pace"};
+          (void)pace.wait_for(1U, std::chrono::milliseconds{20});
+        }
+        if (matched_min == std::numeric_limits<std::size_t>::max()) {
+          matched_min = 0U;
+        }
+        bench.fanout_matched_min = matched_min;
+        bench.fanout_matched_max = matched_max;
+        std::cout << "BENCH_METRIC name=fanout_publish events="
+                  << options.bench_fanout_n << " peers=" << bench_peer_keys.size()
+                  << " matched_min=" << matched_min
+                  << " matched_max=" << matched_max
+                  << " publish_failures=" << bench.fanout_publish_failures << '\n';
+      } else {
+        bench.fanout_publish_failures += options.bench_fanout_n;
+        std::cout << "BENCH_METRIC name=fanout_publish error=subscriptions-not-attached"
+                  << " event_sessions="
+                  << node.value_if()->service_diagnostics().event_sessions << '\n';
+      }
+    }
+
+    // ---- file sections: single push, two concurrent pushes (the default
+    // per-session send cap), and one push under shell contention. ----
+    node.value_if()->set_file_event_observer(
+        [&bench_file_channel](const heyaki::DeviceEndpointKey&,
+                              const heyaki::FileTransferEvent& event) {
+          const auto phase = static_cast<int>(event.phase);
+          // Progress events are far too chatty for CI logs; boundaries and
+          // terminals carry the diagnostic value.
+          if (phase >= static_cast<int>(heyaki::FileTransferPhase::verifying)) {
+            std::cout << "BENCH_FILE_EVENT phase=" << phase
+                      << " name=" << event.logical_name
+                      << " done=" << event.bytes_done << " total=" << event.bytes_total
+                      << " err="
+                      << (event.error ? event.error->safe_detail() : std::string{"-"})
+                      << '\n';
+          }
+          (void)bench_file_channel.try_send(BenchFileEvent{
+              event.transfer_id, static_cast<int>(event.phase),
+              steady_micros_now()});
+        });
+    // Terminal states observed for any transfer while polling, so a commit
+    // that lands while another transfer's wait is active is not lost.
+    std::map<heyaki::TransferId, std::pair<int, std::uint64_t>> file_terminal;
+    const auto poll_file_events = [&]() {
+      BenchFileEvent record;
+      while (bench_file_channel.try_receive(record)) {
+        if (record.phase == static_cast<int>(heyaki::FileTransferPhase::committed) ||
+            record.phase == static_cast<int>(heyaki::FileTransferPhase::failed) ||
+            record.phase == static_cast<int>(heyaki::FileTransferPhase::cancelled)) {
+          file_terminal[record.transfer] = {record.phase, record.done_micros};
+        }
+      }
+    };
+    const auto wait_file_terminal = [&](const heyaki::TransferId& transfer,
+                                        bool& committed) {
+      committed = false;
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{90};
+      while (std::chrono::steady_clock::now() < deadline) {
+        poll_file_events();
+        const auto found = file_terminal.find(transfer);
+        if (found != file_terminal.end()) {
+          committed = found->second.first ==
+                      static_cast<int>(heyaki::FileTransferPhase::committed);
+          return steady_micros_now();
+        }
+        executor::comm::PhaseGate poll{"heyaki-bench-file-poll"};
+        (void)poll.wait_for(1U, std::chrono::milliseconds{2});
+      }
+      // Timeout forensics: the public transfer summaries plus channel stats
+      // pinpoint which side of a stalled transfer stopped moving.
+      std::cout << "BENCH_FILE_STALL transfer_wait_timed_out";
+      for (const auto& summary : node.value_if()->file_transfers(peer_key0)) {
+        std::cout << " tx=" << heyaki::to_string(summary.transfer_id)
+                  << ",name=" << summary.logical_name << ",phase="
+                  << static_cast<int>(summary.phase) << ",done=" << summary.bytes_done
+                  << ",total=" << summary.bytes_total;
+      }
+      std::cout << '\n';
+      return steady_micros_now();
+    };
+    if (options.bench_file_bytes > 0U) {
+      // Single push.
+      {
+        const auto t0 = steady_micros_now();
+        const auto pushed = node.value_if()->push_file(
+            peer_key0, "inbox", "bench/single.bin", m7_source);
+        bool committed = false;
+        std::uint64_t done = 0U;
+        if (pushed) {
+          done = wait_file_terminal(*pushed.value_if(), committed);
+        }
+        bench.file_single_ok = committed;
+        const auto duration_ms = (done - t0) / 1000U;
+        bench.file_single_mib_s =
+            duration_ms == 0U
+                ? 0.0
+                : static_cast<double>(options.bench_file_bytes) / 1.048576e6 /
+                      (static_cast<double>(duration_ms) / 1000.0);
+        std::cout << "BENCH_THROUGHPUT name=file_single"
+                  << " bytes=" << options.bench_file_bytes
+                  << " duration_ms=" << duration_ms
+                  << " mib_per_s=" << bench.file_single_mib_s
+                  << " ok=" << (committed ? 1 : 0) << '\n';
+      }
+      // Two concurrent pushes (default per-session send cap is 2).
+      if (options.bench_file_multi_bytes > 0U) {
+        const auto multi_source = m7_state_dir / "bench-multi.bin";
+        {
+          std::ofstream out(multi_source, std::ios::binary | std::ios::trunc);
+          const std::string pattern = "m9 bench multi payload 0123456789abcdef\n";
+          std::uint64_t written = 0U;
+          while (written < options.bench_file_multi_bytes) {
+            const auto chunk = std::min<std::uint64_t>(pattern.size(),
+                                                       options.bench_file_multi_bytes -
+                                                           written);
+            out.write(pattern.data(), static_cast<std::streamsize>(chunk));
+            written += chunk;
+          }
+        }
+        const auto t0 = steady_micros_now();
+        const auto first = node.value_if()->push_file(
+            peer_key0, "inbox", "bench/multi-a.bin", multi_source);
+        const auto second = node.value_if()->push_file(
+            peer_key0, "inbox", "bench/multi-b.bin", multi_source);
+        bool first_committed = false;
+        bool second_committed = false;
+        std::uint64_t done = steady_micros_now();
+        if (first) {
+          done = wait_file_terminal(*first.value_if(), first_committed);
+        }
+        if (second) {
+          done = std::max(done, wait_file_terminal(*second.value_if(), second_committed));
+        }
+        bench.file_multi_ok = first_committed && second_committed;
+        const auto duration_ms = (done - t0) / 1000U;
+        const std::uint64_t total_bytes =
+            ((first ? 1U : 0U) + (second ? 1U : 0U)) * options.bench_file_multi_bytes;
+        bench.file_multi_mib_s =
+            duration_ms == 0U
+                ? 0.0
+                : static_cast<double>(total_bytes) / 1.048576e6 /
+                      (static_cast<double>(duration_ms) / 1000.0);
+        std::cout << "BENCH_THROUGHPUT name=file_multi_concurrent"
+                  << " bytes=" << total_bytes
+                  << " transfers=" << (first ? 1 : 0) + (second ? 1 : 0)
+                  << " duration_ms=" << duration_ms
+                  << " mib_per_s=" << bench.file_multi_mib_s
+                  << " ok=" << (bench.file_multi_ok ? 1 : 0) << '\n';
+      }
+    }
+
+    // ---- shell contention: keystroke→output round trip idle, then while a
+    // bulk push occupies the same session. The PTY echoes the command line,
+    // so the token round trip measures input frame → PTY → output frame —
+    // exactly the interactivity the file transfer competes with. ----
+    if (options.bench_shell) {
+      node.value_if()->set_shell_event_observer(
+          [&](const heyaki::DeviceEndpointKey&,
+              const heyaki::ShellServiceEvent& event) {
+            if (!event.output.empty()) {
+              bench_shell_accumulated.append(
+                  reinterpret_cast<const char*>(event.output.data()),
+                  event.output.size());
+              (void)bench_shell_output.try_publish(bench_shell_accumulated);
+            }
+            (void)bench_shell_phase.try_publish(static_cast<int>(event.phase));
+          });
+      const auto shell = node.value_if()->open_shell(peer_key0, "bench",
+                                                     heyaki::ShellOpenOptions{});
+      if (shell) {
+        int phase = -1;
+        const auto active = wait_until(
+            [&] {
+              (void)bench_shell_phase.try_load(phase);
+              return phase == static_cast<int>(heyaki::ShellPhase::active);
+            },
+            std::chrono::milliseconds{10000});
+        if (active) {
+          const auto ping_shell = [&](const std::string& token) {
+            const auto t0 = steady_micros_now();
+            const std::string line = "echo " + token + "\r";
+            std::vector<std::byte> bytes;
+            bytes.reserve(line.size());
+            for (const char value : line) {
+              bytes.push_back(static_cast<std::byte>(value));
+            }
+            const auto sent = node.value_if()->shell_send_input(
+                peer_key0, *shell.value_if(), bytes);
+            if (!sent) {
+              return std::numeric_limits<std::uint64_t>::max();
+            }
+            const auto seen = wait_until(
+                [&] {
+                  std::string copy;
+                  if (!bench_shell_output.try_load(copy)) {
+                    return false;
+                  }
+                  return copy.find(token) != std::string::npos;
+                },
+                std::chrono::milliseconds{10000});
+            if (!seen) {
+              return std::numeric_limits<std::uint64_t>::max();
+            }
+            return steady_micros_now() - t0;
+          };
+          std::vector<std::uint64_t> idle_samples;
+          for (std::size_t index = 0U; index < options.bench_shell_pings; ++index) {
+            const auto rtt = ping_shell("benchidle" + std::to_string(index));
+            if (rtt != std::numeric_limits<std::uint64_t>::max()) {
+              idle_samples.push_back(rtt);
+            }
+            executor::comm::PhaseGate pace{"heyaki-bench-shell-pace"};
+            (void)pace.wait_for(1U, std::chrono::milliseconds{200});
+          }
+          bench.shell_idle_p95 = summarize_latencies(idle_samples).p95;
+          print_bench_metric("shell_ping_idle", idle_samples,
+                             options.bench_shell_pings - idle_samples.size());
+          if (options.bench_file_bytes > 0U) {
+            const auto push_begin = steady_micros_now();
+            const auto pushed = node.value_if()->push_file(
+                peer_key0, "inbox", "bench/under-shell.bin", m7_source);
+            std::vector<std::uint64_t> contended_samples;
+            for (std::size_t index = 0U; index < options.bench_shell_pings * 3U &&
+                                          contended_samples.size() <
+                                              options.bench_shell_pings;
+                 ++index) {
+              const auto rtt = ping_shell("benchbusy" + std::to_string(index));
+              if (rtt != std::numeric_limits<std::uint64_t>::max()) {
+                contended_samples.push_back(rtt);
+              }
+              executor::comm::PhaseGate pace{"heyaki-bench-shell-pace"};
+              (void)pace.wait_for(1U, std::chrono::milliseconds{100});
+            }
+            bench.shell_contended_p95 = summarize_latencies(contended_samples).p95;
+            print_bench_metric("shell_ping_contended", contended_samples,
+                               options.bench_shell_pings - contended_samples.size());
+            bool committed = false;
+            const auto commit_done =
+                pushed ? wait_file_terminal(*pushed.value_if(), committed)
+                       : steady_micros_now();
+            const auto duration_ms = (commit_done - push_begin) / 1000U;
+            const double mib_per_s =
+                duration_ms == 0U
+                    ? 0.0
+                    : static_cast<double>(options.bench_file_bytes) / 1.048576e6 /
+                          (static_cast<double>(duration_ms) / 1000.0);
+            std::cout << "BENCH_THROUGHPUT name=file_under_shell"
+                      << " bytes=" << options.bench_file_bytes
+                      << " duration_ms=" << duration_ms
+                      << " mib_per_s=" << mib_per_s
+                      << " ok=" << (committed ? 1 : 0)
+                      << " shell_p95_us=" << bench.shell_contended_p95 << '\n';
+          }
+          bench.shell_ok = true;
+        }
+        (void)node.value_if()->close_shell(peer_key0, *shell.value_if());
+        (void)wait_until(
+            [&] {
+              int latest = -1;
+              (void)bench_shell_phase.try_load(latest);
+              return latest == static_cast<int>(heyaki::ShellPhase::closed);
+            },
+            std::chrono::milliseconds{8000});
+      } else {
+        std::cout << "BENCH_METRIC name=shell_ping_idle error=open-failed"
+                  << " detail=" << shell.error_if()->safe_detail() << '\n';
+      }
+    }
+
+    // Feed the shared result-line mailboxes so the existing MATRIX_RESULT
+    // machinery stays the single source for the harness.
+    (void)m6_message_acked.try_publish(bench.message_failures == 0U);
+    (void)m6_rpc_status.try_publish(bench.rpc_failures == 0U &&
+                                            bench.rpc_admission_rejects == 0U
+                                        ? 0
+                                        : -1);
+    (void)m7_event_received.try_publish(bench.fanout_publish_failures == 0U);
+    (void)m7_file_committed.try_publish(
+        bench.file_single_ok &&
+        (options.bench_file_multi_bytes == 0U || bench.file_multi_ok));
+    std::cout << "BENCH_SUMMARY ok=1"
+              << " connect_ms=" << bench.connect_ms
+              << " data_path=" << bench.data_path
+              << " message_p95_us=" << bench.message_p95
+              << " rpc_p95_us=" << bench.rpc_p95
+              << " rpc_concurrent_p95_us=" << bench.rpc_concurrent_p95
+              << " fanout_matched_min=" << bench.fanout_matched_min
+              << " fanout_matched_max=" << bench.fanout_matched_max
+              << " file_single_mib_per_s=" << bench.file_single_mib_s
+              << " file_multi_mib_per_s=" << bench.file_multi_mib_s
+              << " shell_idle_p95_us=" << bench.shell_idle_p95
+              << " shell_contended_p95_us=" << bench.shell_contended_p95
+              << " message_failures=" << bench.message_failures
+              << " rpc_failures=" << bench.rpc_failures
+              << " rpc_admission_rejects=" << bench.rpc_admission_rejects
+              << " fanout_publish_failures=" << bench.fanout_publish_failures
+              << '\n';
+    return bench;
   };
 
   if (options.soak_cycles > 0U) {
@@ -957,37 +1739,76 @@ int run_node(const std::filesystem::path& database, std::string_view application
   }
 
   if (options.role == "initiator") {
+    const auto discovered_peer_count = [&]() {
+      std::size_t count = 0U;
+      for (const auto& entry : node.value_if()->endpoints()) {
+        if (entry.key != local_key && peer_has_endpoint(entry)) {
+          ++count;
+        }
+      }
+      return count;
+    };
     const auto peer_endpoint = wait_until(
         [&] {
-          const auto entries = node.value_if()->endpoints();
-          return std::any_of(entries.begin(), entries.end(),
-                             [&](const auto& entry) {
-                               return entry.key != local_key &&
-                                      peer_has_endpoint(entry);
-                             });
+          return options.bench_initiator
+                     ? discovered_peer_count() >= options.bench_peers
+                     : discovered_peer_count() >= 1U;
         },
-        std::chrono::milliseconds{10000});
+        options.bench_initiator ? std::chrono::milliseconds{20000}
+                                : std::chrono::milliseconds{10000});
     if (!peer_endpoint) {
       std::cout << "MATRIX_RESULT authenticated=0 data_path=none duration_ms=0"
                 << " relay_state=no_peer\n";
       (void)node.value_if()->shutdown();
       return 0;
     }
-    const auto entries = node.value_if()->endpoints();
-    const auto peer = std::find_if(entries.begin(), entries.end(),
-                                   [&](const auto& entry) {
-                                     return entry.key != local_key &&
-                                            peer_has_endpoint(entry);
-                                   });
-    const auto connected = options.lan_only
-                               ? node.value_if()->connect_lan(peer->key)
-                               : node.value_if()->connect(peer->key);
-    attempted = (bool)connected;
-    if (!connected) {
-      std::cout << "MATRIX_RESULT authenticated=0 data_path=none duration_ms=0"
-                << " connect_error=" << connected.error_if()->safe_detail() << '\n';
-      (void)node.value_if()->shutdown();
-      return 0;
+    const auto dial_peer = [&](const heyaki::DeviceEndpointKey& key) {
+      return options.lan_only ? node.value_if()->connect_lan(key)
+                              : node.value_if()->connect(key);
+    };
+    if (options.bench_initiator) {
+      // M9-10: dial every discovered peer (fan-out subscribers count as
+      // peers); sections beyond connect timing use the first authenticated
+      // session. The dial timestamp anchors BENCH_CONNECT. Dials are
+      // staggered: each one bursts offer+candidates through the relay, and
+      // the relay's per-IP rate scope (32/s) is shared by every identity on
+      // a loopback host — a simultaneous fan-out dial trips it and the
+      // rejected control traffic churns the relay connections.
+      bench_dial_begin_us = steady_micros_now();
+      unsigned dialed = 0U;
+      const auto entries = node.value_if()->endpoints();
+      for (const auto& entry : entries) {
+        if (entry.key != local_key && peer_has_endpoint(entry)) {
+          const auto connected = dial_peer(entry.key);
+          attempted = attempted || (bool)connected;
+          if ((bool)connected) {
+            ++dialed;
+          }
+          executor::comm::PhaseGate dial_gap{"heyaki-bench-dial-gap"};
+          (void)dial_gap.wait_for(1U, std::chrono::milliseconds{300});
+        }
+      }
+      if (dialed == 0U) {
+        std::cout << "MATRIX_RESULT authenticated=0 data_path=none duration_ms=0"
+                  << " connect_error=no-dial-admitted\n";
+        (void)node.value_if()->shutdown();
+        return 0;
+      }
+    } else {
+      const auto entries = node.value_if()->endpoints();
+      const auto peer = std::find_if(entries.begin(), entries.end(),
+                                     [&](const auto& entry) {
+                                       return entry.key != local_key &&
+                                              peer_has_endpoint(entry);
+                                     });
+      const auto connected = dial_peer(peer->key);
+      attempted = (bool)connected;
+      if (!connected) {
+        std::cout << "MATRIX_RESULT authenticated=0 data_path=none duration_ms=0"
+                  << " connect_error=" << connected.error_if()->safe_detail() << '\n';
+        (void)node.value_if()->shutdown();
+        return 0;
+      }
     }
   }
 
@@ -1040,6 +1861,12 @@ int run_node(const std::filesystem::path& database, std::string_view application
             if (session.state == heyaki::NodePeerSessionState::authenticated) {
               (void)node.value_if()->subscribe_events(
                   session.peer, "telemetry", true, heyaki::EventQos::best_effort_latest);
+              if (options.bench_responder) {
+                // M9-10 fan-out: reliable QoS so the delivered-count gate is
+                // meaningful (drops would be a finding, not a pacing artifact).
+                (void)node.value_if()->subscribe_events(
+                    session.peer, "bench.fanout", true, heyaki::EventQos::reliable_live);
+              }
               return true;
             }
           }
@@ -1075,20 +1902,26 @@ int run_node(const std::filesystem::path& database, std::string_view application
     // churn scenario may drop the session mid-exercise, which reports as
     // m6=0/-1 rather than a topology failure.
     if (options.role == "initiator") {
-      heyaki::DeviceEndpointKey peer_key{};
-      for (const auto& session : node.value_if()->peer_sessions()) {
-        if (session.state == heyaki::NodePeerSessionState::authenticated) {
-          peer_key = session.peer;
-          break;
+      if (options.bench_initiator) {
+        // M9-10: the bench suite replaces the one-shot m6/m7 exercise and
+        // feeds the shared outcome mailboxes itself.
+        (void)run_bench_suite();
+      } else {
+        heyaki::DeviceEndpointKey peer_key{};
+        for (const auto& session : node.value_if()->peer_sessions()) {
+          if (session.state == heyaki::NodePeerSessionState::authenticated) {
+            peer_key = session.peer;
+            break;
+          }
         }
+        // M6 message+RPC and the M7 event+file push ride the authenticated
+        // session on every topology (the responder subscribes to the telemetry
+        // root; both directions carry file scopes). A relay-restart churn
+        // scenario may drop the session mid-exercise, which reports as
+        // m6=0/-1 rather than a topology failure. The mailbox loads below the
+        // block carry the outcomes into the result line.
+        (void)exercise_initiator_services(peer_key, "matrix/m7.bin");
       }
-      // M6 message+RPC and the M7 event+file push ride the authenticated
-      // session on every topology (the responder subscribes to the telemetry
-      // root; both directions carry file scopes). A relay-restart churn
-      // scenario may drop the session mid-exercise, which reports as
-      // m6=0/-1 rather than a topology failure. The mailbox loads below the
-      // block carry the outcomes into the result line.
-      (void)exercise_initiator_services(peer_key, "matrix/m7.bin");
     }
     executor::comm::PhaseGate hold{"heyaki-m4-matrix-hold"};
     (void)hold.wait_for(1U, options.hold);
@@ -1178,7 +2011,7 @@ int run_node(const std::filesystem::path& database, std::string_view application
 int usage() {
   std::cerr << "usage:\n"
             << "  heyaki-m4-matrix-node init-profile DB APP_ID\n"
-            << "  heyaki-m4-matrix-node seed-trust FIRST_DB SECOND_DB\n"
+            << "  heyaki-m4-matrix-node seed-trust FIRST_DB SECOND_DB [SEED_BASE]\n"
             << "  heyaki-m4-matrix-node enroll DB APP_ID RELAY_URL CA TENANT TOKEN\n"
             << "  heyaki-m4-matrix-node run DB APP_ID RELAY_URL CA TENANT BUDGET_MS\n"
             << "      [--role initiator|responder] [--stun HOST:PORT]\n"
@@ -1188,7 +2021,12 @@ int usage() {
             << "      [--hold-ms N] [--authenticate-budget-ms N] [--connect-retries N]\n"
             << "      [--m7-bytes N] [--m7-pause-hold-ms N] [--m7-wait-ms N]\n"
             << "      [--turn-credential-expiry-offset-ms N]\n"
-            << "      [--soak-cycles N]  (initiator only; M9-09 soak)\n";
+            << "      [--soak-cycles N]  (initiator only; M9-09 soak)\n"
+            << "      [--bench-initiator] [--bench-connect-only] [--bench-peers N]\n"
+            << "      [--bench-msg-n N] [--bench-rpc-n N] [--bench-rpc-concurrent-n N]\n"
+            << "      [--bench-rpc-window N] [--bench-fanout-n N] [--bench-file-bytes N]\n"
+            << "      [--bench-file-multi-bytes N] [--bench-shell-pings N]  (M9-10)\n"
+            << "      [--bench-responder] [--bench-shell]  (responder; M9-10)\n";
   return 2;
 }
 
@@ -1266,9 +2104,16 @@ int main(int argc, char** argv) {
     return 0;
   }
   if (command == "seed-trust") {
-    if (argc != 4) {
+    if (argc != 4 && argc != 5) {
       return usage();
     }
+    // M9-10: the id seed derives the GrantIds; a profile trusted with several
+    // peers in sequence must use distinct seeds per pair or the later grants
+    // upsert over the earlier ones (same GrantId) and the earlier peers fall
+    // back to untrusted. Default keeps the historical 1/2 for single-pair
+    // seeding; the bench harness passes a distinct even base per subscriber.
+    const std::uint8_t seed_base =
+        argc == 5 ? static_cast<std::uint8_t>(parse_u64(argv[4]) & 0x7FU) : 1U;
     auto first = heyaki::ProfileStore::open(argv[2]);
     if (!first) {
       std::cerr << first.error_if()->safe_detail() << '\n';
@@ -1279,16 +2124,21 @@ int main(int argc, char** argv) {
       std::cerr << second.error_if()->safe_detail() << '\n';
       return 1;
     }
-    // Grants canonicalize to a sorted, deduplicated scope list.
+    // Grants canonicalize to a sorted, deduplicated scope list. shell.open:bench
+    // is inert unless a bench participant calls the M8 shell API (M9-10).
   const std::vector<std::string> scopes = {"event.subscribe:*", "file.pull:inbox",
                                         "file.push:inbox",   "matrix.connect",
-                                        "message.send",      "rpc.device.read"};
-    auto forward = seed_one_way_trust(*first.value_if(), *second.value_if(), scopes, 1U);
+                                        "message.send",      "rpc.device.read",
+                                        "shell.open:bench"};
+    auto forward =
+        seed_one_way_trust(*first.value_if(), *second.value_if(), scopes, seed_base);
     if (!forward) {
       std::cerr << forward.error_if()->safe_detail() << '\n';
       return 1;
     }
-    auto backward = seed_one_way_trust(*second.value_if(), *first.value_if(), scopes, 2U);
+    auto backward =
+        seed_one_way_trust(*second.value_if(), *first.value_if(), scopes,
+                           static_cast<std::uint8_t>(seed_base + 1U));
     if (!backward) {
       std::cerr << backward.error_if()->safe_detail() << '\n';
       return 1;
@@ -1365,6 +2215,33 @@ int main(int argc, char** argv) {
             std::chrono::milliseconds{parse_i64(argv[++index])};
       } else if (flag == "--soak-cycles" && index + 1 < argc) {
         options.soak_cycles = static_cast<unsigned>(parse_u64(argv[++index]));
+      } else if (flag == "--bench-initiator") {
+        options.bench_initiator = true;
+      } else if (flag == "--bench-responder") {
+        options.bench_responder = true;
+      } else if (flag == "--bench-shell") {
+        options.bench_shell = true;
+      } else if (flag == "--bench-connect-only") {
+        options.bench_connect_only = true;
+      } else if (flag == "--bench-peers" && index + 1 < argc) {
+        options.bench_peers = static_cast<std::size_t>(parse_u64(argv[++index]));
+      } else if (flag == "--bench-msg-n" && index + 1 < argc) {
+        options.bench_msg_n = static_cast<std::size_t>(parse_u64(argv[++index]));
+      } else if (flag == "--bench-rpc-n" && index + 1 < argc) {
+        options.bench_rpc_n = static_cast<std::size_t>(parse_u64(argv[++index]));
+      } else if (flag == "--bench-rpc-concurrent-n" && index + 1 < argc) {
+        options.bench_rpc_concurrent_n =
+            static_cast<std::size_t>(parse_u64(argv[++index]));
+      } else if (flag == "--bench-rpc-window" && index + 1 < argc) {
+        options.bench_rpc_window = static_cast<std::size_t>(parse_u64(argv[++index]));
+      } else if (flag == "--bench-fanout-n" && index + 1 < argc) {
+        options.bench_fanout_n = static_cast<std::size_t>(parse_u64(argv[++index]));
+      } else if (flag == "--bench-file-bytes" && index + 1 < argc) {
+        options.bench_file_bytes = parse_u64(argv[++index]);
+      } else if (flag == "--bench-file-multi-bytes" && index + 1 < argc) {
+        options.bench_file_multi_bytes = parse_u64(argv[++index]);
+      } else if (flag == "--bench-shell-pings" && index + 1 < argc) {
+        options.bench_shell_pings = static_cast<std::size_t>(parse_u64(argv[++index]));
       } else {
         return usage();
       }
@@ -1373,6 +2250,33 @@ int main(int argc, char** argv) {
     // cycle; it has no responder-side variant.
     if (options.soak_cycles > 0U && options.role != "initiator") {
       std::cerr << "--soak-cycles requires --role initiator\n";
+      return usage();
+    }
+    if (options.bench_initiator && options.role != "initiator") {
+      std::cerr << "--bench-initiator requires --role initiator\n";
+      return usage();
+    }
+    if (options.bench_responder && options.role != "responder") {
+      std::cerr << "--bench-responder requires --role responder\n";
+      return usage();
+    }
+    if (options.bench_connect_only && !options.bench_initiator) {
+      std::cerr << "--bench-connect-only requires --bench-initiator\n";
+      return usage();
+    }
+    // The shell contention section needs the serving-side profile; the flag
+    // is what exposes it, so pairing it with the initiator-only connect
+    // loop would silently skip the section.
+    if (options.bench_shell && options.bench_connect_only) {
+      std::cerr << "--bench-connect-only skips the shell section; drop --bench-shell\n";
+      return usage();
+    }
+    // The window must stay under the client pending-call cap (64) and the
+    // server concurrent-call cap (16); a window above them measures
+    // admission rejection, not RPC latency.
+    if (options.bench_rpc_window > 16U) {
+      std::cerr << "--bench-rpc-window above the default server cap (16) would "
+                   "measure admission rejection, not latency\n";
       return usage();
     }
     // lan_only sessions carry host candidates only; contradictory transport

@@ -456,6 +456,48 @@ relay-table growth → lease/endpoint TTL eviction. Re-run the failing phase
 with a larger `HEYAKI_SOAK_SESSION_CYCLES` to confirm the slope before
 filing.
 
+### Run a performance benchmark (M9-10)
+
+The M9-10 bench harness measures the v1 acceptance P95s and the service
+latency/throughput populations on one loopback machine: Phase R
+(registration + direct-connect P95, fresh process pairs), Phase T (TURN
+fallback P95 through two `heyaki-test-turn-server` instances), Phase L
+(message RTT, sequential/concurrent RPC, event fan-out to N subscribers,
+single/concurrent file throughput, shell keystroke latency idle and under a
+bulk push). The CI slice runs on every push (`heyaki_m9_bench`, gated by
+`HEYAKI_REQUIRE_M9_BENCH=1`, Release build on the coturn-topology job).
+
+Command form:
+
+```bash
+HEYAKI_REQUIRE_M9_BENCH=1 \
+HEYAKI_BENCH_CYCLES=<p95-samples> HEYAKI_BENCH_SUBSCRIBERS=<fanout> \
+HEYAKI_BENCH_MSG_N=<n> HEYAKI_BENCH_RPC_N=<n> \
+HEYAKI_BENCH_RPC_CONC_N=<n> HEYAKI_BENCH_FANOUT_N=<events> \
+HEYAKI_BENCH_FILE_BYTES=<bytes> \
+tests/network/run_m9_bench_harness.sh \
+  --relay-bin build/heyaki-relay \
+  --matrix-bin build/heyaki-m4-matrix-node \
+  --demo-bin build/heyaki-m3b-relay-demo \
+  --turn-bin build/heyaki-test-turn-server
+```
+
+Gates enforced: registration P95 < 2 s, direct connect P95 < 3 s, TURN
+fallback P95 < 5 s (the v1 acceptance targets on loopback — a lower bound,
+not a substitute for the NAT-matrix numbers), zero failures in every
+latency population, complete fan-out delivery on every subscriber, and all
+file pushes committed. The measured numbers (not just the gates) are the
+deliverable: `BENCH_METRIC`/`BENCH_THROUGHPUT` lines per population, the
+`M9_BENCH_OK` summary line, and per-subscriber fan-out P95s — archive them
+with the run record; they are the input for the M9-11 parameter freeze and
+the v1 acceptance record.
+
+Reading the numbers: loopback direct paths are the reproducible cross-commit
+trend baseline (compare before/after dependency or policy changes); the
+netns NAT matrix keeps the topology-realistic connect P95s; shell ping
+latency includes the ~500 ms PTY output drain tick by design (M8-04), so
+expect `shell_ping_idle p50` around that tick regardless of link speed.
+
 ### Roll back a version
 
 Rollback order: relay binary first (devices tolerate an older relay

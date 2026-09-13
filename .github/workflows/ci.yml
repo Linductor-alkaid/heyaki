@@ -137,7 +137,7 @@ jobs:
       - name: Build relay and matrix apps
         run: >-
           cmake --build build --target heyaki-relay heyaki-m4-matrix-node
-          heyaki-m3b-relay-demo --parallel 2
+          heyaki-m3b-relay-demo heyaki-test-turn-server --parallel 2
       - name: Install coturn fallback package
         timeout-minutes: 10
         run: |
@@ -194,6 +194,16 @@ jobs:
           --relay-bin "$PWD/build/heyaki-relay"
           --matrix-bin "$PWD/build/heyaki-m4-matrix-node"
           --demo-bin "$PWD/build/heyaki-m3b-relay-demo"
+      - name: Run M9 bench harness (P95 loops + latency suite)
+        timeout-minutes: 30
+        env:
+          HEYAKI_REQUIRE_M9_BENCH: "1"
+        run: >-
+          tests/network/run_m9_bench_harness.sh
+          --relay-bin "$PWD/build/heyaki-relay"
+          --matrix-bin "$PWD/build/heyaki-m4-matrix-node"
+          --demo-bin "$PWD/build/heyaki-m3b-relay-demo"
+          --turn-bin "$PWD/build/heyaki-test-turn-server"
 
   sanitizer:
     runs-on: ubuntu-24.04
