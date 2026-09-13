@@ -627,6 +627,14 @@ class WebRtcTransportSession::Impl
     fail_pending_open(event.channel->kind(), ErrorCode::cancelled,
                       "channel_closed_before_open");
     event.channel->buffered_low();
+    // A closed REGISTERED channel must free the kind: leaving it in
+    // channels_ parks every later open of the kind in pending_opens_
+    // forever (the kind deadlock the tsan round of this test exposed).
+    const auto registered = channels_.find(event.channel->kind());
+    if (registered != channels_.end() &&
+        registered->second.get() == event.channel.get()) {
+      channels_.erase(registered);
+    }
   }
   void handle(BufferedLowEvent& event) {
     event.channel->buffered_low();
