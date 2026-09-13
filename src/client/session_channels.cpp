@@ -153,11 +153,19 @@ std::string_view queue_full_policy_name(QueueFullPolicy policy) noexcept {
 }
 
 Result<void> validate_channel_budget_config(const ChannelBudgetConfig& config) {
+  // M9-11 hard upper bounds: per-peer and per-channel queues are the largest
+  // session memory amplifiers, so they are capped 64-128x above the frozen
+  // defaults (docs/operations/parameter-freeze.md).
+  constexpr std::size_t max_queued_frames = 65536U;
+  constexpr std::size_t max_queued_bytes = 256U * 1024U * 1024U;
   if (config.max_open_channels == 0U || config.max_open_channels > 1024U) {
     return Result<void>::failure(
         channel_error(ErrorCode::configuration, "max_open_channels_invalid"));
   }
-  if (config.per_peer_queued_frames == 0U || config.per_peer_queued_bytes == 0U) {
+  if (config.per_peer_queued_frames == 0U ||
+      config.per_peer_queued_frames > max_queued_frames ||
+      config.per_peer_queued_bytes == 0U ||
+      config.per_peer_queued_bytes > max_queued_bytes) {
     return Result<void>::failure(
         channel_error(ErrorCode::configuration, "per_peer_budget_invalid"));
   }
@@ -165,7 +173,10 @@ Result<void> validate_channel_budget_config(const ChannelBudgetConfig& config) {
     return Result<void>::failure(
         channel_error(ErrorCode::configuration, "control_reservation_invalid"));
   }
-  if (config.max_channel_queued_frames == 0U || config.max_channel_queued_bytes == 0U) {
+  if (config.max_channel_queued_frames == 0U ||
+      config.max_channel_queued_frames > max_queued_frames ||
+      config.max_channel_queued_bytes == 0U ||
+      config.max_channel_queued_bytes > max_queued_bytes) {
     return Result<void>::failure(
         channel_error(ErrorCode::configuration, "channel_queue_bounds_invalid"));
   }

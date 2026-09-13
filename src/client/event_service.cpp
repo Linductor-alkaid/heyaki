@@ -79,9 +79,16 @@ Result<void> EventService::attach() {
   if (attached_) {
     return Result<void>::success();
   }
+  // M9-11 hard upper bounds (docs/operations/parameter-freeze.md): subscriber
+  // fan-out memory is bounded per peer and per subscription queue.
   if (config_.subscriber_queue_items == 0U ||
+      config_.subscriber_queue_items > 65536U ||
       config_.max_subscriptions_per_peer == 0U ||
-      config_.channel_frame_capacity == 0U || config_.channel_byte_capacity == 0U) {
+      config_.max_subscriptions_per_peer > 4096U ||
+      config_.channel_frame_capacity == 0U ||
+      config_.channel_frame_capacity > 65536U ||
+      config_.channel_byte_capacity == 0U ||
+      config_.channel_byte_capacity > 256U * 1024U * 1024U) {
     return Result<void>::failure(
         event_service_error(ErrorCode::configuration, "event_config_invalid"));
   }

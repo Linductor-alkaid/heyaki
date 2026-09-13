@@ -247,6 +247,10 @@ struct RelayNodeConfig {
   std::size_t send_capacity{64U};
 };
 
+// M9-11: heartbeat/backoff/queue bounds (frozen defaults plus hard upper
+// limits) are documented in docs/operations/parameter-freeze.md.
+[[nodiscard]] Result<void> validate_relay_node_config(const RelayNodeConfig& config);
+
 struct RelayNodeSnapshot {
   bool enabled{false};
   RelayNodeState state{RelayNodeState::disabled};

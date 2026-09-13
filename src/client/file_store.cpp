@@ -9,6 +9,7 @@
 #include <blake3.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -646,6 +647,85 @@ Result<ResumeState> read_resume_state(const std::filesystem::path& state_path) {
     return Result<ResumeState>::failure(store_error(ErrorCode::protocol, "state_fields_invalid"));
   }
   return Result<ResumeState>::success(std::move(state));
+}
+
+namespace {
+
+// Staging leftovers are named "<final>.heyaki-<32 hex>.part" / "...state"
+// (create_staging); TransferId is 16 bytes, so the hex segment is exactly 32
+// lowercase hex characters. Anything else is user data and never touched.
+constexpr std::size_t kTransferHexChars = 32U;
+
+bool is_staging_leftover_name(std::string_view name) {
+  constexpr std::string_view marker = ".heyaki-";
+  const auto marker_pos = name.rfind(marker);
+  if (marker_pos == std::string_view::npos) {
+    return false;
+  }
+  const std::string_view tail = name.substr(marker_pos + marker.size());
+  if (tail.size() <= kTransferHexChars) {
+    return false;
+  }
+  const auto hex = tail.substr(0U, kTransferHexChars);
+  const auto suffix = tail.substr(kTransferHexChars);
+  if (suffix != ".part" && suffix != ".state") {
+    return false;
+  }
+  return std::all_of(hex.begin(), hex.end(), [](char character) {
+    return (character >= '0' && character <= '9') ||
+           (character >= 'a' && character <= 'f');
+  });
+}
+
+}  // namespace
+
+Result<std::size_t> sweep_stale_staging(const std::filesystem::path& root_directory,
+                                        std::chrono::milliseconds max_age) {
+  std::error_code ec;
+  if (!std::filesystem::is_directory(root_directory, ec) || ec) {
+    return Result<std::size_t>::failure(
+        store_error(ErrorCode::internal, "staging_sweep_root_missing"));
+  }
+  const auto cutoff = std::filesystem::file_time_type::clock::now() - max_age;
+  std::size_t removed = 0U;
+  std::filesystem::directory_iterator entry(root_directory,
+                                            std::filesystem::directory_options::skip_permission_denied,
+                                            ec);
+  for (const auto end = std::filesystem::directory_iterator(); !ec && entry != end;
+       entry.increment(ec)) {
+    const auto name = entry->path().filename().string();
+    if (!is_staging_leftover_name(name)) {
+      continue;
+    }
+    std::error_code entry_ec;
+    const auto status = entry->symlink_status(entry_ec);
+    if (entry_ec) {
+      entry_ec.clear();
+      continue;
+    }
+    // Regular files and dangling/fresh symlinks are removable; directories
+    // (including directory symlinks) are never touched.
+    if (!std::filesystem::is_regular_file(status) &&
+        !std::filesystem::is_symlink(status)) {
+      continue;
+    }
+    const auto written = std::filesystem::last_write_time(entry->path(), entry_ec);
+    if (entry_ec) {
+      entry_ec.clear();
+      continue;
+    }
+    if (written > cutoff) {
+      continue;  // Young enough to belong to a live or recent transfer.
+    }
+    if (remove_quietly(entry->path())) {
+      ++removed;
+    }
+  }
+  if (ec) {
+    return Result<std::size_t>::failure(
+        store_error(ErrorCode::internal, "staging_sweep_scan_failed"));
+  }
+  return Result<std::size_t>::success(removed);
 }
 
 }  // namespace heyaki::file_store

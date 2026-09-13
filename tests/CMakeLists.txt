@@ -533,6 +533,26 @@ heyaki_add_runtime_test(
 set_tests_properties(heyaki_m9_slo_rules PROPERTIES
   TIMEOUT 60)
 
+add_executable(heyaki_m9_parameter_freeze_tests unit/m9_parameter_freeze_test.cpp)
+target_link_libraries(heyaki_m9_parameter_freeze_tests PRIVATE
+  heyaki::client
+  heyaki::relay
+  heyaki::core
+  heyaki::blake3
+  executor::executor
+  GTest::gtest_main)
+target_include_directories(heyaki_m9_parameter_freeze_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/client"
+  "${CMAKE_CURRENT_SOURCE_DIR}/unit")
+heyaki_target_use_pinned_boost_beast(heyaki_m9_parameter_freeze_tests)
+heyaki_configure_target(heyaki_m9_parameter_freeze_tests)
+heyaki_add_runtime_test(
+  heyaki_m9_parameter_freeze heyaki_m9_parameter_freeze_tests
+  "unit;config;m9;parameters;freezing")
+set_tests_properties(heyaki_m9_parameter_freeze PROPERTIES
+  TIMEOUT 120)
+
 add_executable(heyaki_m8_service_tests
   unit/m8_codec_test.cpp
   unit/m8_shell_test.cpp

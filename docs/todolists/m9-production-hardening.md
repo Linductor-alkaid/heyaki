@@ -1,6 +1,6 @@
 # M9：生产加固与 v1 发布
 
-> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6、M9-07 Round 7、M9-08 Round 8、M9-09 Round 9 与 M9-10 Round 10（基准 harness + 同 kind 双流 UAF 修复）已交付，M9-11 起未开始，见文末实施记录）
+> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6、M9-07 Round 7、M9-08 Round 8、M9-09 Round 9、M9-10 Round 10（基准 harness + 同 kind 双流 UAF 修复）与 M9-11 Round 11（参数冻结 + 孤儿 staging 清理）已交付，M9-12 起未开始，见文末实施记录）
 > - 所属计划：[Heyaki MVP 至 v1 实施 TODO 计划](heyaki-implementation-plan.md)
 > - 前置：M8 | 建议发布点：v1.0
 
@@ -19,7 +19,7 @@
 - [x] `M9-08` 完成 relay 重启、coturn 重启、网络切换、credential 过期、磁盘满、慢消费者和任意关闭点故障注入。（Round 8 交付 2026-09-12：三面合成——进程级故障矩阵 `deploy/coturn/run_fault_matrix.sh`（CTest `heyaki_m9_fault_matrix`，root+coturn 门控 SKIP 77，CI coturn-topology job 执行）六场景：relay_restart_transfer（m7 传输在首个 transferring 相位确定性暂停→杀 relay→重启→恢复提交，直连数据面不依赖信令 relay）、turn_restart（双 coturn 杀死→已认证 TURN 会话经 ICE consent（RFC 7675，pinned libjuice 30s）显式关闭→coturn 重启后新参与者经 TURN 重建）、path_switch（同一对设备在 direct→blocked(TURN)→direct 三段网络条件下重建正确路径）、lease_expiry（SIGSTOP 冻结 responder 越过 3s 租约→endpoint 被逐出→解冻后 heartbeat 重插租约、新发起方可达）、slow_receiver（2 MiB 推入 4mbit/50ms 整形链路，限内有界完成）、stale_turn_credential（过期 REST 凭据→coturn 拒绝分配→有界显式失败）；matrix node 新增 `--m7-bytes/--m7-pause-hold-ms/--m7-wait-ms/--turn-credential-expiry-offset-ms`。磁盘满：`RLIMIT_FSIZE` 模式（EFBIG 为 ENOSPC 的可移植替身）两例单测——m7 接收方中途写失败→命名错误+无最终文件+staging 清理+sender 收到终态+限额恢复后重推字节一致；relay SQLite 写满→显式 storage 错误+已提交行保留+失败事务回滚+重开完好。任意关闭点：ProfileStore 崩溃矩阵模式克隆到文件服务——test-only 编译 `heyaki_file_fault_injection`（`HEYAKI_FILE_FAULT_POINT` 命中即 `_Exit(86)`）在 file_store 六个盘上边界（staging.after_create/chunk.after_write/state.after_write/commit.before_rename/commit.after_rename/commit.after_cleanup；state 写入经 thread_local 深度标记与 chunk 写区分）注入进程死亡，`tests/file/file_crash_probe.cpp` + `RunFileCrashTest.cmake` 驱动（CTest `heyaki_m9_file_crash_recovery`）：rename 前任意崩溃点最终文件不可见（原子性）、崩溃后同内容新传输提交且字节一致、残留 staging 不阻塞不毒化。既有覆盖映射：relay outage/backoff/进程级 relay_restart（m3b + M4 矩阵）、TURN 凭据/租约/token/grant 过期单测（fake clock 全绿）、同 transfer id 会话丢失恢复（m7 SessionLossPauses）、接口切换发现层（m3a HEYAKI_SWITCH_INTERFACE）、慢订阅者背压（m5/m6/m7 队列上限族）。见实施记录 Round 8。）
 - [x] `M9-09` 执行 24/72 小时长稳、反复发现/过期/建连/断连和容量过载测试，证明内存、fd/handle、worker、session、endpoint directory 和 TTL/replay cache 有界。（Round 9 交付 2026-09-12：`tests/network/run_m9_soak_harness.sh`（CTest `heyaki_m9_soak`，`HEYAKI_REQUIRE_M9_SOAK=1` 门控 SKIP 77，CI coturn-topology job 以 Release 构建直跑）三相位——Phase A 会话 churn：matrix node 新 `--soak-cycles N` 让长存 initiator 在单进程内循环 dial/authenticate/m6+m7 演练/SIGKILL 断连（harness 每循环杀并重生 responder，同 profile 重登录重发布），每循环采样 RSS/fd/会话表/replay 深度/executor 任务 gauge（`SOAK_CYCLE` 行），`SOAK_SUMMARY` 携带门（work_done/closed_ok 全循环达成、live 会话排空、fds_first→last ≤ +24、RSS 增长 ≤ 32MiB、replay_peak ≤ per-peer 256）；Phase B 设备 churn：K 个短生命周期全新设备对同一长存 relay 顺序 enroll/login/publish/exit，每迭代 scrape `/metrics` 采样五个 gauge 族 + relay RSS/fd 门；Phase C 容量过载：第二个 tight relay（max_connections=3、endpoint_directory_capacity=2）承受 5 并发参与者，断言连接容量与目录容量拒绝计数器点燃、幸存者仍可登录、优雅退出后 lease/endpoint 表排空、RSS/fd 有界。CI 片段经 runbook 的"长稳（soak）测试"程序放大为 24/72h 运行（含验收门与斜率分析）。既有确定性单测映射：TTL 表容量/过期（m3b_relay_ttl）、endpoint directory 容量/代际/租户冲突（m3b_relay_endpoint）、replay cache 全局/per-peer/TTL（m4_signaling M4ReplayCache）、连接容量拒绝（m3b_relay ConnectionCapacityRejectsAboveBound）、限速四 scope（m3b_relay_wss_client/rate_limiter）、队列上限与慢消费者（m5/m6/m7 overflow 族）。关键发现：closed 会话进入 `finished_peer_sessions` 有界诊断史环（容量 1024）是设计行为——soak 门是"无 live 会话 + 总数随循环数有界"，不是"列表归零"。见实施记录 Round 9。）
 - [x] `M9-10` 基准消息 latency、并发 RPC、事件 fan-out、单/多文件吞吐、Shell 竞争延迟、relay 内存和带宽。（Round 10 交付 2026-09-13：`tests/network/run_m9_bench_harness.sh`（CTest `heyaki_m9_bench`，`HEYAKI_REQUIRE_M9_BENCH=1` 门控 SKIP 77，CI coturn-topology job Release 直跑）三相位——Phase R 注册+直连 P95（fresh 进程对 ×N 循环，endpoint 表排空后下一轮），Phase T TURN fallback P95（双 `heyaki-test-turn-server` 静态凭据 + `--force-turn`，标签契约与 Windows 矩阵一致接受 `turn_udp|direct_srflx` 半中转对），Phase L 长存套件（matrix node 新 `--bench-initiator/--bench-responder/--bench-shell/--bench-connect-only` 模式：消息 RTT（顺序单在途 1KiB、终态事件采样、发送前 drain）、顺序/并发 RPC（16 窗口 × N 完成、按 wire RequestId 匹配、MpscChannel 交付）、事件 fan-out（N 订阅者 × 可靠 QoS × 时间戳载荷、逐订阅者 delivered/P95 门）、单文件/双并发文件吞吐、shell 敲键→回显延迟空闲 vs 2MiB 推送竞争下）；门 = v1 验收数值（登录 P95<2s/直连 P95<3s/TURN P95<5s）+ 零失败 + fan-out 全量送达 + 文件全部提交；`BENCH_METRIC`/`BENCH_THROUGHPUT`/`M9_BENCH_OK` 行即测量交付物（M9-11 输入）。runbook 新程序"Run a performance benchmark"。基准首跑与收敛过程抓出并修复 **三个真缺陷**（M4 同 kind 双流 UAF、m7 零字节伪 complete、m7 提前 complete，见 Round 10 记录）：双方同时为同一 ChannelKind 建流时，入站重复流的包装对象不在 transport `channels_` map 里，其 OpenEvent 把悬垂指针交给 pending open 完成——堆 UAF（ASan 钉死）；修复 = transport 级确定性收敛（offerer 的流胜出：offerer 拒绝重复流，answerer 在重复流 OpenEvent 时 promote 并退役自己的流；重复包装对象由 `duplicates_` map 持有；关闭/错误事件对重复流不传导为会话失败）+ 会话级 `adopt_physical_channel` 对非 initiator-owned 域（shell/stream）允许替换 + `TransportSession::async_open_channel` 契约文档化（answerer 竞争时 completion 指针需经 channel handler 修正）；回归测试 `M4WebRtcTransport.SimultaneousSameKindOpensResolveToRegisteredChannel`（真双侧 SCTP，offerer 拒绝 + answerer promote + 双向 roundtrip）。本机实测（debug/loopback）：登录 P95 22ms、直连 P95 1021ms、TURN P95 1077ms、消息 P95 2.7ms、RPC P95 2.3ms、并发 RPC P95 8.5ms、单文件 8MiB/s、双并发 9MiB/s、shell ping p50≈300ms（PTY 输出 500ms 维护 tick 的设计行为，M9-11 输入）、fan-out 三订阅者 10/10 送达。见实施记录 Round 10。）
-- [ ] `M9-11` 基于结果重新冻结默认容量、水位、timeout 和重试参数；默认值必须有测量依据和硬上限。
+- [x] `M9-11` 基于结果重新冻结默认容量、水位、timeout 和重试参数；默认值必须有测量依据和硬上限。（Round 11 交付 2026-09-13：[docs/operations/parameter-freeze.md](../operations/parameter-freeze.md) 冻结表（默认值 + 硬上限 + 测量依据三栏，M9-10 基准/ M9-09 soak / M9-06-08 矩阵数据为据，实测全部低于验收门、结论为默认值零调整）+ 九处校验补硬上限（RuntimeConfig 全部容量/线程/11 个生命周期超时、RelayNodeConfig 超时/心跳≤租约帽/退避/队列、RelayWssClientConfig、ChannelBudgetConfig、ByteStreamLimits、SignalingCoordinatorConfig、五个服务 attach、ShellProfileConfig 24h/7d/1GiB、RelayServerConfig 写队列帧/lease 子容量/限流策略前移）+ 新导出 `validate_config`/`validate_relay_node_config` 公共声明 + 孤儿 staging 清理（`file_store::sweep_stale_staging`：24h 年龄门（最慢实测传输三个数量级之外）、严格 `.heyaki-<32hex>.part/.state` 匹配不碰用户文件与目录、FileService attach 向阻塞 worker 投递 fire-and-forget 清理）+ Round 10 移交决策处置：shell 500ms tick 冻结（实测 p50≈300ms，事件驱动 drain 记 v1.x 候选）、packetsLost 维持 bytes/rtt 随 M9-19 后端切换重估、per-IP 32/s 保留 + NAT 共享出口部署观察项；`tests/unit/m9_parameter_freeze_test.cpp` 18 例钉死全部默认值与上限拒绝（漂移即红）。本机 ctest 61/61 全绿。见实施记录 Round 11。）
 - [ ] `M9-12` 完成 schema N-1/N 兼容、rolling relay upgrade 和新旧设备互通；不兼容行为必须在握手期拒绝。
 - [ ] `M9-19` 解除 TURN/TCP 与 TURN/TLS 的 pinned 依赖阻断，交付 v1 的 TURN/TCP/TLS 连通能力。（立项 2026-09-13，方案调研结论如下；交付语义 = M9-07 遗留的 udp_blocked-with-TURN-unreachable 场景可经 TURN/TCP（及 TLS）建立 DataChannel 并通过 m6/m7 端到端演练。）
   - **缺口**：pinned libdatachannel v0.23.2 默认 ICE 后端 libjuice 的 TURN 客户端仅 UDP（`juice_create` 只绑 UDP socket，上游 README 明示 RFC 6544/TCP 不支持，issue #104 无实现计划），`allow_turn_tcp/allow_turn_tls` 因此被 `WebRtcTransportConfig::tcp_turn_backend_verified=false` 门控拒绝。协议面（wire 标签、candidate policy、`IceServerKind::turn_tcp/turn_tls`）已就绪。
@@ -887,12 +887,81 @@ harness 三相位端到端绿（3 订阅者、双循环，终态连续 4/4 全�
    延迟目标，需评估 drain 触发点（输出即排或缩短 tick），这是参数/产品
    决策而非基准轮改动。
 
+### Round 11（2026-09-13）：M9-11 参数冻结 + 孤儿 staging 清理
+
+交付物：
+
+- `docs/operations/parameter-freeze.md`（冻结表）：三栏语义（默认值 / 硬上限 /
+  测量依据）覆盖 Runtime、Relay 客户端、会话与信令、五个服务、LAN 与安全面、
+  shell/file root、relay 服务端、无配置面的硬编码设计常量（500ms 节点 tick、
+  50ms PTY tick、60KiB SCTP 经验上限、per-domain 通道容量、base/4 jitter 等）
+  九族；v1 验收数值对账表（登录 22ms/2s、直连 1021ms/3s、TURN 1077ms/5s 等
+  余量 3–90×）+ **结论：默认值零调整**——M9-10/09 实测全部低于验收门，本轮
+  只补上限与冻结。冻结语义：改默认值/上限必须同提交更新文档与测试。
+- 九处校验补硬上限（全部拒绝式，无静默 clamp；上限普遍为默认值 16–256×）：
+  - `validate_config`（`src/client/runtime.cpp`，**新导出**至
+    `include/heyaki/runtime.hpp`）：五容量 ≤65536、executor 线程 ≤64/256、
+    11 个生命周期超时 ≤10min（原仅 ≥0）。
+  - `validate_relay_node_config`（`src/client/node.cpp`，**新导出**至
+    `include/heyaki/node.hpp`）：connect/handshake/close ≤60s、
+    heartbeat ≤120s（= 租约绝对上限——心跳节奏必须能在租约内续期的不变式）、
+    backoff ≤10min/1h、收发队列 ≤65536（原仅非零）。
+  - `RelayWssClient::create`：容量 ≤65536、三超时 ≤60s。
+  - `validate_channel_budget_config`：per-peer/单通道队列帧 ≤65536、字节
+    ≤256MiB（会话内存最大放大器）。
+  - `validate_byte_stream_limits`：窗口帧 ≤65536、并发流 ≤1024、pending 写
+    ≤64MiB、pending 读/写 ≤4096（原仅非零）。
+  - `SignalingCoordinator::create`：attempt 表 ≤65536、候选 ≤4096、attempt_ttl
+    ≤10min、入站限速 ≤100000/60s、rate key ≤1Mi（原仅非零）。
+  - 五服务 attach（message/event/rpc/file/shell）：全部容量字段上限
+    （frame ≤65536、byte ≤64–256MiB、fan-out 双向封顶、send window ≤256MiB、
+    并发 send ≤256、rpc 并发 ≤4096）；`result_cache_entries=0 = 禁用重放缓存`
+    显式为契约行为（非零 ≤65536）。
+  - `validate_shell_profile`：idle ≤24h、absolute ≤7d、max_output ≤1GiB、
+    POSIX 输入 pending ≤1MiB（Windows 128KiB 管道帽继续强制）。
+  - `validate_relay_server_config`：`control_write_queue_frames` ≤65536、
+    lease per-device/per-tenant ≤65536（原仅非零）、限流四 scope 策略校验
+    从 `RelayServer::create` 前移到 config 层（配置文件错误即时暴露）。
+- 孤儿 staging 清理（Round 8 移交评估项落地）：
+  `file_store::sweep_stale_staging(root, 24h)`（`src/client/file_store.cpp`）——
+  严格 `.heyaki-<32hex>.part/.state` 匹配（用户文件/目录/symlink 指向目录
+  永不触碰、单条目失败静默跳过）、last_write 早于 24h 年龄门才删；接入
+  `FileService::attach()` 每接收根向阻塞 worker 投递一次 fire-and-forget 清理
+  （不在 strand 扫描、不阻塞会话、失败不通知）。24h 依据：M9-08 整形链路
+  最慢传输数十秒量级，年龄门在其三个数量级之外。
+- Round 10 移交决策（冻结表 §9 逐项）：shell 500ms tick **冻结保留**
+  （p50≈300ms 已实测有界；事件驱动 drain 需改 M8-04 strand 单拍模型，记
+  v1.x 候选 + bench shell 段可量化验收）；packetsLost **维持 bytes/rtt**
+  （M9-19 切 libnice 后 getStats 面变化，届时统一重估）；per-IP 32/s
+  **默认保留** + NAT 共享出口 IP 部署需上调（cap 1024）记 runbook 观察项。
+- `tests/unit/m9_parameter_freeze_test.cpp`（18 例，CTest
+  `heyaki_m9_parameter_freeze`，labels unit;config;m9;parameters;freezing）：
+  八个 defaults 测试钉死九族全部默认值、七个 caps 测试逐一断言"上限 +1 拒绝"、
+  sweep 三例（只删陈旧 staging/缺根失败/attach 投递契约）+ 服务层 attach 拒绝
+  五例（复用 m6/m8 harness 的会话对，超配 config 在开通道前拒绝）。
+- runbook Quick reference 增加冻结表链接与变更纪律（同提交改文档+测试）。
+
+坑（后续轮避免）：
+
+1. `RelayServerConfig.listen_port = 0` 是**合法语义**（OS 分配临时端口，全部
+   服务端测试与嵌入方依赖）——首轮把"端口 0 校验缺失"当缺口补校验后
+   m3b/m4/m9 三个服务端测试族全红，已撤销；"硬上限"清单必须先核对既有用法
+   再动笔。
+2. `validate_config` 原藏在 runtime.cpp 的匿名命名空间（内部链接）——导出公共
+   声明时须把定义移出匿名命名空间；注意 `heyaki::detail::{anon}` 内的辅助
+   （valid_runtime_text）在 heyaki 作用域要 `detail::` 限定。
+3. 服务层校验在 `attach()` 而非 create——测试拒绝路径必须走真 attach（复用
+   m6_support 会话对最省事），不要为可测性重构五个服务的构造签名。
+
+本机验证：全量 ctest 61/61 通过（6 环境门控跳过与基线一致）；冻结测试覆盖
+的全部拒绝路径逐例断言 configuration 错误码。
+
 ### 剩余范围（M9-01 完成前）
 
 - ~~注册成功率/租约续期失败计数器、信令 fallback/winner 聚合、TUI 队列/渲染
   导出~~：Round 2 已交付（见上）。
-- 丢包估计受 pinned libdatachannel API 限制（bytes/rtt 已聚合，packetsLost
-  不存在）：升级依赖或在应用层推导的取舍留给 M9-10 基准测试结论后决定。
+- ~~丢包估计（packetsLost 缺口）取舍~~：Round 11 已决策——维持 bytes/rtt
+  现状替代面，随 M9-19 后端切换统一重估（参数冻结表 §9.3）。
 - Prometheus 指标族语义评审（命名/标签/类型过一遍 scrape 消费视角）；
   ~~M9-03 correlation ID 与 instance 标签打通~~：Round 4 已交付（见上）。
 - ~~M9-02 relay 侧导出~~：Round 3 已交付（见上）。M9-04/05 dashboard 与

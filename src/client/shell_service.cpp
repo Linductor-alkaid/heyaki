@@ -162,8 +162,16 @@ Result<void> ShellService::attach() {
   if (attached_) {
     return Result<void>::success();
   }
-  if (config_.channel_frame_capacity == 0U || config_.channel_byte_capacity == 0U ||
-      config_.max_output_window_bytes == 0U || config_.max_retained_terminal == 0U) {
+  // M9-11 hard upper bounds (docs/operations/parameter-freeze.md): the output
+  // window and retained-terminal table bound interactive-shell memory.
+  if (config_.channel_frame_capacity == 0U ||
+      config_.channel_frame_capacity > 65536U ||
+      config_.channel_byte_capacity == 0U ||
+      config_.channel_byte_capacity > 64U * 1024U * 1024U ||
+      config_.max_output_window_bytes == 0U ||
+      config_.max_output_window_bytes > 64U * 1024U * 1024U ||
+      config_.max_retained_terminal == 0U ||
+      config_.max_retained_terminal > 4096U) {
     return Result<void>::failure(
         shell_service_error(ErrorCode::configuration, "shell_config_invalid"));
   }

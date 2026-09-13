@@ -68,8 +68,15 @@ Result<void> MessageService::attach() {
   if (attached_) {
     return Result<void>::success();
   }
-  if (config_.dedup_capacity == 0U || config_.pending_ack_capacity == 0U ||
-      config_.channel_frame_capacity == 0U || config_.channel_byte_capacity == 0U) {
+  // M9-11 hard upper bounds (docs/operations/parameter-freeze.md): dedup and
+  // ack tables cap at 64-128x the frozen defaults.
+  if (config_.dedup_capacity == 0U || config_.dedup_capacity > 65536U ||
+      config_.pending_ack_capacity == 0U ||
+      config_.pending_ack_capacity > 65536U ||
+      config_.channel_frame_capacity == 0U ||
+      config_.channel_frame_capacity > 65536U ||
+      config_.channel_byte_capacity == 0U ||
+      config_.channel_byte_capacity > 256U * 1024U * 1024U) {
     return Result<void>::failure(
         message_service_error(ErrorCode::configuration, "message_config_invalid"));
   }

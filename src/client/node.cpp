@@ -458,18 +458,29 @@ Result<void> validate_relay_node_config(const RelayNodeConfig& config) {
   if (!config.enabled) {
     return Result<void>::success();
   }
+  // M9-11 hard upper bounds (docs/operations/parameter-freeze.md): the
+  // heartbeat cap equals the absolute lease maximum so every heartbeat cadence
+  // can still renew its lease; backoff and queue caps bound reconnect storms
+  // and control-queue memory.
   if (config.relay_url.empty() || config.relay_url.size() > 2048U ||
       config.tenant.empty() || config.tenant.size() > 128U ||
       (config.relay_pin && config.relay_pin->size() != relay_tls_pin_bytes) ||
       config.enrollment_generation == 0U ||
-      config.connect_timeout.count() <= 0 || config.handshake_timeout.count() <= 0 ||
-      config.close_timeout.count() <= 0 || config.heartbeat_interval.count() < 1000 ||
+      config.connect_timeout.count() <= 0 || config.connect_timeout > std::chrono::milliseconds{60000} ||
+      config.handshake_timeout.count() <= 0 || config.handshake_timeout > std::chrono::milliseconds{60000} ||
+      config.close_timeout.count() <= 0 || config.close_timeout > std::chrono::milliseconds{60000} ||
+      config.heartbeat_interval.count() < 1000 ||
+      config.heartbeat_interval > std::chrono::milliseconds{120000} ||
       config.lease_duration.count() < 1000 ||
       config.lease_duration > std::chrono::milliseconds{120000} ||
       config.missed_heartbeat_limit == 0U || config.missed_heartbeat_limit > 64U ||
-      config.minimum_backoff.count() < 100 || config.maximum_backoff < config.minimum_backoff ||
+      config.minimum_backoff.count() < 100 ||
+      config.minimum_backoff > std::chrono::milliseconds{600000} ||
+      config.maximum_backoff < config.minimum_backoff ||
+      config.maximum_backoff > std::chrono::milliseconds{3600000} ||
       config.poll_interval.count() < 10 || config.poll_interval.count() > 1000 ||
-      config.receive_capacity == 0U || config.send_capacity == 0U) {
+      config.receive_capacity == 0U || config.receive_capacity > 65536U ||
+      config.send_capacity == 0U || config.send_capacity > 65536U) {
     return Result<void>::failure(
         node_error(ErrorCode::configuration, "relay_node_config_invalid"));
   }
@@ -6123,6 +6134,34 @@ Result<Node> Node::create(NodeConfig config) {
       *path_policy.value_if(), lan.value_if()->connectivity_mode);
   if (!valid_path_policy) {
     return Result<Node>::failure(*valid_path_policy.error_if());
+  }
+  // M9-11 hard upper bounds for the optional NodeConfig overrides. Zero means
+  // "keep the service default", so only positive values are capped (see
+  // docs/operations/parameter-freeze.md).
+  {
+    constexpr std::size_t max_pairing_failure_threshold = 100U;
+    constexpr auto max_pairing_backoff_base = std::chrono::milliseconds{600000};
+    constexpr auto max_pairing_backoff_max = std::chrono::milliseconds{3600000};
+    constexpr std::uint64_t max_pairing_grant_ttl_milliseconds = 31536000000ULL;
+    constexpr std::size_t max_event_subscriber_queue_items = 65536U;
+    constexpr std::size_t max_event_subscriptions_per_peer = 4096U;
+    constexpr std::uint64_t max_file_peer_receive_bytes = 1ULL << 40U;
+    const auto pairing_base_over = config.pairing_backoff_base > max_pairing_backoff_base;
+    const auto pairing_max_over = config.pairing_backoff_max > max_pairing_backoff_max;
+    const auto pairing_order_over =
+        config.pairing_backoff_base > std::chrono::milliseconds::zero() &&
+        config.pairing_backoff_max > std::chrono::milliseconds::zero() &&
+        config.pairing_backoff_max < config.pairing_backoff_base;
+    const auto grant_ttl_over =
+        config.pairing_grant_ttl_milliseconds > max_pairing_grant_ttl_milliseconds;
+    if (config.pairing_failure_threshold > max_pairing_failure_threshold ||
+        pairing_base_over || pairing_max_over || pairing_order_over || grant_ttl_over ||
+        config.event_subscriber_queue_items > max_event_subscriber_queue_items ||
+        config.event_max_subscriptions_per_peer > max_event_subscriptions_per_peer ||
+        config.file_max_peer_receive_bytes > max_file_peer_receive_bytes) {
+      return Result<Node>::failure(node_error(ErrorCode::configuration,
+                                              "node_config_invalid"));
+    }
   }
   auto identity = config.profile->load_identity();
   if (!identity) {

@@ -16,6 +16,7 @@
 #include <heyaki/file.hpp>
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -78,6 +79,14 @@ struct StagingFile {
 
 // Removes the temp and state files of an abandoned transfer.
 [[nodiscard]] Result<void> discard_staging(const StagingFile& staging);
+
+// Orphan sweep (M9-11): staging files only outlive their transfer when the
+// process dies mid-transfer. Removes `*.heyaki-<32hex>.part` / `.state`
+// leftovers in `root_directory` whose last write is older than `max_age`;
+// every other name is user data and is never touched. Per-entry failures are
+// skipped quietly; the scan itself fails with a named error.
+[[nodiscard]] Result<std::size_t> sweep_stale_staging(
+    const std::filesystem::path& root_directory, std::chrono::milliseconds max_age);
 
 // Sidecar persistence (M7-13): the receiver's durable resume record next to
 // the temp file. `bitmap` has one byte per chunk (0/1).

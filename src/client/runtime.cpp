@@ -43,27 +43,6 @@ bool valid_runtime_text(std::string_view value, std::size_t maximum_size,
   });
 }
 
-Result<void> validate_config(const RuntimeConfig& config) {
-  if (config.callback_capacity == 0U || config.shutdown_hook_capacity == 0U ||
-      config.executor_queue_capacity == 0U ||
-      config.executor_min_threads == 0U ||
-      config.executor_max_threads < config.executor_min_threads ||
-      !valid_runtime_text(config.worker_name, 64U, false) ||
-      config.worker_start_timeout.count() < 0 || config.callback_drain_timeout.count() < 0 ||
-      config.producer_stop_timeout.count() < 0 ||
-      config.service_cancel_timeout.count() < 0 || config.peer_close_timeout.count() < 0 ||
-      config.relay_unregister_timeout.count() < 0 ||
-      config.operation_drain_timeout.count() < 0 || config.worker_stop_timeout.count() < 0 ||
-      config.persistence_flush_timeout.count() < 0 ||
-      config.executor_drain_timeout.count() < 0 ||
-      config.shell_command_capacity == 0U || config.shell_event_capacity == 0U ||
-      config.shell_worker_stop_timeout.count() < 0) {
-    return Result<void>::failure(
-        Error{ErrorCode::configuration, "runtime", "invalid_runtime_configuration"});
-  }
-  return Result<void>::success();
-}
-
 bool valid_shutdown_stage(RuntimeShutdownStage stage) noexcept {
   switch (stage) {
     case RuntimeShutdownStage::stop_producers:
@@ -1375,7 +1354,7 @@ void detail::RuntimeAccess::shell_pty_drain(
 
 Result<Runtime> Runtime::create_borrowed(executor::Executor& executor,
                                          const RuntimeConfig& config) {
-  auto valid = detail::validate_config(config);
+  auto valid = validate_config(config);
   if (!valid) {
     return Result<Runtime>::failure(*valid.error_if());
   }
@@ -1399,7 +1378,7 @@ Result<Runtime> Runtime::create_borrowed(executor::Executor& executor,
 }
 
 Result<Runtime> Runtime::create_owned(const RuntimeConfig& config) {
-  auto valid = detail::validate_config(config);
+  auto valid = validate_config(config);
   if (!valid) {
     return Result<Runtime>::failure(*valid.error_if());
   }
@@ -1502,6 +1481,49 @@ std::string_view runtime_shutdown_hook_outcome_name(
       return "timed_out";
   }
   return "unknown";
+}
+
+Result<void> validate_config(const RuntimeConfig& config) {
+  // M9-11 hard upper bounds: every capacity and lifecycle timeout is capped so
+  // a runaway config cannot amplify queue memory or wedge shutdown. The caps
+  // are 16-64x the frozen defaults (see docs/operations/parameter-freeze.md).
+  constexpr std::size_t max_queue_capacity = 65536U;
+  constexpr std::size_t max_executor_min_threads = 64U;
+  constexpr std::size_t max_executor_threads = 256U;
+  constexpr auto max_lifecycle_timeout = std::chrono::milliseconds{600000};
+  const auto timeout_bounded = [&max_lifecycle_timeout](std::chrono::milliseconds value) {
+    return value.count() >= 0 && value <= max_lifecycle_timeout;
+  };
+  if (config.callback_capacity == 0U ||
+      config.callback_capacity > max_queue_capacity ||
+      config.shutdown_hook_capacity == 0U ||
+      config.shutdown_hook_capacity > max_queue_capacity ||
+      config.executor_queue_capacity == 0U ||
+      config.executor_queue_capacity > max_queue_capacity ||
+      config.executor_min_threads == 0U ||
+      config.executor_min_threads > max_executor_min_threads ||
+      config.executor_max_threads > max_executor_threads ||
+      config.executor_max_threads < config.executor_min_threads ||
+      !detail::valid_runtime_text(config.worker_name, 64U, false) ||
+      !timeout_bounded(config.worker_start_timeout) ||
+      !timeout_bounded(config.callback_drain_timeout) ||
+      !timeout_bounded(config.producer_stop_timeout) ||
+      !timeout_bounded(config.service_cancel_timeout) ||
+      !timeout_bounded(config.peer_close_timeout) ||
+      !timeout_bounded(config.relay_unregister_timeout) ||
+      !timeout_bounded(config.operation_drain_timeout) ||
+      !timeout_bounded(config.worker_stop_timeout) ||
+      !timeout_bounded(config.persistence_flush_timeout) ||
+      !timeout_bounded(config.executor_drain_timeout) ||
+      config.shell_command_capacity == 0U ||
+      config.shell_command_capacity > max_queue_capacity ||
+      config.shell_event_capacity == 0U ||
+      config.shell_event_capacity > max_queue_capacity ||
+      !timeout_bounded(config.shell_worker_stop_timeout)) {
+    return Result<void>::failure(
+        Error{ErrorCode::configuration, "runtime", "invalid_runtime_configuration"});
+  }
+  return Result<void>::success();
 }
 
 }  // namespace heyaki

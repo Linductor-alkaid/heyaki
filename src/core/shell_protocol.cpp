@@ -222,8 +222,13 @@ Result<void> validate_shell_profile(const ShellProfileConfig& profile) {
       profile.max_concurrent_sessions > 16U) {
     return Result<void>::failure(shell_error("profile_concurrency_invalid"));
   }
+  // M9-11 hard upper bounds: session lifetimes and the total-output budget
+  // cap at 24h/7d/1GiB so a runaway profile cannot pin a PTY worker forever
+  // (docs/operations/parameter-freeze.md).
   if (profile.idle_timeout <= std::chrono::milliseconds{0} ||
+      profile.idle_timeout > std::chrono::milliseconds{86400000} ||
       profile.absolute_timeout <= std::chrono::milliseconds{0} ||
+      profile.absolute_timeout > std::chrono::milliseconds{604800000} ||
       profile.idle_timeout > profile.absolute_timeout) {
     return Result<void>::failure(shell_error("profile_timeouts_invalid"));
   }
@@ -231,8 +236,11 @@ Result<void> validate_shell_profile(const ShellProfileConfig& profile) {
       profile.terminate_grace > std::chrono::milliseconds{60000}) {
     return Result<void>::failure(shell_error("profile_grace_invalid"));
   }
-  if (profile.max_output_bytes == 0U || profile.max_output_pending_bytes == 0U ||
+  if (profile.max_output_bytes == 0U ||
+      profile.max_output_bytes > 1024U * 1024U * 1024U ||
+      profile.max_output_pending_bytes == 0U ||
       profile.max_input_pending_bytes == 0U ||
+      profile.max_input_pending_bytes > 1024U * 1024U ||
       profile.max_output_pending_bytes > profile.max_output_bytes) {
     return Result<void>::failure(shell_error("profile_output_caps_invalid"));
   }

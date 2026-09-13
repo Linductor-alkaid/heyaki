@@ -436,10 +436,19 @@ class SignalingCoordinator::Impl {
       return Result<void>::failure(coordinator_error(ErrorCode::configuration,
                                                      "local_endpoint_zero"));
     }
-    if (config_.max_pending_attempts == 0U || config_.max_inbound_attempts == 0U ||
-        config_.max_candidates_per_attempt == 0U || config_.inbound_rate_limit == 0U ||
-        config_.rate_key_capacity == 0U || config_.attempt_ttl.count() <= 0 ||
-        config_.inbound_rate_window.count() <= 0) {
+    // M9-11 hard upper bounds: attempt tables, candidate lists and rate keys
+    // cap at 64-256x the frozen defaults so a hostile config cannot amplify
+    // per-attempt memory (docs/operations/parameter-freeze.md).
+    if (config_.max_pending_attempts == 0U || config_.max_pending_attempts > 65536U ||
+        config_.max_inbound_attempts == 0U || config_.max_inbound_attempts > 65536U ||
+        config_.max_candidates_per_attempt == 0U ||
+        config_.max_candidates_per_attempt > 4096U ||
+        config_.inbound_rate_limit == 0U || config_.inbound_rate_limit > 100000U ||
+        config_.rate_key_capacity == 0U || config_.rate_key_capacity > 1048576U ||
+        config_.attempt_ttl.count() <= 0 ||
+        config_.attempt_ttl > std::chrono::milliseconds{600000} ||
+        config_.inbound_rate_window.count() <= 0 ||
+        config_.inbound_rate_window > std::chrono::milliseconds{60000}) {
       return Result<void>::failure(coordinator_error(ErrorCode::configuration,
                                                      "signaling_bounds_invalid"));
     }

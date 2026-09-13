@@ -8,6 +8,11 @@ the exporters delivered in M9-01..M9-03 and the SLO rules shipped under
 
 ## Quick reference
 
+Every tunable default, its hard upper limit, and its measurement basis is
+frozen in the [parameter freeze table](parameter-freeze.md) (M9-11). Changing
+a default or a cap requires updating that document and the
+`heyaki_m9_parameter_freeze` test in the same commit.
+
 ### Relay process
 
 ```sh

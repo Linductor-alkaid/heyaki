@@ -610,9 +610,17 @@ Result<RelayWssClient> RelayWssClient::create(RelayWssClientConfig config,
   if (!parsed) {
     return Result<RelayWssClient>::failure(*parsed.error_if());
   }
-  if (config.receive_capacity == 0U || config.send_capacity == 0U ||
-      config.connect_timeout.count() <= 0 || config.handshake_timeout.count() <= 0 ||
-      config.close_timeout.count() <= 0) {
+  // M9-11 hard upper bounds: queues and connect-phase timeouts are capped so a
+  // runaway config cannot amplify control-plane memory or stall reconnection
+  // (docs/operations/parameter-freeze.md).
+  if (config.receive_capacity == 0U || config.receive_capacity > 65536U ||
+      config.send_capacity == 0U || config.send_capacity > 65536U ||
+      config.connect_timeout.count() <= 0 ||
+      config.connect_timeout > std::chrono::milliseconds{60000} ||
+      config.handshake_timeout.count() <= 0 ||
+      config.handshake_timeout > std::chrono::milliseconds{60000} ||
+      config.close_timeout.count() <= 0 ||
+      config.close_timeout > std::chrono::milliseconds{60000}) {
     return Result<RelayWssClient>::failure(wss_error(ErrorCode::configuration,
                                                      "wss_config_invalid"));
   }

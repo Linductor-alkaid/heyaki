@@ -1,5 +1,7 @@
 #include "relay_config.hpp"
 
+#include "relay_rate_limiter.hpp"
+
 #include <heyaki/error.hpp>
 #include <heyaki/relay_wss_control.hpp>
 
@@ -99,6 +101,11 @@ bool valid_listen_address(std::string_view value) noexcept {
 }  // namespace
 
 Result<void> validate_relay_server_config(const RelayServerConfig& config) {
+  // M9-11 hard upper bounds (docs/operations/parameter-freeze.md): write-queue
+  // frames are capped at config level, lease sub-capacities match the global
+  // lease cap, and the rate-limit policy is checked here instead of only
+  // inside RelayServer::create so config-file errors surface immediately.
+  // listen_port 0 stays legal: it binds an OS-assigned ephemeral port.
   if (!valid_listen_address(config.listen_address) ||
       config.tls_certificate_file.empty() || config.tls_private_key_file.empty() ||
       config.database_file.empty() ||
@@ -113,11 +120,14 @@ Result<void> validate_relay_server_config(const RelayServerConfig& config) {
       config.handshake_timeout.count() < 100 || config.handshake_timeout.count() > 60000 ||
       config.shutdown_timeout.count() < 100 || config.shutdown_timeout.count() > 60000 ||
       config.control_write_queue_frames == 0U ||
+      config.control_write_queue_frames > 65536U ||
       config.control_write_queue_bytes < max_relay_wss_control_frame_bytes ||
       config.control_write_queue_bytes > 64U * 1024U * 1024U ||
       config.lease.capacity == 0U || config.lease.capacity > 65536U ||
       config.lease.per_device_endpoint_capacity == 0U ||
+      config.lease.per_device_endpoint_capacity > 65536U ||
       config.lease.per_tenant_device_capacity == 0U ||
+      config.lease.per_tenant_device_capacity > 65536U ||
       config.lease.default_lease.count() < 1000 ||
       config.lease.maximum_lease < config.lease.default_lease ||
       config.lease.maximum_lease > std::chrono::milliseconds{120000} ||
@@ -131,7 +141,7 @@ Result<void> validate_relay_server_config(const RelayServerConfig& config) {
       config.signaling_rate_per_second > 1024U) {
     return Result<void>::failure(config_error("relay_config_invalid"));
   }
-  return Result<void>::success();
+  return RelayRateLimiter::validate_policy(config.rate_limits);
 }
 
 Result<RelayServerConfig> load_relay_config_file(

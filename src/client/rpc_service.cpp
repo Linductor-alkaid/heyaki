@@ -88,9 +88,20 @@ Result<void> RpcService::attach() {
   if (attached_) {
     return Result<void>::success();
   }
+  // M9-11 hard upper bounds (docs/operations/parameter-freeze.md). A zero
+  // result_cache_entries disables the replay cache by contract (cache_result
+  // never inserts), so only positive values are capped.
   if (config_.max_concurrent_server_calls == 0U ||
-      config_.max_pending_client_calls == 0U || config_.channel_frame_capacity == 0U ||
-      config_.channel_byte_capacity == 0U || config_.result_cache_bytes == 0U) {
+      config_.max_concurrent_server_calls > 4096U ||
+      config_.max_pending_client_calls == 0U ||
+      config_.max_pending_client_calls > 65536U ||
+      config_.result_cache_entries > 65536U ||
+      config_.channel_frame_capacity == 0U ||
+      config_.channel_frame_capacity > 65536U ||
+      config_.channel_byte_capacity == 0U ||
+      config_.channel_byte_capacity > 256U * 1024U * 1024U ||
+      config_.result_cache_bytes == 0U ||
+      config_.result_cache_bytes > 256U * 1024U * 1024U) {
     return Result<void>::failure(
         rpc_service_error(ErrorCode::configuration, "rpc_config_invalid"));
   }

@@ -79,6 +79,10 @@ struct RuntimeConfig {
   std::chrono::milliseconds shell_worker_stop_timeout{5000};
 };
 
+// M9-11: capacity and lifecycle-timeout bounds (frozen defaults plus hard
+// upper limits) are documented in docs/operations/parameter-freeze.md.
+[[nodiscard]] Result<void> validate_config(const RuntimeConfig& config);
+
 struct RuntimeSecurityContext {
   std::string application_id;
   std::optional<DeviceId> peer_id;

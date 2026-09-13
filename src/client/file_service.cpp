@@ -3,6 +3,7 @@
 #include <sodium.h>
 
 #include <algorithm>
+#include <chrono>
 #include <utility>
 
 namespace heyaki {
@@ -59,6 +60,12 @@ std::uint64_t chunk_count_of(std::uint64_t size, std::uint32_t chunk_size) noexc
 // larger limit; a transport with honest limit reporting tightens this
 // through the session's negotiated max_message_bytes anyway.
 constexpr std::uint64_t kEmpiricalSctpMessageCap = 60U * 1024U;
+
+// Orphan staging age gate (M9-11, frozen): the slowest observed transfer
+// (fault-matrix shaped link) completes in tens of seconds, so leftovers older
+// than 24h are three orders of magnitude past any live transfer. See
+// docs/operations/parameter-freeze.md.
+constexpr std::chrono::hours kStagingOrphanMaxAge{24};
 
 }  // namespace
 
@@ -124,8 +131,15 @@ Result<void> FileService::attach() {
   if (attached_) {
     return Result<void>::success();
   }
-  if (config_.send_window_bytes == 0U || config_.max_concurrent_sends == 0U ||
-      config_.channel_frame_capacity == 0U || config_.channel_byte_capacity == 0U) {
+  // M9-11 hard upper bounds (docs/operations/parameter-freeze.md): the send
+  // window is the dominant in-flight byte budget for outgoing transfers.
+  if (config_.send_window_bytes == 0U ||
+      config_.send_window_bytes > 256U * 1024U * 1024U ||
+      config_.max_concurrent_sends == 0U || config_.max_concurrent_sends > 256U ||
+      config_.channel_frame_capacity == 0U ||
+      config_.channel_frame_capacity > 65536U ||
+      config_.channel_byte_capacity == 0U ||
+      config_.channel_byte_capacity > 256U * 1024U * 1024U) {
     return Result<void>::failure(
         file_service_error(ErrorCode::configuration, "file_config_invalid"));
   }
@@ -134,6 +148,17 @@ Result<void> FileService::attach() {
       return Result<void>::failure(
           file_service_error(ErrorCode::configuration, "file_root_invalid"));
     }
+  }
+  // Orphan sweep (M9-11): staging files outlive their transfer only when the
+  // process died mid-transfer; the first attach per root posts one bounded
+  // blocking sweep that removes leftovers older than the frozen 24h age gate.
+  // Failures are quiet — the sweep must never block session setup.
+  for (const auto& root : config_.receive_roots) {
+    const auto directory = root.directory;
+    (void)blocking_dispatch_(
+        "heyaki-file-staging-sweep", [directory](executor::StopToken) {
+          (void)file_store::sweep_stale_staging(directory, kStagingOrphanMaxAge);
+        });
   }
   if (!dispatch_ || !blocking_dispatch_ || !poster_) {
     return Result<void>::failure(

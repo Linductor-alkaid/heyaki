@@ -126,16 +126,22 @@ Result<void> validate_byte_stream_limits(const ByteStreamLimits& limits) {
     return Result<void>::failure(
         stream_error(ErrorCode::configuration, "receive_window_limit_invalid"));
   }
-  if (limits.default_receive_window_frames == 0U) {
+  // M9-11 hard upper bounds for the remaining stream limits (window frames,
+  // stream concurrency, pending budgets): docs/operations/parameter-freeze.md.
+  if (limits.default_receive_window_frames == 0U ||
+      limits.default_receive_window_frames > 65536U) {
     return Result<void>::failure(
         stream_error(ErrorCode::configuration, "receive_window_frames_invalid"));
   }
-  if (limits.max_concurrent_streams == 0U) {
+  if (limits.max_concurrent_streams == 0U ||
+      limits.max_concurrent_streams > 1024U) {
     return Result<void>::failure(
         stream_error(ErrorCode::configuration, "concurrent_stream_limit_invalid"));
   }
-  if (limits.pending_write_bytes == 0U || limits.max_pending_reads == 0U ||
-      limits.max_pending_writes == 0U) {
+  if (limits.pending_write_bytes == 0U ||
+      limits.pending_write_bytes > 64U * 1024U * 1024U ||
+      limits.max_pending_reads == 0U || limits.max_pending_reads > 4096U ||
+      limits.max_pending_writes == 0U || limits.max_pending_writes > 4096U) {
     return Result<void>::failure(
         stream_error(ErrorCode::configuration, "pending_limit_invalid"));
   }
