@@ -825,10 +825,28 @@ staging 时 `next_read >= chunk_count` 已真、window 恰空，FILE_COMPLETE
 complete 条件；回归测试 `M7FileService.ConcurrentSendsOfSameSourceBothCommit`
 （同源双并发 + prune 穿插，即 CI 暴露的交错）。
 
+CI 收敛（提交链 d411155→a2a0e3d→dc9bcfd→f981167→257cb95→7ce4c83→
+4a71ad6，终态 run 34755338925 十 job 全绿——asan m3a_lan 计时与
+Windows matrix relay_direct/first-initiates file=0 两处已知抖动家族
+rerun 即绿）轮内又暴露并修复缺陷 1 修复自身的三个次生问题（全部
+heuristic 由新回归测试在不同 sanitizer/负载下的交错撑出）：
+(a) offerer 到达即关闭入站重复流会杀掉 answerer 自己的注册流（其
+pending open 以 channel_closed_before_open 误终）——收敛改为单向、
+由流主人执行：offerer 只登记忽略，answerer promote 时退役自己的流；
+(b) 已注册通道关闭后滞留 channels_ 使该 kind 的后续 open 永久挂在
+pending_opens（kind 级死锁）——关闭即释放 kind 映射；
+(c) 释放映射时 shared_ptr 引用归零提前析构，PeerSession 裸指针撞已
+毁 vtable（shutdown 矩阵 pure-virtual SIGABRT/SEGV 钉死）——关闭/
+退役包装对象移入会话生命周期的 closed_channels_ 退役列表。回归测试
+最终形态：offerer open 确定（无人可退役 offerer 的流），answerer 结
+局按交错容忍（promote 成功 | adopt/mismatch 有界错误，送达门只绑定
+成功交错），内存安全由 sanitizer 预设把守；本机 debug 20/20、asan
+30/30 稳定。
+
 本机验证：m4 受影响族（webrtc/peer_session/topology/shutdown/session）
 全绿；崩溃独立复现场景（bench initiator+responder + shell 段）ASan 构
-建 3/3 零报告（修复前 1-in-2 崩）；debug 全量 ctest（见 CI 记录）；基
-准 harness 三相位端到端绿（3 订阅者、双循环，终态连续 4/4 全绿）。
+建 3/3 零报告（修复前 1-in-2 崩）；debug 全量 ctest 60/60；基准
+harness 三相位端到端绿（3 订阅者、双循环，终态连续 4/4 全绿）。
 
 坑（后续轮避免）：
 
