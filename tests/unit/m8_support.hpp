@@ -165,8 +165,10 @@ class ManualPtyDispatcher final : public IShellPtyDispatcher {
 };
 
 // A profile with a fixed program; tests never spawn real children here.
-ShellProfileConfig shell_test_profile(std::string name = "maintenance",
-                                      std::size_t max_sessions = 2U) {
+// [[maybe_unused]]: test TUs may include this header for its harness without
+// exercising every helper, and -Werror=unused-function would otherwise fire.
+[[maybe_unused]] ShellProfileConfig shell_test_profile(std::string name = "maintenance",
+                                                       std::size_t max_sessions = 2U) {
   ShellProfileConfig profile;
   profile.name = std::move(name);
   // argv[0] must satisfy the host grammar (P2-F1): slash roots on POSIX,
