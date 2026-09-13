@@ -561,7 +561,6 @@ class WebRtcTransportSession::Impl
     // endpoints on the offerer's stream. The retired wrapper stays alive
     // until the end of this handler so anything still holding its pointer
     // synchronously re-points (channel_handler_ below) before it dies.
-    std::shared_ptr<Channel> retired;
     const auto duplicate = duplicates_.find(event.channel->kind());
     if (duplicate != duplicates_.end() &&
         duplicate->second.first.get() == event.channel.get()) {
@@ -570,8 +569,10 @@ class WebRtcTransportSession::Impl
       if (promotable) {
         const auto registered = channels_.find(event.channel->kind());
         if (registered != channels_.end()) {
-          retired = std::move(registered->second);
-          retired->close(transport::CloseReason::peer_closed);
+          registered->second->close(transport::CloseReason::peer_closed);
+          // Retired wrapper stays owned (raw-pointer holders that miss the
+          // synchronous channel_handler_ re-point keep a live object).
+          closed_channels_.push_back(std::move(registered->second));
           channels_.erase(registered);
         }
         channels_.emplace(event.channel->kind(), event.channel);
@@ -630,9 +631,14 @@ class WebRtcTransportSession::Impl
     // A closed REGISTERED channel must free the kind: leaving it in
     // channels_ parks every later open of the kind in pending_opens_
     // forever (the kind deadlock the tsan round of this test exposed).
+    // The wrapper itself stays owned until the transport session dies —
+    // callers hold raw pointers (PeerSession::physical_channels_) and a
+    // closed channel must answer sends with an error, not with a
+    // destruction (the shutdown-matrix round caught exactly that).
     const auto registered = channels_.find(event.channel->kind());
     if (registered != channels_.end() &&
         registered->second.get() == event.channel.get()) {
+      closed_channels_.push_back(std::move(registered->second));
       channels_.erase(registered);
     }
   }
@@ -904,6 +910,10 @@ class WebRtcTransportSession::Impl
   // the close's own onClosed is recognized). Either way the wrapper stays
   // owned until its terminal event drains.
   std::map<ChannelKind, std::pair<std::shared_ptr<Channel>, bool>> duplicates_;
+  // Wrappers of closed channels, kept owned for the transport session's
+  // lifetime: callers hold raw pointers and must see a clean error from a
+  // closed channel instead of a destruction. Freed with the session.
+  std::vector<std::shared_ptr<Channel>> closed_channels_;
   std::map<ChannelKind, OpenCompletion> pending_opens_;
   MessageHandler message_handler_;
   StateHandler state_handler_;
