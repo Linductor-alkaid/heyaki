@@ -337,7 +337,13 @@ TEST(M9ParameterFreeze, ShellProfileCapsRejectOversized) {
   auto profile = [] {
     ShellProfileConfig config;
     config.name = "bench";
+    // argv[0] must satisfy the host grammar (P2-F1): slash roots on POSIX,
+    // drive roots on Windows. This suite never spawns real children.
+#if defined(_WIN32)
+    config.argv = {"C:\\Windows\\System32\\cmd.exe"};
+#else
     config.argv = {"/bin/sh"};
+#endif
     return config;
   };
   ASSERT_TRUE(validate_shell_profile(profile()));

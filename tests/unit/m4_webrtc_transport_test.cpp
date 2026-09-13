@@ -565,7 +565,11 @@ TEST(M4WebRtcTransport, SimultaneousSameKindOpensResolveToRegisteredChannel) {
     }
     return false;
   };
-  EXPECT_TRUE(wait_rejections(*left));
+  // Two streams map to one kind by construction, so SOME endpoint must
+  // register the loser into duplicates_ and count a rejection — but which
+  // one depends on the attach race (a peer stream arriving before our own
+  // stream registers flips the roles), so accept the rejection on either.
+  EXPECT_TRUE(wait_rejections(*left) || wait_rejections(*right));
 
   // Round trips through the pointers the completions handed out: under the
   // old duplicate handoff this touches storage already freed with the drain
