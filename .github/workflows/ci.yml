@@ -54,10 +54,12 @@ jobs:
       - name: Run protocol libFuzzer targets
         if: matrix.compiler == 'clang' && matrix.build_type == 'Debug'
         run: |
-          build/tests/heyaki_frame_parser_fuzzer -runs=100 build/fuzz-corpus/frame-parser
-          build/tests/heyaki_protocol_state_fuzzer -runs=100 build/fuzz-corpus/protocol-state
-          build/tests/heyaki_protobuf_parser_fuzzer -runs=100 build/fuzz-corpus/protobuf-parser
-          build/tests/heyaki_lan_state_fuzzer -runs=100 build/fuzz-corpus/lan-directory-state
+          build/tests/heyaki_frame_parser_fuzzer -max_total_time=60 -rss_limit_mb=4096 tests/fuzz/corpus/frame-parser build/fuzz-corpus/frame-parser
+          build/tests/heyaki_protocol_state_fuzzer -max_total_time=60 -rss_limit_mb=4096 tests/fuzz/corpus/protocol-state build/fuzz-corpus/protocol-state
+          build/tests/heyaki_protobuf_parser_fuzzer -max_total_time=60 -rss_limit_mb=4096 tests/fuzz/corpus/protobuf-parser build/fuzz-corpus/protobuf-parser
+          build/tests/heyaki_lan_state_fuzzer -max_total_time=60 -rss_limit_mb=4096 tests/fuzz/corpus/lan-directory-state build/fuzz-corpus/lan-directory-state
+          build/tests/heyaki_connection_state_fuzzer -max_total_time=60 -rss_limit_mb=4096 tests/fuzz/corpus/connection-attempt-state build/fuzz-corpus/connection-attempt-state
+          build/tests/heyaki_profile_store_fuzzer -max_total_time=90 -rss_limit_mb=4096 tests/fuzz/corpus/profile-store build/fuzz-corpus/profile-store
       - name: Verify all dependency groups offline
         run: scripts/fetch_third_party.sh --check --all
 

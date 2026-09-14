@@ -799,14 +799,19 @@ add_executable(heyaki_fuzz_smoke
   fuzz/fuzz_smoke.cpp
   fuzz/connection_state_fuzz.cpp
   fuzz/lan_state_fuzz.cpp
+  fuzz/profile_store_fuzz.cpp
   $<TARGET_OBJECTS:heyaki_fuzz_harness>)
 target_link_libraries(heyaki_fuzz_smoke PRIVATE
   heyaki::client
+  heyaki::sqlite
   heyaki_protocol_lite)
 target_include_directories(heyaki_fuzz_smoke PRIVATE
   "${HEYAKI_TEST_GENERATED_DIR}"
   "${PROJECT_SOURCE_DIR}/src"
   "${CMAKE_CURRENT_SOURCE_DIR}/fuzz")
+target_compile_definitions(heyaki_fuzz_smoke PRIVATE
+  "HEYAKI_FUZZ_PROFILE_V1_FIXTURE=\"${CMAKE_CURRENT_SOURCE_DIR}/fixtures/profile_store_v1.sql\""
+  "HEYAKI_FUZZ_REGRESSION_CORPUS_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus\"")
 heyaki_configure_target(heyaki_fuzz_smoke)
 heyaki_add_runtime_test(
   heyaki_fuzz_smoke heyaki_fuzz_smoke "fuzz;security" "${HEYAKI_FUZZ_CORPUS_DIR}")
@@ -872,6 +877,20 @@ if(HEYAKI_BUILD_FUZZERS)
   target_compile_options(heyaki_connection_state_fuzzer PRIVATE -fsanitize=fuzzer)
   target_link_options(heyaki_connection_state_fuzzer PRIVATE -fsanitize=fuzzer)
   heyaki_configure_target(heyaki_connection_state_fuzzer)
+
+  add_executable(heyaki_profile_store_fuzzer
+    fuzz/profile_store_fuzzer_entry.cpp
+    fuzz/profile_store_fuzz.cpp)
+  target_link_libraries(heyaki_profile_store_fuzzer PRIVATE
+    heyaki::client
+    heyaki::sqlite)
+  target_include_directories(heyaki_profile_store_fuzzer PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/fuzz")
+  target_compile_definitions(heyaki_profile_store_fuzzer PRIVATE
+    "HEYAKI_FUZZ_PROFILE_V1_FIXTURE=\"${CMAKE_CURRENT_SOURCE_DIR}/fixtures/profile_store_v1.sql\"")
+  target_compile_options(heyaki_profile_store_fuzzer PRIVATE -fsanitize=fuzzer)
+  target_link_options(heyaki_profile_store_fuzzer PRIVATE -fsanitize=fuzzer)
+  heyaki_configure_target(heyaki_profile_store_fuzzer)
 endif()
 
 add_test(

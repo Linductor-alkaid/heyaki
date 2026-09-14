@@ -609,5 +609,84 @@ int main(int argc, char** argv) {
       return 1;
     }
   }
+
+  // M9-13: ProfileStore migration target over v1 fixtures, truncated files,
+  // and raw corrupt databases (mode byte + payload).
+  const std::vector<std::vector<std::byte>> profile_store_seeds{
+      {std::byte{0U}},
+      {std::byte{1U}, std::byte{0xdeU}, std::byte{0xadU}, std::byte{0xbeU},
+       std::byte{0xefU}, std::byte{0x42U}},
+      {std::byte{2U}, std::byte{128U}},
+      {std::byte{3U}, std::byte{'n'}, std::byte{'o'}, std::byte{'t'},
+       std::byte{' '}, std::byte{'a'}, std::byte{' '}, std::byte{'d'},
+       std::byte{'b'}},
+  };
+  for (std::size_t index = 0U; index < profile_store_seeds.size(); ++index) {
+    heyaki::fuzz::profile_store_migration(profile_store_seeds[index]);
+    const auto name = "profile-store-" + std::to_string(index);
+    if (!write_seed(corpus_root / "profile-store", name,
+                    profile_store_seeds[index])) {
+      std::cerr << "cannot write profile store seed " << name << '\n';
+      return 1;
+    }
+  }
+
+  // M9-13: replay the committed regression corpus so a minimized crash unit
+  // keeps failing (and stays covered) after its fix lands.
+  const std::filesystem::path regression_root{HEYAKI_FUZZ_REGRESSION_CORPUS_DIR};
+  std::error_code regression_error;
+  if (!std::filesystem::is_directory(regression_root, regression_error)) {
+    std::cerr << "regression corpus missing at " << regression_root << '\n';
+    return 1;
+  }
+  const std::vector<std::pair<std::string_view, void (*)(std::span<const std::byte>)>>
+      regression_targets{
+          {"frame-parser", heyaki::fuzz::frame_parser},
+          {"frame-parser", heyaki::fuzz::frame_stream_decoder},
+          {"frame-parser", heyaki::fuzz::pairing_request_parser},
+          {"frame-parser", heyaki::fuzz::trust_grant_parser},
+          {"frame-parser", heyaki::fuzz::lan_datagram_parser},
+          {"frame-parser", heyaki::fuzz::lan_hello_parser},
+          {"frame-parser", heyaki::fuzz::lan_signaling_frame_parser},
+          {"frame-parser", heyaki::fuzz::signed_offer_parser},
+          {"frame-parser", heyaki::fuzz::signed_answer_parser},
+          {"frame-parser", heyaki::fuzz::signed_candidate_parser},
+          {"frame-parser", heyaki::fuzz::signed_session_hello_parser},
+          {"frame-parser", heyaki::fuzz::m8_shell_frame_parser},
+          {"frame-parser", heyaki::fuzz::m8_vt_terminal_parser},
+          {"protocol-state", heyaki::fuzz::protocol_state_machines},
+          {"protobuf-parser", heyaki::fuzz::protobuf_schema_parser},
+          {"lan-directory-state", heyaki::fuzz::lan_directory_state_machine},
+          {"connection-attempt-state",
+           heyaki::fuzz::connection_attempt_state_machine},
+          {"profile-store", heyaki::fuzz::profile_store_migration},
+      };
+  std::size_t replayed = 0U;
+  for (const auto& [directory, target] : regression_targets) {
+    std::error_code iterate_error;
+    std::filesystem::directory_iterator entries{regression_root / directory,
+                                                iterate_error};
+    if (iterate_error) {
+      std::cerr << "regression corpus dir missing: " << (regression_root / directory)
+                << '\n';
+      return 1;
+    }
+    for (const auto& entry : entries) {
+      if (!entry.is_regular_file()) {
+        continue;
+      }
+      std::ifstream input(entry.path(), std::ios::binary);
+      if (!input) {
+        std::cerr << "cannot read regression unit " << entry.path() << '\n';
+        return 1;
+      }
+      const std::string text{std::istreambuf_iterator<char>{input},
+                             std::istreambuf_iterator<char>{}};
+      const std::vector<std::byte> bytes = bytes_from_text(text);
+      target(bytes);
+      ++replayed;
+    }
+  }
+  std::cout << "replayed " << replayed << " regression corpus units\n";
   return 0;
 }

@@ -1,6 +1,6 @@
 # M9：生产加固与 v1 发布
 
-> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6、M9-07 Round 7、M9-08 Round 8、M9-09 Round 9、M9-10 Round 10（基准 harness + 同 kind 双流 UAF 修复）、M9-11 Round 11（参数冻结 + 孤儿 staging 清理）与 M9-12 Round 12（schema N-1/N 兼容 + rolling relay upgrade + 新旧设备互通）已交付，M9-13 起未开始，见文末实施记录）
+> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6、M9-07 Round 7、M9-08 Round 8、M9-09 Round 9、M9-10 Round 10（基准 harness + 同 kind 双流 UAF 修复）、M9-11 Round 11（参数冻结 + 孤儿 staging 清理）与 M9-12 Round 12（schema N-1/N 兼容 + rolling relay upgrade + 新旧设备互通）、M9-13 Round 13（fuzz 扩展 + regression corpus）已交付，M9-14 起未开始，见文末实施记录）
 > - 所属计划：[Heyaki MVP 至 v1 实施 TODO 计划](heyaki-implementation-plan.md)
 > - 前置：M8 | 建议发布点：v1.0
 
@@ -32,7 +32,7 @@
 
 ## 安全与发布工程
 
-- [ ] `M9-13` 扩展 fuzz 持续时间，覆盖所有 parser、状态机、ProfileStore migration 和 VT；保存最小化 regression corpus。
+- [x] `M9-13` 扩展 fuzz 持续时间，覆盖所有 parser、状态机、ProfileStore migration 和 VT；保存最小化 regression corpus。（Round 13 交付 2026-09-15：**覆盖审计与补缺**——既有 20 个 harness 目标（fuzz_targets.hpp）经 5 个 libFuzzer entry 分发：frame-parser entry 覆盖全部 parser 面（frame/stream 解码、LAN datagram/hello/signaling、signed offer/answer/candidate/session-hello、pairing、trust grant、m8 shell、**m8 VT**——VT 此前已覆盖）；本轮发现 m6/m7 service payload parser 不在任何 libFuzzer entry（仅 smoke 直调），补入 frame-parser entry；connection_attempt_state_machine fuzzer 此前已编译但 CI 从未运行，本轮纳入；**新增 ProfileStore migration fuzz 目标**（`tests/fuzz/profile_store_fuzz.cpp` + `heyaki_profile_store_fuzzer`）：四种模式（合法 v1 fixture / 攻击者字节写入 identity 公钥列 / 截断 DB / 整文件随机字节），oracle = M2 迁移契约钉死的不变量（成功 → backup 存在 + 幂等重开；失败 → 文件仍在 + 尝试过迁移必留 backup；任意输入只允许显式错误）。**持续时间**：CI 从 `-runs=100`（<1s/目标）改为逐目标墙钟预算 `-max_total_time=60`（profile 90s），clang Debug job 每轮 ~5.5min 专项 fuzz；corpus README 记录本地 1800s 长跑命令。**regression corpus**：新仓库内 `tests/fuzz/corpus/`（6 个 entry 目录 + README 溯源/最小化纪律/提交新 crash 单元的流程），smoke 测试（`heyaki_fuzz_smoke`）每轮回放全部 corpus 单元（本轮 80 个）并生成种子到 build 目录；CI libFuzzer 以 `tests/fuzz/corpus/<entry>` + `build/fuzz-corpus/<entry>` 双目录为种子。坑：ProfileStore::open 对 DB 文件本身拒绝 group/other 位（外部构造的 v1 fixture 须 chmod 0600，同 M2 fixture 先例）、加密文件后端拒绝权限过宽的目录链（fuzz 根与 case 目录都要 0700）、migrate 尚未开始时（纯损坏字节）不欠 backup——失败不变量必须以"迁移确已尝试"为前提。CI 结果见实施记录 Round 13。）
 - [ ] `M9-14` 完成 secret scan、dependency vulnerability scan、SBOM、许可证、编译 hardening 和发布制品签名。
 - [ ] `M9-15` 执行安全回归：multicast 洪泛/伪造/重放、LAN TLS MITM/slowloris、密码猜测/泄漏、grant/fingerprint/endpoint 伪造、降级、越权 method/topic、路径穿越、relay/TURN 放大。
 - [ ] `M9-16` 编写安装、配置、部署、升级、备份、故障排查和 API 文档；示例必须从已编译源码嵌入或同步测试。
@@ -1062,6 +1062,55 @@ CI 收敛（终态 run 34849636945 十 job 全绿，2026-09-14）：首轮 run 3
 relay_direct/second，签名 file=0/authenticated=0，其余场景每轮全过）——
 与 M9-07/09/10 记录的 first-initiates 抖动家族同因（第 4 次尝试绿）。
 compat 套件在 Windows 全平台一次通过。
+
+### Round 13（2026-09-15）：M9-13 fuzz 持续时间扩展、覆盖补缺、regression corpus
+
+交付物：
+
+- **ProfileStore migration fuzz 目标**（M9-13 点名的最后一块 parser/状态机空白）：
+  `tests/fuzz/profile_store_fuzz.cpp`（新 libFuzzer entry
+  `heyaki_profile_store_fuzzer`，同编译进 `heyaki_fuzz_smoke`）。四种输入模式
+  （首字节低 2 位）：合法 v1 fixture（正路径：迁移成功 → backup 存在 → 幂等
+  重开）；攻击者字节写入 identity 行 public_key 列（schema 合法、内容恶意）；
+  按 fuzz 字节比例截断的 v1 DB；整文件随机字节。oracle 全部为 M2 测试钉死的
+  迁移契约：成功必须留下 `migration_backup_path(path, 1)` 且重开成功；失败后
+  DB 文件必须仍在磁盘上；**仅当迁移确已开始**（合法 v1 schema）失败时才必须
+  留 backup——纯损坏字节在 migrate 前就显式失败，不欠 backup（初版误把 backup
+  断言放在全部失败路径上，会被"读得出 user_version=1 但表损坏"的截断文件
+  误报）。
+- **覆盖审计与补缺**：20 个 harness 目标逐一核对 entry 分发。发现 m6/m7
+  service payload parser 只在 smoke 直调、不在任何 libFuzzer entry → 补入
+  frame-parser entry（含 VT 在内的 parser 面由此全部进入时长扩展范围）；
+  `heyaki_connection_state_fuzzer` 之前只编译、CI 从未运行 → 纳入 CI fuzz 步骤。
+- **持续时间**：CI `-runs=100`（实际 <1s/目标）→ 逐目标 `-max_total_time=60`
+  （profile 90s，文件系统/SQLite 开销大），clang Debug job 每轮约 5.5min 专项
+  fuzz；`-rss_limit_mb=4096` 防内存爆。长跑路径：corpus README 记录
+  `-max_total_time=1800` 本地命令。
+- **regression corpus**（M9-13 保存要求）：仓库内 `tests/fuzz/corpus/`
+  （frame-parser 5 例、protocol-state 1、protobuf-parser 4、
+  lan-directory-state 3、connection-attempt-state 2、profile-store 5 +
+  README）。README 记录目录→entry 映射表、golden-frame 溯源
+  （m1-golden-vectors.json frame.bytes_hex）、最小化纪律（crash →
+  `-minimize_crash=1` → 修复合入时同提交最小单元）、长跑命令。smoke 每轮回放
+  全部 80 个单元（新 `HEYAKI_FUZZ_REGRESSION_CORPUS_DIR` 编译定义指向源树，
+  缺目录即报错）；CI libFuzzer 以 `tests/fuzz/corpus/<entry>` +
+  `build/fuzz-corpus/<entry>` 双目录做种子（提交单元持续参与、生成单元不落盘
+  仓库）。
+
+坑（后续轮避免）：
+
+1. `ProfileStore::open` 对**数据库文件本身** stat 并拒绝 group/other 位
+   （`profile_permissions_too_wide`）——外部构造的 v1 fixture 必须
+   `chmod 0600`（M2 fixture 先例 m2_profile_test.cpp:118）；目录链同理（加密
+   文件后端拒绝过宽目录，fuzz 根 + case 目录都要 0700）。进程内反复用的
+   fuzz 临时根要在创建时立即收紧，不能依赖 umask。
+2. smoke 退出码断言勿经管道（`smoke | tail` 后 `$?` 是 tail 的）——首次
+   "EXIT=0" 是假象，真实 abort 靠重定向到文件再查发现。
+3. libFuzzer entry 是 Clang-only（HEYAKI_BUILD_FUZZERS），本机无 clang 时
+   只能以 smoke 验证新目标；entry 的编译/运行验证依赖 CI clang Debug job。
+
+本机验证：全量 ctest 62/62（fuzz label 含新 profile 目标的 smoke 回放全绿）。
+CI 结果：待推送后记录。
 
 ### 剩余范围（M9-01 完成前）
 
