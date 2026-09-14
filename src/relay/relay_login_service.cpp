@@ -1,8 +1,10 @@
 #include "relay_login_service.hpp"
 
 #include <heyaki/error.hpp>
+#include <heyaki/protocol.hpp>
 #include <heyaki/security.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -149,7 +151,16 @@ Result<RelayLoginCompletion> RelayLoginService::authenticate(
 
   ++impl_->stats.logins_succeeded;
   impl_->stats.challenge_table = impl_->challenges.diagnostics();
-  const auto capabilities = request.supported.bits & known_capability_bits;
+  // Admission negotiated the compatible version window (major match, minor =
+  // min); the granted capability set is the intersection of what the device
+  // advertises with the bits its negotiated version actually defines, so a
+  // device claiming a newer bit at an older minor never receives it.
+  const ProtocolVersion negotiated_version{
+      .major = current_protocol_version.major,
+      .minor = std::min(current_protocol_version.minor,
+                        request.protocol_version.minor)};
+  const auto capabilities =
+      request.supported.bits & capabilities_for_version(negotiated_version);
   return Result<RelayLoginCompletion>::success(RelayLoginCompletion{
       .device_id = request.device_id,
       .endpoint_id = request.endpoint_id,

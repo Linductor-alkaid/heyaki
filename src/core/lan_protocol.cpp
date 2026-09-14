@@ -428,8 +428,11 @@ Result<void> sign_lan_presence(LanPresence& presence, const IdentityKeyPair& ide
 Result<void> validate_lan_presence(const LanPresence& presence) {
   const auto discovery_bit = static_cast<std::uint64_t>(Capability::lan_discovery_v1);
   const auto signaling_bit = static_cast<std::uint64_t>(Capability::lan_signaling_v1);
+  // LAN discovery admits same-major peers from the minor that introduced the
+  // LAN capability bits (1.1): N-1 presence stays visible so SESSION_HELLO can
+  // negotiate down; minor 0 lacks the required bits and stays rejected.
   if (presence.protocol_version.major != current_protocol_version.major ||
-      presence.protocol_version.minor < current_protocol_version.minor ||
+      presence.protocol_version.minor < lan_supported_minor_floor ||
       (presence.supported.bits & (discovery_bit | signaling_bit)) !=
           (discovery_bit | signaling_bit) ||
       (presence.required.bits & ~presence.supported.bits) != 0U ||
@@ -712,7 +715,7 @@ Result<void> validate_lan_hello(const LanHello& hello) {
       all_zero(hello.observed_peer_tls_certificate_sha256) ||
       all_zero(hello.sender_boot_nonce) ||
       hello.protocol_version.major != current_protocol_version.major ||
-      hello.protocol_version.minor < current_protocol_version.minor ||
+      hello.protocol_version.minor < lan_supported_minor_floor ||
       (hello.supported.bits & signaling_bit) == 0U ||
       (hello.required.bits & ~hello.supported.bits) != 0U ||
       (hello.required.bits & ~known_capability_bits) != 0U || hello.expiry.count() <= 0 ||

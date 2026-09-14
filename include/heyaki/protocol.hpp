@@ -61,6 +61,12 @@ inline constexpr std::uint64_t known_capability_bits = protocol_1_2_capability_b
 
 inline constexpr ProtocolVersion current_protocol_version{1U, 2U};
 
+// Lowest minor whose capability set contains the LAN discovery/signaling
+// bits: LAN presence and hello admission accepts same-major peers at or above
+// this floor so N-1 devices stay mutually discoverable, while the actual
+// version/capability negotiation still happens in SESSION_HELLO.
+inline constexpr std::uint32_t lan_supported_minor_floor = 1U;
+
 enum class LanDatagramType : std::uint8_t {
   presence = 1U,
 };
@@ -126,5 +132,9 @@ struct NegotiatedProtocol {
 
 [[nodiscard]] Result<NegotiatedProtocol> negotiate_protocol(const ProtocolHello& local,
                                                             const ProtocolHello& remote);
+
+// Capability set defined by a wire protocol version: the bits a peer at that
+// version may legitimately advertise. Zero for a foreign major version.
+[[nodiscard]] std::uint64_t capabilities_for_version(ProtocolVersion version) noexcept;
 
 }  // namespace heyaki

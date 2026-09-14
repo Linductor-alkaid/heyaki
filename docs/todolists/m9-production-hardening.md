@@ -1,6 +1,6 @@
 # M9：生产加固与 v1 发布
 
-> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6、M9-07 Round 7、M9-08 Round 8、M9-09 Round 9、M9-10 Round 10（基准 harness + 同 kind 双流 UAF 修复）与 M9-11 Round 11（参数冻结 + 孤儿 staging 清理）已交付，M9-12 起未开始，见文末实施记录）
+> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6、M9-07 Round 7、M9-08 Round 8、M9-09 Round 9、M9-10 Round 10（基准 harness + 同 kind 双流 UAF 修复）、M9-11 Round 11（参数冻结 + 孤儿 staging 清理）与 M9-12 Round 12（schema N-1/N 兼容 + rolling relay upgrade + 新旧设备互通）已交付，M9-13 起未开始，见文末实施记录）
 > - 所属计划：[Heyaki MVP 至 v1 实施 TODO 计划](heyaki-implementation-plan.md)
 > - 前置：M8 | 建议发布点：v1.0
 
@@ -20,7 +20,7 @@
 - [x] `M9-09` 执行 24/72 小时长稳、反复发现/过期/建连/断连和容量过载测试，证明内存、fd/handle、worker、session、endpoint directory 和 TTL/replay cache 有界。（Round 9 交付 2026-09-12：`tests/network/run_m9_soak_harness.sh`（CTest `heyaki_m9_soak`，`HEYAKI_REQUIRE_M9_SOAK=1` 门控 SKIP 77，CI coturn-topology job 以 Release 构建直跑）三相位——Phase A 会话 churn：matrix node 新 `--soak-cycles N` 让长存 initiator 在单进程内循环 dial/authenticate/m6+m7 演练/SIGKILL 断连（harness 每循环杀并重生 responder，同 profile 重登录重发布），每循环采样 RSS/fd/会话表/replay 深度/executor 任务 gauge（`SOAK_CYCLE` 行），`SOAK_SUMMARY` 携带门（work_done/closed_ok 全循环达成、live 会话排空、fds_first→last ≤ +24、RSS 增长 ≤ 32MiB、replay_peak ≤ per-peer 256）；Phase B 设备 churn：K 个短生命周期全新设备对同一长存 relay 顺序 enroll/login/publish/exit，每迭代 scrape `/metrics` 采样五个 gauge 族 + relay RSS/fd 门；Phase C 容量过载：第二个 tight relay（max_connections=3、endpoint_directory_capacity=2）承受 5 并发参与者，断言连接容量与目录容量拒绝计数器点燃、幸存者仍可登录、优雅退出后 lease/endpoint 表排空、RSS/fd 有界。CI 片段经 runbook 的"长稳（soak）测试"程序放大为 24/72h 运行（含验收门与斜率分析）。既有确定性单测映射：TTL 表容量/过期（m3b_relay_ttl）、endpoint directory 容量/代际/租户冲突（m3b_relay_endpoint）、replay cache 全局/per-peer/TTL（m4_signaling M4ReplayCache）、连接容量拒绝（m3b_relay ConnectionCapacityRejectsAboveBound）、限速四 scope（m3b_relay_wss_client/rate_limiter）、队列上限与慢消费者（m5/m6/m7 overflow 族）。关键发现：closed 会话进入 `finished_peer_sessions` 有界诊断史环（容量 1024）是设计行为——soak 门是"无 live 会话 + 总数随循环数有界"，不是"列表归零"。见实施记录 Round 9。）
 - [x] `M9-10` 基准消息 latency、并发 RPC、事件 fan-out、单/多文件吞吐、Shell 竞争延迟、relay 内存和带宽。（Round 10 交付 2026-09-13：`tests/network/run_m9_bench_harness.sh`（CTest `heyaki_m9_bench`，`HEYAKI_REQUIRE_M9_BENCH=1` 门控 SKIP 77，CI coturn-topology job Release 直跑）三相位——Phase R 注册+直连 P95（fresh 进程对 ×N 循环，endpoint 表排空后下一轮），Phase T TURN fallback P95（双 `heyaki-test-turn-server` 静态凭据 + `--force-turn`，标签契约与 Windows 矩阵一致接受 `turn_udp|direct_srflx` 半中转对），Phase L 长存套件（matrix node 新 `--bench-initiator/--bench-responder/--bench-shell/--bench-connect-only` 模式：消息 RTT（顺序单在途 1KiB、终态事件采样、发送前 drain）、顺序/并发 RPC（16 窗口 × N 完成、按 wire RequestId 匹配、MpscChannel 交付）、事件 fan-out（N 订阅者 × 可靠 QoS × 时间戳载荷、逐订阅者 delivered/P95 门）、单文件/双并发文件吞吐、shell 敲键→回显延迟空闲 vs 2MiB 推送竞争下）；门 = v1 验收数值（登录 P95<2s/直连 P95<3s/TURN P95<5s）+ 零失败 + fan-out 全量送达 + 文件全部提交；`BENCH_METRIC`/`BENCH_THROUGHPUT`/`M9_BENCH_OK` 行即测量交付物（M9-11 输入）。runbook 新程序"Run a performance benchmark"。基准首跑与收敛过程抓出并修复 **三个真缺陷**（M4 同 kind 双流 UAF、m7 零字节伪 complete、m7 提前 complete，见 Round 10 记录）：双方同时为同一 ChannelKind 建流时，入站重复流的包装对象不在 transport `channels_` map 里，其 OpenEvent 把悬垂指针交给 pending open 完成——堆 UAF（ASan 钉死）；修复 = transport 级确定性收敛（offerer 的流胜出：offerer 拒绝重复流，answerer 在重复流 OpenEvent 时 promote 并退役自己的流；重复包装对象由 `duplicates_` map 持有；关闭/错误事件对重复流不传导为会话失败）+ 会话级 `adopt_physical_channel` 对非 initiator-owned 域（shell/stream）允许替换 + `TransportSession::async_open_channel` 契约文档化（answerer 竞争时 completion 指针需经 channel handler 修正）；回归测试 `M4WebRtcTransport.SimultaneousSameKindOpensResolveToRegisteredChannel`（真双侧 SCTP，offerer 拒绝 + answerer promote + 双向 roundtrip）。本机实测（debug/loopback）：登录 P95 22ms、直连 P95 1021ms、TURN P95 1077ms、消息 P95 2.7ms、RPC P95 2.3ms、并发 RPC P95 8.5ms、单文件 8MiB/s、双并发 9MiB/s、shell ping p50≈300ms（PTY 输出 500ms 维护 tick 的设计行为，M9-11 输入）、fan-out 三订阅者 10/10 送达。见实施记录 Round 10。）
 - [x] `M9-11` 基于结果重新冻结默认容量、水位、timeout 和重试参数；默认值必须有测量依据和硬上限。（Round 11 交付 2026-09-13：[docs/operations/parameter-freeze.md](../operations/parameter-freeze.md) 冻结表（默认值 + 硬上限 + 测量依据三栏，M9-10 基准/ M9-09 soak / M9-06-08 矩阵数据为据，实测全部低于验收门、结论为默认值零调整）+ 九处校验补硬上限（RuntimeConfig 全部容量/线程/11 个生命周期超时、RelayNodeConfig 超时/心跳≤租约帽/退避/队列、RelayWssClientConfig、ChannelBudgetConfig、ByteStreamLimits、SignalingCoordinatorConfig、五个服务 attach、ShellProfileConfig 24h/7d/1GiB、RelayServerConfig 写队列帧/lease 子容量/限流策略前移）+ 新导出 `validate_config`/`validate_relay_node_config` 公共声明 + 孤儿 staging 清理（`file_store::sweep_stale_staging`：24h 年龄门（最慢实测传输三个数量级之外）、严格 `.heyaki-<32hex>.part/.state` 匹配不碰用户文件与目录、FileService attach 向阻塞 worker 投递 fire-and-forget 清理）+ Round 10 移交决策处置：shell 500ms tick 冻结（实测 p50≈300ms，事件驱动 drain 记 v1.x 候选）、packetsLost 维持 bytes/rtt 随 M9-19 后端切换重估、per-IP 32/s 保留 + NAT 共享出口部署观察项；`tests/unit/m9_parameter_freeze_test.cpp` 18 例钉死全部默认值与上限拒绝（漂移即红）。本机 ctest 61/61 全绿。见实施记录 Round 11。）
-- [ ] `M9-12` 完成 schema N-1/N 兼容、rolling relay upgrade 和新旧设备互通；不兼容行为必须在握手期拒绝。
+- [x] `M9-12` 完成 schema N-1/N 兼容、rolling relay upgrade 和新旧设备互通；不兼容行为必须在握手期拒绝。（Round 12 交付 2026-09-14：三处真缺陷修复——(1) LAN presence/hello 版本门由"严格同 minor"放宽为 `lan_supported_minor_floor = 1`（新公共常量 `include/heyaki/protocol.hpp`）：M3a 期遗留的 `minor < current.minor` 会把 1.1 设备从 1.2 设备的发现域整体挡掉，现同 major、minor ≥ LAN 位引入版的 presence/hello 全部准入，真实版本协商仍在 SESSION_HELLO；(2) PeerSession 重启帧收发两侧按协商能力位强制（wire §4 "协商不出的行为不得启用"此前只有发起侧 Node 检查）：协商 < 1.2 的会话 `send_restart_frame` 显式拒绝（`restart_capability_not_negotiated`）、入站 offer/answer/candidate 计数后忽略不转发，对端无法再驱动未协商能力的会话重启；(3) relay login 完成能力集按协商版本钳制（`capabilities_for_version` 新导出 `include/heyaki/protocol.hpp`）：自报 1.1 却声称 bit 12 的设备不再拿到越版能力授予。`tests/unit/m9_compat_test.cpp`（11 例，CTest `heyaki_m9_compat`，labels unit;protocol;relay;m9;compatibility）：协商下调与交集、`capabilities_for_version` 全映射、major 失配/越版 required 位在 `negotiate_protocol` 显式拒绝、1.2↔1.1 loopback 会话认证后协商 {1,1} 且重启帧被忽略/拒绝（含 1.2↔1.2 正常转发对照）、relay login 1.1 设备准入 + 能力钳制 + `incompatible_major_version`/`required_capability_unavailable` 握手期显式拒绝（未知 required 位在 encode 层即不可编码）、enrollment 1.1 准入、LAN 1.1 presence/hello 准入 + 1.0/异 major/缺位拒绝、rolling upgrade（v1 schema + 既有 device 行 → 原库迁移至 v2 → 免重登记 login 成功 → 重启再登录 + audit 保留）。文档：wire 协议 §4 unknown-field 语义修正（解析器显式拒绝未知字段——canonical 签名对象跳过字段会改变签名输入，v1.x 加可选字段必须由发送方按协商 minor 门控发射）+ LAN presence/hello 准入规则成文；runbook 新程序"Roll a relay upgrade"（备份→user_version 对账→换二进制重启→免重登记验证→延迟备份；`schema_too_new` 拒绝打开 = 回滚边界）并更新"Roll back a version"（回滚验证锚定 compat 套件）。既有覆盖对账：relay DB v1→v2 迁移（m3b_relay_database）、ProfileStore v1 迁移（m2_profile）此前已有测试，本轮补齐登录连续性。本机 ctest 62/62 全绿。见实施记录 Round 12。）
 - [ ] `M9-19` 解除 TURN/TCP 与 TURN/TLS 的 pinned 依赖阻断，交付 v1 的 TURN/TCP/TLS 连通能力。（立项 2026-09-13，方案调研结论如下；交付语义 = M9-07 遗留的 udp_blocked-with-TURN-unreachable 场景可经 TURN/TCP（及 TLS）建立 DataChannel 并通过 m6/m7 端到端演练。）
   - **缺口**：pinned libdatachannel v0.23.2 默认 ICE 后端 libjuice 的 TURN 客户端仅 UDP（`juice_create` 只绑 UDP socket，上游 README 明示 RFC 6544/TCP 不支持，issue #104 无实现计划），`allow_turn_tcp/allow_turn_tls` 因此被 `WebRtcTransportConfig::tcp_turn_backend_verified=false` 门控拒绝。协议面（wire 标签、candidate policy、`IceServerKind::turn_tcp/turn_tls`）已就绪。
   - **选定方案 A（主路径）**：将 pinned libdatachannel 切换/双构建到 **libnice ICE 后端**（libdatachannel 构建选项 `USE_JUICE=OFF`，vendored 依赖升级）。这是唯一有官方文档支持的 TURN/TCP+TLS 路径（libdatachannel reference：TCP/TLS 仅 libnice 后端可用）。语义确认：TCP/TLS 只承载 TURN 控制连接，中继数据仍以 UDP 风格分包在隧道内传输——对"UDP 被墙、仅放行 TCP/443 类流量"的 v1 目标场景足够。工作量：第三方 pin 升级 + libnice/GLib 依赖引入 + ICE 行为回归（consent、candidate 提名、M4 矩阵/NAT 矩阵全量重跑）+ 验证后置 `tcp_turn_backend_verified=true` + coturn 侧补 `listening-ip/tcp/443` 与 `cert/tls-listening-port` 配置 + NAT/故障矩阵新增 udp_blocked→turn_tcp/turn_tls 场景。
@@ -971,6 +971,85 @@ sanitizer 负载下连续两轮 asan+tsan 三次红——按"两条流映射一�
 
 本机验证：全量 ctest 61/61 通过（6 环境门控跳过与基线一致）；冻结测试覆盖
 的全部拒绝路径逐例断言 configuration 错误码。CI 终态 run 34793054222 十 job 全绿（2026-09-14，提交链 58d9a1b→696f81f；windows matrix 首轮抖动 rerun 即绿）。
+
+### Round 12（2026-09-14）：M9-12 schema N-1/N 兼容、rolling relay upgrade、新旧设备互通
+
+协议面盘点（动笔前对账）：wire 版本协商（`negotiate_protocol`：major 必须相等、
+minor 取 min、能力交集、required 位双重校验）已接入 SESSION_HELLO、LAN
+presence/hello、relay login/enrollment 四个握手；relay DB 已有 v1→v2 迁移 +
+`schema_too_new` 拒绝打开（m3b_relay_database 测试）；ProfileStore 已有 v1 迁移
+（m2_profile 测试）。本轮据此定位三个真缺陷并补齐端到端兼容测试面。
+
+三处缺陷修复：
+
+1. **LAN 发现域版本门（新旧互通阻断）**：`validate_lan_presence` /
+   `validate_lan_hello` 的 `minor < current_protocol_version.minor` 是 M3a 立项期
+   （minor=0 时代）的写法，1.2 出现后语义变成"1.1 设备从 1.2 设备的 LAN 目录
+   里整体消失"——与 wire §4 的协商语义（capability gating，而非版本同化）冲突。
+   修复：下限改为 `lan_supported_minor_floor = 1`（新公共常量，LAN discovery/
+   signaling 位所在的 minor），同 major、minor ≥ 1 准入；1.0 天然被"必须携带
+   LAN 位"挡住，异 major 拒绝不变。发现准入从不蕴含会话兼容——后者仍由
+   SESSION_HELLO 协商裁决。
+2. **重启帧协商能力位强制缺口（越能力驱动）**：`session_restart_*` 帧此前只在
+   发起侧入口（Node `begin_session_restart`）检查协商位；接收侧 PeerSession 对
+   入站 offer/answer/candidate 无条件转发 handler——一个协商在 1.1 的会话可被
+   对端驱动重启流程（wire §4："parseable 不等于 enabled"）。修复：收发两侧都在
+   PeerSession 收口——`send_restart_frame` 协商位缺失时显式拒绝
+   （`restart_capability_not_negotiated`）；入站重启帧在协商位缺失时计数后忽略
+   （不转发、不失败会话，与"无 handler 时跳过"同级处理）。
+3. **relay login 完成能力越版授予**：登录完成返回的能力集原为
+   `supported & known_capability_bits`，未按协商版本钳制——自报 {1,1} 却声称
+   bit 12 的设备能拿到越版授予。修复：按协商 minor 取
+   `capabilities_for_version`（由匿名命名空间导出至 `include/heyaki/
+   protocol.hpp`）交集后授予，与会话侧语义对齐。
+
+文档修正（与实现长期不一致的两处）：
+
+- wire 协议 §4 "Protobuf unknown fields follow normal proto3 preservation/
+  skipping rules" 与实现相反——全部 inter-peer 消息是 canonical 签名对象或有界
+  datagram，解析器显式拒绝未知字段（跳过会改变签名输入/静默改行为）。改写为
+  "解析器拒绝未知字段；v1.x 增加可选字段/能力是 minor 变更，但发射方必须按
+  协商 minor 门控，N-1 接收方永远不会观察到其会拒绝的字段"，并补 canonical
+  签名理由。
+- wire 协议 LAN presence 段补准入规则成文（同 major、minor ≥ LAN 位引入版；
+  发现准入不蕴含会话兼容）。
+- runbook 新程序 **"Roll a relay upgrade"**：备份 → `PRAGMA user_version`
+  前后对账（只进不退）→ 换二进制重启 → 免重登记验证（`login_completed` 事件
+  + schema gauge）→ 验证通过后才取升级后备份；明确 `schema_too_new` 拒绝打开
+  是回滚边界。"Roll back a version" 的验证步骤锚定 compat 套件。
+
+测试：`tests/unit/m9_compat_test.cpp`（11 例，CTest `heyaki_m9_compat`）六面：
+协商语义（下调/交集/全 minor 映射/异 major/越版 required 拒绝）、1.2↔1.1
+loopback 会话（协商 {1,1} 后重启帧发送拒绝 + 入站忽略 + 计数，1.2↔1.2 对照
+转发）、relay login（1.1 准入 + 能力钳制 + `incompatible_major_version`/
+`required_capability_unavailable` 握手期显式拒绝；未知 required 位在 encode 层
+即不可编码，测试注明不重复覆盖）、enrollment 1.1 准入、LAN（1.1 presence/hello
+准入；1.0/异 major/缺 LAN 位拒绝）、rolling upgrade（v1 schema + 真实 device 行
+→ 原库打开迁移 v2 → 免重登记 login 成功 → 关闭重开再登录 + audit 累积）。
+loopback 会话对沿用 m5 harness 模式（双侧预开控制通道，响应方经 hello 采纳
+入站通道；`inject_into_left` 经第二控制通道注入裸帧以绕过发送侧门控，单独
+覆盖接收侧行为）。
+
+坑（后续轮避免）：
+
+1. 编码层（`encode_relay_login_request` 等）已有 `supported.contains(required)`
+   前置校验——"未知 required 位"在客户端就不可编码，wire 级测试只能覆盖
+   encode 允许而协商拒绝的形态（异 major、越版 required）；不要为覆盖面在
+   测试里手拼绕过 encode 的字节。
+2. bootstrap token 带真实墙钟过期校验：测试用固定 kNow（2023）构造 token 会
+   在 `create_bootstrap_token` 处失败，enrollment 流测试须用 `now_milliseconds()`。
+3. relay/enrollment 的 Result 语义差异：`RelayDatabase::open` 返回
+   `Result<RelayDatabase>`（值语义，无 reset），生命周期用作用域块表达；
+   `Identifier::bytes()` 只在 Identifier 类上（DeviceId 有、IdentityPublicKey 是
+   裸 array 没有）。
+4. 本仓库 pinned 依赖目录曾被 in-source `cmake .` 污染（libdatachannel 及其
+   plog/usrsctp/libjuice 子模块的生成 Makefile/CMakeFiles），依赖校验
+   （`ensure_clean_repository` 连 untracked 都算）会拒绝配置；恢复方式 =
+   `git checkout --` 受污染 tracked 文件 + 删除生成物，再跑
+   `scripts/fetch_third_party.sh --with-tests` 验证。
+
+本机验证：全量 ctest 62/62 通过（新增 heyaki_m9_compat；7 个 root/coturn/
+soak 门控跳过与基线一致）。CI 结果：待推送后记录。
 
 ### 剩余范围（M9-01 完成前）
 

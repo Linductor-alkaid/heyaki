@@ -446,6 +446,10 @@ Result<void> PeerSession::send_restart_frame(FrameType type,
     return Result<void>::failure(
         session_error(ErrorCode::permission, "restart_frame_not_available"));
   }
+  if (!diagnostics_.negotiated_capabilities.has(Capability::session_restart_v1)) {
+    return Result<void>::failure(
+        session_error(ErrorCode::permission, "restart_capability_not_negotiated"));
+  }
   if (payload.empty() || payload.size() > max_signaling_object_bytes) {
     return Result<void>::failure(
         session_error(ErrorCode::protocol, "restart_frame_payload_invalid"));
@@ -631,6 +635,14 @@ void PeerSession::handle_control_frame(transport::TransportChannel& channel,
     ++diagnostics_.restart_frames_received;
     if (!authenticated()) {
       fail(session_error(ErrorCode::authentication, "restart_frame_before_hello"));
+      return;
+    }
+    // The restart behavior is enabled only by the negotiated capability
+    // intersection (bit 12 requires negotiated minor 2). A peer whose session
+    // negotiated below 1.2 must never observe or drive restarts, so frames
+    // arriving without the bit are counted and ignored instead of forwarded.
+    if (!diagnostics_.negotiated_capabilities.has(Capability::session_restart_v1)) {
+      notify();
       return;
     }
     if (type == FrameType::session_restart_offer && restart_handler_.on_restart_offer) {

@@ -503,17 +503,40 @@ netns NAT matrix keeps the topology-realistic connect P95s; shell ping
 latency includes the ~500 ms PTY output drain tick by design (M8-04), so
 expect `shell_ping_idle p50` around that tick regardless of link speed.
 
+### Roll a relay upgrade
+
+The relay migrates its database schema in place on open (`schema_migrations`
+table, one transaction per step; see `RelayDatabase::open`). A rolling
+upgrade is therefore: replace the binary and restart; enrolled devices
+re-login automatically with their stored enrollment generation.
+
+1. Back up the database (see "Back up and restore the relay database").
+2. Note `PRAGMA user_version` before the swap. After the new relay opens the
+   database it must be `<=` the new binary's
+   `heyaki_relay_database_schema_version` gauge, and never lower than the
+   pre-upgrade value (migrations are forward-only).
+3. Replace the relay binary and restart (see "Restart the relay").
+4. Verify: `/health`, `heyaki_relay_database_schema_version` reports the new
+   schema, `login_completed` events appear for pre-upgrade devices without
+   re-enrollment, and a spot-check TUI session passes.
+5. Only then take the post-upgrade backup. Keep the pre-upgrade backup until
+   the rollback window (below) closes.
+
+A database that a newer binary has migrated cannot be opened by an older
+binary (`schema_too_new` refusal on open) — that is the rollback boundary.
+
 ### Roll back a version
 
 Rollback order: relay binary first (devices tolerate an older relay
 better than an older device against a newer relay schema). Before
 replacing binaries: back up the database (see above) — a newer binary may
-have migrated it. N-1 schema compatibility is the design target that
-M9-12 verifies; if `PRAGMA user_version` exceeds what the old binary
+have migrated it. N-1 schema compatibility is pinned by the M9-12
+compatibility suite (`tests/unit/m9_compat_test.cpp`, CTest
+`heyaki_m9_compat`); if `PRAGMA user_version` exceeds what the old binary
 knows, it refuses to open — restore the backup taken before the upgrade. Verify after
 rollback: `/health`, `heyaki_relay_state == 2`, devices re-register
 (`login_completed` events), and a spot-check TUI session. File the
-rollback trigger as an M9-12 compatibility finding regardless of cause.
+rollback trigger as a compatibility finding regardless of cause.
 
 ## Known operational gaps (v1)
 

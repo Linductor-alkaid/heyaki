@@ -4,24 +4,10 @@
 #include <limits>
 
 namespace heyaki {
-namespace {
 
 Result<NegotiatedProtocol> negotiation_error(const char* detail) {
   return Result<NegotiatedProtocol>::failure(Error{ErrorCode::protocol, "negotiation", detail});
 }
-
-std::uint64_t capabilities_for_version(ProtocolVersion version) noexcept {
-  if (version.major != current_protocol_version.major) {
-    return 0U;
-  }
-  if (version.minor == 0U) {
-    return protocol_1_0_capability_bits;
-  }
-  return version.minor == 1U ? protocol_1_1_capability_bits
-                             : protocol_1_2_capability_bits;
-}
-
-}  // namespace
 
 LanDatagramParseResult parse_lan_datagram(std::span<const std::byte> bytes) noexcept {
   if (bytes.size() < lan_datagram_header_bytes) {
@@ -72,6 +58,17 @@ Result<std::vector<std::byte>> encode_lan_datagram(
   output.push_back(static_cast<std::byte>(payload.size() & 0xffU));
   output.insert(output.end(), payload.begin(), payload.end());
   return Result<std::vector<std::byte>>::success(std::move(output));
+}
+
+std::uint64_t capabilities_for_version(ProtocolVersion version) noexcept {
+  if (version.major != current_protocol_version.major) {
+    return 0U;
+  }
+  if (version.minor == 0U) {
+    return protocol_1_0_capability_bits;
+  }
+  return version.minor == 1U ? protocol_1_1_capability_bits
+                             : protocol_1_2_capability_bits;
 }
 
 Result<NegotiatedProtocol> negotiate_protocol(const ProtocolHello& local,

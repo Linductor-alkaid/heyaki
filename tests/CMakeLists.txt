@@ -553,6 +553,27 @@ heyaki_add_runtime_test(
 set_tests_properties(heyaki_m9_parameter_freeze PROPERTIES
   TIMEOUT 120)
 
+add_executable(heyaki_m9_compat_tests unit/m9_compat_test.cpp)
+target_link_libraries(heyaki_m9_compat_tests PRIVATE
+  heyaki::client
+  heyaki::relay
+  heyaki::core
+  heyaki::sqlite
+  executor::executor
+  GTest::gtest_main)
+target_include_directories(heyaki_m9_compat_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/client"
+  "${CMAKE_CURRENT_SOURCE_DIR}/unit")
+heyaki_configure_target(heyaki_m9_compat_tests)
+target_compile_definitions(heyaki_m9_compat_tests PRIVATE
+  "HEYAKI_M9_COMPAT_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}\"")
+heyaki_add_runtime_test(
+  heyaki_m9_compat heyaki_m9_compat_tests
+  "unit;protocol;relay;m9;compatibility")
+set_tests_properties(heyaki_m9_compat PROPERTIES
+  TIMEOUT 120)
+
 add_executable(heyaki_m8_service_tests
   unit/m8_codec_test.cpp
   unit/m8_shell_test.cpp

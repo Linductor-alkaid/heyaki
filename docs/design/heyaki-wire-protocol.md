@@ -288,10 +288,13 @@ Capability bits v1 are: enrollment `0`, signaling `1`, session `2`, pairing `3`,
 bit 12 requires negotiated minor version 2 or newer. A schema field
 being parseable does not enable its behavior without the corresponding negotiated capability.
 
-Protobuf unknown fields follow normal proto3 preservation/skipping rules. Adding an optional field or
-optional capability is a minor change. Changing field meaning, identifier width, canonical signing
-bytes, framing, or a required state transition is a major change. Field numbers and enum numeric values
-MUST NOT be reused.
+Heyaki parsers reject unknown fields instead of skipping them, because every
+inter-peer message is a canonical signed object or a bounded datagram: a skipped field would change
+the canonical signing bytes or silently alter behavior. Within v1.x, adding an optional field or
+optional capability is therefore a minor change whose SENDER must gate emission on the negotiated
+minor version, so N-1 receivers never observe a field they would reject. Changing field meaning,
+identifier width, canonical signing bytes, framing, or a required state transition is a major change.
+Field numbers and enum numeric values MUST NOT be reused.
 
 ## 5. Canonical signed objects
 
@@ -535,6 +538,11 @@ the TLS port is 1-65535, and sequence increases monotonically within one boot no
 address is only a reachability hint and is not signed identity. The message MUST NOT contain display
 name, tenant, service manifest, authorization scope, credential, TrustGrant, relay enrollment, or
 other interface topology.
+
+A receiver admits same-major presence and hello senders whose minor is at least the minor that
+introduced the LAN capability bits (1.1); older-minor or foreign-major senders are rejected. This
+keeps N-1 devices mutually discoverable while the actual version and capability negotiation happens
+in `SESSION_HELLO`. Presence admission never implies session compatibility.
 
 After TLS 1.3 establishes a provisional connection, the only permitted initial message is the bounded
 `signaling.v1.LanHello`, framed as `U16 big-endian payload_length` followed by exactly that many
