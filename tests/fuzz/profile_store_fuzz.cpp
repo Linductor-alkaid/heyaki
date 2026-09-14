@@ -106,8 +106,12 @@ bool create_v1_database(const std::filesystem::path& database_path,
     std::abort();
   }
 #endif
-  auto secrets = heyaki::open_default_secret_backend(secrets_path,
-                                                     heyaki::SecretBackendOptions{});
+  // Force the encrypted-file backend: the same backend ProfileOpenOptions
+  // below resolves, so the stored secret handle stays reachable regardless
+  // of whether the host offers an OS credential store.
+  heyaki::SecretBackendOptions backend_options;
+  backend_options.prefer_os_backend = false;
+  auto secrets = heyaki::open_default_secret_backend(secrets_path, backend_options);
   auto identity = heyaki::create_identity();
   if (!secrets || !identity) {
     std::abort();
