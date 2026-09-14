@@ -322,6 +322,8 @@ TEST(M9CompatSession, InteropsWithOlderMinorAndGatesRestartFrames) {
   harness.left->set_restart_handler(PeerSessionRestartHandler{
       .on_restart_offer =
           [&offer_forwarded](std::vector<std::byte>) { offer_forwarded = true; },
+      .on_restart_answer = {},
+      .on_restart_candidate = {},
   });
 
   // A 1.1-negotiated session must not send restart frames.
@@ -356,6 +358,8 @@ TEST(M9CompatSession, ForwardsRestartFramesWhenCapabilityIsNegotiated) {
   harness.left->set_restart_handler(PeerSessionRestartHandler{
       .on_restart_offer =
           [&forwarded](std::vector<std::byte> payload) { forwarded = std::move(payload); },
+      .on_restart_answer = {},
+      .on_restart_candidate = {},
   });
 
   Frame offer;
