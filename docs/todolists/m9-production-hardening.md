@@ -941,6 +941,22 @@ harness 三相位端到端绿（3 订阅者、双循环，终态连续 4/4 全�
   五例（复用 m6/m8 harness 的会话对，超配 config 在开通道前拒绝）。
 - runbook Quick reference 增加冻结表链接与变更纪律（同提交改文档+测试）。
 
+CI 收敛（提交链 58d9a1b→696f81f 两轮 CI 修复，终态 run 34793054222 十 job
+全绿——windows network matrix turn_udp/first-initiates 首轮抖动 rerun 即绿，
+与 Round 9/10 已知家族同款）：首轮 CI（run 34767278946）四个 Linux job
+Build 步失败——include m8_support.hpp 但未用其全部 helper 的测试 TU 触发
+`-Werror=unused-function`（本机未开 warnings-as-errors 故未现，Round 8
+同款坑），helper 加 [[maybe_unused]]；第二轮（run 34768253190）两个新发现：
+(1) 冻结测试 ShellProfileCapsRejectOversized 用 `/bin/sh` 作 argv[0]，被
+Windows 可执行语法校验（P2-F1，仅盘符/UNC 根为绝对路径）在 caps 断言前
+拒绝——按 m8_support 先例按平台选 argv[0]；(2) Round 10 的
+SimultaneousSameKindOpens… 回归测试只对 offerer 轮询重复流拒绝计数器，
+但哪一端登记败者流取决于 attach 竞争（对端流先于己方流注册时角色翻转），
+sanitizer 负载下连续两轮 asan+tsan 三次红——按"两条流映射一个 kind，必有
+一端登记拒绝"的双端容忍修正（内存安全 oracle——注册指针 roundtrip——不变，
+本机 -Werror 下 6/6 稳定）。gcc Release 的 m3b onboarding/m6 TUI harness
+失败为已知抖动家族（同 run clang Release 同测试绿）。
+
 坑（后续轮避免）：
 
 1. `RelayServerConfig.listen_port = 0` 是**合法语义**（OS 分配临时端口，全部
@@ -954,7 +970,7 @@ harness 三相位端到端绿（3 订阅者、双循环，终态连续 4/4 全�
    m6_support 会话对最省事），不要为可测性重构五个服务的构造签名。
 
 本机验证：全量 ctest 61/61 通过（6 环境门控跳过与基线一致）；冻结测试覆盖
-的全部拒绝路径逐例断言 configuration 错误码。
+的全部拒绝路径逐例断言 configuration 错误码。CI 终态 run 34793054222 十 job 全绿（2026-09-14，提交链 58d9a1b→696f81f；windows matrix 首轮抖动 rerun 即绿）。
 
 ### 剩余范围（M9-01 完成前）
 
