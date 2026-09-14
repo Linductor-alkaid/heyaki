@@ -32,7 +32,8 @@
 
 ## 安全与发布工程
 
-- [x] `M9-13` 扩展 fuzz 持续时间，覆盖所有 parser、状态机、ProfileStore migration 和 VT；保存最小化 regression corpus。（Round 13 交付 2026-09-15：**覆盖审计与补缺**——既有 20 个 harness 目标（fuzz_targets.hpp）经 5 个 libFuzzer entry 分发：frame-parser entry 覆盖全部 parser 面（frame/stream 解码、LAN datagram/hello/signaling、signed offer/answer/candidate/session-hello、pairing、trust grant、m8 shell、**m8 VT**——VT 此前已覆盖）；本轮发现 m6/m7 service payload parser 不在任何 libFuzzer entry（仅 smoke 直调），补入 frame-parser entry；connection_attempt_state_machine fuzzer 此前已编译但 CI 从未运行，本轮纳入；**新增 ProfileStore migration fuzz 目标**（`tests/fuzz/profile_store_fuzz.cpp` + `heyaki_profile_store_fuzzer`）：四种模式（合法 v1 fixture / 攻击者字节写入 identity 公钥列 / 截断 DB / 整文件随机字节），oracle = M2 迁移契约钉死的不变量（成功 → backup 存在 + 幂等重开；失败 → 文件仍在 + 尝试过迁移必留 backup；任意输入只允许显式错误）。**持续时间**：CI 从 `-runs=100`（<1s/目标）改为逐目标墙钟预算 `-max_total_time=60`（profile 90s），clang Debug job 每轮 ~5.5min 专项 fuzz；corpus README 记录本地 1800s 长跑命令。**regression corpus**：新仓库内 `tests/fuzz/corpus/`（6 个 entry 目录 + README 溯源/最小化纪律/提交新 crash 单元的流程），smoke 测试（`heyaki_fuzz_smoke`）每轮回放全部 corpus 单元（本轮 80 个）并生成种子到 build 目录；CI libFuzzer 以 `tests/fuzz/corpus/<entry>` + `build/fuzz-corpus/<entry>` 双目录为种子。坑：ProfileStore::open 对 DB 文件本身拒绝 group/other 位（外部构造的 v1 fixture 须 chmod 0600，同 M2 fixture 先例）、加密文件后端拒绝权限过宽的目录链（fuzz 根与 case 目录都要 0700）、migrate 尚未开始时（纯损坏字节）不欠 backup——失败不变量必须以"迁移确已尝试"为前提。CI 结果见实施记录 Round 13。）
+- [x] `M9-13` 扩展 fuzz 持续时间，覆盖所有 parser、状态机、ProfileStore migration 和 VT；保存最小化 regression corpus。（Round 13 交付 2026-09-15：**覆盖审计与补缺**——既有 20 个 harness 目标（fuzz_targets.hpp）经 5 个 libFuzzer entry 分发：frame-parser entry 覆盖全部 parser 面（frame/stream 解码、LAN datagram/hello/signaling、signed offer/answer/candidate/session-hello、pairing、trust grant、m8 shell、**m8 VT**——VT 此前已覆盖）；本轮发现 m6/m7 service payload parser 不在任何 libFuzzer entry（仅 smoke 直调），补入 frame-parser entry；connection_attempt_state_machine fuzzer 此前已编译但 CI 从未运行，本轮纳入；**新增 ProfileStore migration fuzz 目标**（`tests/fuzz/profile_store_fuzz.cpp` + `heyaki_profile_store_fuzzer`）：四种模式（合法 v1 fixture / 攻击者字节写入 identity 公钥列 / 截断 DB / 整文件随机字节），oracle = M2 迁移契约钉死的不变量（成功 → backup 存在 + 幂等重开；失败 → 文件仍在 + 尝试过迁移必留 backup；任意输入只允许显式错误）。**持续时间**：CI 从 `-runs=100`（<1s/目标）改为逐目标墙钟预算 `-max_total_time=60`（profile 90s），clang Debug job 每轮 ~5.5min 专项 fuzz；corpus README 记录本地 1800s 长跑命令。**regression corpus**：新仓库内 `tests/fuzz/corpus/`（6 个 entry 目录 + README 溯源/最小化纪律/提交新 crash 单元的流程），smoke 测试（`heyaki_fuzz_smoke`）每轮回放全部 corpus 单元（本轮 80 个）并生成种子到 build 目录；CI libFuzzer 以 `tests/fuzz/corpus/<entry>` + `build/fuzz-corpus/<entry>` 双目录为种子。坑：ProfileStore::open 对 DB 文件本身拒绝 group/other 位（外部构造的 v1 fixture 须 chmod 0600，同 M2 fixture 先例）、加密文件后端拒绝权限过宽的目录链（fuzz 根与 case 目录都要 0700）、migrate 尚未开始时（纯损坏字节）不欠 backup——失败不变量必须以"迁移确已尝试"为前提。CI 终态 run 34880683984 十 job 全绿（2026-09-15；首轮 cstdint 补头 e06b8eb、
+次轮 Windows 后端不一致修复 5322a5a、tsan 抖动 rerun 绿）。见实施记录 Round 13。）
 - [ ] `M9-14` 完成 secret scan、dependency vulnerability scan、SBOM、许可证、编译 hardening 和发布制品签名。
 - [ ] `M9-15` 执行安全回归：multicast 洪泛/伪造/重放、LAN TLS MITM/slowloris、密码猜测/泄漏、grant/fingerprint/endpoint 伪造、降级、越权 method/topic、路径穿越、relay/TURN 放大。
 - [ ] `M9-16` 编写安装、配置、部署、升级、备份、故障排查和 API 文档；示例必须从已编译源码嵌入或同步测试。
@@ -1110,7 +1111,18 @@ compat 套件在 Windows 全平台一次通过。
    只能以 smoke 验证新目标；entry 的编译/运行验证依赖 CI clang Debug job。
 
 本机验证：全量 ctest 62/62（fuzz label 含新 profile 目标的 smoke 回放全绿）。
-CI 结果：待推送后记录。
+
+CI 收敛（终态 run 34880683984 十 job 全绿，2026-09-15，提交链 ca9bf1a→
+e06b8eb→5322a5a）：首轮 clang Debug Build 失败——新 entry 漏 `<cstdint>`
+（本机 gcc 经传递头可用，CI clang -Werror 下现形）；第二轮 windows Release
+的 `heyaki_fuzz_smoke` 以 0xc0000409（fail-fast）中止——fuzz fixture 用默认
+SecretBackendOptions 存身份密钥（Windows 上解析到 OS 凭据库），而
+ProfileOpenOptions 强制加密文件后端，open 解析不到已存 handle 即失败触发
+目标 abort（Linux CI 无 OS 后端可回落所以本机/首轮不现）——修复为 fixture
+与 open 两侧都钉加密文件后端（同 M2 fixture 先例）；第三轮 windows 双 job
+转绿、sanitizer (tsan) 在 M3BRelayWssClientTest.
+LogsInHeartbeatsPublishesAndQueriesEndpoint 等待 endpoint 查询处超时一次
+（tsan 慢负载抖动家族，与本轮纯 fuzz 改动无关），rerun 即绿。
 
 ### 剩余范围（M9-01 完成前）
 
