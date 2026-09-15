@@ -28,4 +28,10 @@ paths = ['''(^|/)\.mimosa/''']
 # 'password' facility is a stable snake_case error id from the closed set in
 # src/profile/password.cpp, not a password value.
 regexTarget = "match"
-regexes = ['''password", "(argon2_calibration_failed|argon2_hash_failed|corrupt_password_verifier|invalid_argon2_parameters|invalid_utf8|password_too_long|password_too_short)"''']
+regexes = ['''password", "(argon2_calibration_failed|argon2_hash_failed|corrupt_password_verifier|invalid_argon2_parameters|invalid_utf8|password_too_long|password_too_short)"''',
+# The scanner's own positive-control literal: a syntactically AWS-shaped but
+# fabricated token that scripts/run_secret_scan.sh planted in scratch space
+# to prove the rule set fires (commit 06f8f91 briefly carried the literal;
+# later revisions generate the body at runtime). Exact-token allowlist — any
+# other AKIA-style token still fails the scan.
+'''AKIAIMNOJVGFDXXXE4OA''']

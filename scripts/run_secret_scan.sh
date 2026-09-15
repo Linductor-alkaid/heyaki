@@ -88,10 +88,24 @@ version_output=$("${gitleaks_bin}" version)
 }
 
 # Positive control: the default rule set must detect a planted credential
-# before this scan is allowed to report an all-clear.
+# before this scan is allowed to report an all-clear. The key body is
+# generated at runtime so the scanner's own source never carries a complete
+# literal — this script is part of the scanned history. Generation is pure
+# bash ($RANDOM): an external pipeline like `tr </dev/urandom | head` is not
+# pipefail-safe, because tr takes SIGPIPE once head has read its fill and
+# `set -o pipefail` turns that into a script failure.
 control_dir=$(mktemp -d "${TMPDIR:-/tmp}/heyaki-secret-control.XXXXXX")
 trap 'rm -rf "${control_dir}"' EXIT
-printf 'aws_access_key_id = AKIAIMNOJVGFDXXXE4OA\n' >"${control_dir}/creds.txt"
+control_chars='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+control_body=
+for ((i = 0; i < 16; ++i)); do
+  control_body+=${control_chars:$((RANDOM % 36)):1}
+done
+[[ ${#control_body} -eq 16 ]] || {
+  printf 'FAIL: could not generate control credential body\n' >&2
+  exit 2
+}
+printf 'aws_access_key_id = AKIA%s\n' "${control_body}" >"${control_dir}/creds.txt"
 if "${gitleaks_bin}" dir "${control_dir}" --no-banner --exit-code 1 \
     --log-level error >/dev/null 2>&1; then
   printf 'FAIL: planted credential was not detected; scanner cannot be trusted\n' >&2
@@ -99,7 +113,10 @@ if "${gitleaks_bin}" dir "${control_dir}" --no-banner --exit-code 1 \
 fi
 printf 'SECRET_SCAN_STEP_OK: control credential detected\n'
 
-# Real scan over the full history with the reviewed allowlist.
+# Real scan over the full history with the reviewed allowlist. The cache
+# directory is created in both branches: the report lands there even when a
+# preinstalled --gitleaks binary skips the download path.
+mkdir -p "${cache_dir}"
 report="${cache_dir}/gitleaks-report.json"
 "${gitleaks_bin}" git "${repo_dir}" \
   --config "${config_file}" \

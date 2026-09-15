@@ -560,7 +560,7 @@ class WebRtcTransportSession::Impl
     // created ourselves) promotes over our own stream: converge both
     // endpoints on the offerer's stream. The retired wrapper stays alive
     // until the end of this handler so anything still holding its pointer
-    // synchronously re-points (channel_handler_ below) before it dies.
+    // synchronously re-points (the channel handler below) before it dies.
     const auto duplicate = duplicates_.find(event.channel->kind());
     if (duplicate != duplicates_.end() &&
         duplicate->second.first.get() == event.channel.get()) {
@@ -571,7 +571,7 @@ class WebRtcTransportSession::Impl
         if (registered != channels_.end()) {
           registered->second->close(transport::CloseReason::peer_closed);
           // Retired wrapper stays owned (raw-pointer holders that miss the
-          // synchronous channel_handler_ re-point keep a live object).
+          // synchronous channel-handler re-point keep a live object).
           closed_channels_.push_back(std::move(registered->second));
           channels_.erase(registered);
         }
@@ -595,14 +595,20 @@ class WebRtcTransportSession::Impl
       auto completion = std::move(pending->second);
       pending_opens_.erase(pending);
       completion(Result<TransportChannel*>::success(event.channel.get()));
-    } else if (channel_handler_) {
-      // An incoming (peer-created) channel opened: surface it so the session
-      // can adopt it instead of creating a duplicate stream for the kind.
-      channel_handler_(event.channel->kind(), *event.channel);
+    } else {
+      const auto handlers = handlers_.load(std::memory_order_acquire);
+      if (handlers && handlers->channel) {
+        // An incoming (peer-created) channel opened: surface it so the session
+        // can adopt it instead of creating a duplicate stream for the kind.
+        handlers->channel(event.channel->kind(), *event.channel);
+      }
     }
   }
   void handle(MessageEvent& event) {
-    if (message_handler_) message_handler_(*event.channel, std::move(event.payload));
+    const auto handlers = handlers_.load(std::memory_order_acquire);
+    if (handlers && handlers->message) {
+      handlers->message(*event.channel, std::move(event.payload));
+    }
   }
   void handle(ChannelErrorEvent& event) {
     // A duplicate that dies before promotion never owned the kind; its
@@ -792,6 +798,19 @@ class WebRtcTransportSession::Impl
   // Publishes a refreshed snapshot without firing the state handler: stats
   // resampling is not a state transition and must not re-run session logic.
   // The prior state and error are preserved; only path/buffered refresh.
+  // Publishes a new immutable handler snapshot (see handlers_): load the
+  // current table, apply one setter's replacement, and atomically release
+  // the result for dispatcher-thread readers.
+  template <typename Mutate>
+  void replace_handlers(Mutate&& mutate) {
+    auto next = std::make_shared<HandlerTable>(
+        handlers_.load(std::memory_order_acquire)
+            ? *handlers_.load(std::memory_order_acquire)
+            : HandlerTable{});
+    mutate(*next);
+    handlers_.store(std::move(next), std::memory_order_release);
+  }
+
   void publish_quiet_snapshot() {
     const auto current = snapshots_.load().value;
     publish_snapshot(current.state, current.error, false);
@@ -807,7 +826,10 @@ class WebRtcTransportSession::Impl
       next.buffered_amount += buffered.load(std::memory_order_acquire);
     }
     snapshots_.publish(next);
-    if (notify_handler && state_handler_) state_handler_(next);
+    if (notify_handler) {
+      const auto handlers = handlers_.load(std::memory_order_acquire);
+      if (handlers && handlers->state) handlers->state(next);
+    }
   }
 
   void fail(Error error) {
@@ -915,9 +937,19 @@ class WebRtcTransportSession::Impl
   // closed channel instead of a destruction. Freed with the session.
   std::vector<std::shared_ptr<Channel>> closed_channels_;
   std::map<ChannelKind, OpenCompletion> pending_opens_;
-  MessageHandler message_handler_;
-  StateHandler state_handler_;
-  ChannelHandler channel_handler_;
+  // Handler table published atomically: the setters run on the session owner
+  // thread while drain()/publish_snapshot() invoke handlers on dispatcher
+  // threads, and a peer-initiated open can enqueue events before the owner
+  // finishes installing handlers. Every snapshot is immutable; readers load
+  // one consistent view. Setters themselves are single-owner-thread (the
+  // pre-existing API contract) so a load-mutate-store swap cannot lose a
+  // concurrent update.
+  struct HandlerTable {
+    MessageHandler message;
+    StateHandler state;
+    ChannelHandler channel;
+  };
+  std::atomic<std::shared_ptr<const HandlerTable>> handlers_{};
   PathInfo path_;
   std::atomic<bool> drain_scheduled_{false};
   std::atomic<bool> callback_overflowed_{false};
@@ -1088,15 +1120,24 @@ void WebRtcTransportSession::async_open_channel(ChannelKind kind, ChannelOptions
 }
 
 void WebRtcTransportSession::set_message_handler(MessageHandler handler) {
-  if (impl_) impl_->message_handler_ = std::move(handler);
+  if (!impl_) return;
+  impl_->replace_handlers([captured = std::move(handler)](auto& table) mutable {
+    table.message = std::move(captured);
+  });
 }
 
 void WebRtcTransportSession::set_state_handler(StateHandler handler) {
-  if (impl_) impl_->state_handler_ = std::move(handler);
+  if (!impl_) return;
+  impl_->replace_handlers([captured = std::move(handler)](auto& table) mutable {
+    table.state = std::move(captured);
+  });
 }
 
 void WebRtcTransportSession::set_channel_handler(ChannelHandler handler) {
-  if (impl_) impl_->channel_handler_ = std::move(handler);
+  if (!impl_) return;
+  impl_->replace_handlers([captured = std::move(handler)](auto& table) mutable {
+    table.channel = std::move(captured);
+  });
 }
 
 TransportSessionSnapshot WebRtcTransportSession::snapshot() const noexcept {

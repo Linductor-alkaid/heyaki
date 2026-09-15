@@ -1230,22 +1230,25 @@ if(HEYAKI_BUILD_APPS AND HEYAKI_HARDENING AND UNIX AND NOT APPLE AND
 endif()
 
 # M9-14 release signing roundtrip: a miniature bundle from real build
-# artifacts (relay binary + SPDX SBOM + license manifest) goes through
+# artifacts (binary + SPDX SBOM + license manifest) goes through
 # keygen/manifest/sign/verify/check, and every tamper direction (artifact,
-# manifest, wrong key, extra/missing file) must be rejected.
+# manifest, wrong key, extra/missing file) must be rejected. The bundle's
+# binary is the signing tool itself: sanitizer Debug binaries of the relay
+# reach hundreds of MB, and re-hashing such an artifact repeatedly is pure
+# I/O time that once blew the CI timeout without testing anything new.
 if(HEYAKI_BUILD_APPS)
   add_test(
     NAME heyaki_m9_release_signing
     COMMAND "${HEYAKI_BASH_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/supply_chain/run_release_signing_test.sh"
       --sign-bin "$<TARGET_FILE:heyaki-release-sign>"
-      --artifact-bin "$<TARGET_FILE:heyaki-relay>"
+      --artifact-bin "$<TARGET_FILE:heyaki-release-sign>"
       --sbom "${HEYAKI_SBOM_FILE}"
       --licenses "${HEYAKI_LICENSE_MANIFEST_FILE}"
       --work-dir "${HEYAKI_TEST_STATE_DIR}/release-signing")
   set_tests_properties(heyaki_m9_release_signing PROPERTIES
     LABELS "security;release;m9"
-    TIMEOUT 120)
+    TIMEOUT 300)
 endif()
 
 # M9-14 dependency vulnerability scan (OSV.dev): real pin closure must be

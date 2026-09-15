@@ -83,8 +83,9 @@ expect_reject() {
 }
 
 rm -rf "${bundle_dir}"
+bundle_bin_name=$(basename -- "${artifact_bin}")
 mkdir -p "${bundle_dir}/bin"
-cp "${artifact_bin}" "${bundle_dir}/bin/heyaki-relay"
+cp "${artifact_bin}" "${bundle_dir}/bin/${bundle_bin_name}"
 cp "${sbom_file}" "${bundle_dir}/heyaki.spdx"
 cp "${licenses_file}" "${bundle_dir}/THIRD_PARTY_LICENSES.md"
 
@@ -122,8 +123,8 @@ diff -u "${work_dir}/listed.paths" "${work_dir}/listed.sorted" || {
   printf 'SIGNING_FAIL: manifest paths not sorted\n' >&2
   exit 1
 }
-grep -q '^bin/heyaki-relay$' "${work_dir}/listed.paths" || {
-  printf 'SIGNING_FAIL: manifest missing bin/heyaki-relay\n' >&2
+grep -q "^bin/${bundle_bin_name}$" "${work_dir}/listed.paths" || {
+  printf 'SIGNING_FAIL: manifest missing bin/%s\n' "${bundle_bin_name}" >&2
   exit 1
 }
 printf 'SIGNING_STEP_OK: manifest shape\n'
@@ -179,10 +180,10 @@ printf 'unlisted\n' >"${bundle_dir}/extra.txt"
 expect_reject "extra unlisted file" "${sign_bin}" check "${work_dir}/release.manifest" \
   "${bundle_dir}"
 rm "${bundle_dir}/extra.txt"
-mv "${bundle_dir}/bin/heyaki-relay" "${work_dir}/heyaki-relay.moved"
+mv "${bundle_dir}/bin/${bundle_bin_name}" "${work_dir}/bundle-bin.moved"
 expect_reject "missing file" "${sign_bin}" check "${work_dir}/release.manifest" \
   "${bundle_dir}"
-mv "${work_dir}/heyaki-relay.moved" "${bundle_dir}/bin/heyaki-relay"
+mv "${work_dir}/bundle-bin.moved" "${bundle_dir}/bin/${bundle_bin_name}"
 
 # 8. restored bundle passes end to end.
 expect_ok "final verify" "${sign_bin}" verify "${work_dir}/release.manifest" \
