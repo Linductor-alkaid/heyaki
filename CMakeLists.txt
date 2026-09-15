@@ -28,6 +28,9 @@ option(HEYAKI_ENABLE_IWYU "Run include-what-you-use while compiling Heyaki targe
 option(HEYAKI_REQUIRE_SANITIZER_RUNTIME
   "Fail instead of skipping when the host cannot run a selected sanitizer" OFF)
 option(HEYAKI_BUILD_FUZZERS "Build libFuzzer protocol targets (Clang only)" OFF)
+option(HEYAKI_HARDENING
+  "Compile and link release artifacts with exploit mitigations (PIE, full RELRO, NX stack, stack protector, FORTIFY, CET/CF)"
+  ON)
 
 set(HEYAKI_SANITIZER "none" CACHE STRING "Sanitizer: none, address, undefined, or thread")
 set_property(CACHE HEYAKI_SANITIZER PROPERTY STRINGS none address undefined thread)
@@ -69,6 +72,28 @@ include(HeyakiVersion)
 
 if(HEYAKI_FETCH_DEPENDENCIES OR HEYAKI_VERIFY_DEPENDENCIES OR BUILD_TESTING)
   heyaki_verify_dependencies()
+endif()
+
+# M9-14 hardening: link-level mitigations only hold when every object that
+# goes into the release binaries is built position independent, and the
+# object-level mitigations are worth the most in the vendored C libraries that
+# parse untrusted input. Keep this project-wide (it also covers executor,
+# libdatachannel, and the test-only protobuf/abseil/googletree builds) instead
+# of Heyaki-target-only; executable/link flags are attached per Heyaki target
+# in heyaki_configure_target(). FORTIFY applies to optimized configurations
+# only: at -O0 glibc warns that it is inactive, which is fatal under
+# HEYAKI_WARNINGS_AS_ERRORS.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+if(HEYAKI_HARDENING AND NOT MSVC AND
+   CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+  add_compile_options(-fstack-protector-strong)
+  if(HEYAKI_HARDENING_CET_FLAGS)
+    add_compile_options(${HEYAKI_HARDENING_CET_FLAGS})
+  endif()
+  if(HEYAKI_HARDENING_FORTIFY_SOURCE)
+    add_compile_options(
+      "$<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:-D_FORTIFY_SOURCE=${HEYAKI_HARDENING_FORTIFY_SOURCE}>")
+  endif()
 endif()
 
 heyaki_resolve_build_commit(HEYAKI_RESOLVED_BUILD_COMMIT)
@@ -377,9 +402,16 @@ if(HEYAKI_BUILD_APPS)
   target_link_libraries(heyaki-test-turn-server PRIVATE LibJuice::LibJuiceStatic)
   heyaki_configure_target(heyaki-test-turn-server)
 
+  # M9-14: release artifact signing. Single-shot synchronous CLI over the
+  # pinned libsodium (Ed25519 manifest signatures); no executor context by
+  # design.
+  add_executable(heyaki-release-sign apps/release/heyaki_release_sign.cpp)
+  target_link_libraries(heyaki-release-sign PRIVATE heyaki::sodium)
+  heyaki_configure_target(heyaki-release-sign)
+
   list(APPEND HEYAKI_INSTALL_TARGETS heyaki-relay heyaki-tui heyaki-m2-profile-demo
        heyaki-m3b-relay-demo heyaki-m4-matrix-node heyaki-test-turn-server
-       heyaki-m7-data-demo)
+       heyaki-m7-data-demo heyaki-release-sign)
 endif()
 
 heyaki_add_developer_targets()

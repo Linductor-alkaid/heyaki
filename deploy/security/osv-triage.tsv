@@ -1,0 +1,10 @@
+# Heyaki OSV advisory triage (M9-14 dependency vulnerability scan).
+#
+# Format: advisory-id|dependency|decision|reason|review-date
+#   decision: accepted-risk | not-affected | false-positive
+#
+# Entries here are reviewed acknowledgements, not suppressions: every line
+# must name the exact pinned dependency the advisory was reported for, and
+# upgrades remove entries automatically once OSV no longer matches the new
+# commit (stale entries only warn). Add a line only with a written rationale
+# that a reviewer can re-check.

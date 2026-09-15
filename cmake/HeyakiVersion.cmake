@@ -22,17 +22,19 @@ function(heyaki_generate_supply_chain_files output_dir sbom_output manifest_outp
   add_custom_command(
     OUTPUT "${sbom_file}" "${manifest_file}"
     COMMAND "${CMAKE_COMMAND}"
-      "-DHEYAKI_DEPENDENCY_LOCK=${CMAKE_CURRENT_SOURCE_DIR}/third_party/dependencies.lock"
-      "-DHEYAKI_TRANSITIVE_DEPENDENCY_LOCK=${CMAKE_CURRENT_SOURCE_DIR}/third_party/transitive-dependencies.lock"
-      "-DHEYAKI_LICENSE_LOCK=${CMAKE_CURRENT_SOURCE_DIR}/third_party/licenses.lock"
-      "-DHEYAKI_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
-      "-DHEYAKI_OUTPUT_DIR=${output_dir}"
-      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateSupplyChain.cmake"
+    "-DHEYAKI_DEPENDENCY_LOCK=${CMAKE_CURRENT_SOURCE_DIR}/third_party/dependencies.lock"
+    "-DHEYAKI_TRANSITIVE_DEPENDENCY_LOCK=${CMAKE_CURRENT_SOURCE_DIR}/third_party/transitive-dependencies.lock"
+    "-DHEYAKI_LICENSE_LOCK=${CMAKE_CURRENT_SOURCE_DIR}/third_party/licenses.lock"
+    "-DHEYAKI_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+    "-DHEYAKI_OUTPUT_DIR=${output_dir}"
+    "-DHEYAKI_PROJECT_VERSION=${PROJECT_VERSION}"
+    "-DHEYAKI_BUILD_COMMIT=${HEYAKI_RESOLVED_BUILD_COMMIT}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateSupplyChain.cmake"
     DEPENDS
-      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dependencies.lock"
-      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/transitive-dependencies.lock"
-      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/licenses.lock"
-      "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateSupplyChain.cmake"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dependencies.lock"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/transitive-dependencies.lock"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/licenses.lock"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateSupplyChain.cmake"
     VERBATIM)
   add_custom_target(heyaki-sbom ALL DEPENDS "${sbom_file}" "${manifest_file}")
   set(${sbom_output} "${sbom_file}" PARENT_SCOPE)

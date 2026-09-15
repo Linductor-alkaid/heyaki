@@ -207,6 +207,30 @@ jobs:
           --demo-bin "$PWD/build/heyaki-m3b-relay-demo"
           --turn-bin "$PWD/build/heyaki-test-turn-server"
 
+  supply-chain:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The secret scan covers the full git history, not only HEAD.
+          fetch-depth: 0
+      - name: Fetch pinned dependencies
+        run: scripts/fetch_third_party.sh --all
+      - name: Configure (Release, hardened)
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DHEYAKI_WARNINGS_AS_ERRORS=ON
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Test (supply-chain gates: secret scan, OSV scan, hardening, signing)
+        env:
+          HEYAKI_REQUIRE_SECRET_SCAN: "1"
+          HEYAKI_REQUIRE_VULN_SCAN: "1"
+        run: ctest --test-dir build --output-on-failure --no-tests=error
+      - name: Verify all dependency groups offline
+        run: scripts/fetch_third_party.sh --check --all
+
   sanitizer:
     runs-on: ubuntu-24.04
     strategy:

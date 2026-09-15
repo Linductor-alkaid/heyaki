@@ -1188,6 +1188,8 @@ add_test(
   COMMAND "${CMAKE_COMMAND}"
     "-DHEYAKI_SBOM_FILE=${HEYAKI_SBOM_FILE}"
     "-DHEYAKI_LICENSE_MANIFEST_FILE=${HEYAKI_LICENSE_MANIFEST_FILE}"
+    "-DHEYAKI_PROJECT_VERSION=${PROJECT_VERSION}"
+    "-DHEYAKI_BUILD_COMMIT=${HEYAKI_RESOLVED_BUILD_COMMIT}"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/supply_chain/CheckGeneratedSupplyChain.cmake")
 set_tests_properties(heyaki_supply_chain_inventory PROPERTIES LABELS "security")
 
@@ -1200,6 +1202,83 @@ add_test(
     "-DHEYAKI_TRANSITIVE_DEPENDENCY_LOCK=${CMAKE_CURRENT_SOURCE_DIR}/../third_party/transitive-dependencies.lock"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/supply_chain/CheckTransitiveDependencyLock.cmake")
 set_tests_properties(heyaki_transitive_dependency_lock PROPERTIES LABELS "security")
+
+# M9-14 hardening verification: shipped Linux executables must carry the ELF
+# mitigations HEYAKI_HARDENING produces (PIE, NX stack, full RELRO, stack
+# canary; FORTIFY additionally in optimized single-config builds). Sanitizer
+# presets and non-Linux hosts are excluded at registration time; Windows
+# mitigations (/GS /guard:cf /GUARD:CF /CETCOMPAT) are compile-time flags
+# without an equivalent script and are recorded in the release audit instead.
+if(HEYAKI_BUILD_APPS AND HEYAKI_HARDENING AND UNIX AND NOT APPLE AND
+   HEYAKI_SANITIZER STREQUAL "none")
+  set(heyaki_hardening_check_args)
+  if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$")
+    set(heyaki_hardening_check_args --expect-fortify)
+  endif()
+  add_test(
+    NAME heyaki_m9_hardening_check
+    COMMAND "${HEYAKI_BASH_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/supply_chain/run_hardening_check.sh"
+      ${heyaki_hardening_check_args}
+      "$<TARGET_FILE:heyaki-relay>"
+      "$<TARGET_FILE:heyaki-tui>"
+      "$<TARGET_FILE:heyaki-m4-matrix-node>"
+      "$<TARGET_FILE:heyaki-test-turn-server>")
+  set_tests_properties(heyaki_m9_hardening_check PROPERTIES
+    LABELS "security;build;m9"
+    TIMEOUT 120)
+endif()
+
+# M9-14 release signing roundtrip: a miniature bundle from real build
+# artifacts (relay binary + SPDX SBOM + license manifest) goes through
+# keygen/manifest/sign/verify/check, and every tamper direction (artifact,
+# manifest, wrong key, extra/missing file) must be rejected.
+if(HEYAKI_BUILD_APPS)
+  add_test(
+    NAME heyaki_m9_release_signing
+    COMMAND "${HEYAKI_BASH_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/supply_chain/run_release_signing_test.sh"
+      --sign-bin "$<TARGET_FILE:heyaki-release-sign>"
+      --artifact-bin "$<TARGET_FILE:heyaki-relay>"
+      --sbom "${HEYAKI_SBOM_FILE}"
+      --licenses "${HEYAKI_LICENSE_MANIFEST_FILE}"
+      --work-dir "${HEYAKI_TEST_STATE_DIR}/release-signing")
+  set_tests_properties(heyaki_m9_release_signing PROPERTIES
+    LABELS "security;release;m9"
+    TIMEOUT 120)
+endif()
+
+# M9-14 dependency vulnerability scan (OSV.dev): real pin closure must be
+# clean (or triaged), a planted vulnerable commit must be reported, and the
+# triage file must be honored. Needs the OSV API; self-gates with SKIP 77
+# unless HEYAKI_REQUIRE_VULN_SCAN=1 (CI supply-chain job).
+find_program(HEYAKI_PYTHON3_EXECUTABLE NAMES python3)
+if(HEYAKI_PYTHON3_EXECUTABLE)
+  add_test(
+    NAME heyaki_m9_vulnerability_scan
+    COMMAND "${HEYAKI_BASH_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/supply_chain/run_vulnerability_scan_test.sh")
+  set_tests_properties(heyaki_m9_vulnerability_scan PROPERTIES
+    LABELS "security;supply-chain;m9"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 300)
+endif()
+
+# M9-14 secret scan (pinned gitleaks, full git history): downloads the
+# digest-pinned build when HEYAKI_GITLEAKS_BIN is not provided, proves the
+# rule set fires on a planted credential, then scans the repository history
+# with the reviewed allowlist. Self-gates with SKIP 77 unless
+# HEYAKI_REQUIRE_SECRET_SCAN=1 (CI supply-chain job).
+add_test(
+  NAME heyaki_m9_secret_scan
+  COMMAND "${HEYAKI_BASH_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/run_secret_scan.sh"
+    --repo "${CMAKE_CURRENT_SOURCE_DIR}/.."
+    --cache-dir "${HEYAKI_TEST_STATE_DIR}/secret-scan")
+set_tests_properties(heyaki_m9_secret_scan PROPERTIES
+  LABELS "security;supply-chain;m9"
+  SKIP_RETURN_CODE 77
+  TIMEOUT 600)
 
 add_test(
   NAME heyaki_libdatachannel_compatibility_contract

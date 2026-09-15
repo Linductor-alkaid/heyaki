@@ -45,6 +45,13 @@ license file exists, and emits an SPDX 2.3 tag-value document plus a Markdown li
 Generation fails for a missing, duplicate, extra, or malformed package/license record. CTest also
 checks all expected packages and parent/submodule relationships.
 
+Since M9-14 generation additionally enforces the **license policy**: dependencies linked into
+shipped artifacts (lock groups `runtime` and `test`, plus the recursive submodules) must not carry
+any copyleft atom (AGPL/GPL/LGPL/SSPL); the `optional` group tolerates a copyleft atom only behind
+a permissive OR branch (zstd: `BSD-3-Clause OR GPL-2.0-only`, not built in v1). The SBOM also
+describes the heyaki package itself with the exact project version and build commit; see
+[m9-release-audit.md](m9-release-audit.md).
+
 The inventory covers 35 direct pins and the 5 recursive libdatachannel submodules. M7
 promoted the pinned BLAKE3 checkout (1.8.2, previously a locked-but-unbuilt runtime pin) to
 a built vendored target `heyaki_blake3` compiled from its portable C core only
@@ -57,6 +64,25 @@ the first pins were linked; since M1/M2, built artifacts link and redistribute t
 dependencies and ship the generated license manifest (`THIRD_PARTY_LICENSES.md` in the build tree).
 M3A/M3B/M4 additionally inventory Boost, OpenSSL, coturn and the selected ICE backend artifacts;
 M9 repeats the audit against the final release package.
+
+## Vulnerability and secret scanning (M9-14)
+
+Two recurring release gates, both enforced as CTests in the CI `supply-chain`
+job:
+
+- `scripts/osv_vulnerability_scan.py` (`heyaki_m9_vulnerability_scan`,
+  gate `HEYAKI_REQUIRE_VULN_SCAN=1`): queries OSV.dev for every pinned
+  commit (35 direct + 5 recursive) after proving detection on a
+  known-vulnerable control commit; acknowledgements live in
+  `deploy/security/osv-triage.tsv`, anything untriaged fails.
+- `scripts/run_secret_scan.sh` (`heyaki_m9_secret_scan`, gate
+  `HEYAKI_REQUIRE_SECRET_SCAN=1`): gitleaks 8.24.3, digest-pinned in
+  `deploy/security/secret-scan.lock`, over the full git history with the
+  reviewed allowlist in `deploy/security/gitleaks.toml`; a planted
+  credential must be detected before an all-clear is reported.
+
+Results, limitations, and the coturn deployment-artifact audit are recorded
+in [m9-release-audit.md](m9-release-audit.md).
 
 ## Upgrade workflow
 

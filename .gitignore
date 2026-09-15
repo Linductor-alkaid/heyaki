@@ -109,3 +109,6 @@ Desktop.ini
 *.bak
 *.orig
 *.rej
+
+# Session-tool state (accidentally tracked in 48d7ef40/386f82a; untracked 2026-09-15)
+/.mimosa/

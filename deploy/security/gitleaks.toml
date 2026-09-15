@@ -1,0 +1,31 @@
+# Heyaki secret scan configuration (M9-14), used by
+# scripts/run_secret_scan.sh and the heyaki_m9_secret_scan CTest.
+#
+# Runs the gitleaks default rule set over the full git history. Allowlists
+# below are reviewed exceptions only; each one names the exact reason it is
+# not a secret. Anything not covered fails the scan.
+#
+# Note: the pinned gitleaks 8.24.3 applies the legacy [allowlist] table;
+# the [[allowlists]] array form parses but is not honored by this version.
+
+title = "heyaki secret scan"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Reviewed non-secrets: historical session-tool state and stable error ids"
+
+# Historical session-tool state (.mimosa hook snapshots) was accidentally
+# committed in 48d7ef40/386f82a (August 2026) and untracked again on
+# 2026-09-15. The flagged strings inside those snapshots are source-code
+# identifiers and tool-generated hashes (e.g. sqlite3_api->column_bytes16,
+# key= keys of the tool itself), not Heyaki credentials. History rewrite is
+# out of policy; the paths stay allowlisted until the history ages out.
+paths = ['''(^|/)\.mimosa/''']
+
+# Error{code, "password", detail} construction sites: the token after the
+# 'password' facility is a stable snake_case error id from the closed set in
+# src/profile/password.cpp, not a password value.
+regexTarget = "match"
+regexes = ['''password", "(argon2_calibration_failed|argon2_hash_failed|corrupt_password_verifier|invalid_argon2_parameters|invalid_utf8|password_too_long|password_too_short)"''']
