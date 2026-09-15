@@ -1,6 +1,6 @@
 # M9：生产加固与 v1 发布
 
-> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6、M9-07 Round 7、M9-08 Round 8、M9-09 Round 9、M9-10 Round 10（基准 harness + 同 kind 双流 UAF 修复）、M9-11 Round 11（参数冻结 + 孤儿 staging 清理）与 M9-12 Round 12（schema N-1/N 兼容 + rolling relay upgrade + 新旧设备互通）、M9-13 Round 13（fuzz 扩展 + regression corpus）已交付，M9-14 起未开始，见文末实施记录）
+> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6、M9-07 Round 7、M9-08 Round 8、M9-09 Round 9、M9-10 Round 10（基准 harness + 同 kind 双流 UAF 修复）、M9-11 Round 11（参数冻结 + 孤儿 staging 清理）与 M9-12 Round 12（schema N-1/N 兼容 + rolling relay upgrade + 新旧设备互通）、M9-13 Round 13（fuzz 扩展 + regression corpus）、M9-14 Round 14（secret/vuln 扫描 + SBOM/许可证门禁 + 编译加固 + 发布签名）已交付，M9-15 起未开始，见文末实施记录）
 > - 所属计划：[Heyaki MVP 至 v1 实施 TODO 计划](heyaki-implementation-plan.md)
 > - 前置：M8 | 建议发布点：v1.0
 
@@ -34,7 +34,7 @@
 
 - [x] `M9-13` 扩展 fuzz 持续时间，覆盖所有 parser、状态机、ProfileStore migration 和 VT；保存最小化 regression corpus。（Round 13 交付 2026-09-15：**覆盖审计与补缺**——既有 20 个 harness 目标（fuzz_targets.hpp）经 5 个 libFuzzer entry 分发：frame-parser entry 覆盖全部 parser 面（frame/stream 解码、LAN datagram/hello/signaling、signed offer/answer/candidate/session-hello、pairing、trust grant、m8 shell、**m8 VT**——VT 此前已覆盖）；本轮发现 m6/m7 service payload parser 不在任何 libFuzzer entry（仅 smoke 直调），补入 frame-parser entry；connection_attempt_state_machine fuzzer 此前已编译但 CI 从未运行，本轮纳入；**新增 ProfileStore migration fuzz 目标**（`tests/fuzz/profile_store_fuzz.cpp` + `heyaki_profile_store_fuzzer`）：四种模式（合法 v1 fixture / 攻击者字节写入 identity 公钥列 / 截断 DB / 整文件随机字节），oracle = M2 迁移契约钉死的不变量（成功 → backup 存在 + 幂等重开；失败 → 文件仍在 + 尝试过迁移必留 backup；任意输入只允许显式错误）。**持续时间**：CI 从 `-runs=100`（<1s/目标）改为逐目标墙钟预算 `-max_total_time=60`（profile 90s），clang Debug job 每轮 ~5.5min 专项 fuzz；corpus README 记录本地 1800s 长跑命令。**regression corpus**：新仓库内 `tests/fuzz/corpus/`（6 个 entry 目录 + README 溯源/最小化纪律/提交新 crash 单元的流程），smoke 测试（`heyaki_fuzz_smoke`）每轮回放全部 corpus 单元（本轮 80 个）并生成种子到 build 目录；CI libFuzzer 以 `tests/fuzz/corpus/<entry>` + `build/fuzz-corpus/<entry>` 双目录为种子。坑：ProfileStore::open 对 DB 文件本身拒绝 group/other 位（外部构造的 v1 fixture 须 chmod 0600，同 M2 fixture 先例）、加密文件后端拒绝权限过宽的目录链（fuzz 根与 case 目录都要 0700）、migrate 尚未开始时（纯损坏字节）不欠 backup——失败不变量必须以"迁移确已尝试"为前提。CI 终态 run 34880683984 十 job 全绿（2026-09-15；首轮 cstdint 补头 e06b8eb、
 次轮 Windows 后端不一致修复 5322a5a、tsan 抖动 rerun 绿）。见实施记录 Round 13。）
-- [ ] `M9-14` 完成 secret scan、dependency vulnerability scan、SBOM、许可证、编译 hardening 和发布制品签名。
+- [x] `M9-14` 完成 secret scan、dependency vulnerability scan、SBOM、许可证、编译 hardening 和发布制品签名。（Round 14 交付 2026-09-15：六面控制全部 CTest 强制并进新 CI `supply-chain` job——①**secret scan**：`scripts/run_secret_scan.sh` + digest-pin 的 gitleaks 8.24.3（`deploy/security/secret-scan.lock`，官方 checksum `9991e0b2…`）全 git 历史扫描 + 阳性对照（先证明规则集能命中再报全清）；基线 31 命中全部处置：30 个在 `.mimosa/hook-state/`（**会话工具快照被 48d7f4/386f82a 意外提交，本轮 `git rm -r --cached` 移出 5003 个文件并 gitignore**，内容为工具自身哈希/代码标识非凭据，历史路径 allowlist 留档）、1 个为 `Error{…,"password",detail}` 误报（allowlist 枚举封闭错误串集，真密码仍会命中）；测试 fixture 密钥材料零命中、未发放任何 tests/ 整体豁免。②**漏洞扫描**：`scripts/osv_vulnerability_scan.py` 单批 querybatch 查全部 40 个 pin commit + 已知漏洞 OpenSSL 对照 commit 自检（检不出即 fail-closed）+ `deploy/security/osv-triage.tsv` 三态 triage（未 triage 即红、陈旧条目告警）；结果 0 命中；OSV 对 native C/C++ 覆盖稀疏的限制与补偿控制成文；**coturn 部署制品单审**：4.10.0 镜像含 CVE-2025-69217/2026-27624/40613/43994 修复（fix commit 经 GitHub compare 判定为 tag 祖先），CVE-2026-43915/53448（admin 面板 XSS/SQLi）不在 4.10.0 但部署 `no-cli` 且无 web-admin → not-affected，发布时复检；Ubuntu 回退包 4.6.1-1build4 在多个影响域内 → 生产必须走 digest-pin 镜像。③**SBOM/许可证**：heyaki 自身入册（version+build commit）+ 版本化 namespace（Created 保持固定换字节级可复现）；生成期**copyleft 门禁**（runtime/test 组与递归子模块禁 AGPL/GPL/LGPL/SSPL 原子，optional 组仅允许"permissive OR"形态——zstd `BSD-3-Clause OR GPL-2.0-only` 不进 v1 构建）；现状全部 permissive。④**编译加固**：`HEYAKI_HARDENING`（默认 ON）——全局 `-fstack-protector-strong`/PIC/探针 CET/探针 FORTIFY（3→2 阶梯，仅优化配置，避开 distro 预定义重定义警告）+ 可执行文件 `-pie -Wl,-z,relro,-z,now,-z,noexecstack` + MSVC `/GS /guard:cf /GUARD:CF /CETCOMPAT`（x64）；`heyaki_m9_hardening_check` 用 readelf 断言 PIE/NX/full-RELRO/canary（Release 加 FORTIFY `__*_chk`）；`readelf` 本地化坑以 `LC_ALL=C` 钉死。⑤**发布签名**：`heyaki-release-sign`（pinned libsodium Ed25519；keygen/manifest/sign/verify/check；manifest 字节序确定性、严格解析、symlink 排除）+ 规程 `docs/operations/release-signing.md`（离线 keygen、key id=SHA-256(pub) 前 16 hex、轮换程序）+ `heyaki_m9_release_signing` 往返（真制品 + 全篡改方向必拒）。审计总录 `docs/supply-chain/m9-release-audit.md`。本机 werror 构建 66/66 绿 + Release FORTIFY 断言过 + IVA 独立验证（含 manifest 确定性/坏签名/路径逃逸/漏洞负路径）全 PASS。见实施记录 Round 14。）
 - [ ] `M9-15` 执行安全回归：multicast 洪泛/伪造/重放、LAN TLS MITM/slowloris、密码猜测/泄漏、grant/fingerprint/endpoint 伪造、降级、越权 method/topic、路径穿越、relay/TURN 放大。
 - [ ] `M9-16` 编写安装、配置、部署、升级、备份、故障排查和 API 文档；示例必须从已编译源码嵌入或同步测试。
 - [ ] `M9-17` 打包 client libraries、relay、TUI、coturn 示例配置与符号/许可证，验证干净机器安装和卸载。
@@ -1123,6 +1123,131 @@ ProfileOpenOptions 强制加密文件后端，open 解析不到已存 handle 即
 转绿、sanitizer (tsan) 在 M3BRelayWssClientTest.
 LogsInHeartbeatsPublishesAndQueriesEndpoint 等待 endpoint 查询处超时一次
 （tsan 慢负载抖动家族，与本轮纯 fuzz 改动无关），rerun 即绿。
+
+### Round 14（2026-09-15）：M9-14 secret/vuln 扫描、SBOM/许可证门禁、编译加固、发布签名
+
+交付物：
+
+- `apps/release/heyaki_release_sign.cpp` + `heyaki-release-sign` 目标
+  （pinned libsodium Ed25519）：`keygen`（私钥 0600、key id =
+  SHA-256(pubkey) 前 16 hex）/ `manifest`（正则文件、字节序排序 POSIX
+  相对路径、symlink 排除防链接目标走私、严格解析：count 不符/乱序/
+  `..` 路径/坏摘要全拒）/ `sign`（64 字节 detached）/ `verify`（签名校
+  验）/ `check`（重散列 + 缺失/多余/篡改文件三向对账）。
+- `cmake/HeyakiProjectOptions.cmake`：FORTIFY 探针（`-Werror -O2
+  -D_FORTIFY_SOURCE=3/2` 阶梯——distro 工具链优化时预定义 fortify，
+  异值重定义是警告、同值静默，阶梯最坏落在 distro 自身级别）+ CET
+  探针（x86）；`heyaki_configure_target` 对非 STATIC/INTERFACE 目标加
+  `-Wl,-z,relro,-z,now,-z,noexecstack`、EXECUTABLE 加 `-pie`；MSVC 加
+  `/GS /guard:cf` 编译 + `/GUARD:CF /CETCOMPAT` 链接（x64）。
+- 顶层 `CMakeLists.txt`：`HEYAKI_HARDENING`（默认 ON）+ 全局
+  `CMAKE_POSITION_INDEPENDENT_CODE ON` + `add_compile_options(
+  -fstack-protector-strong [CET] [$<优化配置>:-D_FORTIFY_SOURCE=N])`——
+  对象级缓解覆盖 vendored C 库与 pinned in-tree 依赖（链接级缓解只在
+  全部对象 PIC 时才成立）。FORTIFY 仅优化配置：-O0 下 glibc 警告不生效，
+  在 `-Werror` 下致命。
+- `cmake/GenerateSupplyChain.cmake`：heyaki 包入册（版本+commit）、
+  版本化 namespace、`heyaki_enforce_license_policy`（见勾选项）；
+  `tests/supply_chain/CheckGeneratedSupplyChain.cmake` 断言发布身份
+  五要素。
+- `scripts/osv_vulnerability_scan.py`（stdlib-only）+
+  `deploy/security/osv-triage.tsv` +
+  `tests/supply_chain/run_vulnerability_scan_test.sh`（CTest
+  `heyaki_m9_vulnerability_scan`，`HEYAKI_REQUIRE_VULN_SCAN` 门控）。
+- `scripts/run_secret_scan.sh` + `deploy/security/{gitleaks.toml,
+  secret-scan.lock}`（CTest `heyaki_m9_secret_scan`，
+  `HEYAKI_REQUIRE_SECRET_SCAN` 门控；pinned gitleaks 8.24.3 sha256
+  `9991e0b2…f4ee29c` 与官方 checksums.txt 一致）。
+- `tests/supply_chain/run_hardening_check.sh`（CTest
+  `heyaki_m9_hardening_check`；sanitizer/非 Linux 注册期排除）与
+  `run_release_signing_test.sh`（CTest `heyaki_m9_release_signing`）。
+- `.github/workflows/ci.yml` 新 `supply-chain` job：全历史 checkout
+  （`fetch-depth: 0`——secret scan 扫的是 git 历史，浅克隆会空转通过）
+  + Release 构建 + 双门控 + 全量 ctest + 离线 pin 校验。
+- 文档：`docs/operations/release-signing.md`、
+  `docs/supply-chain/m9-release-audit.md`（审计总录：六控制矩阵、
+  31 命中处置、coturn 镜像/回退包单审、OSV 覆盖限制与补偿）、
+  `dependency-policy.md` 更新。
+
+真缺陷/真实发现（本轮扫描产出）：
+
+1. `.mimosa/` 会话工具状态被 48d7ef40/386f82a（2026-08-25）整体误提交
+   （5003 个文件、2.1M 行），直至本轮 secret scan 基线才暴露。处置：
+   `git rm -r --cached .mimosa` + `/.mimosa/` gitignore（磁盘文件保留，
+   不碰正在运行的插件状态）；历史不重写（仓库政策），allowlist 以
+   "工具自身哈希/代码标识非凭据"留档至历史老化。教训：`git add -A`
+   型提交后无人看 stat 总量。
+2. coturn Ubuntu 回退包 4.6.1-1build4 落在多个 2025/2026 CVE 影响域；
+   4.10.0 镜像缺 CVE-2026-43915/53448（admin 面板）修复但部署面
+   `no-cli` + 无 web-admin → not-affected（审计记录 + 发布时复检项）。
+
+坑（后续轮避免）：
+
+1. CMake `option()` 不拼接相邻字符串字面量——多行描述必须是单个
+   引号串（首个本机配置即 fatal）。
+2. gitleaks 8.24.3 的 `[[allowlists]]` 数组形态能解析但**不生效**，
+   必须用 legacy `[allowlist]` 单表（版本特定行为，config 内注释留档）；
+   TOML 正则串用三引号 `'''…'''`，两引号 + 双引号混拼会报
+   "array elements must be separated by commas"。
+3. allowlist `regexTarget = "match"` 的 match 文本不含规则捕获组外的
+   字符（generic-api-key 命中从 `password` 起而非 `"password` 起）——
+   正则勿带前引号。
+4. `readelf` 输出随 locale 本地化（本机 `类型:`）——任何解析 readelf
+   的脚本先 `export LC_ALL=C`。
+5. 手写协议要读写同源生成：manifest 计数行写入 `N files` 而解析只认
+   纯数字（测试首跑即抓出）；签名单一实现、双端共用常量。
+6. GitHub Actions step 名含 `: ` 必须 quoted（首个 push run 秒挂
+   "workflow file issue"）。
+7. OSV API 对畸形 commit（40 位以外）回 HTTP 400 而非空结果——对照
+   commit 常量抄错一位就会把"基础设施失败"误判为"查询干净"。
+8. `gitleaks git` 子命令用位置参数传仓库（无 `--source`），全局 flag
+   （`--no-banner` 等）与子命令 flag 分开。
+9. `set -o pipefail` 下 `tr </dev/urandom | head -c N` 必然 SIGPIPE 141
+   （head 读满即退，tr 还在写）杀整个脚本；随机串生成要么限输入流
+   （`head -c 4096 /dev/urandom | tr -dc …`，输出量远小于管道缓冲）要么
+   纯 bash `$RANDOM` 循环。
+10. 验证脚本时 `script | tail` 会把非零退出码换成 tail 的 0——必须显式
+    看 `${PIPESTATUS[0]}` 或不经管道直跑（本轮 secret scan 141 曾被
+    `| tail -2` 掩盖成"通过"）。
+
+本机验证：build/werror（Debug+Werror+全部加固 flags）全量 ctest 66/66
+绿（7 个 coturn/matrix 门控 SKIP + 2 个新扫描门控 SKIP）；带双门控后
+五个 M9-14 测试全绿；build/release 的 `heyaki_m9_hardening_check
+--expect-fortify` 过；IVA 独立验证 A–E 全 PASS（readelf 八项属性、
+manifest 字节确定性、63/64 字节坏签名拒绝、`../` 路径逃逸拒绝、
+已知漏洞 commit 负路径 UNTRIAGED 退出 1）。
+
+CI 收敛（终态 run 35000284600 十一 job 全绿，2026-09-15/16，提交链 06f8f91
+→9aa37c5（workflow 修复）→3cbfa5c（三修复））：首轮 run 34994202823 因
+ci.yml step 名含未加引号的冒号被 workflow 解析器秒拒（坑 6）；
+run 34994347040 收敛至三失败（tsan race / ubsan 签名超时 / secret scan
+自命中），三修后 windows (Release) 首跑挂在
+M3aNodeTest.LanLifecyclePressureRemainsBounded（3s 时序预算等待超时，已知
+m3a 抖动家族——本机并行跑 m3a_lan 亦偶发、单独重跑即绿），rerun 即绿。
+
+1. **sanitizer (tsan) 抓出 M4 期真 data race**（全部 gtest 用例 OK 但封装器
+   检出 tsan 报告）：主线程 `set_*_handler` 写 `std::function` 成员 vs
+   'heyaki-asio' 线程 `handle(OpenEvent&)`/`publish_snapshot` 读同一成员
+   （webrtc_transport_session.cpp:1099 写 / :598、:601 读）。生产同样存在
+   窗口：对端先行开通道时 OpenEvent 可在 owner 装 handler 前入队派发。
+   修复 = 三个 handler 合并为不可变 `HandlerTable`，经
+   `std::atomic<std::shared_ptr<const HandlerTable>>` 原子发布，读者
+   acquire 载入一致快照（setter 仍单 owner 线程契约）；本机 tsan 8/8 次
+   零报告 + peer_session 干净。
+2. **sanitizer (ubsan) 的 `heyaki_m9_release_signing` 超时**：本地复现通过
+   → 判定非挂起而是 I/O——sanitizer Debug 的 relay 二进制 ~200MB，测试对
+   其 4 次哈希 + 3 次拷贝在慢速 runner 磁盘上撑爆 120s。bundle 二进制改
+   为签名工具自身（小体积真实产物），bundle 路径取 artifact 基名，
+   TIMEOUT 提至 300s；ubsan 本地全过（202MB relay 手工形态亦过）。
+3. **supply-chain job 的 secret scan**：驱动脚本自身的正控字面量
+   （AWS 形 20 字符伪令牌，精确值见 gitleaks.toml 的逐字符 allowlist 条目）
+   被上一提交带入历史（本地跑时脚本未提交所以
+   未现形）→ 每次全历史扫描命中 AWS 规则。修复 = 键体改运行时生成（首版
+   `tr </dev/urandom | head` 在 pipefail 下必然 SIGPIPE 141 被 IVA 抓出，
+   终版纯 bash `$RANDOM`）+ 历史字面量按逐字符精确 allowlist（近似令牌仍
+   拒绝，IVA 反证 `…E4OB` 仍 exit 1）+ `--gitleaks` 预装分支补建缓存目录。
+   修复过程教训：管道后取输出用 `| tail` 会吞非零退出码，验证必须看
+   退出码本身。
 
 ### 剩余范围（M9-01 完成前）
 
