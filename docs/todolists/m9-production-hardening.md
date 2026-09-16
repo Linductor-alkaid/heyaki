@@ -1397,7 +1397,24 @@ allowed` 的非 UDP relayed 分支同样永远匹配不到 TURN/TCP 候选——
 "任一 TURN 类允许即准入"并成文（类分离管采集配置，不管远端候选
 准入；SDP 无从区分）。NAT 矩阵标签契约注释同步成文。CI 收敛另修：
 libnice 是配置期依赖，apt 安装步骤必须前置于 Configure（首跑顺序
-沿袭 coturn 运行期位次即红）。
+沿袭 coturn 运行期位次即红）；strict-m7 门误绑 m7_event（该字段在
+矩阵节点场景结构上恒 0——事件服务未订阅），改绑 m7_file。
+
+**soak 揭出 libnice 死端检测窗口（第三轮，上游缺陷确认）**：CI 第三轮
+NAT/故障矩阵全绿后 soak Phase A 红——SIGKILL 对端后会话 45s 不关、
+循环中断。根因（本机复现 + 源码判读）：libdatachannel v0.23.2 对
+libnice 的 `consent-freshness` 用构造后 `g_object_set` 设置，而该属性
+是 `G_PARAM_CONSTRUCT_ONLY`——GLib CRITICAL 拒绝（initiator 日志可见），
+RFC 7675 consent 从未启用，死端检测退化为普通 keepalive
+（`NICE_AGENT_TIMER_KEEPALIVE_TIMEOUT` 50s）。本机实测关闭窗口恒定
+≈79-80s（6/6 循环 killed→respawned 间距）；libjuice 为 ~30s（consent）。
+处置 = 接受有界窗口：matrix node 关闭等待 45s→120s、harness closed 门
+60s→150s（覆盖 +50% 余量），双后端本机 soak 全绿（各 6 循环 + Phase
+B/C）。**上游缺陷与重估点**：libdatachannel 应经 `nice_agent_new_full`
+的 `NICE_AGENT_OPTION_CONSENT_FRESHNESS` flag 启用 consent（改 pinned
+源不可行——CI 重取干净 checkout），下次 libdatachannel pin 升级时修复
+并把窗口收回 ~30s；届时 M9-10 基准口径一并重测。v1.x 候选：会话层
+应用级心跳使死端检测与 ICE 后端解耦。
 
 **坑（Round 16）**：①`tail` 管道吞构建退出码（已知家族再犯——后台构建
 命令经 `| tail -5` 汇报 exit 0 实则失败，重跑勿用管道取退出码）；②libnice

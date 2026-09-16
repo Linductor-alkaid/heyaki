@@ -339,13 +339,16 @@ for cycle in $(seq 1 "${session_cycles}"); do
   wait_log "${initiator_log}" "SOAK_CYCLE idx=${cycle} state=work-done" 120 ||
     fail "session cycle ${cycle} never reached work-done"
   # Unclean peer death: the authenticated session must reach a terminal state
-  # without any close handshake.
+  # without any close handshake. The node waits internally for the backend's
+  # dead-peer detection (libjuice consent ~30s, libnice keepalive ~50s — the
+  # pinned libdatachannel v0.23.2 cannot enable libnice consent-freshness
+  # post-construction), so this budget must cover the node's own 75s wait.
   kill -KILL "${responder_pid}" 2>/dev/null || true
   wait "${responder_pid}" 2>/dev/null || true
   responder_pid=""
   sample_relay "phase-a-cycle-${cycle}-killed" "${relay_pid}" "${relay_url}" \
     "${work_dir}/ca.pem" "${work_dir}/relay-metrics-now.txt"
-  wait_log "${initiator_log}" "SOAK_CYCLE idx=${cycle} state=closed" 60 ||
+  wait_log "${initiator_log}" "SOAK_CYCLE idx=${cycle} state=closed" 150 ||
     fail "session cycle ${cycle} never closed after responder SIGKILL"
   if (( cycle == session_cycles )); then
     break

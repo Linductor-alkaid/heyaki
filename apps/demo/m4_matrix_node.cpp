@@ -1638,8 +1638,14 @@ int run_node(const std::filesystem::path& database, std::string_view application
         break;
       }
       // The harness kills the responder once the work-done line is out; the
-      // authenticated session must reach a terminal state within the ICE
-      // consent window (RFC 7675, 30s on the pinned dependency) plus margin.
+      // authenticated session must reach a terminal state after the unclean
+      // peer death. Backend detection windows differ: libjuice rides RFC 7675
+      // consent freshness (~30s); libnice's consent-freshness is a
+      // construct-only property that libdatachannel v0.23.2 sets after
+      // construction (rejected with a GLib CRITICAL, upstream defect), so
+      // detection falls back to libnice's plain keepalive timeout (50s). The
+      // wait covers the slower window plus margin; re-evaluate at the next
+      // libdatachannel pin upgrade.
       const bool closed = wait_until(
           [&] {
             const auto sessions = node.value_if()->peer_sessions();
@@ -1650,7 +1656,7 @@ int run_node(const std::filesystem::path& database, std::string_view application
                                         heyaki::NodePeerSessionState::closed;
                                });
           },
-          std::chrono::milliseconds{45000});
+          std::chrono::milliseconds{120000});
       cycle.closed_cleanly = closed;
       const auto closed_sample = sample_process();
       cycle.closed_rss_kb = closed_sample.rss_kb;

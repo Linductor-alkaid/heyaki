@@ -451,10 +451,14 @@ for scenario in "${scenarios[@]}"; do
       # consent within this window (CI run 34684217306 and a local repro
       # with the embedded TURN server both held state=authenticated 40-70 s
       # past the kill); libnice (the coturn-topology CI backend since M9-19)
-      # implements consent freshness, so sessions may close explicitly there —
-      # either outcome satisfies bounded survival. Session termination on
-      # association loss stays covered by the m4 shutdown matrix. Coturn must
-      # serve fresh allocations again after the restart (recovery pair below).
+      # cannot have consent-freshness enabled by the pinned libdatachannel
+      # v0.23.2 (construct-only property set after construction is rejected,
+      # M9-19 Round 16), so it rides the ~50 s plain-keepalive timeout
+      # instead (measured session close after unclean death ≈ 80 s, soak
+      # Round 16) — either outcome satisfies bounded survival. Session
+      # termination on association loss stays covered by the m4 shutdown
+      # matrix. Coturn must serve fresh allocations again after the restart
+      # (recovery pair below).
       prepare_participants "trestart" || true
       sleep 4
       launch_responder "trestart" 60000 \
