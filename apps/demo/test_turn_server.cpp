@@ -6,6 +6,15 @@
 // passes it both here and to heyaki-m4-matrix-node via
 // --turn-username/--turn-credential.
 //
+// Topology constraint (M9-19): clients on the libnice ICE backend cannot reach
+// a loopback-bound TURN server. libnice binds its TURN relay sockets to
+// physical interface addresses and sets IP_UNICAST_IF on them, so datagrams
+// destined for 127.0.0.1 are silently dropped by the kernel (sendmsg succeeds,
+// nothing is delivered). Harnesses that may run libnice clients must pass
+// --bind 0.0.0.0 --external <non-loopback host address> and point --turn at
+// the host address (see run_m9_bench_harness.sh Phase T). libjuice clients
+// work with either topology.
+//
 // This helper owns no concurrent work: a single libjuice server handle runs
 // on the main thread and the process idles in a blocking sleep until the
 // harness terminates it, so nothing here needs an executor context.

@@ -1416,15 +1416,47 @@ B/C）。**上游缺陷与重估点**：libdatachannel 应经 `nice_agent_new_fu
 并把窗口收回 ~30s；届时 M9-10 基准口径一并重测。v1.x 候选：会话层
 应用级心跳使死端检测与 ICE 后端解耦。
 
+**bench Phase T 揭出 libnice loopback 黑洞（第四轮，resolve 升级定因）**：
+CI 第四轮 M4/NAT/故障/soak 四矩阵全绿后 bench Phase T 复现性红——
+"initiator never authenticated"。本机复现 + strace 双侧抓包 + 多轮假设
+排除未果后按升级规约交 resolve 专家，定因：**libnice 对 TURN 中继 socket
+绑定物理接口地址并设 `IP_UNICAST_IF` 钉出接口**（`socket/udp-bsd.c`，
+by-design 的多接口源地址正确性），发往 127.0.0.1 的数据报**内核静默丢弃**
+（sendmsg 返回成功但永不投递；内核探针矩阵钉死：IP_UNICAST_IF+loopback
+目的 = 黑洞，去掉即通）。libjuice test-turn-server 只绑 127.0.0.1 →
+对 libnice 是物理不可达拓扑。**定性：测试基建拓扑问题，非产品/依赖缺陷**
+——libjuice 客户端不设该选项故历绿；coturn 在 netns 非环回地址故 NAT
+矩阵绿。修复 = bench Phase T 的 TURN server 改 `--bind 0.0.0.0 --external
+<宿主物理 IP>`（harness 以默认路由源地址解析，无物理地址则显式 fail），
+节点 `--turn` 指物理地址；test_turn_server.cpp 头注释记录约束（Windows
+矩阵维持 loopback——libjuice 客户端不受影响，且 Windows 防火墙对物理
+地址监听是额外变量）。连带：非环回 TURN 地址下 libjuice 客户端提名
+local-host×peer-relayed 半中转对（`direct_host`）——force-turn 下对端
+只发 relayed 候选，数据仍经对端 TURN server，与 Windows 矩阵
+`turn_udp|direct_srflx` 半中转契约同类，Phase T 标签门对齐为
+`turn_udp|direct_srflx|direct_host`。双后端本机 bench 全绿（nice
+turn_p95=663ms、juice 1094ms，M9-11 重估输入就位）。**上游观察项**：
+libnice `IP_UNICAST_IF`+loopback 的静默丢弃无任何日志/错误，可向
+libnice 提低优先级 issue；M4 期"relayed<->relayed 提名停滞（pinned
+stack）"边界与 libjuice 客户端行为相关，nice 后端下 relays 对的提名
+行为待 CI 观察。
+
 **坑（Round 16）**：①`tail` 管道吞构建退出码（已知家族再犯——后台构建
-命令经 `| tail -5` 汇报 exit 0 实则失败，重跑勿用管道取退出码）；②libnice
-meson 选项是 `-Dcrypto-library`（非 `crypto`）；③`Result<T>::value_if()`
-返回 `T*`——T 为 shared_ptr 时须 `(*p)->method`（初版测试 `p->method`
-把 close 打在 shared_ptr 上）；④repo 根 9月14日遗留 in-source cmake 污染
-（vendored/、根 Makefile、Config.cmake、tests/ 生成物——与 M9-12
+命令经 `| tail -5` 汇报 exit 0 实则失败，重跑勿用管道取退出码）；
+②libnice meson 选项是 `-Dcrypto-library`（非 `crypto`）；③`Result<T>::
+value_if()` 返回 `T*`——T 为 shared_ptr 时须 `(*p)->method`（初版测试
+`p->method` 把 close 打在 shared_ptr 上）；④repo 根 9月14日遗留 in-source
+cmake 污染（vendored/、根 Makefile、Config.cmake、tests/ 生成物——与 M9-12
 libdatachannel 内污染同族），按恢复法清除；⑤libjuice 的
 `heyaki-test-turn-server` 在 nice 构建下需手工补 add_subdirectory
-（libdatachannel 不再自带，EXCLUDE_FROM_ALL 隔离）。
+（libdatachannel 不再自带，EXCLUDE_FROM_ALL 隔离）；⑥`pkill -f` 模式
+出现在自身复合命令行时自杀整条 shell（两次踩中）——清理进程用
+`for pid in $(pgrep -f …); do kill $pid; done` 且模式避开命令正文；
+⑦strace 抓网络须 `-e trace=network`（glib 用 sendmsg/recvmsg，且
+libjuice server 收包线程的 poll 不属 network 类——单看 sendto/recvfrom
+会误判 server 死亡）；⑧"python 探针得到响应"≠"同样请求得到响应"——
+裸 20 字节 Allocate 与 libnice 的 40 字节请求不同构，server 健康证明
+被高估（resolve 专家纠偏）。
 
 CI 终态：见提交记录（本行由 CI 结果回填写实）。
 

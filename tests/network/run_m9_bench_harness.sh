@@ -441,11 +441,23 @@ turn_a_port=$(pick_port)
 turn_b_port=$(pick_port)
 turn_username="benchturn"
 turn_credential="TEST-ONLY-bench-turn-secret"
-"${turn_bin}" --port "${turn_a_port}" --username "${turn_username}" \
+# M9-19: the TURN address must be a non-loopback host address. The libnice ICE
+# backend binds its TURN relay sockets to physical interface addresses and
+# sets IP_UNICAST_IF, so packets destined for 127.0.0.1 are silently dropped by
+# the kernel (sendmsg succeeds, nothing is delivered) — a loopback-only TURN
+# server is a physically unreachable topology for libnice. The libjuice client
+# backend does not set the option and works with either address.
+turn_host=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1)
+if [[ -z "${turn_host}" || "${turn_host}" == 127.* ]]; then
+  fail "no non-loopback host address found for the TURN servers (libnice cannot reach a loopback TURN server)"
+fi
+"${turn_bin}" --port "${turn_a_port}" --bind 0.0.0.0 --external "${turn_host}" \
+  --username "${turn_username}" \
   --credential "${turn_credential}" --relay-port-begin 49200 --relay-port-end 49249 \
   >"${work_dir}/turn-a.log" 2>&1 &
 turn_a_pid=$!
-"${turn_bin}" --port "${turn_b_port}" --username "${turn_username}" \
+"${turn_bin}" --port "${turn_b_port}" --bind 0.0.0.0 --external "${turn_host}" \
+  --username "${turn_username}" \
   --credential "${turn_credential}" --relay-port-begin 49250 --relay-port-end 49299 \
   >"${work_dir}/turn-b.log" 2>&1 &
 turn_b_pid=$!
@@ -458,9 +470,9 @@ chmod 700 "${work_dir}/phase-t"
 : >"${work_dir}/path-t.txt"
 for cycle in $(seq 1 "${cycles}"); do
   run_cycle t "${work_dir}/phase-t" "cycle${cycle}" \
-    --turn "127.0.0.1:${turn_b_port}" --turn-username "${turn_username}" \
+    --turn "${turn_host}:${turn_b_port}" --turn-username "${turn_username}" \
     --turn-credential "${turn_credential}" --force-turn -- \
-    --turn "127.0.0.1:${turn_a_port}" --turn-username "${turn_username}" \
+    --turn "${turn_host}:${turn_a_port}" --turn-username "${turn_username}" \
     --turn-credential "${turn_credential}" --force-turn
   wait_endpoint_drain 15 ||
     fail "turn cycle ${cycle}: relay endpoint table did not drain between iterations"
@@ -472,9 +484,13 @@ log "PHASE_T samples=$(wc -l <"${work_dir}/connect-t-ms.txt") connect_p95_ms=${c
   fail "TURN fallback P95 ${connect_t_p95}ms exceeds ${turn_p95_ms}ms gate"
 # Same contract as the Windows matrix turn_udp scenario: with forced TURN on
 # a single host, the nominated pair can be local-srflx x peer-relayed (half
-# relayed); the label carries the local candidate type. Both labels mean the
-# TURN allocation mediated the path.
-if grep -qv -E "^(turn_udp|direct_srflx)$" "${work_dir}/path-t.txt"; then
+# relayed); the label carries the local candidate type. M9-19: with the TURN
+# server on a non-loopback host address (required for libnice), the libjuice
+# client also nominates local-host x peer-relayed pairs (direct_host) — the
+# peer under forced TURN only issues relayed candidates, so the data still
+# rides the peer's TURN server. All three labels mean a TURN allocation
+# mediated the path.
+if grep -qv -E "^(turn_udp|direct_srflx|direct_host)$" "${work_dir}/path-t.txt"; then
   fail "Phase T saw a non-TURN data path: $(sort -u "${work_dir}/path-t.txt" | tr '\n' ' ')"
 fi
 
