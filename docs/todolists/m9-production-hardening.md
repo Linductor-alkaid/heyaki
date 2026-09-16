@@ -1323,6 +1323,10 @@ sign-conversion）+ werror 下行为全绿；IVA 独立验证 PASS（六目标�
 12/12 零抖动、ctest 注册与 labels 核对、m3a 对抗过滤三连跑确认 Linux 上
 不跳过且结构性不可跳过、跨序隔离、断言质量逐条核验无空断言）。
 
+CI 终态：run 35099111718（提交 4ba8d77）**十一 job 首跑全绿**（2026-09-16，
+零 rerun——含 windows Debug/Release 双 job 与全部 sanitizer/supply-chain/
+coturn-topology；Linux 各 job 15-28min、windows 31-38min）。
+
 ### 剩余范围（M9-01 完成前）
 
 - ~~注册成功率/租约续期失败计数器、信令 fallback/winner 聚合、TUI 队列/渲染
