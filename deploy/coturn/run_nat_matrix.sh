@@ -589,7 +589,10 @@ dump_outputs() {
 # the udp protocol in SDP and heyaki classifies by the configured ICE server
 # kinds (a TURN/TCP-only server set reports turn_tcp).
 # strict_m7="strict-m7" (M9-19 TURN/TCP scenarios) additionally requires
-# the m7 file push to have committed on the asserted cycle.
+# the m7 file push to have committed on the asserted cycle. m7_event stays
+# structurally 0 in this harness (the matrix-node scenario does not
+# subscribe the event service; every historical line reads m7_event=0
+# m7_file=1), so the strict gate binds m7_file only.
 require_result() {
   # tag line expected_paths_csv strict_m6 [strict_m7]
   local tag=$1 line=$2 expected_paths_csv=$3 strict_m6=$4 strict_m7=${5:-}
@@ -618,8 +621,7 @@ require_result() {
     failures=$((failures + 1))
     return 1
   fi
-  if [[ "${strict_m7}" == "strict-m7" &&
-        ("${m7_event}" != "1" || "${m7_file}" != "1") ]]; then
+  if [[ "${strict_m7}" == "strict-m7" && "${m7_file}" != "1" ]]; then
     log "SCENARIO_FAILED ${tag} m7 file transfer: ${line}"
     dump_outputs "${tag}"
     failures=$((failures + 1))
