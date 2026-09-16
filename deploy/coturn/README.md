@@ -27,7 +27,10 @@ Heyaki uses coturn TURN REST API credentials:
 
 ## Resource policy
 
-- Client listeners: UDP/TCP 3478 and TLS 5349.
+- Client listeners: UDP/TCP 3478 and TLS 5349. Heyaki clients use TURN/UDP and
+  (with `HEYAKI_ICE_BACKEND=nice` builds, M9-19) TURN/TCP; the TLS listener
+  serves other TURN clients (e.g. browsers) — heyaki rejects `turns:` because
+  no pinned ICE backend implements TURN/TLS.
 - Allocation ports: 49160-49200.
 - Total allocation quota: 100; per-user quota: 12.
 - Per-session bandwidth: 2 Mbit/s each direction; server capacity: 16 Mbit/s each direction.

@@ -130,17 +130,23 @@ jobs:
       - uses: actions/checkout@v4
       - name: Fetch pinned dependencies
         run: scripts/fetch_third_party.sh --all
+      # M9-19: this job builds against the libnice ICE backend so the TURN/TCP
+      # client is exercised end to end (and so the whole NAT/fault/soak/bench
+      # surface re-validates ICE behavior on the alternate backend). Every
+      # other job keeps the default vendored libjuice backend, which the unit
+      # suites assert rejects the TURN/TCP policy class.
       - name: Configure relay
         run: >-
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=Release
           -DHEYAKI_BUILD_APPS=ON
+          -DHEYAKI_ICE_BACKEND=nice
           -DHEYAKI_WARNINGS_AS_ERRORS=ON
       - name: Build relay and matrix apps
         run: >-
           cmake --build build --target heyaki-relay heyaki-m4-matrix-node
           heyaki-m3b-relay-demo heyaki-test-turn-server --parallel 2
-      - name: Install coturn fallback package
+      - name: Install coturn fallback package and libnice dev
         timeout-minutes: 10
         run: |
           # The runner's azure mirror can stall without tripping apt's
@@ -157,7 +163,7 @@ jobs:
             -o Acquire::Retries=3 \
             -o Acquire::http::Timeout=30 \
             -o Acquire::https::Timeout=30 \
-            install -y coturn
+            install -y coturn libnice-dev
           sudo systemctl stop coturn || true
           sudo pkill -TERM turnserver || true
           sleep 1

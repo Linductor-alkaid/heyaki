@@ -32,6 +32,7 @@ milestones (M3A/M3B onward) and coturn runs as an external, digest-pinned deploy
 | Boost | Pin the exact modular Asio/System header closure used by M2; freeze Asio SSL integration before M3A and add Beast plus its reviewed closure before M3B WSS work. | Boost 1.88.0 Asio/System/Config/Assert/ThrowException/Predef/WinAPI commits are source-locked; Beast 1.88.0 and the 18 additional reviewed module commits were frozen at M3B entry. | Asio complete for M2; SSL at M3A entry; Beast frozen at M3B entry |
 | TLS backend | Use the OpenSSL 3.x ABI line for Asio LAN TLS, Boost.Beast, and libdatachannel on Linux/Windows; CMake rejects other major lines, while release provenance records the exact headers/runtime package version and digest. | M3A development baseline links OpenSSL 3.0.13 on Linux; the host CLI may differ and is not treated as link evidence. | OpenSSL 3.x line frozen at M3A entry; exact package artifacts remain a release-provenance gate |
 | coturn | Run an external image/package referenced by immutable version and digest; keep its config and image provenance in the deployment tree. | Pinned deployment baseline since M3B (`deploy/coturn`: image `coturn/coturn:4.10.0-debian` by digest, Ubuntu 24.04 `coturn=4.6.1-1build4` fallback); exercised by the M4 CI network matrix topologies. | M3B entry |
+| ICE backend (libnice) | System libnice/GLib pair for `HEYAKI_ICE_BACKEND=nice` builds (M9-19, Linux only): version floor 0.1.21 = the ubuntu-24.04 distro line, probed through the pinned libdatachannel's own find modules. libnice is LGPL-2.1 OR MPL-1.1 and drags GLib (LGPL-2.1+) — copyleft, so it may only ever enter as a **dynamically linked shared library**, never vendored or statically linked, and only in explicitly selected nice-backend builds. Default artifacts keep the vendored libjuice backend and stay inside the permissive closure. | Floor frozen at M9-19 (2026-09-16); CI `coturn-topology` job builds nice against Ubuntu 24.04 `libnice-dev` and runs the full NAT/fault/soak/bench surface on it. | Nice-backend builds must record the exact distro package versions in release provenance; M9-17 packaging must ship the libnice/GLib license texts alongside nice-backend artifacts and keep relinkability (LGPL §4). |
 
 This table deliberately does not claim the developer machine's packages are reproducible. A
 milestone cannot consume one of these components until its exact artifact or package baseline has
@@ -50,7 +51,9 @@ shipped artifacts (lock groups `runtime` and `test`, plus the recursive submodul
 any copyleft atom (AGPL/GPL/LGPL/SSPL); the `optional` group tolerates a copyleft atom only behind
 a permissive OR branch (zstd: `BSD-3-Clause OR GPL-2.0-only`, not built in v1). The SBOM also
 describes the heyaki package itself with the exact project version and build commit; see
-[m9-release-audit.md](m9-release-audit.md).
+[m9-release-audit.md](m9-release-audit.md). The gate scopes itself to lock-file atoms; the M9-19
+libnice/GLib system pair is the one copyleft surface and is governed by the system-dependency row
+above (dynamic linkage, nice-backend builds only) instead.
 
 The inventory covers 35 direct pins and the 5 recursive libdatachannel submodules. M7
 promoted the pinned BLAKE3 checkout (1.8.2, previously a locked-but-unbuilt runtime pin) to

@@ -1,6 +1,7 @@
 #include "webrtc_transport_session.hpp"
 #include "client/peer_session.hpp"
 
+#include <heyaki/detail/build_config.hpp>
 #include <heyaki/runtime.hpp>
 
 #include <executor/comm.hpp>
@@ -25,6 +26,7 @@ using heyaki::transport::TransportChannel;
 using heyaki::transport::TransportState;
 using heyaki::transport::webrtc::WebRtcTransportConfig;
 using heyaki::transport::webrtc::WebRtcTransportSession;
+using heyaki::transport::webrtc::tcp_turn_backend_supported;
 
 template <typename Value>
 Value filled(std::uint8_t seed) {
@@ -112,6 +114,44 @@ TEST(M4WebRtcTransport, RejectsUnverifiedTcpTurnAndInvalidWatermarks) {
   config.candidates.allow_turn_tcp = false;
   config.buffered_amount_low_water = config.buffered_amount_high_water;
   EXPECT_FALSE(WebRtcTransportSession::create(config, dispatcher).has_value());
+}
+
+TEST(M4WebRtcTransport, TcpTurnCapabilityMatchesBuildBackend) {
+  // M9-19: the capability predicate is a compile-time fact of the linked ICE
+  // backend and must match the generated build configuration that gates the
+  // Node-level policy validation.
+  EXPECT_EQ(tcp_turn_backend_supported(), HEYAKI_WEBRTC_TCP_TURN != 0);
+
+  auto dispatcher = [](std::string_view, std::function<heyaki::Result<void>()>) {
+    return heyaki::Result<void>::success();
+  };
+  WebRtcTransportConfig config;
+  config.candidates.allow_turn_tcp = true;
+  config.tcp_turn_backend_verified = tcp_turn_backend_supported();
+  const auto session = WebRtcTransportSession::create(config, dispatcher);
+  EXPECT_EQ(session.has_value(), tcp_turn_backend_supported());
+  if (session.has_value()) {
+    (*session.value_if())->close(heyaki::transport::CloseReason::local_shutdown);
+  }
+
+  // TURN/TLS has no backend in v1 (libnice would silently degrade it to
+  // plaintext TURN/TCP), so the transport rejects the class and a turn_tls
+  // ICE server on every backend.
+  WebRtcTransportConfig tls = WebRtcTransportConfig{};
+  tls.candidates.allow_turn_tls = true;
+  tls.tcp_turn_backend_verified = tcp_turn_backend_supported();
+  EXPECT_FALSE(WebRtcTransportSession::create(tls, dispatcher).has_value());
+
+  WebRtcTransportConfig tls_server = WebRtcTransportConfig{};
+  tls_server.ice_servers.push_back(
+      heyaki::transport::webrtc::IceServerConfig{
+          .kind = heyaki::transport::webrtc::IceServerKind::turn_tls,
+          .hostname = "turn.example",
+          .port = 5349U,
+          .username = "user",
+          .credential = "credential"});
+  tls_server.tcp_turn_backend_verified = tcp_turn_backend_supported();
+  EXPECT_FALSE(WebRtcTransportSession::create(tls_server, dispatcher).has_value());
 }
 
 TEST(M4WebRtcTransport, HostCandidateDataChannelUsesExecutorDispatcher) {

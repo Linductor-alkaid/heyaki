@@ -1,6 +1,6 @@
 # M9：生产加固与 v1 发布
 
-> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6、M9-07 Round 7、M9-08 Round 8、M9-09 Round 9、M9-10 Round 10（基准 harness + 同 kind 双流 UAF 修复）、M9-11 Round 11（参数冻结 + 孤儿 staging 清理）与 M9-12 Round 12（schema N-1/N 兼容 + rolling relay upgrade + 新旧设备互通）、M9-13 Round 13（fuzz 扩展 + regression corpus）、M9-14 Round 14（secret/vuln 扫描 + SBOM/许可证门禁 + 编译加固 + 发布签名）与 M9-15 Round 15（安全回归八面：wire 伪造/重放/slowloris/退避指数/泄漏猎杀/伪造 grant·candidate·endpoint/文法表/服务端 oversized·1:1）已交付，M9-16 起未开始，见文末实施记录）
+> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6、M9-07 Round 7、M9-08 Round 8、M9-09 Round 9、M9-10 Round 10（基准 harness + 同 kind 双流 UAF 修复）、M9-11 Round 11（参数冻结 + 孤儿 staging 清理）与 M9-12 Round 12（schema N-1/N 兼容 + rolling relay upgrade + 新旧设备互通）、M9-13 Round 13（fuzz 扩展 + regression corpus）、M9-14 Round 14（secret/vuln 扫描 + SBOM/许可证门禁 + 编译加固 + 发布签名）、M9-15 Round 15（安全回归八面：wire 伪造/重放/slowloris/退避指数/泄漏猎杀/伪造 grant·candidate·endpoint/文法表/服务端 oversized·1:1）与 M9-19 Round 16（TURN/TCP 解封：libnice 双后端 + TURN/TLS 全后端硬拒绝）已交付，M9-16 起未开始，见文末实施记录）
 > - 所属计划：[Heyaki MVP 至 v1 实施 TODO 计划](heyaki-implementation-plan.md)
 > - 前置：M8 | 建议发布点：v1.0
 
@@ -23,12 +23,12 @@
 - [x] `M9-12` 完成 schema N-1/N 兼容、rolling relay upgrade 和新旧设备互通；不兼容行为必须在握手期拒绝。（Round 12 交付 2026-09-14：三处真缺陷修复——(1) LAN presence/hello 版本门由"严格同 minor"放宽为 `lan_supported_minor_floor = 1`（新公共常量 `include/heyaki/protocol.hpp`）：M3a 期遗留的 `minor < current.minor` 会把 1.1 设备从 1.2 设备的发现域整体挡掉，现同 major、minor ≥ LAN 位引入版的 presence/hello 全部准入，真实版本协商仍在 SESSION_HELLO；(2) PeerSession 重启帧收发两侧按协商能力位强制（wire §4 "协商不出的行为不得启用"此前只有发起侧 Node 检查）：协商 < 1.2 的会话 `send_restart_frame` 显式拒绝（`restart_capability_not_negotiated`）、入站 offer/answer/candidate 计数后忽略不转发，对端无法再驱动未协商能力的会话重启；(3) relay login 完成能力集按协商版本钳制（`capabilities_for_version` 新导出 `include/heyaki/protocol.hpp`）：自报 1.1 却声称 bit 12 的设备不再拿到越版能力授予。`tests/unit/m9_compat_test.cpp`（11 例，CTest `heyaki_m9_compat`，labels unit;protocol;relay;m9;compatibility）：协商下调与交集、`capabilities_for_version` 全映射、major 失配/越版 required 位在 `negotiate_protocol` 显式拒绝、1.2↔1.1 loopback 会话认证后协商 {1,1} 且重启帧被忽略/拒绝（含 1.2↔1.2 正常转发对照）、relay login 1.1 设备准入 + 能力钳制 + `incompatible_major_version`/`required_capability_unavailable` 握手期显式拒绝（未知 required 位在 encode 层即不可编码）、enrollment 1.1 准入、LAN 1.1 presence/hello 准入 + 1.0/异 major/缺位拒绝、rolling upgrade（v1 schema + 既有 device 行 → 原库迁移至 v2 → 免重登记 login 成功 → 重启再登录 + audit 保留）。文档：wire 协议 §4 unknown-field 语义修正（解析器显式拒绝未知字段——canonical 签名对象跳过字段会改变签名输入，v1.x 加可选字段必须由发送方按协商 minor 门控发射）+ LAN presence/hello 准入规则成文；runbook 新程序"Roll a relay upgrade"（备份→user_version 对账→换二进制重启→免重登记验证→延迟备份；`schema_too_new` 拒绝打开 = 回滚边界）并更新"Roll back a version"（回滚验证锚定 compat 套件）。既有覆盖对账：relay DB v1→v2 迁移（m3b_relay_database）、ProfileStore v1 迁移（m2_profile）此前已有测试，本轮补齐登录连续性。本机 ctest 62/62 全绿。CI 终态 run 34849636945 十 job 全绿（2026-09-14；
 首轮 -Werror=missing-field-initializers 修复 0f824b7；windows matrix 已知
 抖动家族轮转三轮后第 4 次绿）。见实施记录 Round 12。）
-- [ ] `M9-19` 解除 TURN/TCP 与 TURN/TLS 的 pinned 依赖阻断，交付 v1 的 TURN/TCP/TLS 连通能力。（立项 2026-09-13，方案调研结论如下；交付语义 = M9-07 遗留的 udp_blocked-with-TURN-unreachable 场景可经 TURN/TCP（及 TLS）建立 DataChannel 并通过 m6/m7 端到端演练。）
-  - **缺口**：pinned libdatachannel v0.23.2 默认 ICE 后端 libjuice 的 TURN 客户端仅 UDP（`juice_create` 只绑 UDP socket，上游 README 明示 RFC 6544/TCP 不支持，issue #104 无实现计划），`allow_turn_tcp/allow_turn_tls` 因此被 `WebRtcTransportConfig::tcp_turn_backend_verified=false` 门控拒绝。协议面（wire 标签、candidate policy、`IceServerKind::turn_tcp/turn_tls`）已就绪。
-  - **选定方案 A（主路径）**：将 pinned libdatachannel 切换/双构建到 **libnice ICE 后端**（libdatachannel 构建选项 `USE_JUICE=OFF`，vendored 依赖升级）。这是唯一有官方文档支持的 TURN/TCP+TLS 路径（libdatachannel reference：TCP/TLS 仅 libnice 后端可用）。语义确认：TCP/TLS 只承载 TURN 控制连接，中继数据仍以 UDP 风格分包在隧道内传输——对"UDP 被墙、仅放行 TCP/443 类流量"的 v1 目标场景足够。工作量：第三方 pin 升级 + libnice/GLib 依赖引入 + ICE 行为回归（consent、candidate 提名、M4 矩阵/NAT 矩阵全量重跑）+ 验证后置 `tcp_turn_backend_verified=true` + coturn 侧补 `listening-ip/tcp/443` 与 `cert/tls-listening-port` 配置 + NAT/故障矩阵新增 udp_blocked→turn_tcp/turn_tls 场景。
-  - **方案 B（备选，不推荐为 v1 主路径）**：等待或上游贡献 libjuice TURN/TCP（RFC 6062，issue #104）——无时间表，v1 不可依赖。
-  - **方案 C（备选）**：自研最小 TURN/TCP 客户端（复用既有 REST 凭据推导）或把 relay WSS 扩展为数据中继——均为数月级自研面，且与"pinned 依赖为权威"的既有原则冲突，仅在方案 A 的可移植性代价不可接受时重估。
-  - **主要风险与联动**：libnice 拖入 GLib 依赖，直接影响 Windows 交付与 M11 Android 移植（Android 无官方 GLib 支持，需静态打包或评估方案 C）；建议先在 Linux CI（coturn-topology job）打通并冻结验收，Windows/Android 的后端选择作为独立决策点记录。M9-10 基准需在切换后重测（ICE 后端行为差异影响 P95 口径）。不进 executor feedback ledger（第三方依赖 API 面，与 M9-01 同类，见 `docs/operations/cross-os-matrix.md`）。
+- [x] `M9-19` 解除 TURN/TCP 的 pinned 依赖阻断，交付 v1 的 TURN/TCP 连通能力；TURN/TLS 证实无任何 pinned 后端可用，改为全后端硬拒绝。（Round 16 交付 2026-09-16，方案 A 落地为双构建 + 关键调研修正，见文末 Round 16。交付语义达成：M9-07 遗留的 udp_blocked-with-TURN-unreachable 场景可经 TURN/TCP 建立 DataChannel 并通过 m6/m7 端到端演练（CI `coturn-topology` job 以 libnice 后端跑 NAT 矩阵新 `turn_tcp` 场景断言）。）
+  - **原缺口**：pinned libdatachannel v0.23.2 默认 ICE 后端 libjuice 的 TURN 客户端仅 UDP（`juice_create` 只绑 UDP socket，上游 README 明示 RFC 6544/TCP 不支持，issue #104 无实现计划），`allow_turn_tcp/allow_turn_tls` 因此被 `WebRtcTransportConfig::tcp_turn_backend_verified=false` 门控拒绝。协议面（wire 标签、candidate policy、`IceServerKind::turn_tcp/turn_tls`）已就绪。
+  - **方案 A 落地（Round 16）**：不升级 pin、双构建——新 CMake 选项 `HEYAKI_ICE_BACKEND`（默认 `juice` = vendored libjuice；`nice` = 系统 libnice/GLib，Linux only，版本地板 0.1.21 = ubuntu-24.04 发行线，与 OpenSSL 同类的平台依赖非 lock-file 原子）。nice 构建置 `USE_NICE=ON` + 编译宏 `HEYAKI_WEBRTC_TCP_TURN=1`，新公共谓词 `heyaki::tcp_turn_backend_supported()` 驱动 Node/transport 双层门控（libjuice 构建继续拒绝 `allow_turn_tcp`，错误不变）；`heyaki-test-turn-server` 在 nice 构建下单独补建 vendored libjuice（EXCLUDE_FROM_ALL）。CI `coturn-topology` job 切 nice 后端（+apt libnice-dev），NAT/故障/soak/bench 全部矩阵在 libnice 上回归（即立项时的"ICE 行为回归全量重跑"）；其余 job 与 Windows 维持 libjuice。
+  - **关键调研修正（TURN/TLS）**：libnice 的 `NICE_RELAY_TYPE_TURN_TLS` 是遗留兼容占位符——`agent_create_tcp_turn_socket` 只对 GOOGLE/OC2007 兼容模式套伪 SSL（`socket/pseudossl.c`，非真 TLS），标准 ICE（RFC 5245，libdatachannel 所用）下 TURN_TLS 与 TURN_TCP 同一明文路径（libnice 0.1.22 源码判读 + 上游生态旁证：kinesis-webrtc-sdk-c issue #1585 指 libnice 连 RFC 6062 全 TCP 分配都是 TODO）。libdatachannel 把 `turns:` 原样映射 `NICE_RELAY_TYPE_TURN_TLS` 交给 libnice。结论：接受 `turns:` 配置 = "TLS"静默退化为明文 TURN/TCP 的配置谎言，且对 coturn `tls-listening-port` 会因无 TLS 握手直接失败。因此 `allow_turn_tls` 候选类与 `NodeIceServerKind::turn_tls` 服务器在 `validate_peer_path_policy` 与 transport `valid_config` 双层硬拒绝（新错误 detail `turn_tls_backend_not_verified`，全部后端），矩阵节点 `--turn-transport tls` 在 flag 解析期拒绝；`DataPathKind::turn_tls` 枚举/metrics/signaling 序列化面保留（v1 内不可达）。解除路径：上游 libnice 落地真 TURN/TLS、libjuice 实现 issue #104、或评估自研（原方案 B/C 不变）。
+  - **安装包缺口修复**：nice 构建导出的 LibDataChannel target 携带 `$<LINK_ONLY:LibNice::LibNice>` 而上游 config 不替消费者 find libnice——heyaki 安装包内置 libdatachannel 的 FindLibNice/FindGLIB 模块并在 heyakiConfig 先建导入 target（`heyaki_installed_consumer` 在 nice 构建下回归验证）。
+  - **主要风险与联动（结转）**：libnice/GLib 依赖影响 Windows 交付与 M11 Android 移植（Android 无官方 GLib 支持）——按立项建议已先在 Linux CI 打通并冻结验收，Windows/Android 后端选择保持独立决策点。M9-10 基准随 CI 后端切换自动转为 libnice 口径（coturn-topology 每次 push 重跑 bench；packetsLost 重估输入随之更新，冻结表 §9.3 已同步）。不进 executor feedback ledger（第三方依赖 API 面，与 M9-01 同类，见 `docs/operations/cross-os-matrix.md` 的 TURN/TCP 与 TURN/TLS 依赖限制节——已按 Round 16 结论重写）。
 
 ## 安全与发布工程
 
@@ -1326,6 +1326,77 @@ sign-conversion）+ werror 下行为全绿；IVA 独立验证 PASS（六目标�
 CI 终态：run 35099111718（提交 4ba8d77）**十一 job 首跑全绿**（2026-09-16，
 零 rerun——含 windows Debug/Release 双 job 与全部 sanitizer/supply-chain/
 coturn-topology；Linux 各 job 15-28min、windows 31-38min）。
+
+### Round 16（2026-09-16）：M9-19 TURN/TCP 解封（libnice 双后端）+ TURN/TLS 全后端硬拒绝
+
+**交付形态**：ICE 后端双构建。`HEYAKI_ICE_BACKEND`（默认 `juice`；`nice`
+= 系统 libnice，Linux only，pkg-config 探测复用 libdatachannel 自带
+FindLibNice/FindGLIB，地板 0.1.21=ubuntu-24.04 线；Windows 显式 FATAL_ERROR
+指回独立决策点）。nice 构建编译宏 `HEYAKI_WEBRTC_TCP_TURN=1`（build_config），
+新公共谓词 `heyaki::tcp_turn_backend_supported()`（node.hpp 导出；
+webrtc_transport_session.cpp 实现——**坑：初版实现落进匿名命名空间，
+外部符号未定义、全部链接失败**，移出到具名命名空间修复）；Node 两处
+transport config 组装点（start_webrtc_transport/start_restart_transport）
+显式镜像谓词值。libjuice 构建行为不变（`allow_turn_tcp` 仍
+`tcp_turn_backend_not_verified` 拒绝）。
+
+**TURN/TLS 调研修正（本轮核心发现）**：立项时"libnice 官方支持 TURN/TCP+TLS"
+的前提对 TLS 一半不成立——libnice `agent_create_tcp_turn_socket` 的 TLS 包装
+只覆盖 GOOGLE/OC2007 兼容模式且是伪 SSL（pseudossl.c）；RFC5245 标准 ICE 下
+`NICE_RELAY_TYPE_TURN_TLS` 走 `nice_udp_turn_over_tcp_socket_new` 明文路径。
+libdatachannel v0.23.2 把 `turns:` 原样映射 TURN_TLS 交给 libnice。因此
+"配置 TLS 实得明文"是必须拒绝的配置谎言：`allow_turn_tls` 候选类 +
+`NodeIceServerKind::turn_tls` 服务器在 validate_peer_path_policy 与
+transport valid_config 双层拒绝（`turn_tls_backend_not_verified`，
+`rtc_config`/candidate_allowed/refresh_path_stats 的 TLS 分支同步收紧为
+turn_tcp-only）；矩阵节点 `--turn-transport` 只收 udp|tcp，tls 在 flag
+解析期显式拒绝（fail-fast 保持脚本诚实）。`DataPathKind::turn_tls` 与
+对应 metrics/signaling 序列化面保留（wire 面 v1 内不可达）。
+
+**NAT 矩阵新场景**：`turn_tcp`——nft forward 链 drop 双私网全部客户端 UDP
+（STUN/TURN-UDP/srflx 全灭），双 coturn `listening-port` TCP 监听保留；
+`--turn-transport tcp` + 无 STUN（死 STUN 只烧 P95 预算）+ `--srflx-only`，
+唯一可达路径 = TURN/TCP relayed 候选；3 循环 P95<5000ms + m6 严格 +
+**m7 文件推送严格**（strict-m7：M9-07 遗留 udp_blocked-with-TURN-
+unreachable 的完整交付语义）。`run_pair` 的 STUN 参数按 turn_mode 分离
+（stun-only/turn 才配 STUN）。coturn 模板 TLS 监听保持（生产基线，
+浏览器类 peer 可用），turn_tls 场景未引入（无后端可测）。
+
+**CI**：`coturn-topology` job 配置加 `-DHEYAKI_ICE_BACKEND=nice`、apt 步骤
+加装 `libnice-dev`（步骤更名 Install coturn fallback package and libnice
+dev）——该 job 的 NAT/故障/soak/bench 全面转 libnice 后端 = 立项要求的
+ICE 行为回归全量重跑；其余 job 维持 libjuice。故障矩阵 `turn_restart`
+注释更新为后端相关（libnice 实现 RFC 7675 consent freshness，TURN 死亡
+可能显式关会话——两种结局都满足"有界存活"断言）。
+
+**安装包**：nice 构建导出的 LibDataChannel target 携带
+`$<LINK_ONLY:LibNice::LibNice>`（静态库 PRIVATE 依赖入 INTERFACE），上游
+LibDataChannelConfig 不替消费者 find——heyaki 包安装 FindLibNice/FindGLIB
+到 `lib/cmake/heyaki/modules/` 并在 heyakiConfig（nice 时）先 find_dependency
+再 find LibDataChannel；`heyaki_installed_consumer` 在双后端各验证一遍。
+
+**本机验证（无 sudo 环境）**：libnice 0.1.22 源码构建到用户前缀
+（meson 1.12 + `-Dcrypto-library=openssl`——libnice 自身 crypto 仅影响其
+遗留伪 SSL/DTLS 面，DTLS 由 libdatachannel 的 OpenSSL 承担；本机无
+gnutls-dev）。nice 构建全目标 + ctest 67/67 绿（installed_consumer 需
+PKG_CONFIG_PATH 指前缀，CI 系统包无此依赖）；juice debug 67/67 + werror
+Release 零警告。IVA 独立验证 PASS（5 项：双后端定向套件、双后端全量、
+CLI 契约三形态 + nice 附加对抗），附二进制级佐证（反汇编谓词
+juice=false/nice=true；ldd 证 libnice 仅 nice 构建链接；两构建
+build_config 宏对账）。TURN/TCP 真数据面（对真 coturn 的 TCP allocation
+端到端）本机被 root/coturn 门控 SKIP，由 CI turn_tcp 场景承担。
+
+**坑（Round 16）**：①`tail` 管道吞构建退出码（已知家族再犯——后台构建
+命令经 `| tail -5` 汇报 exit 0 实则失败，重跑勿用管道取退出码）；②libnice
+meson 选项是 `-Dcrypto-library`（非 `crypto`）；③`Result<T>::value_if()`
+返回 `T*`——T 为 shared_ptr 时须 `(*p)->method`（初版测试 `p->method`
+把 close 打在 shared_ptr 上）；④repo 根 9月14日遗留 in-source cmake 污染
+（vendored/、根 Makefile、Config.cmake、tests/ 生成物——与 M9-12
+libdatachannel 内污染同族），按恢复法清除；⑤libjuice 的
+`heyaki-test-turn-server` 在 nice 构建下需手工补 add_subdirectory
+（libdatachannel 不再自带，EXCLUDE_FROM_ALL 隔离）。
+
+CI 终态：见提交记录（本行由 CI 结果回填写实）。
 
 ### 剩余范围（M9-01 完成前）
 

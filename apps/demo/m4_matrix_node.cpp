@@ -369,6 +369,17 @@ std::string base64(const unsigned char* data, std::size_t size) {
   return output;
 }
 
+// M9-19: the matrix node offers udp and tcp TURN transports. "tls" is
+// deliberately absent: no pinned ICE backend implements TURN/TLS, and
+// libnice's TURN_TLS relay type silently degrades to plaintext TURN/TCP, so
+// the flag rejects at parse time instead of lying about the data path.
+heyaki::NodeIceServerKind turn_kind_for_transport(const std::string& transport) {
+  if (transport == "tcp") {
+    return heyaki::NodeIceServerKind::turn_tcp;
+  }
+  return heyaki::NodeIceServerKind::turn_udp;
+}
+
 // TURN REST API credential contract pinned by deploy/coturn/README.md:
 // username = "<expiry_unix_seconds>:<tenant>:<DeviceId>",
 // password = base64(HMAC-SHA1(static-auth-secret, username)).
@@ -376,6 +387,7 @@ heyaki::NodeIceServer turn_server(const std::string& host, std::uint16_t port,
                                   const std::string& secret,
                                   const std::string& tenant,
                                   const heyaki::DeviceId& device_id,
+                                  heyaki::NodeIceServerKind kind,
                                   std::chrono::milliseconds expiry_offset = {}) {
   // M9-08: a negative offset derives already-stale REST credentials so the
   // fault matrix can prove coturn rejects expired allocations explicitly.
@@ -394,7 +406,7 @@ heyaki::NodeIceServer turn_server(const std::string& host, std::uint16_t port,
                                 reinterpret_cast<const unsigned char*>(username.data()),
                                 username.size(), mac, &mac_size);
   heyaki::NodeIceServer server;
-  server.kind = heyaki::NodeIceServerKind::turn_udp;
+  server.kind = kind;
   server.hostname = host;
   server.port = port;
   server.username = username;
@@ -407,6 +419,11 @@ struct RunOptions {
   std::optional<std::string> stun;
   std::optional<std::string> turn;
   std::string turn_secret;
+  // M9-19: transport for the configured TURN server. udp keeps the M4/M9-07
+  // scenarios; tcp selects the TURN-over-TCP client (libnice builds only; the
+  // node rejects the policy on libjuice builds). tls has no backend in v1 and
+  // fails at flag parse.
+  std::string turn_transport{"udp"};
   // M9-07: explicit TURN credentials bypass the REST API derivation so a
   // libjuice static-credential test TURN server (Windows has no coturn) can
   // serve the turn_udp scenario.
@@ -521,7 +538,7 @@ int run_node(const std::filesystem::path& database, std::string_view application
     const auto separator = options.turn->rfind(':');
     heyaki::NodeIceServer server;
     if (!options.turn_username.empty() && !options.turn_credential.empty()) {
-      server.kind = heyaki::NodeIceServerKind::turn_udp;
+      server.kind = turn_kind_for_transport(options.turn_transport);
       server.hostname = options.turn->substr(0U, separator);
       server.port = static_cast<std::uint16_t>(
           parse_u64(options.turn->substr(separator + 1U)));
@@ -531,9 +548,15 @@ int run_node(const std::filesystem::path& database, std::string_view application
       server = turn_server(
           options.turn->substr(0U, separator),
           static_cast<std::uint16_t>(parse_u64(options.turn->substr(separator + 1U))),
-          options.turn_secret, tenant, device_id, options.turn_expiry_offset);
+          options.turn_secret, tenant, device_id,
+          turn_kind_for_transport(options.turn_transport), options.turn_expiry_offset);
     }
     policy.ice_servers.push_back(std::move(server));
+  }
+  // M9-19: a TURN/TCP server implies the matching candidate class; the
+  // relayed candidates ride the TCP control connection.
+  if (options.turn_transport == "tcp") {
+    policy.allow_turn_tcp = true;
   }
   policy.force_turn_data_path = options.force_turn;
   if (options.force_turn) {
@@ -2016,6 +2039,7 @@ int usage() {
             << "  heyaki-m4-matrix-node run DB APP_ID RELAY_URL CA TENANT BUDGET_MS\n"
             << "      [--role initiator|responder] [--stun HOST:PORT]\n"
             << "      [--turn HOST:PORT] [--turn-secret SECRET] [--force-turn]\n"
+            << "      [--turn-transport udp|tcp]  (M9-19; tcp needs the libnice backend)\n"
             << "      [--turn-username NAME --turn-credential SECRET]\n"
             << "      [--srflx-only] [--lan-only]\n"
             << "      [--hold-ms N] [--authenticate-budget-ms N] [--connect-retries N]\n"
@@ -2187,6 +2211,8 @@ int main(int argc, char** argv) {
         options.turn = argv[++index];
       } else if (flag == "--turn-secret" && index + 1 < argc) {
         options.turn_secret = argv[++index];
+      } else if (flag == "--turn-transport" && index + 1 < argc) {
+        options.turn_transport = argv[++index];
       } else if (flag == "--turn-username" && index + 1 < argc) {
         options.turn_username = argv[++index];
       } else if (flag == "--turn-credential" && index + 1 < argc) {
@@ -2286,6 +2312,25 @@ int main(int argc, char** argv) {
          options.force_turn || options.srflx_only)) {
       std::cerr << "--lan-only cannot be combined with --stun/--turn/"
                    "--force-turn/--srflx-only\n";
+      return usage();
+    }
+    // Validate early: an unknown --turn-transport value must fail usage, not
+    // silently degrade to the udp kind. tls names a transport no pinned ICE
+    // backend implements (libnice would silently degrade it to plaintext
+    // TURN/TCP), so it is not a valid choice in v1.
+    if (options.turn_transport == "tls") {
+      std::cerr << "--turn-transport tls is unavailable: no pinned ICE backend "
+                   "implements TURN/TLS\n";
+      return usage();
+    }
+    if (options.turn_transport != "udp" && options.turn_transport != "tcp") {
+      std::cerr << "--turn-transport must be udp or tcp\n";
+      return usage();
+    }
+    // The transport only matters together with a TURN server; catching the
+    // dangling flag here keeps scenario scripts honest.
+    if (!options.turn.has_value() && options.turn_transport != "udp") {
+      std::cerr << "--turn-transport requires --turn\n";
       return usage();
     }
     return run_node(argv[2], argv[3], argv[4], std::filesystem::path{argv[5]},

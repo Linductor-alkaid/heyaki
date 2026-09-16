@@ -2848,6 +2848,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     config.signaling_path = snapshot.route == SignalingRouteKind::relay
                                 ? transport::SignalingPathKind::relay
                                 : transport::SignalingPathKind::lan;
+    config.tcp_turn_backend_verified =
+        transport::webrtc::tcp_turn_backend_supported();
     config.candidates.allow_ipv6_host = path_policy.allow_ipv6_host;
     config.candidates.allow_ipv4_host = path_policy.allow_ipv4_host;
     config.candidates.allow_server_reflexive = path_policy.allow_server_reflexive;
@@ -4284,6 +4286,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     transport::webrtc::WebRtcTransportConfig config;
     config.offerer = restart.initiator;
     config.signaling_path = transport::SignalingPathKind::none;
+    config.tcp_turn_backend_verified =
+        transport::webrtc::tcp_turn_backend_supported();
     config.candidates.allow_ipv6_host = path_policy.allow_ipv6_host;
     config.candidates.allow_ipv4_host = path_policy.allow_ipv4_host;
     config.candidates.allow_server_reflexive = path_policy.allow_server_reflexive;
@@ -7356,6 +7360,10 @@ Error path_policy_error(const char* detail) {
 
 }  // namespace
 
+bool tcp_turn_backend_supported() noexcept {
+  return transport::webrtc::tcp_turn_backend_supported();
+}
+
 Result<PeerPathPolicy> default_peer_path_policy(ConnectivityMode mode) noexcept {
   PeerPathPolicy policy;
   switch (mode) {
@@ -7396,7 +7404,16 @@ Result<void> validate_peer_path_policy(const PeerPathPolicy& policy,
       return Result<void>::failure(path_policy_error("lan_only_disallows_turn"));
     }
   }
-  if (policy.allow_turn_tcp || policy.allow_turn_tls) {
+  // M9-19: TURN/TLS has no backend in v1 — libnice's TURN_TLS relay type is a
+  // legacy-compat placeholder that silently speaks plaintext TURN/TCP for
+  // standard ICE, so accepting the policy would be a configuration lie.
+  // TURN/TCP is valid only when the linked ICE backend implements the client
+  // (libnice builds); the vendored libjuice backend stays TURN/UDP only.
+  if (policy.allow_turn_tls) {
+    return Result<void>::failure(
+        path_policy_error("turn_tls_backend_not_verified"));
+  }
+  if (policy.allow_turn_tcp && !transport::webrtc::tcp_turn_backend_supported()) {
     return Result<void>::failure(path_policy_error("tcp_turn_backend_not_verified"));
   }
   const bool any_turn_class =
@@ -7431,6 +7448,12 @@ Result<void> validate_peer_path_policy(const PeerPathPolicy& policy,
         server.kind != NodeIceServerKind::turn_tcp &&
         server.kind != NodeIceServerKind::turn_tls) {
       return Result<void>::failure(path_policy_error("ice_server_kind_invalid"));
+    }
+    if (server.kind == NodeIceServerKind::turn_tls) {
+      // Same M9-19 gate as the candidate class: no backend rides TURN/TLS,
+      // and libnice would silently degrade it to plaintext TURN/TCP.
+      return Result<void>::failure(
+          path_policy_error("turn_tls_backend_not_verified"));
     }
     if (server.username.empty() || server.credential.empty()) {
       return Result<void>::failure(path_policy_error("turn_server_requires_credentials"));

@@ -54,9 +54,21 @@ struct WebRtcTransportConfig {
   std::size_t maximum_message_bytes{1024U * 1024U};
   std::size_t buffered_amount_high_water{512U * 1024U};
   std::size_t buffered_amount_low_water{256U * 1024U};
-  // The default pinned libjuice backend does not implement TURN/TCP or TURN/TLS.
+  // Must mirror the TURN/TCP client capability of the linked ICE backend
+  // (tcp_turn_backend_supported()); the transport rejects allow_turn_tcp
+  // otherwise. The vendored libjuice backend implements the TURN client over
+  // UDP only; the libnice backend (M9-19) adds TURN over a TCP control
+  // connection. TURN/TLS has no backend in v1 and is rejected outright.
   bool tcp_turn_backend_verified{false};
 };
+
+// Whether this build's libdatachannel ICE backend implements the TURN client
+// over a TCP control connection. Compile-time fact of the linked backend:
+// true for HEYAKI_ICE_BACKEND=nice builds, false for the default vendored
+// libjuice (TURN/UDP only). TURN/TLS is NOT implemented by any pinned backend:
+// libnice's TURN_TLS relay type silently degrades to plaintext TURN/TCP for
+// standard ICE, so TURN/TLS policies and servers are rejected everywhere.
+[[nodiscard]] bool tcp_turn_backend_supported() noexcept;
 
 struct WebRtcTransportDiagnostics {
   std::uint64_t callbacks_enqueued{};

@@ -446,13 +446,15 @@ for scenario in "${scenarios[@]}"; do
       # Kill both coturns under an authenticated TURN-relayed session. The
       # asserted contracts: the participants stay bounded (both exit inside
       # their budgets with a result line — no hang), and the relay control
-      # plane is unaffected. Explicit note: the pinned libjuice does NOT
+      # plane is unaffected. Backend note: the vendored libjuice does NOT
       # propagate TURN-server death to session closure through RFC 7675
       # consent within this window (CI run 34684217306 and a local repro
       # with the embedded TURN server both held state=authenticated 40-70 s
-      # past the kill); session termination on association loss stays
-      # covered by the m4 shutdown matrix. Coturn must serve fresh
-      # allocations again after the restart (recovery pair below).
+      # past the kill); libnice (the coturn-topology CI backend since M9-19)
+      # implements consent freshness, so sessions may close explicitly there —
+      # either outcome satisfies bounded survival. Session termination on
+      # association loss stays covered by the m4 shutdown matrix. Coturn must
+      # serve fresh allocations again after the restart (recovery pair below).
       prepare_participants "trestart" || true
       sleep 4
       launch_responder "trestart" 60000 \

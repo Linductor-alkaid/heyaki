@@ -16,6 +16,14 @@ set -euo pipefail
 #                        each other through their mapped public addresses
 #   cgnat                home full-cone NAT stacked below a carrier symmetric
 #                        NAT (double NAT); TURN fallback across both layers
+#   turn_tcp (M9-19)     ALL client UDP dropped (STUN, TURN/UDP, srflx all
+#                        dead); the session must establish over TURN/TCP
+#                        (coturn listening-port over TCP) and pass m6+m7
+#                        (libnice ICE backend build only). TURN/TLS has no
+#                        scenario: no pinned ICE backend implements it
+#                        (libnice's TURN_TLS silently degrades to plaintext
+#                        TURN/TCP for standard ICE, so heyaki rejects the
+#                        class outright — see validate_peer_path_policy).
 # tests/network/nat_probe.py queries both STUN servers from one socket before
 # each heyaki run, so the emulated NAT class itself is verified (mapping
 # equality/inequality and the public alias), not just the session outcome.
@@ -35,6 +43,7 @@ usage() {
 Usage: $0 --relay-bin PATH --matrix-bin PATH [--demo-bin PATH] [--coturn-bin PATH]
           [--scenario NAME]...
 Scenarios: full_cone restricted_cone port_restricted_cone symmetric hairpin cgnat
+           turn_tcp
 (default: all)
 USAGE_EOF
 }
@@ -70,7 +79,8 @@ ip netns delete __heyaki_nat_probe
 nft add table inet __heyaki_nat_probe 2>/dev/null || skip "nftables is unavailable to this process"
 nft delete table inet __heyaki_nat_probe
 ((${#scenarios[@]} == 0)) &&
-  scenarios=(full_cone restricted_cone port_restricted_cone symmetric hairpin cgnat)
+  scenarios=(full_cone restricted_cone port_restricted_cone symmetric hairpin cgnat
+    turn_tcp)
 
 work_dir=$(mktemp -d /tmp/heyaki-nat-matrix.XXXXXX)
 chmod 700 "${work_dir}"
@@ -437,6 +447,18 @@ symmetric_ranges() {
     ip saddr "${c}" ip daddr != "${subnet}" snat to "${m}:${r_other}" fully-random
 }
 
+# M9-19: kill every client-originated UDP packet at the forward hook, so STUN
+# binding, TURN/UDP allocation, and srflx gathering are all dead while TCP to
+# the relay (WSS) and to coturn's TCP/TLS listeners stays open. The
+# coturn-to-coturn relayed leg rides inside the public namespace and never
+# crosses this chain.
+client_udp_drops() {
+  nft add rule inet heyaki_nat flt meta l4proto udp ip saddr 10.78.0.0/24 drop
+  nft add rule inet heyaki_nat flt meta l4proto udp ip saddr 10.78.1.0/24 drop
+  nft add rule inet heyaki_nat flt meta l4proto udp ip saddr 10.79.0.0/24 drop
+  nft add rule inet heyaki_nat flt meta l4proto udp ip saddr 10.79.1.0/24 drop
+}
+
 # ---- participants -------------------------------------------------------
 run_in() {
   # namespace output_file command...
@@ -478,14 +500,30 @@ result_field() {
 #               first CI run observed picking turn_udp over a punchable pair)
 #   turn      — STUN + TURN with REST credentials; the session must establish
 #               on a mediated path (symmetric/CGNAT classes)
+#   turn_tcp (M9-19) — only a TURN server over TCP (coturn listening-port);
+#               no STUN server is configured because client UDP is dropped in
+#               this scenario and a dead STUN gather would only burn the P95
+#               budget
 # Extra args (retries, budgets) are shared by both sides.
 run_pair() {
   # tag init_ns resp_ns budget turn_mode [extra node args...]
   local tag=$1 init_ns=$2 resp_ns=$3 budget=$4 turn_mode=$5; shift 5
-  local init_turn_args=() resp_turn_args=()
-  if [[ "${turn_mode}" == "turn" ]]; then
-    init_turn_args=(--turn "${turn_a_ip}:${turn_port}" --turn-secret "${secret}")
-    resp_turn_args=(--turn "${turn_b_ip}:${turn_port_b}" --turn-secret "${secret}")
+  local init_turn_args=() resp_turn_args=() init_stun_args=() resp_stun_args=()
+  case "${turn_mode}" in
+    turn)
+      init_turn_args=(--turn "${turn_a_ip}:${turn_port}" --turn-secret "${secret}")
+      resp_turn_args=(--turn "${turn_b_ip}:${turn_port_b}" --turn-secret "${secret}")
+      ;;
+    turn_tcp)
+      init_turn_args=(--turn "${turn_a_ip}:${turn_port}"
+        --turn-secret "${secret}" --turn-transport tcp)
+      resp_turn_args=(--turn "${turn_b_ip}:${turn_port_b}"
+        --turn-secret "${secret}" --turn-transport tcp)
+      ;;
+  esac
+  if [[ "${turn_mode}" == "stun-only" || "${turn_mode}" == "turn" ]]; then
+    init_stun_args=(--stun "${turn_a_ip}:${turn_port}")
+    resp_stun_args=(--stun "${turn_b_ip}:${turn_port_b}")
   fi
   prepare_participants "${tag}" "${init_ns}" "${resp_ns}"
   # Let endpoints from the previous scenario fall out of the relay directory
@@ -495,7 +533,7 @@ run_pair() {
     run "${work_dir}/${tag}-responder.sqlite" matrix.second \
     "wss://${pub_relay}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" "${budget}" \
     --role responder --srflx-only \
-    --stun "${turn_b_ip}:${turn_port_b}" \
+    ${resp_stun_args[@]+"${resp_stun_args[@]}"} \
     ${resp_turn_args[@]+"${resp_turn_args[@]}"} \
     --authenticate-budget-ms 20000 "$@" &
   local responder_pid=$!
@@ -503,7 +541,7 @@ run_pair() {
     run "${work_dir}/${tag}-initiator.sqlite" matrix.first \
     "wss://${pub_relay}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" "${budget}" \
     --role initiator --srflx-only \
-    --stun "${turn_a_ip}:${turn_port}" \
+    ${init_stun_args[@]+"${init_stun_args[@]}"} \
     ${init_turn_args[@]+"${init_turn_args[@]}"} \
     --authenticate-budget-ms 20000 "$@"
   local initiator_status=$?
@@ -546,14 +584,18 @@ dump_outputs() {
 # proves mediation: the label names the LOCAL candidate type, and with inbound
 # DNAT absent (probe-verified) the remote side can only have been RELAYED —
 # the same contract as the M4 harness's require_authenticated_turn.
+# strict_m7="strict-m7" (M9-19 TURN/TCP+TLS scenarios) additionally requires
+# the m7 file push to have committed on the asserted cycle.
 require_result() {
-  # tag line expected_paths_csv strict_m6
-  local tag=$1 line=$2 expected_paths_csv=$3 strict_m6=$4
-  local authenticated data_path m6_message m6_rpc
+  # tag line expected_paths_csv strict_m6 [strict_m7]
+  local tag=$1 line=$2 expected_paths_csv=$3 strict_m6=$4 strict_m7=${5:-}
+  local authenticated data_path m6_message m6_rpc m7_event m7_file
   authenticated=$(result_field "${line}" authenticated)
   data_path=$(result_field "${line}" data_path)
   m6_message=$(result_field "${line}" m6_message_acked)
   m6_rpc=$(result_field "${line}" m6_rpc_status)
+  m7_event=$(result_field "${line}" m7_event)
+  m7_file=$(result_field "${line}" m7_file)
   local matched=0
   local expected
   for expected in ${expected_paths_csv//,/ }; do
@@ -568,6 +610,13 @@ require_result() {
   if [[ "${strict_m6}" == "strict" &&
         ("${m6_message}" != "1" || "${m6_rpc}" != "1") ]]; then
     log "SCENARIO_FAILED ${tag} m6 services: ${line}"
+    dump_outputs "${tag}"
+    failures=$((failures + 1))
+    return 1
+  fi
+  if [[ "${strict_m7}" == "strict-m7" &&
+        ("${m7_event}" != "1" || "${m7_file}" != "1") ]]; then
+    log "SCENARIO_FAILED ${tag} m7 file transfer: ${line}"
     dump_outputs "${tag}"
     failures=$((failures + 1))
     return 1
@@ -630,7 +679,9 @@ p95_of_samples() { printf '%s\n' "$@" | sort -n | tail -1; }
 
 run_cycles() {
   # scenario_tag cycles expected_paths p95_budget_ms turn_mode init_ns resp_ns
+  # [strict_m7]
   local tag=$1 cycles=$2 expected_paths=$3 p95_budget=$4 turn_mode=$5 init_ns=$6 resp_ns=$7
+  local strict_m7=${8:-}
   local samples=() line duration cycle p95
   for cycle in $(seq 1 "${cycles}"); do
     run_pair "${tag}-${cycle}" "${init_ns}" "${resp_ns}" 40000 "${turn_mode}" \
@@ -640,7 +691,9 @@ run_cycles() {
     # informational (churn races under retry windows are a known tail).
     local m6_mode=info
     [[ ${cycle} -eq 1 ]] && m6_mode=strict
-    require_result "${tag}-${cycle}" "${line}" "${expected_paths}" "${m6_mode}" || true
+    local m7_mode=info
+    [[ ${cycle} -eq 1 && -n "${strict_m7}" ]] && m7_mode="${strict_m7}"
+    require_result "${tag}-${cycle}" "${line}" "${expected_paths}" "${m6_mode}" "${m7_mode}" || true
     duration=$(result_field "${line}" duration_ms)
     [[ -n "${duration}" ]] && samples+=("${duration}")
   done
@@ -758,6 +811,15 @@ for scenario in "${scenarios[@]}"; do
         dump_outputs "cgnat-3"
         failures=$((failures + 1))
       fi
+      ;;
+    turn_tcp)
+      # M9-19: the M9-07 leftover udp_blocked-with-TURN-unreachable case.
+      # All client UDP is dead, so the session can only ride TURN/TCP (coturn
+      # listening-port over TCP); m6 AND the m7 file push must succeed end to
+      # end over the relayed path.
+      nft_bootstrap
+      client_udp_drops
+      run_cycles turntcp 3 turn_tcp 5000 turn_tcp "${ns0}" "${ns1}" strict-m7
       ;;
     *)
       log "unknown scenario: ${scenario}"

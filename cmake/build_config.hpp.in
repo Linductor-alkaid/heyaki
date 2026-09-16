@@ -7,3 +7,8 @@
 #cmakedefine01 HEYAKI_BUILD_FEATURE_RELAY
 #cmakedefine01 HEYAKI_BUILD_FEATURE_TUI
 #cmakedefine01 HEYAKI_BUILD_FEATURE_ZSTD
+// M9-19: 1 when the build's libdatachannel ICE backend implements the
+// TURN client over a TCP control connection (libnice); the vendored libjuice
+// backend is TURN/UDP only. TURN/TLS is implemented by no pinned backend and
+// is rejected at every policy layer on both backends.
+#cmakedefine01 HEYAKI_WEBRTC_TCP_TURN

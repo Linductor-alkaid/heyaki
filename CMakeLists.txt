@@ -31,6 +31,17 @@ option(HEYAKI_BUILD_FUZZERS "Build libFuzzer protocol targets (Clang only)" OFF)
 option(HEYAKI_HARDENING
   "Compile and link release artifacts with exploit mitigations (PIE, full RELRO, NX stack, stack protector, FORTIFY, CET/CF)"
   ON)
+# M9-19: ICE backend for the pinned libdatachannel. `juice` builds the vendored
+# libjuice (TURN client over UDP only). `nice` builds against the system
+# libnice/GLib pair (same class of platform dependency as OpenSSL) and enables
+# the TURN-over-TCP client (RFC 5766 over a TCP control connection, ICE-TCP per
+# RFC 6544). TURN/TLS is NOT provided by either backend: libnice's TURN_TLS
+# relay type silently degrades to plaintext TURN/TCP for standard ICE, so
+# TURN/TLS policies are rejected at every layer regardless of backend. Linux
+# only; the Windows/Android backend choice is a separate decision point
+# (M9-19 record).
+set(HEYAKI_ICE_BACKEND "juice" CACHE STRING
+  "ICE backend for the pinned libdatachannel: juice (vendored, TURN/UDP only) or nice (system libnice, TURN/UDP+TCP)")
 
 set(HEYAKI_SANITIZER "none" CACHE STRING "Sanitizer: none, address, undefined, or thread")
 set_property(CACHE HEYAKI_SANITIZER PROPERTY STRINGS none address undefined thread)
@@ -132,6 +143,40 @@ endif()
 set(BUILD_SHARED_DEPS_LIBS OFF CACHE BOOL "" FORCE)
 set(NO_EXAMPLES ON CACHE BOOL "" FORCE)
 set(NO_TESTS ON CACHE BOOL "" FORCE)
+set(HEYAKI_WEBRTC_TCP_TURN 0)
+if(HEYAKI_ICE_BACKEND STREQUAL "nice")
+  if(WIN32)
+    message(FATAL_ERROR
+      "HEYAKI_ICE_BACKEND=nice is not available on Windows: the libnice backend "
+      "pulls GLib, and the Windows ICE backend choice is a separate decision "
+      "(M9-19). Use the default juice backend.")
+  endif()
+  # Resolve libnice through the pinned dependency's own find modules so the
+  # probe stays identical to what libdatachannel consumes. The version floor
+  # freezes the ubuntu-24.04 distro line (libnice 0.1.21, GLib 2.80): libnice
+  # is a system dependency like OpenSSL, not a lock-file atom, so the floor is
+  # the pin (see docs/supply-chain/dependency-policy.md).
+  list(APPEND CMAKE_MODULE_PATH
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libdatachannel/cmake/Modules")
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(HEYAKI_PC_LIBNICE REQUIRED nice)
+  if(HEYAKI_PC_LIBNICE_VERSION VERSION_LESS 0.1.21)
+    message(FATAL_ERROR
+      "HEYAKI_ICE_BACKEND=nice requires libnice >= 0.1.21 (ubuntu-24.04 distro "
+      "line), found ${HEYAKI_PC_LIBNICE_VERSION}")
+  endif()
+  find_package(LibNice REQUIRED)
+  set(USE_NICE ON CACHE BOOL "" FORCE)
+  set(HEYAKI_WEBRTC_TCP_TURN 1)
+  message(STATUS
+    "Heyaki ICE backend: libnice ${HEYAKI_PC_LIBNICE_VERSION} (TURN/UDP+TCP)")
+elseif(NOT HEYAKI_ICE_BACKEND STREQUAL "juice")
+  message(FATAL_ERROR
+    "HEYAKI_ICE_BACKEND must be 'juice' or 'nice', got '${HEYAKI_ICE_BACKEND}'")
+else()
+  set(USE_NICE OFF CACHE BOOL "" FORCE)
+  message(STATUS "Heyaki ICE backend: vendored libjuice (TURN/UDP only)")
+endif()
 add_subdirectory(third_party/libdatachannel)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 
@@ -398,6 +443,14 @@ if(HEYAKI_BUILD_APPS)
   # scenarios on hosts without coturn (Windows CI, self-hosted cross-OS
   # fleets). Static target: the helper must not drag the libjuice DLL
   # dependency into every consumer of the install tree.
+  # M9-19: with the libnice backend libdatachannel no longer adds its vendored
+  # libjuice subdirectory, so build it here for this helper only (EXCLUDE_FROM
+  # _ALL keeps it out of default builds). The helper stays TURN/UDP: TURN/TCP
+  # and TURN/TLS scenarios run against coturn.
+  if(NOT TARGET LibJuice::LibJuiceStatic)
+    add_subdirectory(third_party/libdatachannel/deps/libjuice libjuice-test-server
+      EXCLUDE_FROM_ALL)
+  endif()
   add_executable(heyaki-test-turn-server apps/demo/test_turn_server.cpp)
   target_link_libraries(heyaki-test-turn-server PRIVATE LibJuice::LibJuiceStatic)
   heyaki_configure_target(heyaki-test-turn-server)
@@ -442,6 +495,17 @@ install(FILES
   DESTINATION "${CMAKE_INSTALL_DATADIR}/heyaki/supply-chain")
 
 set(HEYAKI_CMAKE_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/heyaki")
+# M9-19: with the libnice backend the installed LibDataChannel target carries
+# $<LINK_ONLY:LibNice::LibNice> in its link interface (upstream config does
+# not find libnice for consumers), so the heyaki package must define that
+# target first. Reuse the pinned dependency's own find modules so the consumer
+# probe matches the build probe.
+if(HEYAKI_ICE_BACKEND STREQUAL "nice")
+  install(FILES
+    third_party/libdatachannel/cmake/Modules/FindLibNice.cmake
+    third_party/libdatachannel/cmake/Modules/FindGLIB.cmake
+    DESTINATION "${HEYAKI_CMAKE_INSTALL_DIR}/modules")
+endif()
 configure_package_config_file(
   cmake/heyakiConfig.cmake.in
   "${CMAKE_CURRENT_BINARY_DIR}/heyakiConfig.cmake"

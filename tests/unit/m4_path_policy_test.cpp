@@ -128,7 +128,11 @@ TEST(M4PathPolicy, RejectsEmptyAndLanOnlyConflicts) {
   EXPECT_EQ(rejected.error_if()->safe_detail(), "lan_only_disallows_turn");
 }
 
-TEST(M4PathPolicy, RejectsUnverifiedTcpTurnUntilBackendIsVerified) {
+TEST(M4PathPolicy, TcpTurnPoliciesFollowBackendCapability) {
+  // M9-19: the TURN/TCP candidate class rides on the linked ICE backend's
+  // client. The default vendored libjuice backend is TURN/UDP only and keeps
+  // rejecting the policy; the libnice backend implements the TURN-over-TCP
+  // client and accepts it.
   PeerPathPolicy tcp = PeerPathPolicy{};
   tcp.allow_turn_tcp = true;
   tcp.ice_servers.push_back(NodeIceServer{
@@ -137,15 +141,36 @@ TEST(M4PathPolicy, RejectsUnverifiedTcpTurnUntilBackendIsVerified) {
       .port = 3478U,
       .username = "user",
       .credential = "credential"});
-  auto rejected = validate_peer_path_policy(tcp, ConnectivityMode::automatic);
-  ASSERT_FALSE(rejected);
-  EXPECT_EQ(rejected.error_if()->safe_detail(), "tcp_turn_backend_not_verified");
+  auto validated = validate_peer_path_policy(tcp, ConnectivityMode::automatic);
+  if (tcp_turn_backend_supported()) {
+    ASSERT_TRUE(validated);
+  } else {
+    ASSERT_FALSE(validated);
+    EXPECT_EQ(validated.error_if()->safe_detail(), "tcp_turn_backend_not_verified");
+  }
+}
 
+TEST(M4PathPolicy, TurnTlsRejectedOnEveryBackend) {
+  // M9-19: TURN/TLS has no pinned backend — libnice's TURN_TLS relay type
+  // silently degrades to plaintext TURN/TCP for standard ICE, so both the
+  // candidate class and a turn_tls ICE server must be rejected on libnice and
+  // libjuice builds alike.
   PeerPathPolicy tls = PeerPathPolicy{};
   tls.allow_turn_tls = true;
-  rejected = validate_peer_path_policy(tls, ConnectivityMode::automatic);
+  auto rejected = validate_peer_path_policy(tls, ConnectivityMode::automatic);
   ASSERT_FALSE(rejected);
-  EXPECT_EQ(rejected.error_if()->safe_detail(), "tcp_turn_backend_not_verified");
+  EXPECT_EQ(rejected.error_if()->safe_detail(), "turn_tls_backend_not_verified");
+
+  PeerPathPolicy tls_server = PeerPathPolicy{};
+  tls_server.ice_servers.push_back(NodeIceServer{
+      .kind = NodeIceServerKind::turn_tls,
+      .hostname = "turn.example",
+      .port = 5349U,
+      .username = "user",
+      .credential = "credential"});
+  rejected = validate_peer_path_policy(tls_server, ConnectivityMode::automatic);
+  ASSERT_FALSE(rejected);
+  EXPECT_EQ(rejected.error_if()->safe_detail(), "turn_tls_backend_not_verified");
 }
 
 TEST(M4PathPolicy, ForcedTurnRequiresTurnClassAndServer) {
@@ -357,9 +382,16 @@ TEST_F(M4PathPolicyNodeTest, NodeCreateFailsFastOnInvalidPolicyOverride) {
   PeerPathPolicy tcp = PeerPathPolicy{};
   tcp.allow_turn_tcp = true;
   unverified_tcp.path_policy_override = tcp;
-  rejected = Node::create(std::move(unverified_tcp));
-  ASSERT_FALSE(rejected);
-  EXPECT_EQ(rejected.error_if()->safe_detail(), "tcp_turn_backend_not_verified");
+  auto created = Node::create(std::move(unverified_tcp));
+  if (tcp_turn_backend_supported()) {
+    // libnice backend: the policy is accepted (network reachability of the
+    // TURN server is not a create-time concern).
+    ASSERT_TRUE(created);
+    EXPECT_TRUE(created.value_if()->shutdown().stopped);
+  } else {
+    ASSERT_FALSE(created);
+    EXPECT_EQ(created.error_if()->safe_detail(), "tcp_turn_backend_not_verified");
+  }
 }
 
 TEST_F(M4PathPolicyNodeTest, HostOnlyOverrideStillAssemblesAuthenticatedSession) {

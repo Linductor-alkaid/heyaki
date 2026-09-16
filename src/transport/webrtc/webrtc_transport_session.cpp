@@ -1,5 +1,6 @@
 #include "webrtc_transport_session.hpp"
 
+#include <heyaki/detail/build_config.hpp>
 #include <heyaki/signaling_protocol.hpp>
 
 #include <executor/comm.hpp>
@@ -43,16 +44,26 @@ bool valid_config(const WebRtcTransportConfig& config) noexcept {
       config.buffered_amount_high_water > config.maximum_message_bytes * 64U) {
     return false;
   }
-  if ((!config.candidates.allow_ipv4_host && !config.candidates.allow_ipv6_host &&
+  // M9-19: TURN/TLS has no pinned backend — libnice's TURN_TLS relay type is
+  // a legacy-compat placeholder that silently speaks plaintext TURN/TCP for
+  // standard ICE (RFC 5245), so a TURN/TLS candidate class is a configuration
+  // lie and must fail validation everywhere. TURN/TCP rides the same check as
+  // the linked backend's client capability.
+  if (config.candidates.allow_turn_tls ||
+      (!config.candidates.allow_ipv4_host && !config.candidates.allow_ipv6_host &&
        !config.candidates.allow_server_reflexive && !config.candidates.allow_turn_udp &&
-       !config.candidates.allow_turn_tcp && !config.candidates.allow_turn_tls) ||
-      ((config.candidates.allow_turn_tcp || config.candidates.allow_turn_tls) &&
-       !config.tcp_turn_backend_verified)) {
+       !config.candidates.allow_turn_tcp) ||
+      (config.candidates.allow_turn_tcp && !config.tcp_turn_backend_verified)) {
     return false;
   }
   return std::all_of(config.ice_servers.begin(), config.ice_servers.end(),
                      [](const IceServerConfig& server) {
                        if (server.hostname.empty() || server.port == 0U) {
+                         return false;
+                       }
+                       // M9-19: a TURN/TLS server has no backend to ride on;
+                       // libnice would silently speak plaintext TURN/TCP.
+                       if (server.kind == IceServerKind::turn_tls) {
                          return false;
                        }
                        return server.kind == IceServerKind::stun ||
@@ -104,8 +115,7 @@ rtc::Configuration rtc_config(const WebRtcTransportConfig& config) {
                                   ? rtc::TransportPolicy::Relay
                                   : rtc::TransportPolicy::All;
   output.enableIceTcp = config.tcp_turn_backend_verified &&
-                        (config.candidates.allow_turn_tcp ||
-                         config.candidates.allow_turn_tls);
+                        config.candidates.allow_turn_tcp;
   for (const auto& server : config.ice_servers) {
     switch (server.kind) {
       case IceServerKind::stun:
@@ -142,9 +152,11 @@ bool candidate_allowed(const rtc::Candidate& candidate,
     case rtc::Candidate::Type::PeerReflexive:
       return policy.allow_server_reflexive;
     case rtc::Candidate::Type::Relayed:
+      // A non-UDP relayed candidate rides a TURN-over-TCP control connection;
+      // TURN/TLS has no backend, so the class never admits anything extra.
       return candidate.transportType() == rtc::Candidate::TransportType::Udp
                  ? policy.allow_turn_udp
-                 : (policy.allow_turn_tcp || policy.allow_turn_tls);
+                 : policy.allow_turn_tcp;
     case rtc::Candidate::Type::Unknown:
       return false;
   }
@@ -183,6 +195,10 @@ std::optional<DtlsFingerprint> sha256_fingerprint(
 }
 
 }  // namespace
+
+bool tcp_turn_backend_supported() noexcept {
+  return HEYAKI_WEBRTC_TCP_TURN != 0;
+}
 
 class WebRtcTransportSession::Impl
     : public std::enable_shared_from_this<WebRtcTransportSession::Impl> {
@@ -768,9 +784,6 @@ class WebRtcTransportSession::Impl
     if (local.type() == rtc::Candidate::Type::Relayed) {
       if (local.transportType() == rtc::Candidate::TransportType::Udp) {
         path_.data_path = DataPathKind::turn_udp;
-      } else if (config_.candidates.allow_turn_tls &&
-                 !config_.candidates.allow_turn_tcp) {
-        path_.data_path = DataPathKind::turn_tls;
       } else {
         path_.data_path = DataPathKind::turn_tcp;
       }

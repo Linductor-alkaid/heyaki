@@ -118,10 +118,11 @@ struct NodeIceServer {
 
 // Transport-neutral data-path policy following the architecture's candidate
 // priority order: IPv6 host, LAN IPv4 host, server-reflexive UDP, TURN/UDP,
-// then verified TURN/TCP/TLS. A disabled class is excluded from local
+// then verified TURN/TCP. A disabled class is excluded from local
 // gathering and remote admission; enabling a class never invents connectivity
-// the network cannot provide. TURN/TCP and TURN/TLS stay disabled until a
-// backend providing them is explicitly verified for the pinned dependency.
+// the network cannot provide. TURN/TCP requires a backend that implements the
+// client (see tcp_turn_backend_supported()); TURN/TLS has no pinned backend
+// in v1 and is rejected by validate_peer_path_policy.
 struct PeerPathPolicy {
   bool allow_ipv6_host{true};
   bool allow_ipv4_host{true};
@@ -134,6 +135,13 @@ struct PeerPathPolicy {
   bool force_turn_data_path{false};
   std::vector<NodeIceServer> ice_servers;
 };
+
+// Whether the build's ICE backend implements the TURN client over a TCP
+// control connection (M9-19: HEYAKI_ICE_BACKEND=nice, system libnice). The
+// default vendored libjuice backend is TURN/UDP only, and
+// validate_peer_path_policy rejects allow_turn_tcp there. TURN/TLS is not
+// implemented by any pinned backend and is rejected everywhere.
+[[nodiscard]] bool tcp_turn_backend_supported() noexcept;
 
 // Returns the policy a Node resolves for the mode when no explicit override is
 // configured: lan_only never configures ICE servers or non-host candidates,

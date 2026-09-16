@@ -214,8 +214,11 @@ tick 保留为兜底，预期 p50 降至 <100ms（PTY worker 50ms tick 成为下
 
 pinned libdatachannel v0.23.2 的 stats API 仅暴露 bytes/rtt（M9-01 已知限制）。
 应用层从不可靠通道序列缺口推导丢包率的复杂度与误报风险不划算，且 M9-19（TURN/
-TCP/TLS）计划切换 libnice 后端，届时 getStats 面会变化。**决策：维持 bytes/rtt
-作为现状替代面，丢包估计推迟到 M9-19 后端切换后统一重估。**
+TCP）已于 2026-09-16 落地 libnice 双后端（Linux `coturn-topology` job 以
+libnice 构建并跑全部矩阵/基准；其余构建维持 libjuice），getStats 面随之后端
+相关。**决策：维持 bytes/rtt 作为现状替代面，丢包估计以 libnice 后端的 CI
+基准输出为输入重估；TURN/TLS 被证实无任何 pinned 后端可用（libnice 占位符
+静默降级明文），不影响本决策。**
 
 ### 9.4 relay per-IP 限速 —— 默认保留 + 部署观察项
 
