@@ -491,6 +491,36 @@ TEST(M7FileService, SymlinkedRootComponentRejected) {
   EXPECT_FALSE(std::filesystem::exists(inbox / "real" / "evil.bin"));
 }
 
+// M9-15 security regression: a symlink placed at the FINAL path component must
+// be replaced by the atomic commit rename, never followed — the transfer still
+// commits and the link target outside the receive root stays untouched.
+TEST(M7FileService, FinalPathComponentSymlinkIsReplacedNotFollowed) {
+  M7ServicePair harness(file_options());
+  const auto inbox = harness.right_root_dir.path / "inbox";
+  std::filesystem::create_directories(inbox);
+  const auto escape_target = harness.right_root_dir.path.parent_path() / "evil-target.bin";
+  std::error_code ec;
+  std::filesystem::create_symlink(escape_target, inbox / "report.bin", ec);
+  if (ec) {
+    GTEST_SKIP() << "symlink creation unavailable";
+  }
+
+  const auto source =
+      M7ServicePair::make_source_file(harness.left_root_dir.path, "source.bin", 50'000U,
+                                      0x2AU);
+  ASSERT_TRUE(harness.left_files->push_file("inbox", "report.bin", source));
+  harness.cycle();
+
+  const auto final_path = inbox / "report.bin";
+  ASSERT_TRUE(std::filesystem::exists(final_path));
+  EXPECT_FALSE(std::filesystem::is_symlink(final_path));
+  EXPECT_EQ(M7ServicePair::read_file_bytes(final_path),
+            M7ServicePair::read_file_bytes(source));
+  // The link target outside the receive root was never created or written.
+  EXPECT_FALSE(std::filesystem::exists(escape_target));
+  EXPECT_EQ(harness.right_files->stats().committed, 1U);
+}
+
 TEST(M7FileService, PullServesUnderPullScopeOnly) {
   M7ServicePair harness(file_options());
   // The RIGHT side hosts the file; the LEFT side pulls it.

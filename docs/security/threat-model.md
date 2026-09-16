@@ -180,6 +180,16 @@ Windows enablement was fixed on 2026-09-05 together with P3-F3 (the profile inpu
 budget is now capped at the ConPTY stdin pipe buffer on Windows) and P4-F7 (ConPTY command
 lines use canonical MSVCRT argv quoting); Windows enablement follows the same posture —
 explicitly listed profiles only.
+- The M9-15 security-regression pass (2026-09-16, `m9-security-regression.md`) re-verified
+  all eight attack surfaces end to end and closed the gaps the milestone review found:
+  wire-level presence forgery/replay/identity-claim rejection over the real multicast
+  socket, slowloris-shaped partial handshakes reclaimed by the deadline with a legitimate
+  peer still authenticating, the global provisional cap across distinct source addresses,
+  password backoff doubling/clamping and per-source isolation plus a literal-leak hunt over
+  audit and profile bytes, third-party-key candidates, tampered TrustGrants, endpoint
+  records bound to the logged-in session over live WSS, the scope-matching and file-name
+  grammars pinned as tables, final-component symlink replacement, server-side oversized
+  control frames, and the one-to-one (no fan-out/reflection) signaling forward ratio.
 
 Residual risks accepted for v1 are LAN stable-ID enumeration, local/relay/coturn denial of service and
 traffic analysis, compromise of a device OS principal, lack of cross-VLAN serverless discovery, and lack

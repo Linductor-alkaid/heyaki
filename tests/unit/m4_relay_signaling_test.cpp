@@ -2,6 +2,7 @@
 // unified SignalingCoordinator running end to end through RelaySignalingRoute.
 
 #include "relay_database.hpp"
+#include "relay_endpoint.hpp"
 #include "relay_enrollment.hpp"
 #include "relay_login.hpp"
 #include "relay_server.hpp"
@@ -15,6 +16,13 @@
 #include <heyaki/signaling_protocol.hpp>
 
 #include <heyaki/relay/v1/relay_control.pb.h>
+
+#include <boost/asio/connect.hpp>
+#include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/ssl.hpp>
+#include <boost/beast/core/flat_buffer.hpp>
+#include <boost/beast/ssl.hpp>
+#include <boost/beast/websocket.hpp>
 
 #include <gtest/gtest.h>
 #include <openssl/evp.h>
@@ -627,6 +635,238 @@ TEST(M4RelaySignaling, TenantIsolationAndRateLimit) {
 
   ASSERT_TRUE(client_a.value_if()->close(3s));
   ASSERT_TRUE(client_b.value_if()->close(3s));
+}
+
+// M9-15 security regression: a logged-in session must not be able to publish
+// an endpoint record for a different device, even one validly signed with the
+// attacker's own key — the record is bound to the session identity before any
+// signature or directory work happens.
+TEST(M4RelaySignaling, EndpointPublishIsBoundToLoggedInSession) {
+  RelayFixture relay{"m4-relay-endpoint-forge"};
+  ASSERT_RELAY_READY(relay);
+  auto identity_a = create_identity();
+  auto identity_b = create_identity();
+  ASSERT_TRUE(identity_a && identity_b);
+  enroll_device_record(relay.directory.path() / "relay.sqlite", *identity_a.value_if(),
+                       "tenant-a");
+  enroll_device_record(relay.directory.path() / "relay.sqlite", *identity_b.value_if(),
+                       "tenant-a");
+  const auto now = now_milliseconds();
+  auto client_a = connect_control_client(relay.directory.path(), relay.port,
+                                         "heyaki-m4-relay-forge-a");
+  ASSERT_TRUE(client_a);
+  ASSERT_TRUE(login_client(*client_a.value_if(), *identity_a.value_if(), 1U, now, 0x51U,
+                          "tenant-a"));
+
+  // The publish path requires a live lease for the logged-in endpoint.
+  auto heartbeat = encode_relay_wss_heartbeat_request(RelayWssHeartbeatRequest{});
+  ASSERT_TRUE(heartbeat);
+  ASSERT_TRUE(send_control(*client_a.value_if(), RelayWssControlType::heartbeat,
+                           *heartbeat.value_if()));
+  auto heartbeat_ack = receive_control(*client_a.value_if());
+  ASSERT_TRUE(heartbeat_ack);
+  ASSERT_EQ(heartbeat_ack.value_if()->type, RelayWssControlType::heartbeat_ack);
+
+  const auto make_publish = [&](const IdentityKeyPair& signer,
+                                const DeviceId& claimed_device,
+                                std::uint8_t claimed_endpoint_byte) {
+    RelayEndpointRecord record;
+    EndpointId::Storage endpoint{};
+    endpoint[0] = std::byte{claimed_endpoint_byte};
+    record.endpoint = RelayEndpointKey{.device_id = claimed_device,
+                                       .endpoint_id = EndpointId{endpoint}};
+    record.application_id = "com.example.forge";
+    record.record_generation = 1U;
+    RelayManifestSha256 hash{};
+    hash[0] = std::byte{0x5aU};
+    record.manifest_sha256 = hash;
+    record.expires_unix_milliseconds = now + 60U * 1000U;
+    auto signed_record = sign_relay_endpoint_record(record, signer);
+    EXPECT_TRUE(signed_record) << signed_record.error_if()->safe_detail();
+    auto encoded = encode_relay_endpoint_record(record);
+    EXPECT_TRUE(encoded) << encoded.error_if()->safe_detail();
+    RelayWssEndpointPublish publish;
+    publish.endpoint_record = *encoded.value_if();
+    return encode_relay_wss_endpoint_publish(publish);
+  };
+
+  // Positive control first: this session publishing its own endpoint works.
+  auto own = make_publish(*identity_a.value_if(), identity_a.value_if()->device_id(),
+                          0x51U);
+  ASSERT_TRUE(own) << own.error_if()->safe_detail();
+  ASSERT_TRUE(send_control(*client_a.value_if(),
+                           RelayWssControlType::endpoint_publish, *own.value_if()));
+  auto published = receive_control(*client_a.value_if());
+  ASSERT_TRUE(published) << published.error_if()->safe_detail();
+  EXPECT_EQ(published.value_if()->type, RelayWssControlType::endpoint_publish_ack);
+
+  // Forged claim: session authenticated as A, record claims B's endpoint,
+  // signed by A's own (perfectly valid) key. The bound rejection (and the
+  // session close it carries) must arrive even though the record itself is
+  // validly signed — the signature would only be checked later.
+  auto forged = make_publish(*identity_a.value_if(), identity_b.value_if()->device_id(),
+                             0x52U);
+  ASSERT_TRUE(forged) << forged.error_if()->safe_detail();
+  ASSERT_TRUE(send_control(*client_a.value_if(),
+                           RelayWssControlType::endpoint_publish, *forged.value_if()));
+  auto denied = receive_control(*client_a.value_if());
+  ASSERT_TRUE(denied);
+  ASSERT_EQ(denied.value_if()->type, RelayWssControlType::control_error);
+  auto denial = parse_relay_wss_control_error(denied.value_if()->payload);
+  ASSERT_TRUE(denial);
+  EXPECT_EQ(denial.value_if()->code, ErrorCode::authentication);
+  EXPECT_EQ(denial.value_if()->safe_detail, "endpoint_record_session_mismatch");
+
+  // Exactly one endpoint reached the directory: the forged claim never landed.
+  EXPECT_TRUE(wait_until(
+      [&] {
+        return (*relay.server).value_if()->snapshot().endpoints.published == 1U;
+      },
+      2s));
+  ASSERT_TRUE(client_a.value_if()->close(3s));
+}
+
+// M9-15 security regression: a control frame far beyond
+// max_relay_wss_control_frame_bytes must be dropped at the websocket read cap
+// without unbounded server buffering, and the relay must keep serving
+// legitimate clients afterwards.
+TEST(M4RelaySignaling, OversizedControlFrameIsRejectedAndServerStaysHealthy) {
+  RelayFixture relay{"m4-relay-oversized-frame"};
+  ASSERT_RELAY_READY(relay);
+  const auto sessions_before =
+      (*relay.server).value_if()->snapshot().active_sessions;
+
+  {
+    boost::asio::io_context io;
+    boost::asio::ssl::context client_context{boost::asio::ssl::context::tls_client};
+    client_context.set_verify_mode(boost::asio::ssl::verify_none);
+    boost::beast::websocket::stream<
+        boost::beast::ssl_stream<boost::asio::ip::tcp::socket>>
+        websocket{io, client_context};
+    boost::asio::ip::tcp::resolver resolver{io};
+    auto endpoints = resolver.resolve("127.0.0.1", std::to_string(relay.port));
+    ASSERT_NO_THROW(boost::asio::connect(boost::beast::get_lowest_layer(websocket),
+                                         endpoints));
+    ASSERT_NO_THROW(
+        websocket.next_layer().handshake(boost::asio::ssl::stream_base::client));
+    ASSERT_NO_THROW(websocket.handshake("127.0.0.1",
+                                        std::string{relay_wss_control_path}));
+
+    // One binary message sixteen times the server-side read cap. The write may
+    // complete from kernel buffers or fail mid-stream when the server drops
+    // the session; either client-side outcome is acceptable — the contract
+    // under test is what the server does, asserted below.
+    try {
+      const std::vector<char> bomb(max_relay_wss_control_frame_bytes * 16U, 'x');
+      websocket.write(boost::asio::buffer(bomb));
+      boost::beast::flat_buffer buffer;
+      (void)websocket.read(buffer);
+    } catch (const boost::system::system_error&) {
+      // The server dropped the oversized session mid-stream: expected.
+    }
+  }
+
+  // The attacker session is gone and the relay is still running.
+  EXPECT_TRUE(wait_until(
+      [&] {
+        return (*relay.server).value_if()->snapshot().active_sessions <=
+               sessions_before;
+      },
+      3s));
+  EXPECT_EQ((*relay.server).value_if()->snapshot().state, RelayServerState::running);
+
+  // A fresh legitimate client completes login end to end.
+  auto identity = create_identity();
+  ASSERT_TRUE(identity);
+  enroll_device_record(relay.directory.path() / "relay.sqlite", *identity.value_if(),
+                       "tenant-a");
+  auto client = connect_control_client(relay.directory.path(), relay.port,
+                                       "heyaki-m4-relay-oversized-legit");
+  ASSERT_TRUE(client);
+  ASSERT_TRUE(login_client(*client.value_if(), *identity.value_if(), 1U,
+                          now_milliseconds(), 0x61U));
+  ASSERT_TRUE(client.value_if()->close(3s));
+}
+
+// M9-15 security regression: relayed signaling is strictly one-to-one — N
+// sends produce exactly N deliveries to the one target, nothing to other
+// logged-in endpoints, and no reflection back to the sender (no fan-out or
+// amplification shape).
+TEST(M4RelaySignaling, ForwardIsOneToOneWithoutFanoutOrReflection) {
+  RelayFixture relay{"m4-relay-one-to-one"};
+  ASSERT_RELAY_READY(relay);
+  auto identity_a = create_identity();
+  auto identity_b = create_identity();
+  auto identity_c = create_identity();
+  ASSERT_TRUE(identity_a && identity_b && identity_c);
+  enroll_device_record(relay.directory.path() / "relay.sqlite", *identity_a.value_if(),
+                       "tenant-a");
+  enroll_device_record(relay.directory.path() / "relay.sqlite", *identity_b.value_if(),
+                       "tenant-a");
+  enroll_device_record(relay.directory.path() / "relay.sqlite", *identity_c.value_if(),
+                       "tenant-a");
+  const auto now = now_milliseconds();
+  auto client_a = connect_control_client(relay.directory.path(), relay.port,
+                                         "heyaki-m4-relay-1to1-a");
+  auto client_b = connect_control_client(relay.directory.path(), relay.port,
+                                         "heyaki-m4-relay-1to1-b");
+  auto client_c = connect_control_client(relay.directory.path(), relay.port,
+                                         "heyaki-m4-relay-1to1-c");
+  ASSERT_TRUE(client_a && client_b && client_c);
+  ASSERT_TRUE(login_client(*client_a.value_if(), *identity_a.value_if(), 1U, now, 0x41U));
+  ASSERT_TRUE(login_client(*client_b.value_if(), *identity_b.value_if(), 1U, now, 0x42U));
+  ASSERT_TRUE(login_client(*client_c.value_if(), *identity_c.value_if(), 1U, now, 0x43U));
+
+  const auto forwarded_before =
+      (*relay.server).value_if()->snapshot().signaling_forwarded;
+  constexpr int kSends = 8;
+  for (int index = 0; index < kSends; ++index) {
+    auto send = sample_send();
+    send.target_device_id = identity_b.value_if()->device_id();
+    EndpointId::Storage target_endpoint{};
+    target_endpoint[0] = std::byte{0x42U};
+    send.target_endpoint_id = EndpointId{target_endpoint};
+    RequestId::Storage request{};
+    request[0] = static_cast<std::byte>(1U + static_cast<unsigned>(index));
+    send.request_id = RequestId{request};
+    auto payload = encode_relay_wss_signaling_send(send);
+    ASSERT_TRUE(payload);
+    ASSERT_TRUE(send_control(*client_a.value_if(),
+                             RelayWssControlType::signaling_send, *payload.value_if()));
+  }
+
+  // The target receives exactly kSends deliveries and no error frames.
+  int deliveries = 0;
+  const auto receive_deadline = std::chrono::steady_clock::now() + 5s;
+  while (deliveries < kSends && std::chrono::steady_clock::now() < receive_deadline) {
+    auto frame = receive_control(*client_b.value_if(), 1s);
+    ASSERT_TRUE(frame);
+    ASSERT_EQ(frame.value_if()->type, RelayWssControlType::signaling_deliver);
+    ++deliveries;
+  }
+  EXPECT_EQ(deliveries, kSends);
+  // Nothing further arrives for the target.
+  EXPECT_FALSE(receive_control(*client_b.value_if(), 300ms).has_value());
+  // An unrelated logged-in endpoint receives nothing.
+  EXPECT_FALSE(receive_control(*client_c.value_if(), 300ms).has_value());
+  // The sender gets no reflection of its own traffic.
+  EXPECT_FALSE(receive_control(*client_a.value_if(), 300ms).has_value());
+
+  // The relay forwarded exactly kSends messages — one per send, none extra.
+  const auto counter_deadline = std::chrono::steady_clock::now() + 2s;
+  while ((*relay.server).value_if()->snapshot().signaling_forwarded <
+         forwarded_before + kSends) {
+    if (std::chrono::steady_clock::now() > counter_deadline) {
+      break;
+    }
+    std::this_thread::sleep_for(2ms);
+  }
+  EXPECT_EQ((*relay.server).value_if()->snapshot().signaling_forwarded,
+            forwarded_before + kSends);
+
+  ASSERT_TRUE(client_a.value_if()->close(3s));
+  ASSERT_TRUE(client_b.value_if()->close(3s));
+  ASSERT_TRUE(client_c.value_if()->close(3s));
 }
 
 TEST(M4RelaySignaling, CoordinatorHandshakeOverRelayRoute) {

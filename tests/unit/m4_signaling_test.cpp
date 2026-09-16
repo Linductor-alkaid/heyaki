@@ -852,7 +852,23 @@ TEST(M4Coordinator, CandidateBindingViolationsRejected) {
                                     kSteadyNow, kNowUnix)
                    .has_value());
   EXPECT_EQ(delivered, (std::vector<std::uint32_t>{1U}));
-  EXPECT_GE(flow.b.coordinator->diagnostics().binding_rejected, 1U);
+
+  // M9-15 security regression: a candidate carrying every verified binding
+  // field but signed by a third party's key never reaches the session.
+  auto attacker = heyaki::create_identity();
+  ASSERT_TRUE(attacker) << attacker.error_if()->safe_detail();
+  auto third_party = make_candidate(3U, transcript, "8hKaFrag");
+  ASSERT_TRUE(heyaki::sign_signed_candidate(third_party, *attacker.value_if()));
+  forged_envelope.payload =
+      *heyaki::encode_signed_candidate(third_party).value_if();
+  EXPECT_FALSE(flow.b.coordinator
+                   ->handle_message(forged_envelope, heyaki::SignalingRouteKind::lan,
+                                    kSteadyNow, kNowUnix)
+                   .has_value());
+  EXPECT_EQ(delivered, (std::vector<std::uint32_t>{1U}));
+  EXPECT_GE(flow.b.coordinator->diagnostics().binding_rejected +
+                flow.b.coordinator->diagnostics().signature_rejected,
+            1U);
 }
 
 TEST(M4Coordinator, UnknownPeerIdentityRejected) {

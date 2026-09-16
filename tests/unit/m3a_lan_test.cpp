@@ -1133,6 +1133,342 @@ TEST_F(M3aNodeTest, RejectsForgedMulticastFloodWithinBounds) {
   EXPECT_TRUE(node.value_if()->shutdown().stopped);
 }
 
+// M9-15 security regression: the multicast discovery socket must reject
+// signature-forged, identity-claiming, and replayed presences over the real
+// wire — not only at the codec layer — while keeping directory state bounded.
+TEST_F(M3aNodeTest, ForgedReplayedAndMismatchedPresenceRejectedOverWire) {
+  LanConfiguration configuration;
+  configuration.connectivity_mode = ConnectivityMode::lan_only;
+  configuration.discoverable = false;
+  configuration.directory_capacity = 4U;
+  configuration.trusted_directory_reserve = 1U;
+  configuration.per_interface_directory_capacity = 4U;
+  configuration.per_source_presence_capacity = 4U;
+  configuration.unknown_identity_capacity = 3U;
+  configuration.replay_capacity = 8U;
+  configuration.diagnostic_capacity = 8U;
+  configuration.announcement_rate_per_second = 16U;
+  configuration.per_source_announcement_rate = 16U;
+  auto profile = initialized_profile("wire-forgery", "com.example.forgery",
+                                     configuration);
+  ASSERT_TRUE(profile) << profile.error_if()->safe_detail();
+  auto node = Node::create(node_config(*profile.value_if(), "com.example.forgery"));
+  ASSERT_TRUE(node) << node.error_if()->safe_detail();
+
+  const auto snapshot = node.value_if()->snapshot();
+  const auto interface = std::find_if(
+      snapshot.interfaces.begin(), snapshot.interfaces.end(),
+      [](const auto& candidate) {
+        return candidate.joined && candidate.family == LanInterfaceFamily::ipv4;
+      });
+  if (interface == snapshot.interfaces.end()) {
+    (void)node.value_if()->shutdown();
+    GTEST_SKIP() << "No IPv4 multicast-capable interface";
+  }
+  const auto attacker = create_identity();
+  const auto victim = create_identity();
+  ASSERT_TRUE(attacker && victim);
+
+  boost::asio::io_context io;
+  boost::asio::ip::udp::socket socket{io};
+  socket.open(boost::asio::ip::udp::v4());
+  socket.set_option(boost::asio::ip::multicast::outbound_interface(
+      boost::asio::ip::make_address_v4(interface->address)));
+  socket.set_option(boost::asio::ip::multicast::enable_loopback(true));
+  const boost::asio::ip::udp::endpoint destination{
+      boost::asio::ip::make_address_v4(lan_discovery_ipv4_group),
+      lan_discovery_udp_port};
+  const auto send_datagram = [&](const LanPresence& presence) {
+    auto datagram = encode_lan_presence_datagram(presence);
+    ASSERT_TRUE(datagram) << datagram.error_if()->safe_detail();
+    socket.send_to(boost::asio::buffer(*datagram.value_if()), destination);
+  };
+  const auto wait_for_detail = [&](std::string_view detail) {
+    const bool observed = wait_until(
+        [&] {
+          const auto current = node.value_if()->snapshot();
+          return current.last_error &&
+                 current.last_error->safe_detail() == detail;
+        },
+        std::chrono::seconds{2});
+    if (!observed) {
+      const auto current = node.value_if()->snapshot();
+      std::printf("M9-15 wire forgery: expected %s, last_error=%s rejected=%zu "
+                  "received=%zu\n",
+                  std::string{detail}.c_str(),
+                  current.last_error
+                      ? std::string{current.last_error->safe_detail()}.c_str()
+                      : "<none>",
+                  static_cast<std::size_t>(current.datagrams_rejected),
+                  static_cast<std::size_t>(current.datagrams_received));
+    }
+    EXPECT_TRUE(observed) << "expected rejection detail " << detail;
+  };
+
+  // A validly signed presence from a fresh identity is admitted.
+  send_datagram(signed_presence(*attacker.value_if(), 1U, 1U, 1U,
+                                std::chrono::milliseconds{1000}));
+  EXPECT_TRUE(wait_until(
+      [&] { return node.value_if()->snapshot().directory.current_entries == 1U; },
+      std::chrono::seconds{2}));
+
+  // A newer sequence from the same boot replaces the entry in place.
+  send_datagram(signed_presence(*attacker.value_if(), 1U, 1U, 2U,
+                                std::chrono::milliseconds{1000}));
+  EXPECT_TRUE(wait_until(
+      [&] { return node.value_if()->snapshot().directory.current_entries == 1U; },
+      std::chrono::seconds{2}));
+
+  // The superseded lower sequence is a replay.
+  send_datagram(signed_presence(*attacker.value_if(), 1U, 1U, 1U,
+                                std::chrono::milliseconds{1000}));
+  wait_for_detail("presence_sequence_replay");
+
+  // A field is modified after signing. The codec refuses to serialize such a
+  // presence (good defense), so the forgery is done the wire way: byte
+  // surgery on a validly encoded datagram. The signature field is the last
+  // field of the payload, so flipping the final byte breaks the signature
+  // while leaving every length-prefixed field parseable.
+  auto signed_seq3 = signed_presence(*attacker.value_if(), 1U, 1U, 3U,
+                                     std::chrono::milliseconds{1000});
+  auto tampered_bytes = encode_lan_presence_datagram(signed_seq3);
+  ASSERT_TRUE(tampered_bytes) << tampered_bytes.error_if()->safe_detail();
+  tampered_bytes.value_if()->back() ^= std::byte{0x01U};
+  socket.send_to(boost::asio::buffer(*tampered_bytes.value_if()), destination);
+  wait_for_detail("presence_signature_invalid");
+
+  // The device_id claim is swapped to a victim identity while the signing key
+  // stays the attacker's: the identity derived from the included key no
+  // longer matches the claimed device_id (checked before the signature).
+  auto signed_seq5 = signed_presence(*attacker.value_if(), 1U, 1U, 5U,
+                                     std::chrono::milliseconds{1000});
+  auto impostor_bytes = encode_lan_presence_datagram(signed_seq5);
+  ASSERT_TRUE(impostor_bytes) << impostor_bytes.error_if()->safe_detail();
+  const auto& attacker_id = attacker.value_if()->device_id().bytes();
+  const auto& victim_id = victim.value_if()->device_id().bytes();
+  const auto found = std::search(impostor_bytes.value_if()->begin(),
+                                 impostor_bytes.value_if()->end(), attacker_id.begin(),
+                                 attacker_id.end());
+  ASSERT_NE(found, impostor_bytes.value_if()->end())
+      << "device_id not found in encoded datagram";
+  std::copy(victim_id.begin(), victim_id.end(), found);
+  socket.send_to(boost::asio::buffer(*impostor_bytes.value_if()), destination);
+  wait_for_detail("presence_device_id_mismatch");
+
+  const auto after = node.value_if()->snapshot();
+  EXPECT_EQ(after.directory.current_entries, 1U);
+  EXPECT_GE(after.datagrams_rejected, 3U);
+  EXPECT_LE(after.directory.replay_entries, configuration.replay_capacity);
+  EXPECT_EQ(after.tls.authenticated_connections, 0U);
+  EXPECT_TRUE(node.value_if()->shutdown().stopped);
+}
+
+namespace {
+
+// A stalled TLS client that trickles a partial ClientHello record: enough
+// bytes for the server to know more is coming, never enough to finish.
+void trickle_partial_client_hello(boost::asio::ip::tcp::socket& socket) {
+  const std::array<std::byte, 5U> record_header{
+      std::byte{0x16U}, std::byte{0x03U}, std::byte{0x01U}, std::byte{0x01U},
+      std::byte{0x00U}};
+  std::array<std::byte, 16U> body{};
+  body[0] = std::byte{0x01U};  // ClientHello handshake type
+  boost::asio::write(socket, boost::asio::buffer(record_header));
+  boost::asio::write(socket, boost::asio::buffer(body));
+}
+
+}  // namespace
+
+// M9-15 security regression: slowloris-shaped connections (valid TLS record
+// header, trickled partial body, never completed) must be reclaimed by the
+// handshake deadline instead of pinning provisional slots, and a legitimate
+// peer must still authenticate on the same listener afterwards.
+TEST_F(M3aNodeTest, SlowTrickledHandshakeTimesOutAndLegitimatePeerStillAuthenticates) {
+  LanConfiguration configuration;
+  configuration.connectivity_mode = ConnectivityMode::lan_only;
+  configuration.announcement_interval = std::chrono::milliseconds{100};
+  configuration.announcement_jitter = std::chrono::milliseconds{0};
+  configuration.presence_lease = std::chrono::milliseconds{2000};
+  configuration.interface_refresh_interval = std::chrono::seconds{2};
+  configuration.announcement_rate_per_second = 100U;
+  configuration.per_source_announcement_rate = 100U;
+  configuration.provisional_connection_capacity = 2U;
+  configuration.per_source_provisional_capacity = 2U;
+  configuration.provisional_accept_rate_per_second = 10U;
+  configuration.per_source_provisional_rate = 4U;
+  configuration.handshake_timeout = std::chrono::milliseconds{300};
+  configuration.hello_timeout = std::chrono::milliseconds{300};
+  auto victim_profile = initialized_profile("slowloris-victim",
+                                            "com.example.slowloris", configuration);
+  auto peer_profile = initialized_profile("slowloris-peer", "com.example.peer",
+                                          configuration);
+  ASSERT_TRUE(victim_profile && peer_profile)
+      << (victim_profile ? std::string{peer_profile.error_if()->safe_detail()}
+                         : std::string{victim_profile.error_if()->safe_detail()});
+  ASSERT_TRUE(heyaki::test::seed_mutual_trust(*victim_profile.value_if(),
+                                              *peer_profile.value_if(),
+                                              {"m4.test"}));
+  auto victim = Node::create(node_config(*victim_profile.value_if(),
+                                         "com.example.slowloris"));
+  auto peer = Node::create(node_config(*peer_profile.value_if(),
+                                       "com.example.peer"));
+  ASSERT_TRUE(victim && peer);
+  if (joined_interface_count(victim.value_if()->snapshot()) == 0U ||
+      joined_interface_count(peer.value_if()->snapshot()) == 0U) {
+    (void)victim.value_if()->shutdown();
+    (void)peer.value_if()->shutdown();
+    if (environment_enabled("HEYAKI_REQUIRE_LAN_INTERFACES")) {
+      FAIL() << "Required LAN interface is unavailable";
+    }
+    GTEST_SKIP() << "No multicast-capable non-loopback interface";
+  }
+  ASSERT_TRUE(wait_until(
+      [&] { return victim.value_if()->endpoints().size() == 1U; },
+      std::chrono::seconds{4}));
+  const auto port = victim.value_if()->snapshot().tls.listen_port;
+  ASSERT_NE(port, 0U);
+
+  {
+    boost::asio::io_context io;
+    for (int cycle = 0; cycle < 2; ++cycle) {
+      boost::asio::ip::tcp::socket socket{io};
+      const boost::asio::ip::tcp::endpoint listener{
+          boost::asio::ip::make_address_v6("::1"), port};
+      ASSERT_NO_THROW(socket.connect(listener));
+      ASSERT_NO_THROW(trickle_partial_client_hello(socket));
+      EXPECT_TRUE(wait_until(
+          [&] {
+            const auto tls = victim.value_if()->snapshot().tls;
+            return tls.timed_out >= static_cast<std::uint64_t>(cycle) + 1U &&
+                   tls.provisional_connections == 0U;
+          },
+          std::chrono::seconds{2}))
+          << "slowloris cycle " << cycle << " was not reclaimed by the deadline";
+      boost::system::error_code ignored;
+      socket.close(ignored);
+    }
+  }
+
+  // The reclaimed listener still authenticates a real peer.
+  const auto peer_key = victim.value_if()->endpoints().front().key;
+  ASSERT_TRUE(victim.value_if()->connect_lan(peer_key));
+  EXPECT_TRUE(wait_until(
+      [&] {
+        const auto victim_connections = victim.value_if()->signaling_connections();
+        const auto peer_connections = peer.value_if()->signaling_connections();
+        const auto authenticated = [](const auto& connection) {
+          return connection.state == LanSignalingConnectionState::authenticated;
+        };
+        return std::count_if(victim_connections.begin(), victim_connections.end(),
+                             authenticated) == 1 &&
+               std::count_if(peer_connections.begin(), peer_connections.end(),
+                             authenticated) == 1;
+      },
+      std::chrono::seconds{4}));
+  EXPECT_TRUE(victim.value_if()->shutdown().stopped);
+  EXPECT_TRUE(peer.value_if()->shutdown().stopped);
+}
+
+// M9-15 security regression: the global provisional-connection cap must apply
+// across distinct source addresses, so one attacker with many addresses cannot
+// hold more unauthenticated slots than the configured capacity.
+TEST_F(M3aNodeTest, ProvisionalCapacityCapAppliesAcrossSources) {
+  LanConfiguration configuration;
+  configuration.connectivity_mode = ConnectivityMode::lan_only;
+  configuration.discoverable = false;
+  configuration.provisional_connection_capacity = 2U;
+  configuration.per_source_provisional_capacity = 2U;
+  configuration.provisional_accept_rate_per_second = 10U;
+  configuration.per_source_provisional_rate = 4U;
+  configuration.handshake_timeout = std::chrono::milliseconds{300};
+  configuration.hello_timeout = std::chrono::milliseconds{300};
+  auto profile = initialized_profile("capacity-sources", "com.example.capacity",
+                                     configuration);
+  ASSERT_TRUE(profile) << profile.error_if()->safe_detail();
+  auto node = Node::create(node_config(*profile.value_if(), "com.example.capacity"));
+  if (!node && node.error_if()->safe_detail() == "lan_no_ready_interface") {
+    if (environment_enabled("HEYAKI_REQUIRE_LAN_INTERFACES")) {
+      FAIL() << "Required LAN interface is unavailable";
+    }
+    GTEST_SKIP() << "No multicast-capable non-loopback interface";
+  }
+  ASSERT_TRUE(node) << node.error_if()->safe_detail();
+  const auto port = node.value_if()->snapshot().tls.listen_port;
+  ASSERT_NE(port, 0U);
+
+  boost::asio::io_context io;
+  const boost::asio::ip::tcp::endpoint listener{
+      boost::asio::ip::make_address_v4("127.0.0.1"), port};
+  const auto connect_from = [&](const char* source_address) {
+    boost::asio::ip::tcp::socket socket{io};
+    boost::system::error_code error;
+    socket.open(boost::asio::ip::tcp::v4(), error);
+    if (!error) {
+      socket.bind(boost::asio::ip::tcp::endpoint{
+                      boost::asio::ip::make_address_v4(source_address), 0U},
+                  error);
+    }
+    if (!error) {
+      socket.connect(listener, error);
+    }
+    if (error) {
+#if defined(__linux__)
+      return Result<boost::asio::ip::tcp::socket>::failure(
+          Error{ErrorCode::transport, "test", "alternate_loopback_source_failed"});
+#else
+      return Result<boost::asio::ip::tcp::socket>::failure(
+          Error{ErrorCode::cancelled, "test", "alternate_loopback_source_unsupported"});
+#endif
+    }
+    return Result<boost::asio::ip::tcp::socket>::success(std::move(socket));
+  };
+
+  std::vector<boost::asio::ip::tcp::socket> held;
+  for (const char* source : {"127.0.0.2", "127.0.0.3"}) {
+    auto connection = connect_from(source);
+    if (!connection &&
+        connection.error_if()->safe_detail() == "alternate_loopback_source_unsupported") {
+      (void)node.value_if()->shutdown();
+      GTEST_SKIP() << "Alternate loopback source addresses are unavailable";
+    }
+    ASSERT_TRUE(connection) << connection.error_if()->safe_detail();
+    held.push_back(std::move(*connection.value_if()));
+  }
+  EXPECT_TRUE(wait_until(
+      [&] { return node.value_if()->snapshot().tls.provisional_connections == 2U; },
+      std::chrono::seconds{2}));
+
+  // The capacity is exhausted for every further source, distinct or not.
+  auto third = connect_from("127.0.0.4");
+  if (!third &&
+      third.error_if()->safe_detail() == "alternate_loopback_source_unsupported") {
+    (void)node.value_if()->shutdown();
+    GTEST_SKIP() << "Alternate loopback source addresses are unavailable";
+  }
+  ASSERT_TRUE(third) << third.error_if()->safe_detail();
+  held.push_back(std::move(*third.value_if()));
+  EXPECT_TRUE(wait_until(
+      [&] {
+        const auto current = node.value_if()->snapshot();
+        return current.tls.rejected >= 1U && current.last_error &&
+               current.last_error->safe_detail() ==
+                   "provisional_connection_capacity_full";
+      },
+      std::chrono::seconds{2}));
+
+  EXPECT_TRUE(wait_until(
+      [&] {
+        const auto tls = node.value_if()->snapshot().tls;
+        return tls.timed_out >= 2U && tls.provisional_connections == 0U;
+      },
+      std::chrono::seconds{2}));
+  for (auto& socket : held) {
+    boost::system::error_code ignored;
+    socket.close(ignored);
+  }
+  EXPECT_TRUE(node.value_if()->shutdown().stopped);
+}
+
 TEST_F(M3aNodeTest, RejectsRelayedHelloAndCertificateSubstitution) {
   LanConfiguration configuration;
   configuration.connectivity_mode = ConnectivityMode::lan_only;

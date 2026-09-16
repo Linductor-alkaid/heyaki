@@ -574,6 +574,19 @@ heyaki_add_runtime_test(
 set_tests_properties(heyaki_m9_compat PROPERTIES
   TIMEOUT 120)
 
+add_executable(heyaki_m9_security_regression_tests
+  unit/m9_security_regression_test.cpp)
+target_link_libraries(heyaki_m9_security_regression_tests PRIVATE
+  heyaki::client
+  heyaki::core
+  GTest::gtest_main)
+heyaki_configure_target(heyaki_m9_security_regression_tests)
+heyaki_add_runtime_test(
+  heyaki_m9_security_regression heyaki_m9_security_regression_tests
+  "unit;security;m9;regression")
+set_tests_properties(heyaki_m9_security_regression PROPERTIES
+  TIMEOUT 60)
+
 add_executable(heyaki_m8_service_tests
   unit/m8_codec_test.cpp
   unit/m8_shell_test.cpp

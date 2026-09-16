@@ -1,6 +1,6 @@
 # M9：生产加固与 v1 发布
 
-> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6、M9-07 Round 7、M9-08 Round 8、M9-09 Round 9、M9-10 Round 10（基准 harness + 同 kind 双流 UAF 修复）、M9-11 Round 11（参数冻结 + 孤儿 staging 清理）与 M9-12 Round 12（schema N-1/N 兼容 + rolling relay upgrade + 新旧设备互通）、M9-13 Round 13（fuzz 扩展 + regression corpus）、M9-14 Round 14（secret/vuln 扫描 + SBOM/许可证门禁 + 编译加固 + 发布签名）已交付，M9-15 起未开始，见文末实施记录）
+> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6、M9-07 Round 7、M9-08 Round 8、M9-09 Round 9、M9-10 Round 10（基准 harness + 同 kind 双流 UAF 修复）、M9-11 Round 11（参数冻结 + 孤儿 staging 清理）与 M9-12 Round 12（schema N-1/N 兼容 + rolling relay upgrade + 新旧设备互通）、M9-13 Round 13（fuzz 扩展 + regression corpus）、M9-14 Round 14（secret/vuln 扫描 + SBOM/许可证门禁 + 编译加固 + 发布签名）与 M9-15 Round 15（安全回归八面：wire 伪造/重放/slowloris/退避指数/泄漏猎杀/伪造 grant·candidate·endpoint/文法表/服务端 oversized·1:1）已交付，M9-16 起未开始，见文末实施记录）
 > - 所属计划：[Heyaki MVP 至 v1 实施 TODO 计划](heyaki-implementation-plan.md)
 > - 前置：M8 | 建议发布点：v1.0
 
@@ -35,7 +35,7 @@
 - [x] `M9-13` 扩展 fuzz 持续时间，覆盖所有 parser、状态机、ProfileStore migration 和 VT；保存最小化 regression corpus。（Round 13 交付 2026-09-15：**覆盖审计与补缺**——既有 20 个 harness 目标（fuzz_targets.hpp）经 5 个 libFuzzer entry 分发：frame-parser entry 覆盖全部 parser 面（frame/stream 解码、LAN datagram/hello/signaling、signed offer/answer/candidate/session-hello、pairing、trust grant、m8 shell、**m8 VT**——VT 此前已覆盖）；本轮发现 m6/m7 service payload parser 不在任何 libFuzzer entry（仅 smoke 直调），补入 frame-parser entry；connection_attempt_state_machine fuzzer 此前已编译但 CI 从未运行，本轮纳入；**新增 ProfileStore migration fuzz 目标**（`tests/fuzz/profile_store_fuzz.cpp` + `heyaki_profile_store_fuzzer`）：四种模式（合法 v1 fixture / 攻击者字节写入 identity 公钥列 / 截断 DB / 整文件随机字节），oracle = M2 迁移契约钉死的不变量（成功 → backup 存在 + 幂等重开；失败 → 文件仍在 + 尝试过迁移必留 backup；任意输入只允许显式错误）。**持续时间**：CI 从 `-runs=100`（<1s/目标）改为逐目标墙钟预算 `-max_total_time=60`（profile 90s），clang Debug job 每轮 ~5.5min 专项 fuzz；corpus README 记录本地 1800s 长跑命令。**regression corpus**：新仓库内 `tests/fuzz/corpus/`（6 个 entry 目录 + README 溯源/最小化纪律/提交新 crash 单元的流程），smoke 测试（`heyaki_fuzz_smoke`）每轮回放全部 corpus 单元（本轮 80 个）并生成种子到 build 目录；CI libFuzzer 以 `tests/fuzz/corpus/<entry>` + `build/fuzz-corpus/<entry>` 双目录为种子。坑：ProfileStore::open 对 DB 文件本身拒绝 group/other 位（外部构造的 v1 fixture 须 chmod 0600，同 M2 fixture 先例）、加密文件后端拒绝权限过宽的目录链（fuzz 根与 case 目录都要 0700）、migrate 尚未开始时（纯损坏字节）不欠 backup——失败不变量必须以"迁移确已尝试"为前提。CI 终态 run 34880683984 十 job 全绿（2026-09-15；首轮 cstdint 补头 e06b8eb、
 次轮 Windows 后端不一致修复 5322a5a、tsan 抖动 rerun 绿）。见实施记录 Round 13。）
 - [x] `M9-14` 完成 secret scan、dependency vulnerability scan、SBOM、许可证、编译 hardening 和发布制品签名。（Round 14 交付 2026-09-15：六面控制全部 CTest 强制并进新 CI `supply-chain` job——①**secret scan**：`scripts/run_secret_scan.sh` + digest-pin 的 gitleaks 8.24.3（`deploy/security/secret-scan.lock`，官方 checksum `9991e0b2…`）全 git 历史扫描 + 阳性对照（先证明规则集能命中再报全清）；基线 31 命中全部处置：30 个在 `.mimosa/hook-state/`（**会话工具快照被 48d7f4/386f82a 意外提交，本轮 `git rm -r --cached` 移出 5003 个文件并 gitignore**，内容为工具自身哈希/代码标识非凭据，历史路径 allowlist 留档）、1 个为 `Error{…,"password",detail}` 误报（allowlist 枚举封闭错误串集，真密码仍会命中）；测试 fixture 密钥材料零命中、未发放任何 tests/ 整体豁免。②**漏洞扫描**：`scripts/osv_vulnerability_scan.py` 单批 querybatch 查全部 40 个 pin commit + 已知漏洞 OpenSSL 对照 commit 自检（检不出即 fail-closed）+ `deploy/security/osv-triage.tsv` 三态 triage（未 triage 即红、陈旧条目告警）；结果 0 命中；OSV 对 native C/C++ 覆盖稀疏的限制与补偿控制成文；**coturn 部署制品单审**：4.10.0 镜像含 CVE-2025-69217/2026-27624/40613/43994 修复（fix commit 经 GitHub compare 判定为 tag 祖先），CVE-2026-43915/53448（admin 面板 XSS/SQLi）不在 4.10.0 但部署 `no-cli` 且无 web-admin → not-affected，发布时复检；Ubuntu 回退包 4.6.1-1build4 在多个影响域内 → 生产必须走 digest-pin 镜像。③**SBOM/许可证**：heyaki 自身入册（version+build commit）+ 版本化 namespace（Created 保持固定换字节级可复现）；生成期**copyleft 门禁**（runtime/test 组与递归子模块禁 AGPL/GPL/LGPL/SSPL 原子，optional 组仅允许"permissive OR"形态——zstd `BSD-3-Clause OR GPL-2.0-only` 不进 v1 构建）；现状全部 permissive。④**编译加固**：`HEYAKI_HARDENING`（默认 ON）——全局 `-fstack-protector-strong`/PIC/探针 CET/探针 FORTIFY（3→2 阶梯，仅优化配置，避开 distro 预定义重定义警告）+ 可执行文件 `-pie -Wl,-z,relro,-z,now,-z,noexecstack` + MSVC `/GS /guard:cf /GUARD:CF /CETCOMPAT`（x64）；`heyaki_m9_hardening_check` 用 readelf 断言 PIE/NX/full-RELRO/canary（Release 加 FORTIFY `__*_chk`）；`readelf` 本地化坑以 `LC_ALL=C` 钉死。⑤**发布签名**：`heyaki-release-sign`（pinned libsodium Ed25519；keygen/manifest/sign/verify/check；manifest 字节序确定性、严格解析、symlink 排除）+ 规程 `docs/operations/release-signing.md`（离线 keygen、key id=SHA-256(pub) 前 16 hex、轮换程序）+ `heyaki_m9_release_signing` 往返（真制品 + 全篡改方向必拒）。审计总录 `docs/supply-chain/m9-release-audit.md`。本机 werror 构建 66/66 绿 + Release FORTIFY 断言过 + IVA 独立验证（含 manifest 确定性/坏签名/路径逃逸/漏洞负路径）全 PASS。见实施记录 Round 14。）
-- [ ] `M9-15` 执行安全回归：multicast 洪泛/伪造/重放、LAN TLS MITM/slowloris、密码猜测/泄漏、grant/fingerprint/endpoint 伪造、降级、越权 method/topic、路径穿越、relay/TURN 放大。
+- [x] `M9-15` 执行安全回归：multicast 洪泛/伪造/重放、LAN TLS MITM/slowloris、密码猜测/泄漏、grant/fingerprint/endpoint 伪造、降级、越权 method/topic、路径穿越、relay/TURN 放大。（Round 15 交付 2026-09-16：八攻击面覆盖矩阵审计 + 真缺口补齐，全部测试轮、零生产缺陷——唯一生产面发现是 `encode_lan_presence` 拒绝序列化签名不符对象（纵深防御，迫使伪造走字节手术=真实攻击者路径）。新增：`tests/unit/m9_security_regression_test.cpp`（CTest `heyaki_m9_security_regression`：`trust_scope_covers` 精确/前缀通配文法表测 + `safe_logical_file_name` 攻击形态全表）；m3a 三例（真组播 socket 上签名伪造/身份冒名/低序列重放拒收、slowloris 滴注部分 ClientHello 被握手死线回收且真实 peer 照常认证、跨源全局 provisional 容量帽）；m5 四例（退避指数翻倍/封顶全表 fake clock、跨源隔离无全局锁死、伪造 TrustGrant 签名接受侧拒绝零持久化、密码字面量泄漏猎杀——审计 detail + profile 根全文件字节扫描）；m4_signaling 第三方密钥 candidate 拒绝；m4_relay_signaling 三例（endpoint 发布会话绑定 E2E `endpoint_record_session_mismatch` + 正控、服务端 oversized WSS 帧丢弃存活、信令 1:1 无扇出/无反射恰 +8）；m7 终段 symlink 被 rename 替换不跟随。降级面经核对由 M9-12 compat 套件完备覆盖。审计总录 `docs/security/m9-security-regression.md`（含残余接受项：/metrics 无客户端认证、coturn 配置级反射控制）；threat-model §7 记 M9-15 回归门。本机 debug 全量 6 目标绿 + werror 构建零警告 + IVA 独立验证 12/12 二连跑零抖动 PASS。见实施记录 Round 15。）
 - [ ] `M9-16` 编写安装、配置、部署、升级、备份、故障排查和 API 文档；示例必须从已编译源码嵌入或同步测试。
 - [ ] `M9-17` 打包 client libraries、relay、TUI、coturn 示例配置与符号/许可证，验证干净机器安装和卸载。
 - [ ] `M9-18` 形成 v1 release checklist，记录测试 commit、依赖 commit、协议版本、已知限制和回滚方案。
@@ -1248,6 +1248,80 @@ m3a 抖动家族——本机并行跑 m3a_lan 亦偶发、单独重跑即绿）�
    拒绝，IVA 反证 `…E4OB` 仍 exit 1）+ `--gitleaks` 预装分支补建缓存目录。
    修复过程教训：管道后取输出用 `| tail` 会吞非零退出码，验证必须看
    退出码本身。
+
+### Round 15（2026-09-16）：M9-15 安全回归八面
+
+覆盖矩阵审计（八攻击面 → 控制点 → 既有/新增测试的完整映射见
+[../security/m9-security-regression.md](../security/m9-security-regression.md)）：
+multicast 洪泛（既有 wire 洪泛 + 编码层篡改）、LAN TLS MITM（既有双指纹
+替换拒绝）、降级（M9-12 compat 套件完备）、越权 method/topic（既有五服务
+scope 族 + 会话级 default-deny）四面经核对已有覆盖，本轮补齐五个真缺口
+族，全部端到端或原语级：
+
+- **LAN wire 伪造/重放**（m3a `ForgedReplayedAndMismatchedPresenceRejected
+  OverWire`，真组播 socket）：签名尾字节翻转 → `presence_signature_invalid`；
+  32 字节 device_id 字段覆写 → `presence_device_id_mismatch`（派生校验先于
+  签名验证）；低序列重放 → `presence_sequence_replay`。目录恒 1 条目、
+  datagrams_rejected ≥ 3、authenticated_connections == 0。
+- **slowloris 与跨源容量帽**（m3a 两例）：滴注 TLS 记录头 + 部分
+  ClientHello 两轮被握手死线回收（timed_out 递增、provisional 归零），
+  随后受信真实 peer 在同一 listener 照常认证；127.0.0.2/.3 占满
+  capacity=2 后 127.0.0.4 第三连接被 `provisional_connection_capacity_full`
+  拒绝（非 Linux 无备用环回源即 SKIP，Linux 上结构性不可跳过——bind 失败
+  走 FAIL 分支）。
+- **密码面四例**（m5）：退避窗口 1000→2000→4000→4000（clamp）全表 +
+  成功清零（fake clock）；A 限流同时 B 即时配对（无全局锁死）；签名翻位
+  TrustGrant 接受侧 authentication 拒绝 + TrustStore 零持久化；密码字面量
+  泄漏猎杀（审计 detail + profile 根递归全文件字节扫描 + "argon2" 不入
+  审计）。relay 侧按协议不接触密码，泄漏面不存在。
+- **伪造 grant/candidate/endpoint**：第三方密钥 candidate（绑定字段全照抄、
+  攻击者密钥签名）拒绝（m4_signaling 扩展）；endpoint 记录冒名 E2E
+  （m4_relay_signaling `EndpointPublishIsBoundToLoggedInSession`：A 会话签发
+  B endpoint 的有效签名记录 → `endpoint_record_session_mismatch`，会话
+  绑定先于验签；正控先行——`send_error` 恒 close-after-write，拒绝后不能
+  再用同一连接）。
+- **文法与路径原语**：`trust_scope_covers`（授权匹配原语）精确/前缀通配
+  全表——`prefix:*` 只覆盖 `prefix:x`（含更深层），不覆盖裸 prefix/
+  `prefix:`，`:*`/`*`/空串不构成全局通配；`safe_logical_file_name` 攻击
+  形态全表（NUL/控制字节/反斜杠/空段/尾点尾空格/COM1-9·LPT1-9·CON·PRN·
+  AUX 任意大小写+扩展名/512B/32 段边界含恰好达界正值）；m7 终段 symlink
+  被 rename 替换不跟随（逃逸目标从未创建、终路径为字节一致常规文件）。
+- **relay 放大**（m4_relay_signaling 两例）：服务端 oversized WSS 帧
+  （裸 beast 客户端写 16× `max_relay_wss_control_frame_bytes` → 会话丢弃、
+  server 保持 running、新客户端照常登录——服务端 `read_message_max` 首次
+  有真 socket 对拍）；信令 1:1 无放大（A→B 8 发 = B 恰收 8、第三方 C 与
+  发送方零接收、`signaling_forwarded` 恰好 +8）。
+
+交付物清单：`tests/unit/m9_security_regression_test.cpp`（CTest
+`heyaki_m9_security_regression`，labels unit;security;m9;regression）；
+m3a/m5/m4_signaling/m4_relay_signaling/m7 五文件新增 13 例；
+`docs/security/m9-security-regression.md`（八面矩阵 + 残余接受项 + 坑表）；
+threat-model §7 增 M9-15 回归门条目。零生产代码变更。
+
+坑（后续轮避免）：
+
+1. `encode_lan_presence` 先验证后编码——签名不符/身份不符的 presence 无法
+   经 codec 序列化（`ASSERT_TRUE(datagram)` 在 lambda 里失败只退出 lambda、
+   不发报，现象是"对端永远收不到"）；wire 级伪造必须对合法编码做字节手术
+   （签名是 payload 末字段，尾字节=签名尾字节；device_id 可按 32 字节模式
+   搜索定位）。
+2. presence 字节级重复 = 幂等吸收（无错误无计数）；重放错误只在更低序列或
+   退役 boot nonce 时出现——触发条件是"先推进再回退"。
+3. relay `send_error` 恒 close-after-write（与 `send_signaling_error` 不同）
+   ——测试依赖"被拒后继续用同一控制连接"时必须把正控放在拒绝之前。
+4. `per_source_provisional_capacity` ≤ `provisional_connection_capacity`
+   是 LAN 配置不变式（profile 层 `invalid_lan_configuration` 拒绝）。
+5. GCC `std::filesystem` 无 `create_file_symlink`，用 `create_symlink`。
+6. m3a 真实 socket 测试的诊断纪律：等待特定 `last_error` detail 的轮询在
+   失败时打印实际 detail 与 received/rejected 计数（本轮排障的关键手段，
+   已留在测试里）。
+
+本机验证：debug 全量六目标（m9_security_regression 2/2、m5 9/9、m3a
+29+4 skip（既有环境门控族，新测试零跳过）、m4_signaling 22/22、
+m4_relay_route 9/9、m7 symlink 2/2）；werror 构建零警告（收敛掉一处
+sign-conversion）+ werror 下行为全绿；IVA 独立验证 PASS（六目标二连跑
+12/12 零抖动、ctest 注册与 labels 核对、m3a 对抗过滤三连跑确认 Linux 上
+不跳过且结构性不可跳过、跨序隔离、断言质量逐条核验无空断言）。
 
 ### 剩余范围（M9-01 完成前）
 
