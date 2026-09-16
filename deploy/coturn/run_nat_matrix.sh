@@ -584,7 +584,11 @@ dump_outputs() {
 # proves mediation: the label names the LOCAL candidate type, and with inbound
 # DNAT absent (probe-verified) the remote side can only have been RELAYED —
 # the same contract as the M4 harness's require_authenticated_turn.
-# strict_m7="strict-m7" (M9-19 TURN/TCP+TLS scenarios) additionally requires
+# The turn_tcp label is CONFIG-derived, not candidate-derived: an RFC 5766
+# allocation always relays UDP, so a TURN/TCP-relayed candidate still carries
+# the udp protocol in SDP and heyaki classifies by the configured ICE server
+# kinds (a TURN/TCP-only server set reports turn_tcp).
+# strict_m7="strict-m7" (M9-19 TURN/TCP scenarios) additionally requires
 # the m7 file push to have committed on the asserted cycle.
 require_result() {
   # tag line expected_paths_csv strict_m6 [strict_m7]

@@ -1386,6 +1386,19 @@ juice=false/nice=true；ldd 证 libnice 仅 nice 构建链接；两构建
 build_config 宏对账）。TURN/TCP 真数据面（对真 coturn 的 TCP allocation
 端到端）本机被 root/coturn 门控 SKIP，由 CI turn_tcp 场景承担。
 
+**CI 首跑抓出分类层真缺陷（第二轮修复）**：turntcp 场景会话/传输全过
+（UDP 全灭下 2-3s 建立、m6+m7 严格断言全绿）但标签断言红——
+`data_path=turn_udp`。根因是 RFC 5766 协议语义：TURN 分配的服务器侧
+中继腿永远是 UDP，TURN/TCP 中继候选在 SDP 里就是 `udp typ relay`，
+候选层面无法区分客户端控制连接的传输。修复 = 分类改用配置事实：
+`refresh_path_stats` 对 relayed 提名按 ICE 服务器 kind 推导（仅
+turn_tcp 服务器 → `turn_tcp`，否则 `turn_udp`）；同类问题 `candidate_
+allowed` 的非 UDP relayed 分支同样永远匹配不到 TURN/TCP 候选——改为
+"任一 TURN 类允许即准入"并成文（类分离管采集配置，不管远端候选
+准入；SDP 无从区分）。NAT 矩阵标签契约注释同步成文。CI 收敛另修：
+libnice 是配置期依赖，apt 安装步骤必须前置于 Configure（首跑顺序
+沿袭 coturn 运行期位次即红）。
+
 **坑（Round 16）**：①`tail` 管道吞构建退出码（已知家族再犯——后台构建
 命令经 `| tail -5` 汇报 exit 0 实则失败，重跑勿用管道取退出码）；②libnice
 meson 选项是 `-Dcrypto-library`（非 `crypto`）；③`Result<T>::value_if()`

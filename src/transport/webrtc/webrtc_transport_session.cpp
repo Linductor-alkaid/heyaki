@@ -152,11 +152,14 @@ bool candidate_allowed(const rtc::Candidate& candidate,
     case rtc::Candidate::Type::PeerReflexive:
       return policy.allow_server_reflexive;
     case rtc::Candidate::Type::Relayed:
-      // A non-UDP relayed candidate rides a TURN-over-TCP control connection;
-      // TURN/TLS has no backend, so the class never admits anything extra.
-      return candidate.transportType() == rtc::Candidate::TransportType::Udp
-                 ? policy.allow_turn_udp
-                 : policy.allow_turn_tcp;
+      // An RFC 5766 allocation always relays UDP: the SDP protocol of a
+      // TURN-relayed candidate describes the server-side relayed leg, so a
+      // candidate riding a TURN/TCP control connection still reports the UDP
+      // transport type and the client-side control transport is not
+      // distinguishable at the candidate level. Admission therefore accepts a
+      // relayed candidate when any TURN class is allowed; the class split
+      // governs which TURN servers are configured, not remote admission.
+      return policy.allow_turn_udp || policy.allow_turn_tcp;
     case rtc::Candidate::Type::Unknown:
       return false;
   }
@@ -782,11 +785,23 @@ class WebRtcTransportSession::Impl
     path_.selected_candidate = local.candidate();
     if (path_.selected_candidate.size() > 512U) path_.selected_candidate.resize(512U);
     if (local.type() == rtc::Candidate::Type::Relayed) {
-      if (local.transportType() == rtc::Candidate::TransportType::Udp) {
-        path_.data_path = DataPathKind::turn_udp;
-      } else {
-        path_.data_path = DataPathKind::turn_tcp;
-      }
+      // An RFC 5766 allocation always relays UDP, so the selected candidate's
+      // transport type is UDP even when the client's control connection to the
+      // TURN server rides TCP: the control transport is a configuration fact
+      // (the configured ICE server kinds), not a candidate property. A
+      // TURN/TCP-only server set therefore reports turn_tcp; anything else
+      // keeps the turn_udp label.
+      const bool turn_tcp_only =
+          std::any_of(config_.ice_servers.begin(), config_.ice_servers.end(),
+                      [](const IceServerConfig& server) {
+                        return server.kind == IceServerKind::turn_tcp;
+                      }) &&
+          std::none_of(config_.ice_servers.begin(), config_.ice_servers.end(),
+                       [](const IceServerConfig& server) {
+                         return server.kind == IceServerKind::turn_udp;
+                       });
+      path_.data_path = turn_tcp_only ? DataPathKind::turn_tcp
+                                      : DataPathKind::turn_udp;
     } else if (local.type() == rtc::Candidate::Type::ServerReflexive ||
                local.type() == rtc::Candidate::Type::PeerReflexive) {
       path_.data_path = DataPathKind::direct_srflx;
