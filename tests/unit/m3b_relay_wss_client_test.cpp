@@ -767,6 +767,17 @@ TEST(M3BRelayWssClientTest, LogsInHeartbeatsPublishesAndQueriesEndpoint) {
   EXPECT_TRUE(validate_relay_endpoint_record(*published_record.value_if(),
                                              published_device, now_milliseconds()));
 
+  // The server counters publish asynchronously from the control-session
+  // dispatch; a single immediate snapshot loses the race on slow sanitizer
+  // runners (CI tsan/asan flakes observed on endpoint_queries), so poll for
+  // the query counter before asserting the whole group.
+  ASSERT_TRUE(wait_until(
+      [&] {
+        const auto current = server.value_if()->snapshot();
+        return current.endpoint_queries >= 1U;
+      },
+      2s))
+      << "server never observed the endpoint query";
   const auto snapshot = server.value_if()->snapshot();
   EXPECT_GE(snapshot.login_challenges, 1U);
   EXPECT_GE(snapshot.logins_completed, 1U);
