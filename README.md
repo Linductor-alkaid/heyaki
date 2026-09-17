@@ -53,7 +53,7 @@ public APIs, and a TUI `shell` view. Production enablement on POSIX was signed o
 path validation, fixed together with P3-F3/P4-F7) landed on 2026-09-05, so Windows
 enablement follows the same explicitly-listed-profile posture. See the
 [M8 milestone file](docs/todolists/m8-remote-shell.md) for the delivery record.
-M9 (Production hardening) is in progress (opened 2026-09-05). The observability track has
+M9 (Production hardening) is complete (opened 2026-09-05, closed 2026-09-17). The observability track has
 landed: M9-01 rounds 1-2 deliver a unified `NodeMetrics` aggregate published through
 `Node::metrics()` with Prometheus text export (~200 families across node, pairing,
 connectivity, transport, channels, services, and the executor runtime snapshot), pairing
@@ -75,8 +75,21 @@ dashboard and alerting over those surfaces and the operating runbook: Prometheus
 recording/alert rule files plus a Grafana dashboard under `deploy/observability/` (8 SLO
 ratios, 20 alerts across relay-fleet and device groups), CI-enforced to reference only
 metrics the exporters actually emit, and `docs/operations/runbook.md` with per-alert triage
-and the rotation/revocation/restart/backup/overload/rollback procedures. See the
-[M9 milestone file](docs/todolists/m9-production-hardening.md) for the round-by-round record.
+and the rotation/revocation/restart/backup/overload/rollback procedures. The
+reliability, compatibility, security, and release tracks closed the milestone
+(2026-09-17): NAT/fault/Windows matrices, soak and benchmark harnesses with v1
+acceptance gates, parameter freeze with hard upper bounds, schema N-1/N
+compatibility with rolling relay upgrades, extended fuzzing with a regression
+corpus, supply-chain controls (secret/OSV scans, SBOM license gates, compile
+hardening, Ed25519 release signing), an eight-surface security regression
+suite, a dual ICE-backend build (vendored libjuice for TURN/UDP, system
+libnice for TURN/TCP, TURN/TLS rejected everywhere), the user documentation
+set with sync-tested examples, release packaging (clean-prefix install,
+license texts incl. the LGPL notice on libnice builds, split debug symbols,
+manifest-driven uninstall), and the
+[v1 release checklist](docs/operations/release-checklist-v1.md). See the
+[M9 milestone file](docs/todolists/m9-production-hardening.md) for the
+round-by-round record.
 
 
 | Milestone | Scope | State |
@@ -91,7 +104,7 @@ and the rotation/revocation/restart/backup/overload/rollback procedures. See the
 | M6 | Message service and unary RPC | Done |
 | M7 | Remote events (best_effort_latest / reliable_live) and resumable file transfer | Done |
 | M8 | Remote shell (default-off, executor PTY worker, safe VT renderer, TUI shell view) | Done — production enable signed off (POSIX 2026-09-04; Windows unblocked 2026-09-05 after the F1/F3/F7 fixes, same listed-profile posture) |
-| M9 | Production hardening | In progress — M9-01 device metrics + Prometheus export, M9-02 relay `/metrics` + structured logs, M9-03 correlation ids, and M9-04/05 SLO dashboard + alerting + runbook delivered; the hardening tracks (M9-06..M9-18) remain |
+| M9 | Production hardening | Done — observability, NAT/fault/Windows matrices, soak/bench with v1 gates, parameter freeze, N-1/N compat, fuzz corpus, supply chain (scan/SBOM/hardening/signing), security regression, dual ICE backend (TURN/TCP via libnice; TURN/TLS rejected), docs with sync-tested examples, packaging (licenses/symbols/uninstall), v1 release checklist |
 | M10 | Gateway proxy service (scoped L4 gateway over an authorized session, protocol 1.3) | Planned |
 | M11 | Android (NDK) port | Planned |
 

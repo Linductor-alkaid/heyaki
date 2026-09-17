@@ -20,6 +20,7 @@
 
 #include <cctype>
 #include <filesystem>
+#include <map>
 #include <fstream>
 #include <optional>
 #include <set>
@@ -404,6 +405,99 @@ TEST(M9SloRulesTest, ExportersRenderTheFullFamilySurface) {
       heyaki::RelayServerSnapshot{}, "m9-slo-surface");
   EXPECT_GE(exposition_families(node_text).size(), std::size_t{190U});
   EXPECT_GE(exposition_families(relay_text).size(), std::size_t{95U});
+}
+
+// M9-01 semantics review, made mechanical: naming/type conventions every
+// scrape consumer can rely on. Any new exception must extend the frozen
+// allowlists here and the conventions section of
+// deploy/observability/README.md in the same change.
+TEST(M9SloRulesTest, MetricFamiliesFollowNamingConventions) {
+  struct Export {
+    std::string name;
+    std::string text;
+  };
+  const Export exports[] = {
+      {"node", heyaki::format_node_metrics_prometheus(heyaki::NodeMetrics{})},
+      {"relay", heyaki::format_relay_metrics_prometheus(
+                    heyaki::RelayServerSnapshot{}, "m9-slo-surface")},
+  };
+
+  // Manual histogram triple (Prometheus histogram naming uses bare
+  // _count/_sum, so these counters intentionally do not carry _total).
+  const std::set<std::string> histogram_counter_families = {
+      "heyaki_connectivity_connect_duration_samples",
+      "heyaki_connectivity_connect_duration_milliseconds_sum",
+      "heyaki_connectivity_connect_duration_milliseconds_max",
+  };
+  // Device-side durations are milliseconds by decision (see the conventions
+  // section); the base-unit question is handled at ingest if needed.
+  const std::set<std::string> millisecond_families = {
+      "heyaki_metrics_unix_milliseconds",
+      "heyaki_node_relay_backoff_milliseconds",
+      "heyaki_node_relay_registration_started_unix_milliseconds",
+      "heyaki_connectivity_connect_duration_milliseconds_sum",
+      "heyaki_connectivity_connect_duration_milliseconds_max",
+      "heyaki_transport_rtt_milliseconds_sum",
+      "heyaki_transport_rtt_milliseconds_max",
+  };
+
+  for (const auto& exported : exports) {
+    std::map<std::string, std::string> family_types;
+    std::map<std::string, bool> family_has_help;
+    std::istringstream lines{exported.text};
+    std::string line;
+    std::string last_help_family;
+    while (std::getline(lines, line)) {
+      if (!line.empty() && line.back() == '\r') {
+        line.pop_back();
+      }
+      if (line.rfind("# HELP ", 0U) == 0U) {
+        const auto rest = std::string_view{line}.substr(7U);
+        const auto end = rest.find(' ');
+        ASSERT_NE(end, std::string_view::npos) << exported.name << ": " << line;
+        last_help_family = std::string{rest.substr(0, end)};
+        family_has_help[last_help_family] = true;
+        continue;
+      }
+      if (line.rfind("# TYPE ", 0U) == 0U) {
+        const auto rest = std::string_view{line}.substr(7U);
+        const auto end = rest.find(' ');
+        ASSERT_NE(end, std::string_view::npos) << exported.name << ": " << line;
+        const std::string family{rest.substr(0, end)};
+        const std::string type{rest.substr(end + 1U)};
+        family_types[family] = type;
+        EXPECT_TRUE(family_has_help[family])
+            << exported.name << " family without HELP: " << family;
+        continue;
+      }
+      last_help_family.clear();
+    }
+
+    EXPECT_GE(family_types.size(), std::size_t{10U}) << exported.name;
+    for (const auto& [family, type] : family_types) {
+      EXPECT_TRUE(family.rfind("heyaki", 0U) == 0U)
+          << exported.name << " family outside the heyaki namespace: " << family;
+      if (type == "counter") {
+        const bool total_suffixed = family.size() > 6U &&
+                                    family.compare(family.size() - 6U, 6U, "_total") == 0U;
+        EXPECT_TRUE(total_suffixed || histogram_counter_families.count(family) != 0U)
+            << exported.name << " counter without _total: " << family;
+      } else if (type == "gauge") {
+        const bool total_suffixed = family.size() > 6U &&
+                                    family.compare(family.size() - 6U, 6U, "_total") == 0U;
+        EXPECT_FALSE(total_suffixed)
+            << exported.name << " gauge must not end in _total: " << family;
+      } else {
+        ADD_FAILURE() << exported.name << " unexpected TYPE " << type
+                      << " for " << family;
+      }
+      if (family.find("millisecond") != std::string::npos) {
+        EXPECT_NE(millisecond_families.count(family), 0U)
+            << exported.name << " new millisecond-named family needs a "
+            << "conventions decision: " << family;
+      }
+    }
+  }
 }
 
 TEST(M9SloRulesTest, RecordingRulesOnlyReferenceRealMetrics) {

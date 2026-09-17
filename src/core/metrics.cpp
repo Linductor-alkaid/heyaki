@@ -105,11 +105,13 @@ void write_node_section(MetricsWriter& writer, const NodeSnapshot& node) {
                "1 when the relay control connection is configured.");
   writer.gauge("heyaki_node_relay_state", static_cast<std::uint64_t>(relay.state),
                "RelayNodeState enum value.");
-  writer.counter("heyaki_node_relay_enrollment_generation",
-                 relay.enrollment_generation,
-                 "Enrollment generation in use (gauge semantics).");
-  writer.counter("heyaki_node_relay_lease_generation", relay.lease_generation,
-                 "Endpoint lease generation (gauge semantics).");
+  // M9-01 semantics review: generations are state markers, not
+  // accumulations - expose as gauges so TYPE matches HELP and consumers do
+  // not reach for rate() on them.
+  writer.gauge("heyaki_node_relay_enrollment_generation",
+               relay.enrollment_generation, "Enrollment generation in use.");
+  writer.gauge("heyaki_node_relay_lease_generation", relay.lease_generation,
+               "Endpoint lease generation.");
   writer.counter("heyaki_node_relay_registration_attempts_total",
                  relay.registration_attempts,
                  "Relay WSS connect + login cycles started.");
@@ -494,7 +496,9 @@ void write_event_section(MetricsWriter& writer, const EventServiceStats& event) 
                  "Deliveries below the newest seen sequence.");
   writer.counter("heyaki_event_lag_events_total", event.lag_events,
                  "Deliveries that skipped at least one sequence.");
-  writer.counter("heyaki_event_lag_total_sequences", event.lag_total_sequences,
+  // M9-01 semantics review: renamed from *_lag_total_sequences so counter
+  // families uniformly end in _total.
+  writer.counter("heyaki_event_lag_sequences_total", event.lag_total_sequences,
                  "Total sequences skipped by lag events.");
   writer.counter("heyaki_event_duplicate_items_total", event.duplicate_items,
                  "Duplicate event items.");

@@ -92,7 +92,41 @@ code change. Revisit if a v1.x milestone adds distributed tracing.
 - Device-side series require the textfile/ingestion convention above; out
   of the box only the relay fleet reports.
 - Loss estimation remains bounded by the pinned libdatachannel stats API
-  (bytes/rtt only) — the M9-01 recorded gap; revisit after M9-10.
+  (bytes/rtt only) — recorded in the parameter freeze §9.3; re-evaluate on
+  the next libdatachannel pin bump (the backend landscape already shifted
+  once with M9-19).
 - coturn exposes no Prometheus surface in the pinned deployment; observe
   TURN health through the device-side path counters and coturn logs (see
   the runbook's TURN sections).
+
+## Metric semantics conventions (M9-01 review, enforced)
+
+The M9-01 semantics review walked both exporters (`format_node_metrics_
+prometheus`, `format_relay_metrics_prometheus`) from the scrape consumer's
+perspective and froze these conventions. The `heyaki_m9_slo_rules` test
+enforces them mechanically — extending an allowlist requires updating this
+section in the same change:
+
+- **Namespace**: every family starts with `heyaki_` (`heyaki_node_*` /
+  `heyaki_relay_*` / domain prefixes). Nothing outside the namespace is
+  exported, so scrape-time relabeling and allowlists are trivial.
+- **Counters** end in `_total`. The only exceptions are the manual
+  histogram triple `heyaki_connectivity_connect_duration_{samples,
+  milliseconds_sum, milliseconds_max}` (Prometheus histogram naming uses
+  bare `_count`/`_sum`).
+- **Gauges** never end in `_total`, and state markers (enum values,
+  generations, versions) are gauges, not counters — `rate()` on them is a
+  consumer error the type line now prevents. (The enrollment/lease
+  generation families were counters with "gauge semantics" HELP text
+  before the review; they are gauges now.)
+- **Units**: durations are milliseconds and say so in the family name (the
+  frozen allowlist lives in the test). Prometheus base-unit purists should
+  convert at ingest (`* 0.001` in a recording rule) rather than expecting
+  `_seconds` families.
+- **Labels**: cardinality is bounded by design — the relay exports one
+  `instance` label (relay certificate SHA-256, joinable with the JSON log
+  stream), device-side exports use no per-peer/per-session labels
+  (per-peer detail is TUI/local diagnostics, not scrape series).
+- **Completeness**: families render unconditionally from zero-value
+  aggregates, so `absent()`-style alerting and schema diffing work; a
+  missing family means the exporter changed, not that traffic is zero.

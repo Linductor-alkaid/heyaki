@@ -24,6 +24,7 @@ delivery record.
 | Protocol compatibility policy | [compatibility/](compatibility/) |
 | Threat model | [security/threat-model.md](security/threat-model.md) |
 | Dependency policy, pins, and audits | [supply-chain/dependency-policy.md](supply-chain/dependency-policy.md) |
+| v1 release checklist | [operations/release-checklist-v1.md](operations/release-checklist-v1.md) |
 
 ## Keeping examples honest
 
