@@ -195,6 +195,14 @@ is not present. Performance tests include session-establishment P95 budgets.
 
 ## Documentation
 
+Start from the [documentation index](docs/README.md). Highlights:
+
+- [Getting started](docs/getting-started.md) — build, install, run a relay, first device
+- [Configuration reference](docs/configuration.md) — every relay key and device knob
+- [Deployment](docs/deployment.md) — production relay, coturn, observability
+- [Client library API](docs/api.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Operations runbook](docs/operations/runbook.md)
 - [Architecture](docs/design/heyaki-architecture.md)
 - [Wire Protocol v1](docs/design/heyaki-wire-protocol.md)
 - [LAN serverless connectivity](docs/design/lan-serverless-connectivity.md)

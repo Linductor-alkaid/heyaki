@@ -553,6 +553,69 @@ heyaki_add_runtime_test(
 set_tests_properties(heyaki_m9_parameter_freeze PROPERTIES
   TIMEOUT 120)
 
+# M9-16: user-facing documentation examples are extracted from the docs and
+# compiled/executed, so a stale or non-compiling sample fails CI instead of
+# rotting. Extraction runs at configure time; the doc files are registered as
+# configure dependencies so editing them re-runs the extraction.
+set(HEYAKI_DOCS_EXAMPLE_DIR "${CMAKE_CURRENT_BINARY_DIR}/docs-examples")
+set(HEYAKI_DOCS_SOURCES
+  "${PROJECT_SOURCE_DIR}/docs/getting-started.md"
+  "${PROJECT_SOURCE_DIR}/docs/configuration.md"
+  "${PROJECT_SOURCE_DIR}/docs/deployment.md"
+  "${PROJECT_SOURCE_DIR}/docs/api.md"
+  "${PROJECT_SOURCE_DIR}/docs/troubleshooting.md")
+execute_process(
+  COMMAND "${CMAKE_COMMAND}"
+    "-DHEYAKI_DOCS_LIST=${HEYAKI_DOCS_SOURCES}"
+    "-DHEYAKI_OUTPUT_DIR=${HEYAKI_DOCS_EXAMPLE_DIR}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/docs/extract_doc_examples.cmake"
+  RESULT_VARIABLE heyaki_docs_extraction_result)
+if(NOT heyaki_docs_extraction_result EQUAL 0)
+  message(FATAL_ERROR "Doc example extraction failed")
+endif()
+include("${HEYAKI_DOCS_EXAMPLE_DIR}/examples-manifest.cmake")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  ${HEYAKI_DOCS_SOURCES})
+
+foreach(heyaki_doc_slug IN LISTS HEYAKI_DOC_CPP_EXAMPLES)
+  add_executable(heyaki-doc-example-${heyaki_doc_slug}
+    "${HEYAKI_DOCS_EXAMPLE_DIR}/${heyaki_doc_slug}.cpp")
+  target_link_libraries(heyaki-doc-example-${heyaki_doc_slug} PRIVATE
+    heyaki::client
+    executor::executor)
+  heyaki_configure_target(heyaki-doc-example-${heyaki_doc_slug})
+  list(APPEND HEYAKI_DOC_CPP_BINARIES
+    "$<TARGET_FILE:heyaki-doc-example-${heyaki_doc_slug}>")
+endforeach()
+if("node-lifecycle" IN_LIST HEYAKI_DOC_CPP_EXAMPLES)
+  heyaki_enable_executor_exception_adapter_source(
+    "${HEYAKI_DOCS_EXAMPLE_DIR}/node-lifecycle.cpp")
+endif()
+
+add_executable(heyaki-doc-relay-config-check docs/relay_config_doc_check.cpp)
+target_link_libraries(heyaki-doc-relay-config-check PRIVATE
+  heyaki::relay
+  executor::executor)
+heyaki_configure_target(heyaki-doc-relay-config-check)
+
+set(HEYAKI_DOC_RELAY_CONFIG_FILES "")
+foreach(heyaki_doc_slug IN LISTS HEYAKI_DOC_RELAY_CONFIGS)
+  list(APPEND HEYAKI_DOC_RELAY_CONFIG_FILES
+    "${HEYAKI_DOCS_EXAMPLE_DIR}/${heyaki_doc_slug}.conf")
+endforeach()
+
+add_test(
+  NAME heyaki_m9_docs_examples
+  COMMAND "${CMAKE_COMMAND}"
+    "-DHEYAKI_DOC_CPP_BINARIES=${HEYAKI_DOC_CPP_BINARIES}"
+    "-DHEYAKI_DOC_RELAY_CONFIGS=${HEYAKI_DOC_RELAY_CONFIG_FILES}"
+    "-DHEYAKI_DOC_CONFIG_CHECK=$<TARGET_FILE:heyaki-doc-relay-config-check>"
+    "-DHEYAKI_DOC_WORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/docs-examples-work"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/docs/run_doc_examples.cmake")
+set_tests_properties(heyaki_m9_docs_examples PROPERTIES
+  LABELS "unit;docs;m9"
+  TIMEOUT 300)
+
 add_executable(heyaki_m9_compat_tests unit/m9_compat_test.cpp)
 target_link_libraries(heyaki_m9_compat_tests PRIVATE
   heyaki::client
