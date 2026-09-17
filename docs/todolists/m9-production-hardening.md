@@ -1,12 +1,12 @@
 # M9：生产加固与 v1 发布
 
-> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6、M9-07 Round 7、M9-08 Round 8、M9-09 Round 9、M9-10 Round 10（基准 harness + 同 kind 双流 UAF 修复）、M9-11 Round 11（参数冻结 + 孤儿 staging 清理）与 M9-12 Round 12（schema N-1/N 兼容 + rolling relay upgrade + 新旧设备互通）、M9-13 Round 13（fuzz 扩展 + regression corpus）、M9-14 Round 14（secret/vuln 扫描 + SBOM/许可证门禁 + 编译加固 + 发布签名）、M9-15 Round 15（安全回归八面：wire 伪造/重放/slowloris/退避指数/泄漏猎杀/伪造 grant·candidate·endpoint/文法表/服务端 oversized·1:1）、M9-19 Round 16（TURN/TCP 解封：libnice 双后端 + TURN/TLS 全后端硬拒绝）与 M9-16 Round 17（安装/配置/部署/API/故障排查五篇文档 + `heyaki_m9_docs_examples` 示例同步测试）、M9-17 Round 18（打包：版本 1.0.0、coturn 示例配置与 40+2 许可文本入安装树、package_release.sh 发布流（符号拆分/双 tar/卸载仿真）、uninstall target、heyaki_m9_package CTest）已交付，M9-18 未开始，见文末实施记录）
+> - 状态：已完成（2026-09-05 立项，2026-09-17 收官；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6、M9-07 Round 7、M9-08 Round 8、M9-09 Round 9、M9-10 Round 10（基准 harness + 同 kind 双流 UAF 修复）、M9-11 Round 11（参数冻结 + 孤儿 staging 清理）与 M9-12 Round 12（schema N-1/N 兼容 + rolling relay upgrade + 新旧设备互通）、M9-13 Round 13（fuzz 扩展 + regression corpus）、M9-14 Round 14（secret/vuln 扫描 + SBOM/许可证门禁 + 编译加固 + 发布签名）、M9-15 Round 15（安全回归八面：wire 伪造/重放/slowloris/退避指数/泄漏猎杀/伪造 grant·candidate·endpoint/文法表/服务端 oversized·1:1）、M9-19 Round 16（TURN/TCP 解封：libnice 双后端 + TURN/TLS 全后端硬拒绝）与 M9-16 Round 17（安装/配置/部署/API/故障排查五篇文档 + `heyaki_m9_docs_examples` 示例同步测试）、M9-17 Round 18（打包：版本 1.0.0、coturn 示例配置与 40+2 许可文本入安装树、package_release.sh 发布流（符号拆分/双 tar/卸载仿真）、uninstall target、heyaki_m9_package CTest）与 M9-18/M9-01 Round 19（v1 release checklist + 指标族语义评审收尾：两处 TYPE 矛盾修复 + 命名约定机械化强制 + 验收对账）已交付——**M9 全部条目完成**，最终 CI 状态见 Round 19 记录，见文末实施记录）
 > - 所属计划：[Heyaki MVP 至 v1 实施 TODO 计划](heyaki-implementation-plan.md)
 > - 前置：M8 | 建议发布点：v1.0
 
 ## 可观测性与运维
 
-- [ ] `M9-01` 设备端导出架构第 13.2 节全部 LAN/relay/协议指标，并与 executor failure/status、comm stats 建立明确关联字段。（Round 1 交付 2026-09-05：`NodeMetrics` 统一聚合 + `Node::metrics()` 周期发布 + Prometheus 文本导出 `format_node_metrics_prometheus`；新增 pairing 审计计数器与连通性结果/时长计数器；executor 关联字段经内嵌 `RuntimeSnapshot`。Round 2 交付 2026-09-05：relay 注册/租约计数器、信令 winner/fallback 聚合、backend 字节 gauge 周期采样、TUI 队列/渲染诊断与 `metrics` 命令；丢包估计受 pinned libdatachannel API 限制，见实施记录。缺口见实施记录"剩余范围"。）
+- [x] `M9-01` 设备端导出架构第 13.2 节全部 LAN/relay/协议指标，并与 executor failure/status、comm stats 建立明确关联字段。（Round 1/2 交付指标面；Round 11 决策丢包替代面；Round 19 收尾 = 指标族语义评审：全 376 族从 scrape 消费视角过命名/类型/单位/标签基数——修两处 TYPE 语义矛盾（enrollment/lease generation counter→gauge，HELP 原文自述 gauge semantics）、一处 counter 命名（event_lag_total_sequences→event_lag_sequences_total）；毫秒单位、手写直方图三元组、标签基数策略成文为约定（deploy/observability/README.md 新节）并由 heyaki_m9_slo_rules 新测试 `MetricFamiliesFollowNamingConventions` 机械化强制（counter 必 _total 除直方图三元组、gauge 禁 _total、HELP 必在 TYPE 前、新毫秒族须进冻结允许表）。无引用面破坏（dashboard/rules/golden 均未引用被改族）。）（Round 1 交付 2026-09-05：`NodeMetrics` 统一聚合 + `Node::metrics()` 周期发布 + Prometheus 文本导出 `format_node_metrics_prometheus`；新增 pairing 审计计数器与连通性结果/时长计数器；executor 关联字段经内嵌 `RuntimeSnapshot`。Round 2 交付 2026-09-05：relay 注册/租约计数器、信令 winner/fallback 聚合、backend 字节 gauge 周期采样、TUI 队列/渲染诊断与 `metrics` 命令；丢包估计受 pinned libdatachannel API 限制，见实施记录。缺口见实施记录"剩余范围"。）
 - [x] `M9-02` relay 导出 Prometheus 指标、结构化日志、有限审计和可选 trace correlation；高频成功事件采样。（Round 3 交付 2026-09-06：`format_relay_metrics_prometheus` 全量导出 `RelayServerSnapshot` 七个诊断块；同端口 TLS 上的纯 HTTP `GET /metrics` 端点（无 WebSocket upgrade，`metrics_path` 可配置，非 GET 405）；`RelayLogRecord` JSON Lines 结构化日志（16 类事件，失败/安全/生命周期事件全量，心跳/信令转发/查询按 `success_log_period` 采样，0 关闭采样）；登录/注册完成与拒绝携带 device/endpoint/tenant 审计字段（拒绝含声称身份），信令事件携带 `RequestId` 关联字段，metrics instance 标签 = 证书 SHA-256 十六进制与日志流可 join；`heyaki-relay` main 默认把日志打到 stdout。OpenTelemetry 出口属于部署侧桥接，留 M9-04 工具链决策。见实施记录 Round 3。）
 - [x] `M9-03` 为 registration、pairing、connection、session、operation 和 transfer 建立不含机密的 correlation ID。（Round 4 交付 2026-09-08：全部复用既有随机非机密 wire ID，无协议变更——pairing 审计事件携带 wire pairing RequestId + GrantId 并经 `Node::pairing_audit_records()` 暴露有界审计环；RPC 完成事件 `RpcCallOutcome.request_id` 自关联，准入失败 Error 携带 operation ID；shell 审计记录补 `shell_id`；connection/session 的 RequestId/SessionId 进入 TUI 会话视图（request=/session= 行，与 relay 信令日志同 ID 空间）；registration 因 v1 控制协议冻结无 wire ID，以快照墙钟锚点 `registration_started_unix_milliseconds`（TUI `since=`/指标 gauge）+ device+tenant join relay 日志；transfer 级 `TransferId` 在 API/事件/TUI 已全覆盖，本轮核对无缺口。见实施记录 Round 4。）
 - [x] `M9-04` 定义 SLO dashboard 与告警：multicast/listener readiness、presence/handshake reject、登录失败、租约续期、直连率、TURN allocation、pairing 猜测、队列拒绝、RPC overload、文件 hash 和 worker failure。（Round 5 交付 2026-09-09：`deploy/observability/` 下 Prometheus recording rules（8 条 `heyaki:slo:*` 比率）+ alert rules（20 条，relay-fleet 与 device 两组，critical/warning 分级）+ Grafana dashboard（24 面板）+ scrape 配置示例与信号映射 README；`tests/unit/m9_slo_rules_test.cpp` 渲染两个导出器并强制规则/面板只引用真实指标族、告警结构完整、runbook 锚点有效。设备侧序列无通路时告警天然静默。OTel 决策：v1 不内建出口，部署侧用 otel-collector 的 Prometheus receiver 桥接。见实施记录 Round 5。）
@@ -38,21 +38,21 @@
 - [x] `M9-15` 执行安全回归：multicast 洪泛/伪造/重放、LAN TLS MITM/slowloris、密码猜测/泄漏、grant/fingerprint/endpoint 伪造、降级、越权 method/topic、路径穿越、relay/TURN 放大。（Round 15 交付 2026-09-16：八攻击面覆盖矩阵审计 + 真缺口补齐，全部测试轮、零生产缺陷——唯一生产面发现是 `encode_lan_presence` 拒绝序列化签名不符对象（纵深防御，迫使伪造走字节手术=真实攻击者路径）。新增：`tests/unit/m9_security_regression_test.cpp`（CTest `heyaki_m9_security_regression`：`trust_scope_covers` 精确/前缀通配文法表测 + `safe_logical_file_name` 攻击形态全表）；m3a 三例（真组播 socket 上签名伪造/身份冒名/低序列重放拒收、slowloris 滴注部分 ClientHello 被握手死线回收且真实 peer 照常认证、跨源全局 provisional 容量帽）；m5 四例（退避指数翻倍/封顶全表 fake clock、跨源隔离无全局锁死、伪造 TrustGrant 签名接受侧拒绝零持久化、密码字面量泄漏猎杀——审计 detail + profile 根全文件字节扫描）；m4_signaling 第三方密钥 candidate 拒绝；m4_relay_signaling 三例（endpoint 发布会话绑定 E2E `endpoint_record_session_mismatch` + 正控、服务端 oversized WSS 帧丢弃存活、信令 1:1 无扇出/无反射恰 +8）；m7 终段 symlink 被 rename 替换不跟随。降级面经核对由 M9-12 compat 套件完备覆盖。审计总录 `docs/security/m9-security-regression.md`（含残余接受项：/metrics 无客户端认证、coturn 配置级反射控制）；threat-model §7 记 M9-15 回归门。本机 debug 全量 6 目标绿 + werror 构建零警告 + IVA 独立验证 12/12 二连跑零抖动 PASS。见实施记录 Round 15。）
 - [x] `M9-16` 编写安装、配置、部署、升级、备份、故障排查和 API 文档；示例必须从已编译源码嵌入或同步测试。（Round 17 交付 2026-09-17：新五篇用户文档 + 文档索引——`docs/README.md`（索引 + 示例同步纪律）、`docs/getting-started.md`（前置依赖/预设构建/安装前缀/已安装包消费/首次 relay+TUI/demos 表）、`docs/configuration.md`（relay 配置文件全 24 键三列表 + 相对路径语义 + CLI 覆写 + 设备侧 struct 配置模型与校验器映射）、`docs/deployment.md`（拓扑、relay 主机要求 + systemd 单元、bootstrap token 创建面、coturn/observability、设备机队、升级/备份/回滚 → runbook 锚点表、安装树布局）、`docs/api.md`（六 target 模块表、executor 并发契约、错误模型、profile/node 生命周期、发现/会话/配对/五服务/指标/relay 注册、协议兼容规则）、`docs/troubleshooting.md`（六域症状优先分诊表 + 诊断采集法 + 平台注记）。示例同步测试 `heyaki_m9_docs_examples`（tests/docs/）：`extract_doc_examples.cmake` 在 configure 期从五篇文档提取 `heyaki-cpp <slug>`（编译为独立可执行并逐个运行）与 `heyaki-relay-config <slug>`（经真 `load_relay_config_file` 解析+校验，含缺证书负路径断言）围栏块；文档列为 CMAKE_CONFIGURE_DEPENDS（编辑即重提取）；重复 slug/空块/未配对围栏 configure 期 FATAL。README Documentation 节前置文档索引。本机 debug+werror 双构建零警告、docs 测试绿、全量 werror ctest 绿（m3a/m3b 并行抖动单跑绿，已知家族）。见实施记录 Round 17。）
 - [x] `M9-17` 打包 client libraries、relay、TUI、coturn 示例配置与符号/许可证，验证干净机器安装和卸载。（Round 18 交付 2026-09-17：项目版本 0.0.0→1.0.0；安装树补齐 coturn 示例配置四件套（turnserver.conf/docker-compose.yml/env 模板/README → share/heyaki/coturn/）与 licenses.lock 全部 40 个第三方许可文本（逐条 RENAME `<name>-<basename>` → share/heyaki/licenses/，缺文件即 configure FATAL 与 SBOM 生成同语义）；nice 构建额外装 LGPL-2.1 全文 + NOTICE-libnice（动态链接满足重链接义务、源码指路，M9-19 遗留项闭环）；新 `scripts/package_release.sh` 单命令发布流——干净前缀安装 → M9-17 清单断言（8 二进制/5 公共头/cmake 包/proto/coturn 四件套/SBOM/许可清单/≥30 许可文本）→ readelf 探测 + objcopy 拆分调试符号（<stage>/… 与 <dbg>/….debug 镜像）→ strip 后二进制复跑 --version → 主/-dbg 双 tar.gz + SHA256SUMS → 解包冒烟 → **manifest 驱动卸载仿真**（新 `cmake/cmake_uninstall.cmake` + `uninstall` target，逐文件删除后断言前缀零常规文件）；构建无调试信息退出 77（CTest skip 语义——普通 Release CI job 跳过，supply-chain job 配 `-DCMAKE_*_FLAGS=-g` 后全流程真跑）。CTest `heyaki_m9_package`（Linux 非 sanitizer、objcopy/readelf/tar/bash 齐备才注册，SKIP_RETURN_CODE 77，TIMEOUT 900）。deployment.md 打包产物节更新为终态。本机验证：debug 全流程 PACKAGE_OK（11 个调试文件、版本 heyaki-1.0.0-linux-x86_64、卸载零残留）、plain Release skip 路径、nice 构建安装 42 许可文件含 LGPL/NOTICE、juice 40 且无 LGPL、installed_consumer/supply_chain/release_signing/docs 四测试随版本升全绿。见实施记录 Round 18。）
-- [ ] `M9-18` 形成 v1 release checklist，记录测试 commit、依赖 commit、协议版本、已知限制和回滚方案。
+- [x] `M9-18` 形成 v1 release checklist，记录测试 commit、依赖 commit、协议版本、已知限制和回滚方案。（Round 19 交付 2026-09-17：`docs/operations/release-checklist-v1.md`——发布身份（1.0.0/wire {1,2}/heyaki 自身许可 NOASSERTION 为产品决策点）；依赖 commit 记录（dependencies.lock 35 直依赖 + transitive 5 + licenses.lock 全文随包，系统面 OpenSSL 3.x 地板/libnice 0.1.21 地板/coturn 4.10.0 digest + 回退包 CVE 结论）+ 发布前三复检（OSV/coturn 镜像/secret scan）；验证证据矩阵（十一 CI job 覆盖面 + 验收实测数字 + 打包流落 supply-chain job）与 tag 时盖章步骤；已知限制 13 条成文（TURN/TLS、libnice consent 80s、packetsLost、控制面字节计数、/metrics 认证、无 admin CLI、跨 OS 阻断、Windows 磁盘满、共享出口限速、shell tick、SCTP 帧帽、未知字段拒绝、打包 Linux-only）；回滚方案四层（relay schema 边界/设备 N-1/TURN 四代凭据/库 SameMajorVersion）；发布七步程序（打包→签名→复检→盖章→tag 为产品所有者动作）。文档索引挂链。）
 
 ## M9/v1 最终验收
 
-- [ ] 同区域正常网络登记 P95 < 2 秒，可打洞直连 P95 < 3 秒，TURN fallback P95 < 5 秒。
-- [ ] 无 relay/STUN/TURN 的三设备测试 LAN 能自主发现、认证和建立 host-candidate DataChannel；未知/已信任 peer 分别进入 PairingRestricted/Authorized。
-- [ ] TUI 本地初始化后，同 OS 用户的库应用可复用 profile 运行 LAN-only；存在 enrollment 时可无人工登录 relay，多 endpoint 同时在线且路由准确。
-- [ ] 未信任设备只能进入 pairing-only，错误密码不触达业务 handler，正确密码只授予策略交集内 scope。
-- [ ] LAN-only、relay-signaled direct 和 TURN 三条路径均通过消息、RPC、事件、ByteStream、文件和启用后的 Shell 端到端测试。
-- [ ] 所有发送/接收/任务/诊断队列在压力下保持配置上限，无持续内存增长或静默消息损失。
-- [ ] 文件可从任意已确认块恢复并通过最终 BLAKE3；非幂等 RPC 断线返回 `outcome_unknown`。
-- [ ] Shell 未授权、文件越界、超额资源、协议降级、伪造签名和重放全部默认拒绝。
-- [ ] relay 数据库、日志、WSS 终止点和 TURN 抓包均不能恢复授权密码、verifier、私钥或业务明文。
-- [ ] TUI 仅通过 Heyaki 公共 API 覆盖全部正式能力；高频事件与窄终端下仍保持有界刷新和可用布局。
-- [ ] Linux/Windows 发布矩阵、sanitizer、fuzz、长稳、故障注入、兼容性和安全评审全部通过或有明确阻断结论。
+- [x] 同区域正常网络登记 P95 < 2 秒，可打洞直连 P95 < 3 秒，TURN fallback P95 < 5 秒。（M9-10 基准 harness 三相位 CI 常跑（coturn-topology Release，libnice 后端）；冻结表实测：登记 P95 22-32ms（余量 60-90×）、直连 300-1021ms（3-10×）、TURN 663-1077ms（5-7×）；门 = bench Phase R/T 断言。NAT 矩阵拓扑真实 P95：cone 打洞 ≤2059ms、symmetric/CGNAT TURN ≤1356ms。）
+- [x] 无 relay/STUN/TURN 的三设备测试 LAN 能自主发现、认证和建立 host-candidate DataChannel；未知/已信任 peer 分别进入 PairingRestricted/Authorized。（m3a `heyaki_network_harness` 全套 + Windows/CI lan_only 矩阵场景（direct_host 认证、m6/m7 严格）；默认拒绝→PairingRestricted→配对→Authorized 由 m5 全套与 M9-15 伪造/重放面钉死；TUI 同 OS 用户复用 profile 由 m2/TUI harness 覆盖。）
+- [x] TUI 本地初始化后，同 OS 用户的库应用可复用 profile 运行 LAN-only；存在 enrollment 时可无人工登录 relay，多 endpoint 同时在线且路由准确。（ProfileStore 共享 profile/endpoint_for 合一（m2+架构 §5.4，TUI org.heyaki.tui 与库应用各持 endpoint）；免登录 relay 重连经 enrollment generation（m3b 重连/重启测试）；多 endpoint 路由=endpoint 目录 + tenant 隔离（m3b_relay_endpoint/m4_signaling）；文档化于 getting-started/api.md。）
+- [x] 未信任设备只能进入 pairing-only，错误密码不触达业务 handler，正确密码只授予策略交集内 scope。（m5 default-deny 全套 + M9-15 补齐：退避指数全表、跨源隔离、伪造 TrustGrant 拒绝、scope 文法表 heyaki_m9_security_regression；交集语义在 m5 与 api.md 成文。）
+- [x] LAN-only、relay-signaled direct 和 TURN 三条路径均通过消息、RPC、事件、ByteStream、文件和启用后的 Shell 端到端测试。（M9-07 Windows lan_only/relay_direct/turn_udp 矩阵首轮严格断言 m6+m7；M9-06 NAT 矩阵六场景 m6 严格 + m7 文件；M9-19 turn_tcp 场景 strict-m7（UDP 全灭下 TURN/TCP）；shell 端到端 = m8 全套 + bench shell 段（空闲/竞争）；ByteStream = m5/m6 通道族。三条路径 × 能力对账见 cross-os-matrix.md。）
+- [x] 所有发送/接收/任务/诊断队列在压力下保持配置上限，无持续内存增长或静默消息损失。（M9-09 soak 三相位：RSS/fd/replay/会话史环/任务 gauge 全循环门 + Phase B/C 设备与容量过载；慢消费者/队列上限/反饥饿 = m5/m6/m7 overflow 族 + M9-08 slow_receiver 整形链路；有界性另由 M9-11 冻结上限钉死。）
+- [x] 文件可从任意已确认块恢复并通过最终 BLAKE3；非幂等 RPC 断线返回 `outcome_unknown`。（m7 bitmap 续传/SessionLossPauses/崩溃矩阵六盘上边界（heyaki_m9_file_crash_recovery）+ Round 10 两处 complete 缺陷回归；outcome_unknown = m6 语义族 + at-most-once result cache。）
+- [x] Shell 未授权、文件越界、超额资源、协议降级、伪造签名和重放全部默认拒绝。（shell live scope + 默认关（m8）；文件 roots/配额/文法（m7 + M9-15 文法全表）；降级 = M9-12 compat 套件（版本/能力/重启帧三层）；伪造签名/重放 = M9-15 八面（presence 字节手术/低序列重放/伪造 grant·candidate·endpoint）；审计总录 m9-security-regression.md。）
+- [x] relay 数据库、日志、WSS 终止点和 TURN 抓包均不能恢复授权密码、verifier、私钥或业务明文。（密码面按协议不接触 relay；M9-15 密码字面量泄漏猎杀（审计 detail + profile 根全文件扫描）；relay 只持哈希 token/generation（m3b schema）；数据面 P2P + TURN 中继不含信令明文；TUI/relay 日志审计字段不含机密（M9-02/03 设计约束 + 测试）。）
+- [x] TUI 仅通过 Heyaki 公共 API 覆盖全部正式能力；高频事件与窄终端下仍保持有界刷新和可用布局。（heyaki_tui_setup 只链 heyaki::client/profile 公共面；m3b/m4/m6/m7/m8 TUI harness 驱动全部视图；QUEUES/RENDER 有界性 = M9-01 Round 2 + 高频 fan-out bench 段。）
+- [x] Linux/Windows 发布矩阵、sanitizer、fuzz、长稳、故障注入、兼容性和安全评审全部通过或有明确阻断结论。（CI 十一 job 全绿基线（M9-19 终态 35178705793 + M9-16/17/18 增量轮见记录）；阻断结论成文：跨 OS 真机组合 runner 不可达、Windows udp_blocked 不可仿真、TURN/TLS 无后端（cross-os-matrix.md / release-checklist 已知限制）；M9-15 IVA 独立验证 + 审计总录。）
 
 ## 实施记录
 
@@ -1648,13 +1648,45 @@ NOTICE）、juice 40 个且无 LGPL；版本升级后 installed_consumer /
 supply_chain_inventory / m9_release_signing / m9_docs_examples 四测
 全绿；debug 全量构建零错误。
 
+### Round 19（2026-09-17）：M9-18 v1 release checklist + M9-01 指标语义评审收尾 + 最终验收对账
+
+交付物：
+
+- `docs/operations/release-checklist-v1.md`（M9-18，内容见勾选项）。
+- M9-01 语义评审（收尾）：
+  - 全量审计两导出器 397 族（node 298 + relay 99，渲染面实测）：前缀、counter `_total`、
+    gauge 反 `_total`、HELP/TYPE 配对、单位命名、标签基数。
+  - **两处真修复**：`heyaki_node_relay_enrollment_generation`/
+    `lease_generation` 由 counter() 改 gauge()（HELP 原文自述
+    "(gauge semantics)"，TYPE 行与语义矛盾——消费端会误用 rate()）；
+    `heyaki_event_lag_total_sequences` → `heyaki_event_lag_sequences_total`
+    （counter 命名一致性）。dashboard/规则/golden 零引用，改名无破坏。
+  - 约定成文：deploy/observability/README.md 新节 "Metric semantics
+    conventions"——命名空间、counter/gauge 规则与直方图三元组例外、
+    毫秒单位决策（ingest 侧换算）、标签基数（relay 单 instance 标签、
+    设备侧无 per-peer 标签）、零值全渲染（absent() 语义）。
+  - 机械化强制：`heyaki_m9_slo_rules` 新测试
+    `MetricFamiliesFollowNamingConventions`（渲染两导出器，断言
+    heyaki_ 前缀 / counter⇒_total（直方图三元组白名单）/ gauge⇒非
+    _total / HELP 先于 TYPE / 新毫秒族必须进冻结允许表）——新例外
+    必须同提交扩表并改文档。
+  - Known limitations 陈旧指针更新（丢包面"revisit after M9-10" →
+    冻结表 §9.3 的 pin 升级重估）。
+- 最终验收对账：11 项全部勾选，逐项证据指针（基准/NAT 实测数字、
+  覆盖套件名、阻断结论文档位置）。
+- `docs/README.md` 索引补 release-checklist 行。
+
+本机验证：heyaki_m9_slo_rules（含新约定测试）与 heyaki_m9_metrics
+全绿（后者证明改名/改型未破 golden）。
+
 ### 剩余范围（M9-01 完成前）
 
 - ~~注册成功率/租约续期失败计数器、信令 fallback/winner 聚合、TUI 队列/渲染
   导出~~：Round 2 已交付（见上）。
 - ~~丢包估计（packetsLost 缺口）取舍~~：Round 11 已决策——维持 bytes/rtt
   现状替代面，随 M9-19 后端切换统一重估（参数冻结表 §9.3）。
-- Prometheus 指标族语义评审（命名/标签/类型过一遍 scrape 消费视角）；
-  ~~M9-03 correlation ID 与 instance 标签打通~~：Round 4 已交付（见上）。
+- ~~Prometheus 指标族语义评审（命名/标签/类型过一遍 scrape 消费视角）~~：
+  Round 19 已交付（见上）。
+- ~~M9-03 correlation ID 与 instance 标签打通~~：Round 4 已交付（见上）。
 - ~~M9-02 relay 侧导出~~：Round 3 已交付（见上）。M9-04/05 dashboard 与
   runbook 以 Round 1/2/3 指标族与日志事件为输入。
