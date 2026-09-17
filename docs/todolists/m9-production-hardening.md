@@ -1677,7 +1677,18 @@ supply_chain_inventory / m9_release_signing / m9_docs_examples 四测
 - `docs/README.md` 索引补 release-checklist 行。
 
 本机验证：heyaki_m9_slo_rules（含新约定测试）与 heyaki_m9_metrics
-全绿（后者证明改名/改型未破 golden）。
+全绿（后者证明改名/改型未破 golden）；全量 debug ctest 69/69 绿（9 个
+环境门控跳过与基线一致）。IVA 独立验证 PASS（含独立渲染探针核对两处
+修复的 TYPE 行与旧名零残留、checklist 全链接/锚点/事实抽查（协议版本、
+coturn digest、35+5 pin、40 许可、11 job 计数）、todolist 零未勾条目；
+两处记录笔误——状态词与族数 376→397——已按报告修正）。
+
+**M9 收官 CI 终态**：Round 17（M9-16 文档）run 35242112880、Round 18
+（M9-17 打包，supply-chain job 首跑 `heyaki_m9_package` 真实打包流）run
+35244546917、Round 19（本轮）run 35246768481——三个 run 各自十一 job
+全绿零 rerun（2026-09-17）。v1.0.0 发布按
+[release-checklist-v1.md](../operations/release-checklist-v1.md) 执行，
+tag 与发布是产品所有者动作。
 
 ### 剩余范围（M9-01 完成前）
 
