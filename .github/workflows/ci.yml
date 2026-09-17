@@ -225,14 +225,16 @@ jobs:
           fetch-depth: 0
       - name: Fetch pinned dependencies
         run: scripts/fetch_third_party.sh --all
-      - name: Configure (Release, hardened)
+      - name: "Configure (Release, hardened, with debug info for symbol split)"
         run: >-
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_CXX_FLAGS=-g
+          -DCMAKE_C_FLAGS=-g
           -DHEYAKI_WARNINGS_AS_ERRORS=ON
       - name: Build
         run: cmake --build build --parallel 2
-      - name: "Test (supply-chain gates: secret scan, OSV scan, hardening, signing)"
+      - name: "Test (supply-chain gates: secret scan, OSV scan, hardening, signing, packaging)"
         env:
           HEYAKI_REQUIRE_SECRET_SCAN: "1"
           HEYAKI_REQUIRE_VULN_SCAN: "1"

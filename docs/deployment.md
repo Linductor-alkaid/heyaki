@@ -138,10 +138,17 @@ rollback boundary), N-1 devices interoperate (see
 ├── include/      public headers
 └── share/heyaki/
     ├── proto/                wire schema sources
+    ├── coturn/               example turnserver.conf, compose file, env template
+    ├── licenses/             third-party license texts (+ LGPL notice on nice builds)
     └── supply-chain/         SBOM, license manifest, notices
 ```
 
-Release packaging (dist tarball with coturn example configuration, license
-texts, and split debug symbols, plus Ed25519 manifest signing) is specified in
-[operations/release-signing.md](operations/release-signing.md) and the v1
-release checklist.
+The release flow (`scripts/package_release.sh`) installs into a clean prefix,
+asserts that inventory, splits debug symbols into a companion `-dbg` tarball,
+verifies the stripped binaries still run, and verifies the manifest-driven
+uninstall leaves the prefix empty; signing the tarball set with
+`heyaki-release-sign` is the separate operator procedure in
+[operations/release-signing.md](operations/release-signing.md). `cmake
+--build <dir> --target uninstall` performs the same removal interactively.
+The whole packaging flow runs as the `heyaki_m9_package` CTest (CI
+supply-chain job).

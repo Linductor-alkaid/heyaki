@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 
 project(
   heyaki
-  VERSION 0.0.0
+  VERSION 1.0.0
   DESCRIPTION "Device-to-device communication infrastructure"
   LANGUAGES C CXX)
 
@@ -493,6 +493,48 @@ install(FILES
   docs/supply-chain/m1-libsodium-sha256-notices.md
   docs/supply-chain/boost-software-license-1.0.txt
   DESTINATION "${CMAKE_INSTALL_DATADIR}/heyaki/supply-chain")
+# M9-17: the release tree carries the example coturn deployment baseline and
+# every third-party license text referenced by the license lock, so the
+# package is self-contained for compliance review without the source tree.
+install(FILES
+  deploy/coturn/turnserver.conf
+  deploy/coturn/docker-compose.yml
+  deploy/coturn/heyaki-turn.env.example
+  deploy/coturn/README.md
+  DESTINATION "${CMAKE_INSTALL_DATADIR}/heyaki/coturn")
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/licenses.lock"
+  heyaki_license_lock_lines)
+set(heyaki_license_file_count 0)
+foreach(heyaki_license_line IN LISTS heyaki_license_lock_lines)
+  if(heyaki_license_line STREQUAL "" OR heyaki_license_line MATCHES "^#")
+    continue()
+  endif()
+  string(REPLACE "|" ";" heyaki_license_fields "${heyaki_license_line}")
+  list(LENGTH heyaki_license_fields heyaki_license_field_count)
+  if(NOT heyaki_license_field_count EQUAL 3)
+    message(FATAL_ERROR "Invalid license lock entry: ${heyaki_license_line}")
+  endif()
+  list(GET heyaki_license_fields 0 heyaki_license_name)
+  list(GET heyaki_license_fields 2 heyaki_license_path)
+  if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${heyaki_license_path}")
+    message(FATAL_ERROR
+      "License file for ${heyaki_license_name} does not exist: ${heyaki_license_path}")
+  endif()
+  get_filename_component(heyaki_license_basename "${heyaki_license_path}" NAME)
+  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/${heyaki_license_path}"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/heyaki/licenses"
+    RENAME "${heyaki_license_name}-${heyaki_license_basename}")
+  math(EXPR heyaki_license_file_count "${heyaki_license_file_count} + 1")
+endforeach()
+message(STATUS "Packaging ${heyaki_license_file_count} third-party license texts")
+# M9-19/M9-17: libnice builds dynamically link LGPL-2.1 system libraries;
+# ship the license text and the compliance notice with the artifacts.
+if(HEYAKI_ICE_BACKEND STREQUAL "nice")
+  install(FILES
+    deploy/licenses/lgpl-2.1.txt
+    deploy/licenses/NOTICE-libnice.md
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/heyaki/licenses")
+endif()
 
 set(HEYAKI_CMAKE_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/heyaki")
 # M9-19: with the libnice backend the installed LibDataChannel target carries
@@ -535,3 +577,12 @@ if(HEYAKI_AUTO_INSTALL)
     add_dependencies(heyaki-deploy heyaki-sbom)
   endif()
 endif()
+
+# M9-17: manifest-driven uninstall (see cmake/cmake_uninstall.cmake for the
+# contract). The packaging test exercises it against a scratch prefix.
+add_custom_target(uninstall
+  COMMAND "${CMAKE_COMMAND}"
+    "-DHEYAKI_INSTALL_MANIFEST=${CMAKE_BINARY_DIR}/install_manifest.txt"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/cmake_uninstall.cmake"
+  USES_TERMINAL
+  COMMENT "Uninstalling Heyaki (files recorded in install_manifest.txt)")

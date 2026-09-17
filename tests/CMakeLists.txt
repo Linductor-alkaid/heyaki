@@ -1408,6 +1408,32 @@ add_test(
     -P "${CMAKE_CURRENT_SOURCE_DIR}/consumer/RunConsumerTest.cmake")
 set_tests_properties(heyaki_installed_consumer PROPERTIES LABELS "integration")
 
+# M9-17: release packaging verification (Linux, non-sanitizer). Installs into
+# a scratch prefix, asserts the packaging inventory, splits debug symbols,
+# runs the stripped binaries, creates + extracts the tarballs, and simulates a
+# manifest-driven uninstall. Exit 77 (skip) when the build carries no debug
+# info; the CI supply-chain job configures with -g so the full flow runs.
+if(UNIX AND NOT APPLE AND NOT WIN32 AND HEYAKI_SANITIZER STREQUAL "none"
+   AND NOT CMAKE_CROSSCOMPILING)
+  find_program(HEYAKI_OBJCOPY objcopy)
+  find_program(HEYAKI_READELF readelf)
+  find_program(HEYAKI_TAR tar)
+  find_program(HEYAKI_BASH_INTERPRETER bash)
+  if(HEYAKI_OBJCOPY AND HEYAKI_READELF AND HEYAKI_TAR
+     AND HEYAKI_BASH_INTERPRETER)
+    add_test(
+      NAME heyaki_m9_package
+      COMMAND "${HEYAKI_BASH_INTERPRETER}"
+        "${PROJECT_SOURCE_DIR}/scripts/package_release.sh"
+        "--build-dir" "${CMAKE_BINARY_DIR}"
+        "--output" "${CMAKE_CURRENT_BINARY_DIR}/package-test")
+    set_tests_properties(heyaki_m9_package PROPERTIES
+      LABELS "integration;release;m9;packaging"
+      TIMEOUT 900
+      SKIP_RETURN_CODE 77)
+  endif()
+endif()
+
 if(WIN32)
   set_tests_properties(heyaki_public_headers
     PROPERTIES LABELS "protocol;security;windows")
