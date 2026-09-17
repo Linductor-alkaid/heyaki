@@ -18,7 +18,12 @@ def main():
     tenant = os.environ["HEYAKI_TENANT"]
     token = os.environ["HEYAKI_TOKEN"]
     log_path = os.environ.get("HEYAKI_TUI_DRIVE_LOG", "/dev/null")
-    timeout = 35.0
+    # Guardrail against a hung TUI, not a product budget: heavily loaded CI
+    # runners (sanitizer builds, concurrent jobs) render the PTY exchange far
+    # slower than the 10 s a local run needs, and the driver timed out twice
+    # in a row there at 35 s (M9-19 CI convergence). Overridable for local
+    # stress experiments.
+    timeout = float(os.environ.get("HEYAKI_TUI_DRIVE_TIMEOUT_S", "60"))
 
     master, slave = pty.openpty()
     env = os.environ.copy()
