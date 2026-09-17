@@ -1,6 +1,6 @@
 # M9：生产加固与 v1 发布
 
-> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6、M9-07 Round 7、M9-08 Round 8、M9-09 Round 9、M9-10 Round 10（基准 harness + 同 kind 双流 UAF 修复）、M9-11 Round 11（参数冻结 + 孤儿 staging 清理）与 M9-12 Round 12（schema N-1/N 兼容 + rolling relay upgrade + 新旧设备互通）、M9-13 Round 13（fuzz 扩展 + regression corpus）、M9-14 Round 14（secret/vuln 扫描 + SBOM/许可证门禁 + 编译加固 + 发布签名）、M9-15 Round 15（安全回归八面：wire 伪造/重放/slowloris/退避指数/泄漏猎杀/伪造 grant·candidate·endpoint/文法表/服务端 oversized·1:1）与 M9-19 Round 16（TURN/TCP 解封：libnice 双后端 + TURN/TLS 全后端硬拒绝）已交付，M9-16 起未开始，见文末实施记录）
+> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6、M9-07 Round 7、M9-08 Round 8、M9-09 Round 9、M9-10 Round 10（基准 harness + 同 kind 双流 UAF 修复）、M9-11 Round 11（参数冻结 + 孤儿 staging 清理）与 M9-12 Round 12（schema N-1/N 兼容 + rolling relay upgrade + 新旧设备互通）、M9-13 Round 13（fuzz 扩展 + regression corpus）、M9-14 Round 14（secret/vuln 扫描 + SBOM/许可证门禁 + 编译加固 + 发布签名）、M9-15 Round 15（安全回归八面：wire 伪造/重放/slowloris/退避指数/泄漏猎杀/伪造 grant·candidate·endpoint/文法表/服务端 oversized·1:1）与 M9-19 Round 16（TURN/TCP 解封：libnice 双后端 + TURN/TLS 全后端硬拒绝，CI 35178705793 十一 job 绿）已交付，M9-16 起未开始，见文末实施记录）
 > - 所属计划：[Heyaki MVP 至 v1 实施 TODO 计划](heyaki-implementation-plan.md)
 > - 前置：M8 | 建议发布点：v1.0
 
@@ -1458,7 +1458,16 @@ libjuice server 收包线程的 poll 不属 network 类——单看 sendto/recvf
 裸 20 字节 Allocate 与 libnice 的 40 字节请求不同构，server 健康证明
 被高估（resolve 专家纠偏）。
 
-CI 终态：见提交记录（本行由 CI 结果回填写实）。
+**CI 终态**：run 35178705793（提交链 569d596 主交付 → e823ac3 CI 步骤
+顺序 → b530a62 relayed 标签分类 → b3c064e/124737c strict-m7 门（远端经
+API 回退提交，443 断连家族）→ d34105a soak 窗口 → ae18e0f bench TURN
+拓扑 → a37e01f m3b 计数器轮询 → 85f590f TUI driver 超时）**十一 job
+全绿**（2026-09-17，coturn-topology 25m：libnice 后端下 M4 矩阵 + NAT
+矩阵 turn_tcp + 故障矩阵 + soak + bench 全部通过；收敛期另历经 m3b/
+TUI/m3a 抖动家族轮转与三处测试基建加固——m3b 计数器改 wait_until 轮询
+（asan/tsan 双红同用例两轮后加固）、TUI enrollment driver 35s→60s
+（慢 runner 下连续三次双 attempt 超时，本机 3/3 十秒绿对照）、
+LogsInHeartbeats 用例同前）。
 
 ### 剩余范围（M9-01 完成前）
 
