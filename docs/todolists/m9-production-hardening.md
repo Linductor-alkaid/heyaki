@@ -1,6 +1,6 @@
 # M9：生产加固与 v1 发布
 
-> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6、M9-07 Round 7、M9-08 Round 8、M9-09 Round 9、M9-10 Round 10（基准 harness + 同 kind 双流 UAF 修复）、M9-11 Round 11（参数冻结 + 孤儿 staging 清理）与 M9-12 Round 12（schema N-1/N 兼容 + rolling relay upgrade + 新旧设备互通）、M9-13 Round 13（fuzz 扩展 + regression corpus）、M9-14 Round 14（secret/vuln 扫描 + SBOM/许可证门禁 + 编译加固 + 发布签名）、M9-15 Round 15（安全回归八面：wire 伪造/重放/slowloris/退避指数/泄漏猎杀/伪造 grant·candidate·endpoint/文法表/服务端 oversized·1:1）、M9-19 Round 16（TURN/TCP 解封：libnice 双后端 + TURN/TLS 全后端硬拒绝）与 M9-16 Round 17（安装/配置/部署/API/故障排查五篇文档 + `heyaki_m9_docs_examples` 示例同步测试）已交付，M9-17/18 未开始，见文末实施记录）
+> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6、M9-07 Round 7、M9-08 Round 8、M9-09 Round 9、M9-10 Round 10（基准 harness + 同 kind 双流 UAF 修复）、M9-11 Round 11（参数冻结 + 孤儿 staging 清理）与 M9-12 Round 12（schema N-1/N 兼容 + rolling relay upgrade + 新旧设备互通）、M9-13 Round 13（fuzz 扩展 + regression corpus）、M9-14 Round 14（secret/vuln 扫描 + SBOM/许可证门禁 + 编译加固 + 发布签名）、M9-15 Round 15（安全回归八面：wire 伪造/重放/slowloris/退避指数/泄漏猎杀/伪造 grant·candidate·endpoint/文法表/服务端 oversized·1:1）、M9-19 Round 16（TURN/TCP 解封：libnice 双后端 + TURN/TLS 全后端硬拒绝）与 M9-16 Round 17（安装/配置/部署/API/故障排查五篇文档 + `heyaki_m9_docs_examples` 示例同步测试）、M9-17 Round 18（打包：版本 1.0.0、coturn 示例配置与 40+2 许可文本入安装树、package_release.sh 发布流（符号拆分/双 tar/卸载仿真）、uninstall target、heyaki_m9_package CTest）已交付，M9-18 未开始，见文末实施记录）
 > - 所属计划：[Heyaki MVP 至 v1 实施 TODO 计划](heyaki-implementation-plan.md)
 > - 前置：M8 | 建议发布点：v1.0
 
@@ -37,7 +37,7 @@
 - [x] `M9-14` 完成 secret scan、dependency vulnerability scan、SBOM、许可证、编译 hardening 和发布制品签名。（Round 14 交付 2026-09-15：六面控制全部 CTest 强制并进新 CI `supply-chain` job——①**secret scan**：`scripts/run_secret_scan.sh` + digest-pin 的 gitleaks 8.24.3（`deploy/security/secret-scan.lock`，官方 checksum `9991e0b2…`）全 git 历史扫描 + 阳性对照（先证明规则集能命中再报全清）；基线 31 命中全部处置：30 个在 `.mimosa/hook-state/`（**会话工具快照被 48d7f4/386f82a 意外提交，本轮 `git rm -r --cached` 移出 5003 个文件并 gitignore**，内容为工具自身哈希/代码标识非凭据，历史路径 allowlist 留档）、1 个为 `Error{…,"password",detail}` 误报（allowlist 枚举封闭错误串集，真密码仍会命中）；测试 fixture 密钥材料零命中、未发放任何 tests/ 整体豁免。②**漏洞扫描**：`scripts/osv_vulnerability_scan.py` 单批 querybatch 查全部 40 个 pin commit + 已知漏洞 OpenSSL 对照 commit 自检（检不出即 fail-closed）+ `deploy/security/osv-triage.tsv` 三态 triage（未 triage 即红、陈旧条目告警）；结果 0 命中；OSV 对 native C/C++ 覆盖稀疏的限制与补偿控制成文；**coturn 部署制品单审**：4.10.0 镜像含 CVE-2025-69217/2026-27624/40613/43994 修复（fix commit 经 GitHub compare 判定为 tag 祖先），CVE-2026-43915/53448（admin 面板 XSS/SQLi）不在 4.10.0 但部署 `no-cli` 且无 web-admin → not-affected，发布时复检；Ubuntu 回退包 4.6.1-1build4 在多个影响域内 → 生产必须走 digest-pin 镜像。③**SBOM/许可证**：heyaki 自身入册（version+build commit）+ 版本化 namespace（Created 保持固定换字节级可复现）；生成期**copyleft 门禁**（runtime/test 组与递归子模块禁 AGPL/GPL/LGPL/SSPL 原子，optional 组仅允许"permissive OR"形态——zstd `BSD-3-Clause OR GPL-2.0-only` 不进 v1 构建）；现状全部 permissive。④**编译加固**：`HEYAKI_HARDENING`（默认 ON）——全局 `-fstack-protector-strong`/PIC/探针 CET/探针 FORTIFY（3→2 阶梯，仅优化配置，避开 distro 预定义重定义警告）+ 可执行文件 `-pie -Wl,-z,relro,-z,now,-z,noexecstack` + MSVC `/GS /guard:cf /GUARD:CF /CETCOMPAT`（x64）；`heyaki_m9_hardening_check` 用 readelf 断言 PIE/NX/full-RELRO/canary（Release 加 FORTIFY `__*_chk`）；`readelf` 本地化坑以 `LC_ALL=C` 钉死。⑤**发布签名**：`heyaki-release-sign`（pinned libsodium Ed25519；keygen/manifest/sign/verify/check；manifest 字节序确定性、严格解析、symlink 排除）+ 规程 `docs/operations/release-signing.md`（离线 keygen、key id=SHA-256(pub) 前 16 hex、轮换程序）+ `heyaki_m9_release_signing` 往返（真制品 + 全篡改方向必拒）。审计总录 `docs/supply-chain/m9-release-audit.md`。本机 werror 构建 66/66 绿 + Release FORTIFY 断言过 + IVA 独立验证（含 manifest 确定性/坏签名/路径逃逸/漏洞负路径）全 PASS。见实施记录 Round 14。）
 - [x] `M9-15` 执行安全回归：multicast 洪泛/伪造/重放、LAN TLS MITM/slowloris、密码猜测/泄漏、grant/fingerprint/endpoint 伪造、降级、越权 method/topic、路径穿越、relay/TURN 放大。（Round 15 交付 2026-09-16：八攻击面覆盖矩阵审计 + 真缺口补齐，全部测试轮、零生产缺陷——唯一生产面发现是 `encode_lan_presence` 拒绝序列化签名不符对象（纵深防御，迫使伪造走字节手术=真实攻击者路径）。新增：`tests/unit/m9_security_regression_test.cpp`（CTest `heyaki_m9_security_regression`：`trust_scope_covers` 精确/前缀通配文法表测 + `safe_logical_file_name` 攻击形态全表）；m3a 三例（真组播 socket 上签名伪造/身份冒名/低序列重放拒收、slowloris 滴注部分 ClientHello 被握手死线回收且真实 peer 照常认证、跨源全局 provisional 容量帽）；m5 四例（退避指数翻倍/封顶全表 fake clock、跨源隔离无全局锁死、伪造 TrustGrant 签名接受侧拒绝零持久化、密码字面量泄漏猎杀——审计 detail + profile 根全文件字节扫描）；m4_signaling 第三方密钥 candidate 拒绝；m4_relay_signaling 三例（endpoint 发布会话绑定 E2E `endpoint_record_session_mismatch` + 正控、服务端 oversized WSS 帧丢弃存活、信令 1:1 无扇出/无反射恰 +8）；m7 终段 symlink 被 rename 替换不跟随。降级面经核对由 M9-12 compat 套件完备覆盖。审计总录 `docs/security/m9-security-regression.md`（含残余接受项：/metrics 无客户端认证、coturn 配置级反射控制）；threat-model §7 记 M9-15 回归门。本机 debug 全量 6 目标绿 + werror 构建零警告 + IVA 独立验证 12/12 二连跑零抖动 PASS。见实施记录 Round 15。）
 - [x] `M9-16` 编写安装、配置、部署、升级、备份、故障排查和 API 文档；示例必须从已编译源码嵌入或同步测试。（Round 17 交付 2026-09-17：新五篇用户文档 + 文档索引——`docs/README.md`（索引 + 示例同步纪律）、`docs/getting-started.md`（前置依赖/预设构建/安装前缀/已安装包消费/首次 relay+TUI/demos 表）、`docs/configuration.md`（relay 配置文件全 24 键三列表 + 相对路径语义 + CLI 覆写 + 设备侧 struct 配置模型与校验器映射）、`docs/deployment.md`（拓扑、relay 主机要求 + systemd 单元、bootstrap token 创建面、coturn/observability、设备机队、升级/备份/回滚 → runbook 锚点表、安装树布局）、`docs/api.md`（六 target 模块表、executor 并发契约、错误模型、profile/node 生命周期、发现/会话/配对/五服务/指标/relay 注册、协议兼容规则）、`docs/troubleshooting.md`（六域症状优先分诊表 + 诊断采集法 + 平台注记）。示例同步测试 `heyaki_m9_docs_examples`（tests/docs/）：`extract_doc_examples.cmake` 在 configure 期从五篇文档提取 `heyaki-cpp <slug>`（编译为独立可执行并逐个运行）与 `heyaki-relay-config <slug>`（经真 `load_relay_config_file` 解析+校验，含缺证书负路径断言）围栏块；文档列为 CMAKE_CONFIGURE_DEPENDS（编辑即重提取）；重复 slug/空块/未配对围栏 configure 期 FATAL。README Documentation 节前置文档索引。本机 debug+werror 双构建零警告、docs 测试绿、全量 werror ctest 绿（m3a/m3b 并行抖动单跑绿，已知家族）。见实施记录 Round 17。）
-- [ ] `M9-17` 打包 client libraries、relay、TUI、coturn 示例配置与符号/许可证，验证干净机器安装和卸载。
+- [x] `M9-17` 打包 client libraries、relay、TUI、coturn 示例配置与符号/许可证，验证干净机器安装和卸载。（Round 18 交付 2026-09-17：项目版本 0.0.0→1.0.0；安装树补齐 coturn 示例配置四件套（turnserver.conf/docker-compose.yml/env 模板/README → share/heyaki/coturn/）与 licenses.lock 全部 40 个第三方许可文本（逐条 RENAME `<name>-<basename>` → share/heyaki/licenses/，缺文件即 configure FATAL 与 SBOM 生成同语义）；nice 构建额外装 LGPL-2.1 全文 + NOTICE-libnice（动态链接满足重链接义务、源码指路，M9-19 遗留项闭环）；新 `scripts/package_release.sh` 单命令发布流——干净前缀安装 → M9-17 清单断言（8 二进制/5 公共头/cmake 包/proto/coturn 四件套/SBOM/许可清单/≥30 许可文本）→ readelf 探测 + objcopy 拆分调试符号（<stage>/… 与 <dbg>/….debug 镜像）→ strip 后二进制复跑 --version → 主/-dbg 双 tar.gz + SHA256SUMS → 解包冒烟 → **manifest 驱动卸载仿真**（新 `cmake/cmake_uninstall.cmake` + `uninstall` target，逐文件删除后断言前缀零常规文件）；构建无调试信息退出 77（CTest skip 语义——普通 Release CI job 跳过，supply-chain job 配 `-DCMAKE_*_FLAGS=-g` 后全流程真跑）。CTest `heyaki_m9_package`（Linux 非 sanitizer、objcopy/readelf/tar/bash 齐备才注册，SKIP_RETURN_CODE 77，TIMEOUT 900）。deployment.md 打包产物节更新为终态。本机验证：debug 全流程 PACKAGE_OK（11 个调试文件、版本 heyaki-1.0.0-linux-x86_64、卸载零残留）、plain Release skip 路径、nice 构建安装 42 许可文件含 LGPL/NOTICE、juice 40 且无 LGPL、installed_consumer/supply_chain/release_signing/docs 四测试随版本升全绿。见实施记录 Round 18。）
 - [ ] `M9-18` 形成 v1 release checklist，记录测试 commit、依赖 commit、协议版本、已知限制和回滚方案。
 
 ## M9/v1 最终验收
@@ -1568,6 +1568,85 @@ LogsInHeartbeats 用例同前）。
 `heyaki_m9_docs_examples` 两构建全绿（5 cpp + 2 relay-config 全部通过，
 含 node-lifecycle 真实建节点 + shutdown）；全量 werror ctest 除 m3a/m3b
 并行抖动（单跑绿，既有家族）与旧构建目录缺产物（补建后绿）外全绿。
+
+### Round 18（2026-09-17）：M9-17 打包与干净机安装/卸载验证
+
+交付物：
+
+- 版本定版：`project(heyaki VERSION 0.0.0 → 1.0.0)`——`HEYAKI_VERSION_STRING`
+  经 build_config 直出 `--version`/SBOM namespace/heyakiConfigVersion
+  （SameMajorVersion），打包产物名 heyaki-1.0.0-linux-<arch>。无任何
+  "0.0.0" 断言测试（grep 核对）。
+- 安装树补齐（`CMakeLists.txt`）：
+  - coturn 示例配置四件套（turnserver.conf、docker-compose.yml、
+    heyaki-turn.env.example、README）→ `${CMAKE_INSTALL_DATADIR}/heyaki/
+    coturn/`——打包件自带部署基线，不用回仓库找。
+  - licenses.lock 全部许可文本：configure 期解析锁文件，逐条
+    `install(FILES … RENAME <name>-<basename>)` → `share/heyaki/licenses/`
+    （40 个：boost 26 族归并到 BSL 文本仍按 name 各装一份、libsodium/
+    blake3/sqlite/executor/FTXUI/libdatachannel/protobuf/abseil/
+    googletest…）；许可文件缺失即 FATAL（与 GenerateSupplyChain 的
+    存在性检查同语义，二道闸）。THIRD_PARTY_LICENSES.md 表格中的路径
+    由"仓库相对路径"升级为"随包可寻"。
+  - nice 构建（M9-19 遗留项闭环）：`deploy/licenses/lgpl-2.1.txt`
+    （GNU 官方文本，与 Debian common-licenses 逐字节一致）+
+    `deploy/licenses/NOTICE-libnice.md`（动态链接=重链接义务满足、
+    源码指路 libnice/GLib upstream、版本地板引 dependency-policy）→
+    `share/heyaki/licenses/`；juice 构建不装（NOTICE 内明示适用范围）。
+- `cmake/cmake_uninstall.cmake` + `uninstall` target：manifest 驱动卸载
+  （install_manifest.txt 逐文件删除，目录仅在空时自底向上移除）；
+  **-P 脚本模式没有构建目录上下文——manifest 路径必须显式传参**
+  （`-DHEYAKI_INSTALL_MANIFEST=<build>/install_manifest.txt`），经典
+  模板里 `${CMAKE_CURRENT_BINARY_DIR}` 的假设不成立。卸载语义 =
+  "前缀零常规文件"，目录树残留不属于非包管理器安装的违约。
+- `scripts/package_release.sh`（Linux；bash，set -Eeuo pipefail）：
+  1. 取构建树（`--build-dir` 复用；缺省时全新 RelWithDebInfo
+     out-of-source 配置构建——发布件携带调试信息的默认路径）；
+  2. `cmake --install` 进全新 stage 前缀（"干净机器"形态）并复制
+     install_manifest.txt（防后续 build 的 heyaki-deploy ALL 安装
+     覆写指向）；
+  3. M9-17 清单断言：8 个安装二进制、5 个代表性公共头、
+     lib/cmake/heyaki 三件、proto、coturn 四件套、SBOM +
+     THIRD_PARTY_LICENSES.md + ≥30 个许可文本；
+  4. 符号拆分：readelf -S 探测 .debug_info → objcopy
+     --only-keep-debug 到 dbg 镜像树 + --strip-debug 原件；
+     **零符号构建（plain Release）退出 77**（CTest skip 语义），
+     有符号但 <5 个 = 不一致即 FATAL；
+  5. strip 后 relay/TUI `--version` 复跑；
+  6. 主 tar.gz（干净前缀全量）+ `-dbg.tar.gz` + SHA256SUMS；
+     解包后 --version + coturn 配置存在性冒烟；
+  7. 卸载仿真：cmake -P cmake_uninstall（日志落盘、失败才 tail），
+     断言 stage 零常规文件。
+- `heyaki_m9_package` CTest（tests/CMakeLists.txt）：Linux + 非
+  sanitizer + objcopy/readelf/tar/bash 齐备才注册（Windows 不注册——
+  Windows 安装验证由既有 heyaki_installed_consumer 矩阵承担，tarball
+  打包为 Linux-only 发布形态）；SKIP_RETURN_CODE 77；TIMEOUT 900。
+- CI（.github/workflows/ci.yml supply-chain job）：Release 配置加
+  `-DCMAKE_CXX_FLAGS=-g -DCMAKE_C_FLAGS=-g`（distro 式 release+调试
+  信息；FORTIFY/RELRO 等加固不受影响，hardening check 仍过），该 job
+  的全量 ctest 于是真跑打包流；其余 Linux job（无 -g）经 77 跳过。
+- `docs/deployment.md` 打包产物节更新为终态布局（coturn/、licenses/、
+  supply-chain/ 三目录）+ 发布流描述（脚本与签名是两个程序：脚本管
+  清单/符号/卸载，签名按 release-signing.md 由操作者执行）。
+
+坑（Round 18）：
+
+1. `file(REMOVE_DIRECTORY)` 不是 file() 子命令——空目录删除用
+   `REMOVE_RECURSE`（仅在 GLOB 判空之后执行）。
+2. 管道吞退出码再犯（自查时 `script | tail; echo $?` 显示 0 掩盖
+   失败）——验证脚本必须直接取 `$?` 或显式落盘日志。
+3. `install(FILES)` 的 RENAME 只对单文件生效——成对重命名必须逐条
+   循环，不能把 (src, name) 对拼进一个列表。
+4. add_test 里经 CMake wrapper -P 脚本无法传播 77（message 无退出码
+   通道）——skip 语义要么测试命令直调脚本 + SKIP_RETURN_CODE，要么
+   别包 wrapper。
+
+本机验证：debug 全流程 PACKAGE_OK heyaki-1.0.0-linux-x86_64（11 个
+调试文件、双 tar + SHA256SUMS、解包冒烟、卸载零残留）；plain Release
+重配置后 Skipped（77 路径）；nice 构建安装 42 个许可文件（40+LGPL+
+NOTICE）、juice 40 个且无 LGPL；版本升级后 installed_consumer /
+supply_chain_inventory / m9_release_signing / m9_docs_examples 四测
+全绿；debug 全量构建零错误。
 
 ### 剩余范围（M9-01 完成前）
 
