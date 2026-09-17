@@ -1,6 +1,6 @@
 # M9：生产加固与 v1 发布
 
-> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6、M9-07 Round 7、M9-08 Round 8、M9-09 Round 9、M9-10 Round 10（基准 harness + 同 kind 双流 UAF 修复）、M9-11 Round 11（参数冻结 + 孤儿 staging 清理）与 M9-12 Round 12（schema N-1/N 兼容 + rolling relay upgrade + 新旧设备互通）、M9-13 Round 13（fuzz 扩展 + regression corpus）、M9-14 Round 14（secret/vuln 扫描 + SBOM/许可证门禁 + 编译加固 + 发布签名）、M9-15 Round 15（安全回归八面：wire 伪造/重放/slowloris/退避指数/泄漏猎杀/伪造 grant·candidate·endpoint/文法表/服务端 oversized·1:1）与 M9-19 Round 16（TURN/TCP 解封：libnice 双后端 + TURN/TLS 全后端硬拒绝，CI 35178705793 十一 job 绿）已交付，M9-16 起未开始，见文末实施记录）
+> - 状态：进行中（2026-09-05 立项；前置 M8 遗留三件套 P2-F1/P3-F3/P4-F7（+P4-F9）已修复放行，见 [m8-remote-shell.md](m8-remote-shell.md) 遗留节；M9-01 Round 1/2、M9-02 Round 3、M9-03 Round 4、M9-04/05 Round 5、M9-06 Round 6、M9-07 Round 7、M9-08 Round 8、M9-09 Round 9、M9-10 Round 10（基准 harness + 同 kind 双流 UAF 修复）、M9-11 Round 11（参数冻结 + 孤儿 staging 清理）与 M9-12 Round 12（schema N-1/N 兼容 + rolling relay upgrade + 新旧设备互通）、M9-13 Round 13（fuzz 扩展 + regression corpus）、M9-14 Round 14（secret/vuln 扫描 + SBOM/许可证门禁 + 编译加固 + 发布签名）、M9-15 Round 15（安全回归八面：wire 伪造/重放/slowloris/退避指数/泄漏猎杀/伪造 grant·candidate·endpoint/文法表/服务端 oversized·1:1）、M9-19 Round 16（TURN/TCP 解封：libnice 双后端 + TURN/TLS 全后端硬拒绝）与 M9-16 Round 17（安装/配置/部署/API/故障排查五篇文档 + `heyaki_m9_docs_examples` 示例同步测试）已交付，M9-17/18 未开始，见文末实施记录）
 > - 所属计划：[Heyaki MVP 至 v1 实施 TODO 计划](heyaki-implementation-plan.md)
 > - 前置：M8 | 建议发布点：v1.0
 
@@ -36,7 +36,7 @@
 次轮 Windows 后端不一致修复 5322a5a、tsan 抖动 rerun 绿）。见实施记录 Round 13。）
 - [x] `M9-14` 完成 secret scan、dependency vulnerability scan、SBOM、许可证、编译 hardening 和发布制品签名。（Round 14 交付 2026-09-15：六面控制全部 CTest 强制并进新 CI `supply-chain` job——①**secret scan**：`scripts/run_secret_scan.sh` + digest-pin 的 gitleaks 8.24.3（`deploy/security/secret-scan.lock`，官方 checksum `9991e0b2…`）全 git 历史扫描 + 阳性对照（先证明规则集能命中再报全清）；基线 31 命中全部处置：30 个在 `.mimosa/hook-state/`（**会话工具快照被 48d7f4/386f82a 意外提交，本轮 `git rm -r --cached` 移出 5003 个文件并 gitignore**，内容为工具自身哈希/代码标识非凭据，历史路径 allowlist 留档）、1 个为 `Error{…,"password",detail}` 误报（allowlist 枚举封闭错误串集，真密码仍会命中）；测试 fixture 密钥材料零命中、未发放任何 tests/ 整体豁免。②**漏洞扫描**：`scripts/osv_vulnerability_scan.py` 单批 querybatch 查全部 40 个 pin commit + 已知漏洞 OpenSSL 对照 commit 自检（检不出即 fail-closed）+ `deploy/security/osv-triage.tsv` 三态 triage（未 triage 即红、陈旧条目告警）；结果 0 命中；OSV 对 native C/C++ 覆盖稀疏的限制与补偿控制成文；**coturn 部署制品单审**：4.10.0 镜像含 CVE-2025-69217/2026-27624/40613/43994 修复（fix commit 经 GitHub compare 判定为 tag 祖先），CVE-2026-43915/53448（admin 面板 XSS/SQLi）不在 4.10.0 但部署 `no-cli` 且无 web-admin → not-affected，发布时复检；Ubuntu 回退包 4.6.1-1build4 在多个影响域内 → 生产必须走 digest-pin 镜像。③**SBOM/许可证**：heyaki 自身入册（version+build commit）+ 版本化 namespace（Created 保持固定换字节级可复现）；生成期**copyleft 门禁**（runtime/test 组与递归子模块禁 AGPL/GPL/LGPL/SSPL 原子，optional 组仅允许"permissive OR"形态——zstd `BSD-3-Clause OR GPL-2.0-only` 不进 v1 构建）；现状全部 permissive。④**编译加固**：`HEYAKI_HARDENING`（默认 ON）——全局 `-fstack-protector-strong`/PIC/探针 CET/探针 FORTIFY（3→2 阶梯，仅优化配置，避开 distro 预定义重定义警告）+ 可执行文件 `-pie -Wl,-z,relro,-z,now,-z,noexecstack` + MSVC `/GS /guard:cf /GUARD:CF /CETCOMPAT`（x64）；`heyaki_m9_hardening_check` 用 readelf 断言 PIE/NX/full-RELRO/canary（Release 加 FORTIFY `__*_chk`）；`readelf` 本地化坑以 `LC_ALL=C` 钉死。⑤**发布签名**：`heyaki-release-sign`（pinned libsodium Ed25519；keygen/manifest/sign/verify/check；manifest 字节序确定性、严格解析、symlink 排除）+ 规程 `docs/operations/release-signing.md`（离线 keygen、key id=SHA-256(pub) 前 16 hex、轮换程序）+ `heyaki_m9_release_signing` 往返（真制品 + 全篡改方向必拒）。审计总录 `docs/supply-chain/m9-release-audit.md`。本机 werror 构建 66/66 绿 + Release FORTIFY 断言过 + IVA 独立验证（含 manifest 确定性/坏签名/路径逃逸/漏洞负路径）全 PASS。见实施记录 Round 14。）
 - [x] `M9-15` 执行安全回归：multicast 洪泛/伪造/重放、LAN TLS MITM/slowloris、密码猜测/泄漏、grant/fingerprint/endpoint 伪造、降级、越权 method/topic、路径穿越、relay/TURN 放大。（Round 15 交付 2026-09-16：八攻击面覆盖矩阵审计 + 真缺口补齐，全部测试轮、零生产缺陷——唯一生产面发现是 `encode_lan_presence` 拒绝序列化签名不符对象（纵深防御，迫使伪造走字节手术=真实攻击者路径）。新增：`tests/unit/m9_security_regression_test.cpp`（CTest `heyaki_m9_security_regression`：`trust_scope_covers` 精确/前缀通配文法表测 + `safe_logical_file_name` 攻击形态全表）；m3a 三例（真组播 socket 上签名伪造/身份冒名/低序列重放拒收、slowloris 滴注部分 ClientHello 被握手死线回收且真实 peer 照常认证、跨源全局 provisional 容量帽）；m5 四例（退避指数翻倍/封顶全表 fake clock、跨源隔离无全局锁死、伪造 TrustGrant 签名接受侧拒绝零持久化、密码字面量泄漏猎杀——审计 detail + profile 根全文件字节扫描）；m4_signaling 第三方密钥 candidate 拒绝；m4_relay_signaling 三例（endpoint 发布会话绑定 E2E `endpoint_record_session_mismatch` + 正控、服务端 oversized WSS 帧丢弃存活、信令 1:1 无扇出/无反射恰 +8）；m7 终段 symlink 被 rename 替换不跟随。降级面经核对由 M9-12 compat 套件完备覆盖。审计总录 `docs/security/m9-security-regression.md`（含残余接受项：/metrics 无客户端认证、coturn 配置级反射控制）；threat-model §7 记 M9-15 回归门。本机 debug 全量 6 目标绿 + werror 构建零警告 + IVA 独立验证 12/12 二连跑零抖动 PASS。见实施记录 Round 15。）
-- [ ] `M9-16` 编写安装、配置、部署、升级、备份、故障排查和 API 文档；示例必须从已编译源码嵌入或同步测试。
+- [x] `M9-16` 编写安装、配置、部署、升级、备份、故障排查和 API 文档；示例必须从已编译源码嵌入或同步测试。（Round 17 交付 2026-09-17：新五篇用户文档 + 文档索引——`docs/README.md`（索引 + 示例同步纪律）、`docs/getting-started.md`（前置依赖/预设构建/安装前缀/已安装包消费/首次 relay+TUI/demos 表）、`docs/configuration.md`（relay 配置文件全 24 键三列表 + 相对路径语义 + CLI 覆写 + 设备侧 struct 配置模型与校验器映射）、`docs/deployment.md`（拓扑、relay 主机要求 + systemd 单元、bootstrap token 创建面、coturn/observability、设备机队、升级/备份/回滚 → runbook 锚点表、安装树布局）、`docs/api.md`（六 target 模块表、executor 并发契约、错误模型、profile/node 生命周期、发现/会话/配对/五服务/指标/relay 注册、协议兼容规则）、`docs/troubleshooting.md`（六域症状优先分诊表 + 诊断采集法 + 平台注记）。示例同步测试 `heyaki_m9_docs_examples`（tests/docs/）：`extract_doc_examples.cmake` 在 configure 期从五篇文档提取 `heyaki-cpp <slug>`（编译为独立可执行并逐个运行）与 `heyaki-relay-config <slug>`（经真 `load_relay_config_file` 解析+校验，含缺证书负路径断言）围栏块；文档列为 CMAKE_CONFIGURE_DEPENDS（编辑即重提取）；重复 slug/空块/未配对围栏 configure 期 FATAL。README Documentation 节前置文档索引。本机 debug+werror 双构建零警告、docs 测试绿、全量 werror ctest 绿（m3a/m3b 并行抖动单跑绿，已知家族）。见实施记录 Round 17。）
 - [ ] `M9-17` 打包 client libraries、relay、TUI、coturn 示例配置与符号/许可证，验证干净机器安装和卸载。
 - [ ] `M9-18` 形成 v1 release checklist，记录测试 commit、依赖 commit、协议版本、已知限制和回滚方案。
 
@@ -1468,6 +1468,106 @@ TUI/m3a 抖动家族轮转与三处测试基建加固——m3b 计数器改 wait
 （asan/tsan 双红同用例两轮后加固）、TUI enrollment driver 35s→60s
 （慢 runner 下连续三次双 attempt 超时，本机 3/3 十秒绿对照）、
 LogsInHeartbeats 用例同前）。
+
+### Round 17（2026-09-17）：M9-16 安装/配置/部署/API/故障排查文档 + 示例同步测试
+
+交付物：
+
+- `docs/README.md`：文档索引（14 个领域 → 文件映射表）+ 示例同步纪律
+  说明（三种围栏标签的语义与 CI 锚点）。README 的 Documentation 节前置
+  该索引与六条用户文档链接。
+- `docs/getting-started.md`：前置依赖表（工具链/OpenSSL/libnice 可选）、
+  `fetch_third_party` + preset 构建流、配置选项表（ICE 后端/加固/
+  sanitizer/fuzzer/auto-install）、`cmake --install` 前缀安装、已安装包
+  CMake 消费片段（与 tests/consumer 同源，由 `heyaki_installed_consumer`
+  验证）、首次 relay（openssl 自签 + 最小配置 + check-config/health）、
+  TUI 首跑（platform state 目录路径、enrollment、视图索引）、七个
+  demo/工具二进制表。
+- `docs/configuration.md`：relay 配置文件格式语义（key=value 行式、64KiB
+  帽、路径按 config 文件位置解析、证书加载期存在性检查）、全部 24 个
+  文件键的默认值/约束/含义三列表、struct-only 旋钮（control_write_
+  queue_*、endpoint TTL、四 scope 限速）成文、"拒绝式不 clamp"语义、
+  CLI 覆写与 `--check-config`、稳定错误 detail 串清单、设备侧
+  struct 配置模型（七个配置结构体 → 校验器映射表）+ 平台 profile 目录。
+- `docs/deployment.md`：ASCII 拓扑图（控制面/数据面/coturn 分离）、
+  relay 主机要求（证书+leaf pin、端口、持久 DB、Linux 为 CI 验证平台）、
+  systemd 单元样例（--check-config 前置 + 加固指令）、bootstrap token
+  创建面（RelayDatabase API + demo 指引 + runbook 轮换程序）、coturn 与
+  observability 部署锚点、设备机队（初始化/enroll/配对/防火墙端口——
+  组播组 239.192.72.89 / ff12::4845:5941:4b49、UDP 49189、hop limit 1）、
+  升级/备份/回滚/轮换/吊销/磁盘满/过载 → runbook 程序锚点表、安装树
+  布局。
+- `docs/api.md`：六 target 表、executor 并发契约（无自建线程/回调在
+  executor 上下文/全队列有界）、错误模型（Result/ErrorCode/component/
+  safe_detail ≤64B）、profile store（default root、endpoint_for、权限、
+  secret backend）、Node 生命周期（含本地初始化——create_password_
+  verifier → initialize_local → NodeConfig → create/shutdown 完整可运行
+  示例）、发现与会话（endpoints/connect/connect_lan/restart_session、
+  data_path 标签语义、PairingRestricted→Authorized）、配对与信任
+  （pair_peer、scope 交集、轮换、审计环、trust_scope_covers 文法示例）、
+  五服务表（语义要点：peer_offline 即时失败、outcome_unknown、reliable_
+  live、TransferId 续传、shell 默认关）、safe_logical_file_name 示例、
+  指标、relay 注册、协议兼容（版本交集/拒绝未知字段/N-1/前向 schema）。
+- `docs/troubleshooting.md`：诊断采集法（TUI --status/metrics/QUEUES、
+  relay /metrics 与 JSON 日志、join 键、三组 state gauge 语义）、六域
+  症状表（发现/配对信任/会话路径/relay 设备侧/文件 shell/relay 运维，
+  每行症状→原因→查什么）、平台注记（WFP loopback 豁免、turns: 全后端
+  拒绝、跨 OS runner 阻断）。
+- 示例同步测试（`tests/docs/`）：`extract_doc_examples.cmake`（configure
+  期执行；string(FIND) 配对扫描 ``` 标记——**不能 split 成 CMake list，
+  C++ 示例内容本身的 `;` 即列表分隔符**；info string 正则匹配
+  `heyaki-cpp <slug>`/`heyaki-relay-config <slug>`；重复 slug/空块/
+  未配对围栏/整表零提取一律 FATAL）+ `run_doc_examples.cmake`（CTest
+  driver：逐示例建 0700 工作目录——**ProfileStore 拒绝 group/other 位
+  目录链**——运行每个编译出的示例，再逐 config 跑 checker）+
+  `relay_config_doc_check.cpp`（把提取的 config 连同相对路径引用的空
+  stub 文件部署进 scratch 目录，先断言缺证书负路径（certificate_
+  missing/private_key_missing），再断言 load 成功）。
+- `tests/CMakeLists.txt` 注册：五篇文档为 CMAKE_CONFIGURE_DEPENDS；
+  每个 cpp 块编译为独立 `heyaki-doc-example-<slug>` 可执行（链 heyaki::
+  client + executor；node-lifecycle 加 executor 异常适配源）；CTest
+  `heyaki_m9_docs_examples`（labels unit;docs;m9，TIMEOUT 300）经 cmake
+  -P driver 运行全部示例（多配置生成器二进制定位用 `$<TARGET_FILE:>`
+  逐个经 add_test 参数传递）。
+
+设计说明：
+
+- 文档示例的三种同步形态：(1) `heyaki-cpp` 块 = 提取即编译即运行（示例
+  既是文档也是测试源码，漂移即红）；(2) `heyaki-relay-config` 块 = 经真
+  配置解析器/校验器加载（含负路径）；(3) CMake 消费片段 = 与
+  tests/consumer 同内容，由 `heyaki_installed_consumer` CI 验证。文档
+  索引明示该纪律，后续贡献者改示例必须留在围栏标签内。
+- relay 配置键表以 `load_relay_config_file` 解析器 + `validate_relay_
+  server_config`（M9-11 上限）为源核对；struct-only 旋钮单列成文防
+  "文件键存在"的误读。
+- 全部七个示例均可运行断言（无网络依赖：profile/node 生命周期用临时
+  目录，纯函数示例直接断言语义——包括"故意配错必须被拒"的负示例）。
+
+坑（Round 17）：
+
+1. CMake `string(FIND)` 无起始位置参数（与 findstring 不同）——区间扫描
+   必须切 remainder 子串再 FIND 后回加偏移。
+2. CMake `string(SUBSTRING)` 的长度参数不做算术——`"${a}-${b}"` 形态
+   直接报错，须先 `math(EXPR ...)`。
+3. C++/配置示例内容含 `;`，任何"split 成 CMake list"的提取模型都会被
+   内容击穿（首个版本 8 围栏 split 出 66 段）——标记配对扫描是唯一稳
+   姿势。
+4. add_test COMMAND 里经变量传递的 `$<TARGET_FILE:...>` 不会二次展开
+   （genexp 求值先于变量展开）——动态目标列表必须把 genexp 字面拼进
+   add_test 参数。checker 的单目标直接字面书写即过。
+5. Node::create 拒绝未本地初始化的 profile（not_registered/local_
+   profile_not_initialized）——文档示例必须演示完整初始化流（verifier
+   → initialize_local），这恰好是 API 文档应讲的核心概念。
+6. 指定初始化器跳过聚合成员在 CI -Werror（missing-field-initializers）
+   下致命（Round 12 同族）——文档示例一律"默认构造 + 成员赋值"姿势。
+7. `Node::metrics()` 在首个 prune tick 前返回默认构造快照（device_id
+   全零）——文档示例演示 snapshot()（实时）与 metrics()（周期聚合）的
+   差异。
+
+本机验证：debug 与 werror（Release+Werror+全加固 flags）双构建零警告；
+`heyaki_m9_docs_examples` 两构建全绿（5 cpp + 2 relay-config 全部通过，
+含 node-lifecycle 真实建节点 + shutdown）；全量 werror ctest 除 m3a/m3b
+并行抖动（单跑绿，既有家族）与旧构建目录缺产物（补建后绿）外全绿。
 
 ### 剩余范围（M9-01 完成前）
 
