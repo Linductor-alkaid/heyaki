@@ -91,7 +91,7 @@ locks on every build. M9-14 changes:
 
 - The document now describes the **heyaki package itself**
   (`SPDXRef-Package-heyaki`, version `<project version>+<build commit>`,
-  license NOASSERTION pending the v1 licensing decision) in addition to the
+  license MIT as of the v1.0.0 decision) in addition to the
   third-party closure; the document namespace is versioned
   (`…/sbom/<version>/<commit>`). `Created` stays pinned (2026-08-14) so the
   document is byte-reproducible for a given tree; the namespace identifies

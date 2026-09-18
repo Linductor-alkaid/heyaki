@@ -7,12 +7,17 @@ endif()
 
 # M9-14: the release SBOM must describe the heyaki package itself, with the
 # exact project version and build commit stamped into both the package
-# version and the document namespace.
+# version and the document namespace. v1.0.0 decision: heyaki is MIT (LICENSE
+# at the repository root) and the SBOM must declare it.
 foreach(release_identity IN ITEMS
     "PackageName: heyaki(\n|$)"
     "SPDXID: SPDXRef-Package-heyaki\n"
     "PackageVersion: ${HEYAKI_PROJECT_VERSION}[+]${HEYAKI_BUILD_COMMIT}\n"
-    "Relationship: SPDXRef-DOCUMENT DESCRIBES SPDXRef-Package-heyaki\n"
+    # One multi-line pattern, scoped to the heyaki package block: the
+    # DESCRIBES relationship immediately after the license lines names this
+    # package, so a license regression on heyaki itself cannot be masked by
+    # any dependency that also declares MIT elsewhere in the SBOM.
+    "PackageLicenseConcluded: MIT[\n]PackageLicenseDeclared: MIT[\n]Relationship: SPDXRef-DOCUMENT DESCRIBES SPDXRef-Package-heyaki[\n]"
     "DocumentNamespace: https://heyaki[.]invalid/sbom/${HEYAKI_PROJECT_VERSION}/${HEYAKI_BUILD_COMMIT}\n")
   if(NOT sbom MATCHES "${release_identity}")
     message(FATAL_ERROR "SBOM is missing release identity: ${release_identity}")

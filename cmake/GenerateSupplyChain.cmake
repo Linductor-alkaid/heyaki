@@ -80,18 +80,18 @@ string(APPEND sbom
   "DocumentNamespace: https://heyaki.invalid/sbom/${HEYAKI_PROJECT_VERSION}/${HEYAKI_BUILD_COMMIT}\n")
 string(APPEND sbom "Creator: Tool: heyaki-cmake-m9\nCreated: 2026-08-14T00:00:00Z\n\n")
 # The heyaki package itself: release SBOM consumers need one DESCRIBES entry
-# for the shipped project, not only its dependencies. License is NOASSERTION
-# pending the v1 licensing decision; the license policy below governs the
-# third-party closure. Created stays pinned so the document is reproducible
-# from the same tree; version and build commit in the namespace identify the
-# release it describes.
+# for the shipped project, not only its dependencies. Heyaki is MIT (LICENSE
+# at the repository root, v1.0.0 decision); the license policy below governs
+# the third-party closure. Created stays pinned so the document is
+# reproducible from the same tree; version and build commit in the namespace
+# identify the release it describes.
 string(APPEND sbom "PackageName: heyaki\n")
 string(APPEND sbom "SPDXID: SPDXRef-Package-heyaki\n")
 string(APPEND sbom "PackageVersion: ${HEYAKI_PROJECT_VERSION}+${HEYAKI_BUILD_COMMIT}\n")
 string(APPEND sbom "PackageDownloadLocation: https://github.com/Linductor-alkaid/heyaki\n")
 string(APPEND sbom "FilesAnalyzed: false\n")
-string(APPEND sbom "PackageLicenseConcluded: NOASSERTION\n")
-string(APPEND sbom "PackageLicenseDeclared: NOASSERTION\n")
+string(APPEND sbom "PackageLicenseConcluded: MIT\n")
+string(APPEND sbom "PackageLicenseDeclared: MIT\n")
 string(APPEND sbom "Relationship: SPDXRef-DOCUMENT DESCRIBES SPDXRef-Package-heyaki\n\n")
 set(manifest "# Heyaki Third-Party Licenses\n\n")
 string(APPEND manifest "Generated from `third_party/dependencies.lock` and `third_party/licenses.lock`.\n\n")

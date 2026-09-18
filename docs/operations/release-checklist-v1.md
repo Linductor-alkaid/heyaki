@@ -13,7 +13,7 @@ signing procedure: [release-signing.md](release-signing.md).
 | Product version | 1.0.0 (`project(heyaki VERSION 1.0.0)`, stamped into `--version`, SBOM namespace, CMake package version) |
 | Wire protocol | `{major 1, minor 2}` (`include/heyaki/protocol.hpp`; capability bits frozen; schema change control in [proto/README.md](../../proto/README.md) and the [wire protocol](../design/heyaki-wire-protocol.md)) |
 | Release commit | Stamp at tag time: the commit whose full CI run (all 11 jobs) is green, recorded below in "Verification evidence" |
-| License of heyaki itself | NOASSERTION in the SBOM — the v1 licensing decision is a product owner action; the third-party closure is permissive-only by policy ([dependency-policy.md](../supply-chain/dependency-policy.md)) |
+| License of heyaki itself | MIT ([LICENSE](../../LICENSE)), decided at v1.0.0 (2026-09-18); the SBOM declares `PackageLicenseDeclared: MIT` (enforced by `heyaki_supply_chain_inventory`); the third-party closure is permissive-only by policy ([dependency-policy.md](../supply-chain/dependency-policy.md)) |
 
 ## Dependency pins (recorded at release)
 

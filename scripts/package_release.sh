@@ -123,6 +123,7 @@ expect_file share/heyaki/coturn/turnserver.conf
 expect_file share/heyaki/coturn/docker-compose.yml
 expect_file share/heyaki/coturn/heyaki-turn.env.example
 expect_file share/heyaki/coturn/README.md
+expect_file share/licenses/heyaki/LICENSE
 expect_file share/heyaki/supply-chain/heyaki.spdx
 expect_file share/heyaki/supply-chain/THIRD_PARTY_LICENSES.md
 expect_file share/heyaki/licenses/libdatachannel-LICENSE

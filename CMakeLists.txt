@@ -490,6 +490,9 @@ install(FILES "${HEYAKI_GENERATED_DIR}/heyaki/detail/build_config.hpp"
 install(FILES "${HEYAKI_SBOM_FILE}" "${HEYAKI_LICENSE_MANIFEST_FILE}"
   DESTINATION "${CMAKE_INSTALL_DATADIR}/heyaki/supply-chain")
 install(FILES
+  LICENSE
+  DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/heyaki")
+install(FILES
   docs/supply-chain/m1-libsodium-sha256-notices.md
   docs/supply-chain/boost-software-license-1.0.txt
   DESTINATION "${CMAKE_INSTALL_DATADIR}/heyaki/supply-chain")

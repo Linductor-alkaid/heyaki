@@ -5,228 +5,159 @@
   </picture>
 </p>
 
-# Heyaki
+<h1 align="center">Heyaki</h1>
 
-[![CI](https://github.com/Linductor-alkaid/heyaki/actions/workflows/ci.yml/badge.svg)](https://github.com/Linductor-alkaid/heyaki/actions/workflows/ci.yml)
+<p align="center">
+  <strong>Peer-to-peer communication infrastructure for devices — your data never rides a server.</strong><br>
+  <a href="README.md">English</a> | <a href="README_zh.md">简体中文</a>
+</p>
 
-Heyaki is a C++20 device-to-device communication infrastructure. Devices discover each other
-on a LAN, exchange signed signaling, and establish mutually authenticated sessions over
-WebRTC DataChannels. When peers are on different networks, a relay provides the control plane
-— enrollment, presence, signaling forwarding, and short-lived TURN credentials — while user
-data stays peer-to-peer. All concurrency is centralized through the pinned
-[`executor`](AGENTS.md) dependency.
+<p align="center">
+  <a href="https://github.com/Linductor-alkaid/heyaki/actions/workflows/ci.yml"><img src="https://github.com/Linductor-alkaid/heyaki/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/Linductor-alkaid/heyaki/releases"><img src="https://img.shields.io/github/v/release/Linductor-alkaid/heyaki?include_prereleases" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows-blue" alt="Platform">
+  <img src="https://img.shields.io/badge/C%2B%2B-20-00599C" alt="C++20">
+</p>
 
-## Status
+---
 
-The engineering baseline (M0), protocol and crypto layer (M1), runtime and identity (M2),
-LAN serverless connectivity (M3A), relay control plane (M3B), and connectivity MVP (M4)
-milestones are complete; the CI network matrix — leak enumeration plus coturn topologies
-(direct / forced TURN / TURN-fallback P95 / UDP-blocked / lossy / relay restart) — finished
-with MATRIX_OK. M5 (Authorization & ByteStream) is closed (2026-08-28): default-deny
-session authorization, password pairing with signed TrustGrants, weighted channel
-scheduling, and ByteStream delivery. M6 (Message & unary RPC) is closed (2026-08-29):
-a message service (`best_effort`/`peer_acked` with bounded TTL dedup), unary RPC
-(registry, deadlines, cooperative cancellation, at-most-once result caching,
-`outcome_unknown` semantics), Node public APIs, TUI message/RPC views, and a semantics
-demo (`apps/demo/m6_message_rpc_demo.cpp`). See the
-[implementation plan](docs/todolists/heyaki-implementation-plan.md) for details.
-M7 (Remote events & file transfer) is closed (2026-08-31): a publisher-direct event
-bus (exact/segment-prefix topics, per-subscriber bounded staging with
-keep-latest or reliable-live QoS, observable overwrite/drop/stale/lag), an explicit
-executor::comm Topic bridge at the device boundary, and a resumable file protocol
-(manifest → accept-with-bitmap → bounded-window chunks → BLAKE3 verify → fsync →
-atomic rename) with root mapping, quotas, symlink-race-resistant staging, pause/
-cancel/resume by transfer id, and pull riding the frozen unary-RPC surface. Node
-public APIs, TUI event/file views, and the semantics demo
-(`apps/demo/m7_data_demo.cpp`) ship with it.
-M8 (Remote Shell) is code-complete (2026-09-03): a default-off shell service with locally
-configured profiles (`ShellProfileConfig`: fixed program, OS user, working directory, env
-allowlist, timeouts, caps), live `shell.open:<profile>` scope and per-profile concurrency
-checks, the full frozen shell frame family with a per-shell state machine, a third
-executor-managed blocking worker owning every child process (POSIX forkpty/process group,
-Windows ConPTY/job object) with a TERM→grace→kill escalation ladder, idle/absolute/output
-caps and bounded stdin, content-free audit records, a first-party safe-subset VT renderer
-(OSC/clipboard/title and unknown sequences dropped, SGR degraded, UTF-8 validated), Node
-public APIs, and a TUI `shell` view. Production enablement on POSIX was signed off on
-2026-09-04 after the independent security review
-([report](docs/security/m8-remote-shell-security-review.md)); the Windows blocker (P2-F1
-path validation, fixed together with P3-F3/P4-F7) landed on 2026-09-05, so Windows
-enablement follows the same explicitly-listed-profile posture. See the
-[M8 milestone file](docs/todolists/m8-remote-shell.md) for the delivery record.
-M9 (Production hardening) is complete (opened 2026-09-05, closed 2026-09-17). The observability track has
-landed: M9-01 rounds 1-2 deliver a unified `NodeMetrics` aggregate published through
-`Node::metrics()` with Prometheus text export (~200 families across node, pairing,
-connectivity, transport, channels, services, and the executor runtime snapshot), pairing
-audit counters, connectivity outcome/duration counters, relay registration/lease counters,
-signaling route winner/fallback accounting, periodic backend byte/RTT sampling, and TUI
-queue/render diagnostics plus a `metrics` command. M9-02 (round 3, 2026-09-06) delivers the
-relay-side counterpart: a `GET /metrics` Prometheus endpoint on the TLS control listener
-(~106 `heyaki_relay_` families, configurable `metrics_path`), JSON Lines structured logs
-(16 event kinds with identifier-class audit fields; high-frequency success events sampled
-via `success_log_period`), and scrape/log counters in the relay snapshot; the delivery round
-closed with CI 10/10 green. M9-03 (round 4, 2026-09-08) threads non-secret correlation
-ids through every lifecycle area: pairing audit events carry the wire pairing
-RequestId/GrantId into a bounded `Node::pairing_audit_records()` ring, RPC completions
-(and admission-failure errors) name their operation id, shell audit records carry
-`shell_id`, TUI session lines expose the signaling request id that joins relay signaling
-logs, and relay registration cycles expose a wall-clock anchor gauge (the frozen control
-protocol carries no per-cycle wire id). M9-04/M9-05 (round 5, 2026-09-09) define the SLO
-dashboard and alerting over those surfaces and the operating runbook: Prometheus
-recording/alert rule files plus a Grafana dashboard under `deploy/observability/` (8 SLO
-ratios, 20 alerts across relay-fleet and device groups), CI-enforced to reference only
-metrics the exporters actually emit, and `docs/operations/runbook.md` with per-alert triage
-and the rotation/revocation/restart/backup/overload/rollback procedures. The
-reliability, compatibility, security, and release tracks closed the milestone
-(2026-09-17): NAT/fault/Windows matrices, soak and benchmark harnesses with v1
-acceptance gates, parameter freeze with hard upper bounds, schema N-1/N
-compatibility with rolling relay upgrades, extended fuzzing with a regression
-corpus, supply-chain controls (secret/OSV scans, SBOM license gates, compile
-hardening, Ed25519 release signing), an eight-surface security regression
-suite, a dual ICE-backend build (vendored libjuice for TURN/UDP, system
-libnice for TURN/TCP, TURN/TLS rejected everywhere), the user documentation
-set with sync-tested examples, release packaging (clean-prefix install,
-license texts incl. the LGPL notice on libnice builds, split debug symbols,
-manifest-driven uninstall), and the
-[v1 release checklist](docs/operations/release-checklist-v1.md). See the
-[M9 milestone file](docs/todolists/m9-production-hardening.md) for the
-round-by-round record.
+Heyaki lets applications on different devices find each other, authenticate, and
+talk directly. Devices on the same LAN discover each other with **no server at
+all**; devices across networks use a relay **only for the control plane** —
+enrollment, presence, and signaling — while messages, files, and shells flow
+**peer-to-peer over mutually authenticated WebRTC DataChannels**, with TURN as
+the fallback path. The relay never sees user payload bytes.
 
-
-| Milestone | Scope | State |
-| --- | --- | --- |
-| M0 | Engineering baseline, CI, dependency locks, supply chain | Done |
-| M1 | Wire protocol, signing, security primitives | Done |
-| M2 | Runtime, ProfileStore, identity, secret backend | Done |
-| M3A | LAN serverless discovery and connectivity | Done |
-| M3B | Relay control plane, coturn integration | Done |
-| M4 | Connectivity MVP (WebRTC sessions, dual routing, session restart, TUI) | Done |
-| M5 | Session authorization, pairing/trust, channel scheduling, ByteStream | Done |
-| M6 | Message service and unary RPC | Done |
-| M7 | Remote events (best_effort_latest / reliable_live) and resumable file transfer | Done |
-| M8 | Remote shell (default-off, executor PTY worker, safe VT renderer, TUI shell view) | Done — production enable signed off (POSIX 2026-09-04; Windows unblocked 2026-09-05 after the F1/F3/F7 fixes, same listed-profile posture) |
-| M9 | Production hardening | Done — observability, NAT/fault/Windows matrices, soak/bench with v1 gates, parameter freeze, N-1/N compat, fuzz corpus, supply chain (scan/SBOM/hardening/signing), security regression, dual ICE backend (TURN/TCP via libnice; TURN/TLS rejected), docs with sync-tested examples, packaging (licenses/symbols/uninstall), v1 release checklist |
-| M10 | Gateway proxy service (scoped L4 gateway over an authorized session, protocol 1.3) | Planned |
-| M11 | Android (NDK) port | Planned |
-
-## Features
-
-- LAN UDP multicast discovery with signed presence, plus a TLS LAN signaling route.
-- Relay control plane over WebSocket Secure: enrollment, login, leases, endpoint directory,
-  and signaling forwarding. The relay never decodes signaling payloads.
-- Short-lived TURN REST credentials (HMAC-SHA1, coturn REST API).
-- Signed offer/answer/candidate signaling (`heyaki.offer.v1` / `answer.v1` / `candidate.v1`)
-  with replay protection.
-- WebRTC DataChannel transport via pinned libdatachannel, parallel ICE gathering, and a
-  `PeerPathPolicy` supporting `lan_only`, `relay_only`, and automatic routing with endpoint
-  deduplication across LAN and relay routes.
-- Signed `heyaki.session-hello.v1` mutual authentication binding the session to verified
-  signaling, with default-deny per-session authorization, password pairing, and signed
-  TrustGrants (`heyaki.trust-grant.v1`).
-- Authorized byte streams over negotiated channels with weighted scheduling and initial
-  window credit.
-- A message service (`MessageEnvelope`, `best_effort`/`peer_acked` delivery, bounded TTL
-  dedup) and unary RPC (per-method scope/policy, relative deadlines, cooperative
-  cancellation, at-most-once result caching, `outcome_unknown` on interrupted
-  non-idempotent calls) exposed through the `heyaki::Node` public API.
-- A default-off Remote Shell service: locally configured profiles, live
-  `shell.open:<profile>` scope checks, an executor-managed PTY worker per node owning every
-  child (process-tree termination escalation, idle/absolute/output caps, bounded stdin), a
-  content-free audit trail, and a safe-subset VT renderer so remote bytes never reach the
-  host terminal unfiltered.
-- Production observability: device-side `Node::metrics()` with Prometheus text export
-  (pairing, connectivity, transport, channel, service, and executor-runtime families) and a
-  TUI `metrics` command; relay-side `GET /metrics` on the TLS control listener plus sampled
-  JSON Lines structured logs carrying identifier-class audit fields.
-- Bounded backpressure and lifecycle observability through executor facilities.
-- An FTXUI diagnostics TUI showing endpoints by route, session state, RTT, buffered bytes,
-  structured failures, pairing/trust management, message/RPC, event/file, and shell views,
-  plus queue/render diagnostics and a `metrics` command that dumps Prometheus text.
-
-## Components
-
-| Target | Kind | Description |
-| --- | --- | --- |
-| `heyaki-relay` | App | Relay server: config, SQLite persistence, enrollment/login, leases, endpoint directory, rate limiting, TURN credentials, WSS signaling forwarding, Prometheus `/metrics` endpoint, JSON Lines structured logs with success sampling |
-| `heyaki-tui` | App | FTXUI terminal client: profile setup, pairing/trust, device/endpoint/session/stream views, message and RPC views, `connect`/`close` REPL |
-| `heyaki-m2-profile-demo`, `heyaki-m3b-relay-demo`, `heyaki-m6-message-rpc-demo` | Apps | Small demos of the profile store, relay enrollment, and message/RPC semantics (admission vs. completion vs. ACK vs. `outcome_unknown`) |
-| `heyaki_core` | Library | Public types, wire protocol, canonical signing, signaling/session protocols, replay cache, identity, limits, node-metrics model with Prometheus text export |
-| `heyaki_client` | Library | `heyaki::Node` connection assembly: discovery, signaling coordinator, `PeerSession`, LAN directory, relay enrollment, runtime, authorization/byte-stream, message/unary-RPC/event/file services, and the default-off remote shell service with its executor-managed PTY worker |
-| `heyaki_profile` | Library | `ProfileStore` (SQLite), Argon2id password hashing, secret backend |
-| `heyaki_transport_webrtc` | Library | `WebRtcTransportSession` wrapping pinned libdatachannel |
-| `heyaki_relay` | Library | Relay server implementation behind `heyaki-relay` |
-| `heyaki_services` | Library | Placeholder for future business services; the M5–M8 pairing, byte-stream, message/RPC, event/file, and shell services live in `heyaki_client` |
-
-## Build
-
-Configure and build with a preset:
-
-```sh
-cmake --preset debug
-cmake --build --preset debug
-ctest --preset debug
+```text
+            control plane (TLS/WSS)            data plane (P2P DataChannels)
+ ┌────────┐ ─────────────────────────▶ ┌──────────┐      ┌─────────────────────┐
+ │ device │   enrollment · presence ·  │  relay   │      │  WebRTC / DTLS /    │
+ │  (TUI  │ ◀───────────────────────── │ (SQLite) │      │  SCTP, direct or    │
+ │ or app)│        signaling           └──────────┘      │  TURN-relayed       │
+ └────────┘                                 │            └─────────────────────┘
+     │  ┌────────┐   same LAN: multicast discovery + LAN TLS signaling   │
+     └─▶│ device │◀─────────────────────────────────────────────────────┘
+        └────────┘        (no relay, no STUN, no TURN — works fully offline)
 ```
 
-By default, CMake synchronizes missing or outdated repositories from
-`third_party/dependencies.lock` during configuration, verifies their exact commits, and
-installs the resulting artifacts into `build/debug/install`. The `heyaki-deploy` target is
-part of the normal build, so no separate dependency or install command is required for a
-local deployment. To choose another install directory, pass
-`-DHEYAKI_INSTALL_PREFIX=/path/to/install` when configuring.
+## Highlights
 
-`release`, `asan`, `ubsan`, and `tsan` presets provide the matching build and test entry
-points. The build fails with an actionable dependency command when a selected runtime, test,
-or optional checkout is absent or no longer matches its locked commit.
+| | |
+| --- | --- |
+| **Serverless LAN mode** | Signed multicast presence + LAN TLS signaling — two devices on one LAN discover, authenticate, and exchange data with zero infrastructure. |
+| **Relay for reach, not for data** | The relay handles enrollment, endpoint presence, and signed signaling forwarding only; TURN REST credentials (coturn) are minted per session. Payloads stay P2P. |
+| **Mutual authentication everywhere** | Ed25519 device identities, signed offers/answers/candidates with replay protection, session keys bound to verified signaling. Unknown peers are pairing-restricted by default. |
+| **Five services on one session** | Messages (best-effort / peer-acked), unary RPC (deadlines, cancellation, `outcome_unknown` semantics), pub-sub events (keep-latest / reliable-live), resumable file transfer (BLAKE3-verified, atomic commit), and a default-off remote shell with a safe VT renderer. |
+| **Password pairing & TrustGrants** | Argon2id-verified password pairing issues signed, scoped trust grants — effective scope is always the policy intersection. |
+| **Bounded by construction** | Every queue, window, cache, and history ring has an explicit frozen cap; overload surfaces as admission errors or backpressure, never silent loss. All concurrency runs on the pinned `executor` — no ad-hoc threads. |
+| **Production observability** | nearly 400 Prometheus metric families across device and relay, JSON Lines structured logs with correlation ids, 20 SLO alerts + Grafana dashboard, and a full operations runbook. |
+| **Hardened supply chain** | Commit-pinned dependencies with verified SBOM (SPDX) and permissive-only license gates, secret & OSV vulnerability scanning in CI, PIE/RELRO/FORTIFY/CET hardening, and Ed25519 release-artifact signing. |
 
-For offline or CI builds where dependencies must already be present, configure with
-`-DHEYAKI_FETCH_DEPENDENCIES=OFF`; CMake will perform check-only verification. Disable
-automatic installation with `-DHEYAKI_AUTO_INSTALL=OFF` when an external packaging step
-owns the install tree.
+## Quick start
 
-Requirements: CMake ≥ 3.25, a C++20 toolchain, and system OpenSSL ≥ 3.0 (< 4.0). Linux
-(GCC 13.3 / Clang) and Windows (MSVC) are supported; all other dependencies (executor,
-libdatachannel, libsodium, protobuf, abseil, sqlite, boost subset, FTXUI, …) are pinned in
-`third_party/dependencies.lock` and fetched automatically by CMake.
+```sh
+git clone https://github.com/Linductor-alkaid/heyaki && cd heyaki
+scripts/fetch_third_party.sh --all   # synchronize pinned dependencies
+cmake --preset release && cmake --build --preset release
+```
 
-Notable CMake options: `HEYAKI_BUILD_APPS` (default ON), `HEYAKI_FETCH_DEPENDENCIES`
-(default ON), `HEYAKI_AUTO_INSTALL` (default ON), `HEYAKI_BUILD_FUZZERS` (Clang),
-`HEYAKI_ENABLE_EXCEPTIONS` (a no-exceptions build is supported), `HEYAKI_WARNINGS_AS_ERRORS`,
-`HEYAKI_ENABLE_CLANG_TIDY`, and `HEYAKI_REQUIRE_SANITIZER_RUNTIME`.
+Start a relay (TLS control plane on :8443):
 
-Generated protocol files, test profiles and credentials, and fuzz corpora are constrained to
-the build tree. `cmake --build build/debug --target heyaki-sbom` regenerates the SPDX
-inventory and license manifest from the lock files.
+```sh
+openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+  -keyout relay.key -out relay.crt -subj "/CN=hey-relay" \
+  -addext "subjectAltName=DNS:hey-relay"
+cat > relay.conf <<'EOF'
+listen_address = 0.0.0.0
+listen_port = 8443
+tls_certificate_file = relay.crt
+tls_private_key_file = relay.key
+database_file = relay.sqlite
+EOF
+build/release/install/bin/heyaki-relay --config relay.conf
+```
 
-## Testing
+Run the terminal client on each device (`build/release/install/bin/heyaki-tui`):
+first run walks through local identity creation and optional relay enrollment,
+then discover, pair, and connect — messages, files, and shells ride the P2P
+session. Embedders use the C++20 library instead:
 
-`ctest --preset <preset>` runs the unit and integration suites (signaling, session hello,
-peer session, WebRTC transport, relay route, path policy, TUI setup, per-milestone service
-suites including the M8 shell/PTY-lifecycle and VT-renderer tests and the M9
-metrics-export/relay-observability suites) plus script harnesses
-for network topologies, relay onboarding, TUI session establishment, and the pinned coturn
-deployment. coturn-dependent checks are skipped automatically when the required environment
-is not present. Performance tests include session-establishment P95 budgets.
+```cmake
+find_package(heyaki CONFIG REQUIRED)
+target_link_libraries(my_app PRIVATE heyaki::client heyaki::services)
+```
+
+Full walkthrough: [docs/getting-started.md](docs/getting-started.md) ·
+API reference: [docs/api.md](docs/api.md)
+
+## Measured performance (v1 acceptance)
+
+Loopback benchmarks from the CI harness (per-scenario P95, budgets in
+[docs/operations/parameter-freeze.md](docs/operations/parameter-freeze.md)):
+
+| Operation | Measured P95 | Acceptance budget |
+| --- | --- | --- |
+| Relay registration + login | 22–32 ms | < 2 s |
+| Direct connect (hole punch) | 0.3–1.0 s | < 3 s |
+| TURN fallback connect | 0.7–1.1 s | < 5 s |
+| Message round-trip (1 KiB) | 0.3–4 ms | — |
+| Unary RPC round-trip | 2.3–8.5 ms | — |
+| Single-file transfer | 4–13 MiB/s | — |
+
+24/72 h soak harnesses bound memory, file descriptors, sessions, and replay
+caches across session/device churn and deliberate overload
+([runbook](docs/operations/runbook.md)).
+
+## Platform support
+
+| | Linux (GCC 13+ / Clang) | Windows 10/11 (MSVC 2022) |
+| --- | --- | --- |
+| Client libraries & TUI | ✅ | ✅ |
+| Relay server | ✅ (CI-verified platform) | ✅ (development) |
+| ICE backend | vendored libjuice (TURN/UDP) or system libnice (TURN/UDP + TCP) | libjuice |
+| NAT/fault/soak/bench matrices | ✅ CI (netns + coturn topologies) | ✅ CI (network matrix incl. firewall profiles) |
+| Sanitizers (ASan/UBSan/TSan) | ✅ CI | — |
+
+Cross-network topologies (symmetric NAT, CGNAT, UDP-blocked → TURN/TCP) are
+exercised in CI with real coturn instances; see
+[docs/operations/cross-os-matrix.md](docs/operations/cross-os-matrix.md) for
+the full coverage map and known platform limits.
+
+## Security
+
+- Default-deny sessions; every wire object is canonically signed; parsers
+  reject unknown fields (signature integrity).
+- Pairing backoff, grant scoping, replay caches, and rate limits on every
+  relay surface; eight-surface adversarial regression suite
+  ([docs/security/m9-security-regression.md](docs/security/m9-security-regression.md),
+  [threat model](docs/security/threat-model.md)).
+- Fuzzing (libFuzzer) with a minimized regression corpus, protocol golden
+  vectors, and crash-injection matrices for the file store.
 
 ## Documentation
 
-Start from the [documentation index](docs/README.md). Highlights:
+Everything is indexed in [docs/README.md](docs/README.md) — architecture,
+frozen wire protocol, deployment & operations runbook, configuration
+reference, API reference, troubleshooting, compatibility policy, and the
+[v1 release checklist](docs/operations/release-checklist-v1.md). The
+engineering delivery record (milestones M0–M9) lives in
+[docs/todolists/](docs/todolists/).
 
-- [Getting started](docs/getting-started.md) — build, install, run a relay, first device
-- [Configuration reference](docs/configuration.md) — every relay key and device knob
-- [Deployment](docs/deployment.md) — production relay, coturn, observability
-- [Client library API](docs/api.md)
-- [Troubleshooting](docs/troubleshooting.md)
-- [Operations runbook](docs/operations/runbook.md)
-- [Architecture](docs/design/heyaki-architecture.md)
-- [Wire Protocol v1](docs/design/heyaki-wire-protocol.md)
-- [LAN serverless connectivity](docs/design/lan-serverless-connectivity.md)
-- [Gateway proxy service](docs/design/gateway-service.md)
-- [Concurrency and shutdown](docs/design/concurrency-and-shutdown.md)
-- [Threat model](docs/security/threat-model.md)
-- [Implementation plan and milestones](docs/todolists/heyaki-implementation-plan.md)
-- [Dependency policy and supply chain](docs/supply-chain/dependency-policy.md)
-- [libdatachannel v0.23.2 compatibility](docs/compatibility/libdatachannel-v0.23.2.md)
-- [Product defaults (decisions)](docs/decisions/m0-product-defaults.md)
-- [coturn deployment](deploy/coturn/README.md)
-- [Protocol schema policy](proto/README.md)
+## Project status
 
-Logo assets live in [`docs/icon/`](docs/icon/).
+**v1.0.0** — the full MVP→v1 roadmap (M0–M9) is complete: protocol & crypto,
+runtime/identity, LAN serverless + relay control plane, WebRTC connectivity,
+authorization/ByteStream, message/RPC, events/file transfer, remote shell, and
+production hardening (observability, matrices, soak/bench, parameter freeze,
+compatibility, fuzzing, supply chain, security regression, packaging, release
+engineering). Release artifacts are built and verified by
+[scripts/package_release.sh](scripts/package_release.sh) and signed per the
+[signing procedure](docs/operations/release-signing.md).
+
+## License
+
+Heyaki is released under the [MIT License](LICENSE). Third-party dependencies
+carry their own permissive licenses (MPL-2.0, ISC, BSL-1.0, MIT, …); every
+license text ships in the release tarball and the SPDX SBOM lists the full
+closure ([docs/supply-chain/dependency-policy.md](docs/supply-chain/dependency-policy.md)).
