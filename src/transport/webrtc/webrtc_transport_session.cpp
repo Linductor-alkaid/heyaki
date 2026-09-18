@@ -615,7 +615,7 @@ class WebRtcTransportSession::Impl
       pending_opens_.erase(pending);
       completion(Result<TransportChannel*>::success(event.channel.get()));
     } else {
-      const auto handlers = handlers_.load(std::memory_order_acquire);
+      const auto handlers = load_handlers();
       if (handlers && handlers->channel) {
         // An incoming (peer-created) channel opened: surface it so the session
         // can adopt it instead of creating a duplicate stream for the kind.
@@ -624,7 +624,7 @@ class WebRtcTransportSession::Impl
     }
   }
   void handle(MessageEvent& event) {
-    const auto handlers = handlers_.load(std::memory_order_acquire);
+    const auto handlers = load_handlers();
     if (handlers && handlers->message) {
       handlers->message(*event.channel, std::move(event.payload));
     }
@@ -831,12 +831,11 @@ class WebRtcTransportSession::Impl
   // the result for dispatcher-thread readers.
   template <typename Mutate>
   void replace_handlers(Mutate&& mutate) {
+    auto current = load_handlers();
     auto next = std::make_shared<HandlerTable>(
-        handlers_.load(std::memory_order_acquire)
-            ? *handlers_.load(std::memory_order_acquire)
-            : HandlerTable{});
+        current ? *current : HandlerTable{});
     mutate(*next);
-    handlers_.store(std::move(next), std::memory_order_release);
+    store_handlers(std::move(next));
   }
 
   void publish_quiet_snapshot() {
@@ -855,7 +854,7 @@ class WebRtcTransportSession::Impl
     }
     snapshots_.publish(next);
     if (notify_handler) {
-      const auto handlers = handlers_.load(std::memory_order_acquire);
+      const auto handlers = load_handlers();
       if (handlers && handlers->state) handlers->state(next);
     }
   }
@@ -977,7 +976,31 @@ class WebRtcTransportSession::Impl
     StateHandler state;
     ChannelHandler channel;
   };
+  // M9-14 publishes handler snapshots atomically. libstdc++ implements
+  // std::atomic<std::shared_ptr<T>> from 12; the Ubuntu 20.04 compatibility
+  // baseline (GCC 11, pinned executor needs its atomic wait/notify) rides
+  // the library's atomic_load/atomic_store free functions instead — same
+  // atomic-publish semantics, serialized by libstdc++'s internal lock
+  // pool; handler swaps happen only at setup so the lock is uncontended.
+#ifdef __cpp_lib_atomic_shared_ptr
   std::atomic<std::shared_ptr<const HandlerTable>> handlers_{};
+
+  std::shared_ptr<const HandlerTable> load_handlers() const {
+    return handlers_.load(std::memory_order_acquire);
+  }
+  void store_handlers(std::shared_ptr<const HandlerTable> next) {
+    handlers_.store(std::move(next), std::memory_order_release);
+  }
+#else
+  std::shared_ptr<const HandlerTable> handlers_{};
+
+  std::shared_ptr<const HandlerTable> load_handlers() const {
+    return std::atomic_load(&handlers_);
+  }
+  void store_handlers(std::shared_ptr<const HandlerTable> next) {
+    std::atomic_store(&handlers_, std::move(next));
+  }
+#endif
   PathInfo path_;
   std::atomic<bool> drain_scheduled_{false};
   std::atomic<bool> callback_overflowed_{false};
