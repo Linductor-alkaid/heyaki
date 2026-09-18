@@ -71,6 +71,18 @@ round-trip on the actual artifacts; soak/bench procedures from the
 **Stamp on release**: run ID + commit SHA of the final green CI run, and the
 `SHA256SUMS` of the produced tarballs, recorded here before tagging.
 
+**v1.0.0 stamp (2026-09-18)**: release commit `1f9acd2`, green CI run
+[35299352938](https://github.com/Linductor-alkaid/heyaki/actions/runs/35299352938)
+(11/11 jobs), tag `v1.0.0`,
+[GitHub release](https://github.com/Linductor-alkaid/heyaki/releases/tag/v1.0.0)
+with Ed25519-signed artifacts (signing key id `fa4d676f792b5e82`).
+
+```text
+5b8b7cd5a272c41d6d7691bd204dfbbf2eb9a5574212af85f6b3c081ccebebd5  SHA256SUMS
+e9b73273fa37fa691d20e59056403f314e1a28c36fb6016eb0e1cb34661763d5  heyaki-1.0.0-linux-x86_64-dbg.tar.gz
+12178553f46fec97d8fcbbaaa325aeb3cbf41c60c4b6b5067db56284e182991c  heyaki-1.0.0-linux-x86_64.tar.gz
+```
+
 ## Known limitations (v1)
 
 Behavior accepted with rationale at release; each has a follow-up owner
