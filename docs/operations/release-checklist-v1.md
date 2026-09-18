@@ -83,6 +83,19 @@ e9b73273fa37fa691d20e59056403f314e1a28c36fb6016eb0e1cb34661763d5  heyaki-1.0.0-l
 12178553f46fec97d8fcbbaaa325aeb3cbf41c60c4b6b5067db56284e182991c  heyaki-1.0.0-linux-x86_64.tar.gz
 ```
 
+**v1.0.0 SDK stamp (2026-09-18)**: the `release-sdk` workflow (run
+35314251833, dispatched for the pre-workflow release) built and attached the
+client-library SDK archives from the same tag, operator-signed with the same
+key (`MANIFEST-sdk.txt` + `.sig`):
+
+```text
+a57688bad996fc70fa69aa12ff23cca3d75d0799849799fce32c7a4e80e518b5  heyaki-1.0.0-linux-x86_64-sdk.tar.gz
+4a113492ccd5cd126903b4403fd828b3aabbb2bfc64650f490e3a0632db91d05  heyaki-1.0.0-windows-x64-sdk.zip
+```
+
+The v1.0.0 SDK archives predate the `heyaki-m6-message-rpc-demo` install-set
+fix (they carry the other demos); noted on the release page.
+
 ## Known limitations (v1)
 
 Behavior accepted with rationale at release; each has a follow-up owner
