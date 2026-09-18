@@ -96,6 +96,16 @@ a57688bad996fc70fa69aa12ff23cca3d75d0799849799fce32c7a4e80e518b5  heyaki-1.0.0-l
 The v1.0.0 SDK archives predate the `heyaki-m6-message-rpc-demo` install-set
 fix (they carry the other demos); noted on the release page.
 
+**v1.0.1 stamp (2026-09-18, Ubuntu 20.04 compatibility)**: release commit
+`af838ac`, green CI run [35378276764](https://github.com/Linductor-alkaid/heyaki/actions/runs/35378276764)
+(12/12 jobs including the new compat-2004 container job — full suite on
+Ubuntu 20.04 with GCC 11 / pinned CMake 3.31.6 / OpenSSL 3.0.22),
+[GitHub release](https://github.com/Linductor-alkaid/heyaki/releases/tag/v1.0.1).
+The Linux SDK is built on the 20.04 baseline (symbol gate: GLIBC_2.30 max,
+zero GLIBCXX references via static libstdc++/libgcc; OpenSSL 3 bundled;
+consumer-verified from the extracted archive). Both manifests signed with
+the v1 key; digests recorded on the release page.
+
 ## Known limitations (v1)
 
 Behavior accepted with rationale at release; each has a follow-up owner
