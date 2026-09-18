@@ -37,7 +37,7 @@ runs:
       run: |
         apt-get update
         apt-get install -y --no-install-recommends \
-          ca-certificates git wget make perl pkg-config binutils \
+          ca-certificates git wget curl make perl pkg-config binutils \
           build-essential python3 software-properties-common gnupg
         add-apt-repository -y ppa:ubuntu-toolchain-r/test
         apt-get update
