@@ -1407,6 +1407,7 @@ add_test(
     "-DHEYAKI_ROOT_BINARY_DIR=${CMAKE_BINARY_DIR}"
     "-DHEYAKI_CONSUMER_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/consumer"
     "-DHEYAKI_CONSUMER_WORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/consumer-work"
+    "-DHEYAKI_CONSUMER_OPENSSL_ROOT_DIR=${OPENSSL_ROOT_DIR}"
     "-DHEYAKI_CONFIG=$<CONFIG>"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/consumer/RunConsumerTest.cmake")
 set_tests_properties(heyaki_installed_consumer PROPERTIES LABELS "integration")

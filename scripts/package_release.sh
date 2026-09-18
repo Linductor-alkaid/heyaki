@@ -89,6 +89,16 @@ fi
   exit 1
 }
 
+# Installed binaries run with a stripped rpath; when the build resolved
+# OpenSSL from a non-system prefix (e.g. the Ubuntu 20.04 compatibility
+# container), its runtime libraries must be on the loader path for the
+# run-in-place verifications below.
+openssl_root="$(sed -n 's/^OPENSSL_ROOT_DIR:PATH=//p' "${build_dir}/CMakeCache.txt" | head -1)"
+if [ -n "${openssl_root}" ] && [ -d "${openssl_root}/lib" ]; then
+  export LD_LIBRARY_PATH="${openssl_root}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+  echo "== using OpenSSL runtime from ${openssl_root}/lib"
+fi
+
 echo "== installing into clean prefix ${stage}"
 cmake --install "${build_dir}" --prefix "${stage}"
 manifest="${work}/install_manifest.txt"

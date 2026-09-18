@@ -23,9 +23,19 @@ if(NOT install_result EQUAL 0)
   message(FATAL_ERROR "Heyaki installation failed")
 endif()
 
+# Optional: forward the build's OPENSSL_ROOT_DIR so the consumer resolves
+# the same OpenSSL on systems where the 3.x line is not the system default
+# (e.g. the Ubuntu 20.04 compatibility container).
+set(openssl_arguments)
+if(DEFINED HEYAKI_CONSUMER_OPENSSL_ROOT_DIR AND
+   NOT HEYAKI_CONSUMER_OPENSSL_ROOT_DIR STREQUAL "")
+  list(APPEND openssl_arguments
+    "-DOPENSSL_ROOT_DIR=${HEYAKI_CONSUMER_OPENSSL_ROOT_DIR}")
+endif()
+
 execute_process(
   COMMAND "${CMAKE_COMMAND}" -S "${HEYAKI_CONSUMER_SOURCE_DIR}" -B "${build_dir}"
-    "-DCMAKE_PREFIX_PATH=${install_dir}"
+    "-DCMAKE_PREFIX_PATH=${install_dir}" ${openssl_arguments}
   RESULT_VARIABLE configure_result)
 if(NOT configure_result EQUAL 0)
   message(FATAL_ERROR "Installed consumer configure failed")
