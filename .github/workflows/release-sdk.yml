@@ -66,16 +66,26 @@ jobs:
       - name: Resolve the tag commit
         # github.sha is the dispatching commit, not the built tree; deref
         # the (annotated) tag through the API so the SDK stamps the commit
-        # it was actually built from.
+        # it was actually built from. Pure python3: the local composite
+        # action resolves from the tag tree, whose package list may lag
+        # master's (curl arrived after this release's tag).
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag_object=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/ref/tags/$TAG" \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["sha"])')
-          commit=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/tags/$tag_object" \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["sha"])')
+          commit=$(python3 - <<'PY'
+          import json, os, urllib.request
+          def get(url):
+              req = urllib.request.Request(url, headers={
+                  "Authorization": "Bearer " + os.environ["GH_TOKEN"]})
+              return json.load(urllib.request.urlopen(req))
+          repo = os.environ["GITHUB_REPOSITORY"]
+          tag = os.environ["TAG"]
+          obj = get(f"https://api.github.com/repos/{repo}/git/ref/tags/{tag}")["object"]
+          if obj["type"] == "tag":
+              obj = get(obj["url"])["object"]
+          print(obj["sha"])
+          PY
+          )
           echo "TAG_COMMIT=$commit" >> "$GITHUB_ENV"
           echo "tag $TAG -> commit $commit"
       - name: Fetch pinned dependencies
