@@ -85,7 +85,11 @@ target_link_libraries(my_app PRIVATE heyaki::client heyaki::services)
 ```
 
 完整流程见 [docs/getting-started.md](docs/getting-started.md)（英文）·
-API 参考：[docs/api.md](docs/api.md)（英文）
+API 参考：[docs/api.md](docs/api.md)（英文）·
+在 Linux 与 Windows 上把 Heyaki 接入你自己的应用：
+[docs/client-library.md](docs/client-library.md)（英文；每个
+[Release](https://github.com/Linductor-alkaid/heyaki/releases) 均附带预构建
+SDK 包）
 
 ## 实测性能（v1 验收）
 

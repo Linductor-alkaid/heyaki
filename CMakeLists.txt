@@ -463,8 +463,8 @@ if(HEYAKI_BUILD_APPS)
   heyaki_configure_target(heyaki-release-sign)
 
   list(APPEND HEYAKI_INSTALL_TARGETS heyaki-relay heyaki-tui heyaki-m2-profile-demo
-       heyaki-m3b-relay-demo heyaki-m4-matrix-node heyaki-test-turn-server
-       heyaki-m7-data-demo heyaki-release-sign)
+       heyaki-m3b-relay-demo heyaki-m6-message-rpc-demo heyaki-m4-matrix-node
+       heyaki-test-turn-server heyaki-m7-data-demo heyaki-release-sign)
 endif()
 
 heyaki_add_developer_targets()

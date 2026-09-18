@@ -11,6 +11,7 @@ delivery record.
 | Configuration: relay config file, CLI flags, device-side config model | [configuration.md](configuration.md) |
 | Production deployment: relay host, coturn, observability, fleet | [deployment.md](deployment.md) |
 | Client library API reference | [api.md](api.md) |
+| Consuming the SDK on Linux and Windows | [client-library.md](client-library.md) |
 | Troubleshooting by symptom (devices, relay, TUI) | [troubleshooting.md](troubleshooting.md) |
 | Upgrade, backup, rollback, per-alert triage, soak/bench procedures | [operations/runbook.md](operations/runbook.md) |
 | Frozen defaults and hard upper bounds for every tunable | [operations/parameter-freeze.md](operations/parameter-freeze.md) |

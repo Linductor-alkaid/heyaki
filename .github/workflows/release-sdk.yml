@@ -1,0 +1,138 @@
+name: release-sdk
+
+# Builds the per-platform client-library SDK archives (install tree with the
+# static libraries, headers, and CMake packages) and attaches them to a
+# GitHub release. Runs automatically when a release is published, or
+# manually via workflow_dispatch for an already-published release (used for
+# v1.0.0, which predates this workflow).
+#
+# The archives are CI-built; the offline-held Ed25519 release key never
+# enters CI. Signing happens afterwards on the release host: the operator
+# downloads the archives, extends the signed manifest, and uploads it (see
+# docs/operations/release-signing.md and the release checklist).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build the SDK archives for (e.g. v1.0.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  linux-sdk:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Resolve release tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            tag="${{ github.event.release.tag_name }}"
+          else
+            tag="${{ inputs.tag }}"
+          fi
+          case "$tag" in
+            v[0-9]*) ;;
+            *) echo "release tag must look like vX.Y.Z, got: $tag" >&2; exit 1 ;;
+          esac
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+          echo "VERSION=${tag#v}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Fetch pinned dependencies
+        run: scripts/fetch_third_party.sh --all
+      - name: Configure (Release, default juice backend)
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DHEYAKI_WARNINGS_AS_ERRORS=ON
+          -DHEYAKI_FETCH_DEPENDENCIES=OFF
+          -DHEYAKI_AUTO_INSTALL=OFF
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Install and archive the SDK
+        run: |
+          root="heyaki-${VERSION}-linux-x86_64"
+          cmake --install build --prefix "$PWD/$root"
+          # The install must report the same version as the release tag.
+          "./$root/bin/heyaki-relay" --version | grep -F "heyaki-relay ${VERSION} "
+          tar -czf "${root}-sdk.tar.gz" "$root"
+          sha256sum "${root}-sdk.tar.gz"
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" heyaki-*-sdk.tar.gz --clobber
+
+  windows-sdk:
+    runs-on: windows-2025
+    steps:
+      - name: Resolve release tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            tag="${{ github.event.release.tag_name }}"
+          else
+            tag="${{ inputs.tag }}"
+          fi
+          case "$tag" in
+            v[0-9]*) ;;
+            *) echo "release tag must look like vX.Y.Z, got: $tag" >&2; exit 1 ;;
+          esac
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+          echo "VERSION=${tag#v}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Fetch pinned dependencies
+        shell: bash
+        run: scripts/fetch_third_party.sh --all
+      - name: Configure (Release, default juice backend)
+        shell: pwsh
+        run: |
+          $opensslRoot = "${env:ProgramFiles}/OpenSSL"
+          if (-not (Test-Path "$opensslRoot/include/openssl/ssl.h")) {
+            throw "GitHub runner OpenSSL development files not found at $opensslRoot"
+          }
+          cmake -S . -B build -A x64 `
+            -DHEYAKI_WARNINGS_AS_ERRORS=ON `
+            -DHEYAKI_FETCH_DEPENDENCIES=OFF `
+            -DHEYAKI_AUTO_INSTALL=OFF `
+            "-DOPENSSL_ROOT_DIR=$opensslRoot"
+      - name: Build
+        run: cmake --build build --config Release --parallel 2
+      - name: Install and archive the SDK
+        shell: pwsh
+        run: |
+          $root = "heyaki-${env:VERSION}-windows-x64"
+          cmake --install build --config Release --prefix "$PWD/$root"
+          # The install must report the same version as the release tag.
+          $versionLine = & "$root/bin/heyaki-relay.exe" --version | Select-Object -First 1
+          if (-not $versionLine.Contains("heyaki-relay ${env:VERSION} ")) {
+            throw "installed version does not match the release tag: $versionLine"
+          }
+          # The SDK's only dynamic third-party runtime besides the MSVC
+          # runtime is OpenSSL; bundle the DLLs next to the apps so the tree
+          # runs as extracted (datachannel.dll is already installed by the
+          # pinned dependency's own install rules).
+          $opensslRoot = "${env:ProgramFiles}/OpenSSL"
+          foreach ($dll in @("libssl-3-x64.dll", "libcrypto-3-x64.dll")) {
+            $source = Join-Path $opensslRoot "bin/$dll"
+            if (Test-Path $source) {
+              Copy-Item $source "$root/bin/$dll"
+            } else {
+              throw "OpenSSL runtime DLL not found: $source"
+            }
+          }
+          Compress-Archive -Path "$root" -DestinationPath "${root}-sdk.zip"
+          Get-FileHash "${root}-sdk.zip" -Algorithm SHA256
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: gh release upload "$env:TAG" "heyaki-$($env:VERSION)-windows-x64-sdk.zip" --clobber

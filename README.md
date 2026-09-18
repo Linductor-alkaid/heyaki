@@ -91,7 +91,10 @@ target_link_libraries(my_app PRIVATE heyaki::client heyaki::services)
 ```
 
 Full walkthrough: [docs/getting-started.md](docs/getting-started.md) ·
-API reference: [docs/api.md](docs/api.md)
+API reference: [docs/api.md](docs/api.md) ·
+linking Heyaki into your own app on Linux and Windows:
+[docs/client-library.md](docs/client-library.md) (prebuilt SDK archives are
+attached to every [release](https://github.com/Linductor-alkaid/heyaki/releases))
 
 ## Measured performance (v1 acceptance)
 

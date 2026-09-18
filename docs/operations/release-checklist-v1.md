@@ -151,6 +151,11 @@ note in the linked record:
 3. `scripts/package_release.sh --output <dist-dir>` from a clean checkout of
    the release commit (fresh RelWithDebInfo build by default) — produces
    `heyaki-1.0.0-linux-<arch>.tar.gz`, the `-dbg` companion, and SHA256SUMS.
+   The per-platform client-library SDK archives
+   (`*-linux-x86_64-sdk.tar.gz`, `*-windows-x64-sdk.zip`) are built and
+   uploaded by the `release-sdk` workflow automatically on release publish
+   (`workflow_dispatch` for releases that predate it); consumption is
+   documented in [client-library.md](../client-library.md).
 4. Sign per [release-signing.md](release-signing.md): keygen (offline) →
    `manifest` → `sign` → `verify` → `check` over the tarball set; publish
    the public key id alongside the artifacts.

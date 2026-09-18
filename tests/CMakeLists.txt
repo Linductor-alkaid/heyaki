@@ -563,7 +563,8 @@ set(HEYAKI_DOCS_SOURCES
   "${PROJECT_SOURCE_DIR}/docs/configuration.md"
   "${PROJECT_SOURCE_DIR}/docs/deployment.md"
   "${PROJECT_SOURCE_DIR}/docs/api.md"
-  "${PROJECT_SOURCE_DIR}/docs/troubleshooting.md")
+  "${PROJECT_SOURCE_DIR}/docs/troubleshooting.md"
+  "${PROJECT_SOURCE_DIR}/docs/client-library.md")
 execute_process(
   COMMAND "${CMAKE_COMMAND}"
     "-DHEYAKI_DOCS_LIST=${HEYAKI_DOCS_SOURCES}"
@@ -587,10 +588,12 @@ foreach(heyaki_doc_slug IN LISTS HEYAKI_DOC_CPP_EXAMPLES)
   list(APPEND HEYAKI_DOC_CPP_BINARIES
     "$<TARGET_FILE:heyaki-doc-example-${heyaki_doc_slug}>")
 endforeach()
-if("node-lifecycle" IN_LIST HEYAKI_DOC_CPP_EXAMPLES)
-  heyaki_enable_executor_exception_adapter_source(
-    "${HEYAKI_DOCS_EXAMPLE_DIR}/node-lifecycle.cpp")
-endif()
+foreach(heyaki_doc_node_example IN ITEMS "node-lifecycle" "sdk-first-program")
+  if(heyaki_doc_node_example IN_LIST HEYAKI_DOC_CPP_EXAMPLES)
+    heyaki_enable_executor_exception_adapter_source(
+      "${HEYAKI_DOCS_EXAMPLE_DIR}/${heyaki_doc_node_example}.cpp")
+  endif()
+endforeach()
 
 add_executable(heyaki-doc-relay-config-check docs/relay_config_doc_check.cpp)
 target_link_libraries(heyaki-doc-relay-config-check PRIVATE

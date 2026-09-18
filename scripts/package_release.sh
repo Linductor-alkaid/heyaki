@@ -109,6 +109,7 @@ expect_file bin/heyaki-relay
 expect_file bin/heyaki-tui
 expect_file bin/heyaki-m2-profile-demo
 expect_file bin/heyaki-m3b-relay-demo
+expect_file bin/heyaki-m6-message-rpc-demo
 expect_file bin/heyaki-m4-matrix-node
 expect_file bin/heyaki-m7-data-demo
 expect_file bin/heyaki-test-turn-server
