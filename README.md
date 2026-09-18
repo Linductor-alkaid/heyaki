@@ -116,7 +116,7 @@ caches across session/device churn and deliberate overload
 
 ## Platform support
 
-| | Linux (Ubuntu 20.04+; GCC 10–13 / Clang) | Windows 10/11 (MSVC 2022) |
+| | Linux (Ubuntu 20.04+; GCC 11–13 / Clang) | Windows 10/11 (MSVC 2022) |
 | --- | --- | --- |
 | Client libraries & TUI | ✅ | ✅ |
 | Relay server | ✅ (CI-verified platform) | ✅ (development) |

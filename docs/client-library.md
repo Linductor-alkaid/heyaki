@@ -29,7 +29,7 @@ The archives are built by CI from the release tag (see
 | | Linux | Windows |
 | --- | --- | --- |
 | Distribution / baseline | Ubuntu 20.04 or newer — the SDK is built on the 20.04 baseline (glibc ≥ 2.31, libstdc++ ≥ 3.4.28), so it runs on 20.04 and every newer distribution | Windows 10/11, x64 |
-| Toolchain | GCC 10+ (C++20; Ubuntu 20.04: `g++-10` from the focal archive) — GCC 13 / Clang 17 recommended | Visual Studio 2022 (MSVC 19.38+), x64 |
+| Toolchain | GCC 11+ (C++20; the pinned `executor` dependency uses `std::atomic` wait/notify, which libstdc++ implements from 11.1 — Ubuntu 20.04: `g++-11` from the `ubuntu-toolchain-r/test` PPA, which also brings the matching runtime) — GCC 13 / Clang 17 recommended | Visual Studio 2022 (MSVC 19.38+), x64 |
 | CMake | ≥ 3.25 | ≥ 3.25 |
 | OpenSSL | 3.x development package (`libssl-dev`; ≥ 3.0, < 4.0) — or use the copy bundled in the SDK (see [Ubuntu 20.04](#ubuntu-2004)) | OpenSSL 3.x — headers + import libraries for compiling (e.g. from [slproweb](https://slproweb.com/products/Win32OpenSSL.html) installed to the default location, or set `OPENSSL_ROOT_DIR`); the runtime DLLs ship inside the SDK `bin/` |
 | Runtime | `libssl.so.3` / `libcrypto.so.3` — system package, or the SDK's bundled copy | MSVC redistributable (matching VS 2022); `datachannel.dll` and OpenSSL DLLs are in the SDK `bin/` |
@@ -86,8 +86,14 @@ pinned CMake, source-built OpenSSL 3.0.x — see
 and a CI job builds and runs the full test suite on that baseline, so the
 archives run on 20.04 and newer. What that means for you on a 20.04 machine:
 
-- **Compiler**: install `g++-10` (`sudo apt install g++-10`, in the focal
-  archive) or newer; C++20 support in GCC 9 is incomplete.
+- **Compiler**: install `g++-11` or newer —
+  `sudo add-apt-repository ppa:ubuntu-toolchain-r/test && sudo apt install g++-11`.
+  GCC 10 is not enough (the pinned `executor` dependency uses
+  `std::atomic` wait/notify, a libstdc++ 11 feature), and the PPA install
+  also updates the system `libstdc++` runtime your compiled apps need.
+- **Ready-to-run binaries**: the executables inside the SDK (`bin/`) link
+  libstdc++/libgcc statically, so `heyaki-relay`, `heyaki-tui`, and the
+  demos run on a bare 20.04 as extracted.
 - **CMake**: the distro package is 3.16 — install ≥ 3.25 (Kitware's official
   tarball or `pip install cmake`).
 - **OpenSSL 3**: focal ships the 1.1 line, and Heyaki freezes the 3.x ABI
@@ -107,8 +113,8 @@ LD_LIBRARY_PATH=$HOME/heyaki-sdk/lib ./build/my_device_app
   a system OpenSSL 3 (22.04+) none of this is needed.
 
 Building Heyaki **from source** on 20.04 uses the same recipe the CI job
-runs: `g++-10`, CMake ≥ 3.25, OpenSSL 3 from source, then the normal
-[build steps](#building-the-sdk-from-source-instead).
+runs: `g++-11` (toolchain PPA), CMake ≥ 3.25, OpenSSL 3 from source, then
+the normal [build steps](#building-the-sdk-from-source-instead).
 
 ## Your first program
 

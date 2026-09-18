@@ -126,10 +126,12 @@ jobs:
 
   compat-2004:
     # Ubuntu 20.04 compatibility: the oldest supported build baseline
-    # (glibc 2.31, GCC 10, source-built OpenSSL 3). Native 20.04 runners
-    # are retired, so this runs in an ubuntu:20.04 container. Warnings are
-    # not errors here: the tree is validated warning-clean on the GCC 13 /
-    # Clang 17 line, older compilers may word things differently.
+    # (glibc 2.31, GCC 11 from the toolchain PPA - the pinned executor uses
+    # std::atomic wait/notify, a libstdc++ 11 feature - and source-built
+    # OpenSSL 3). Native 20.04 runners are retired, so this runs in an
+    # ubuntu:20.04 container. Warnings are not errors here: the tree is
+    # validated warning-clean on the GCC 13 / Clang 17 line, older
+    # compilers may word things differently.
     runs-on: ubuntu-latest
     container:
       image: ubuntu:20.04
@@ -139,7 +141,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # Local composite actions resolve from the workspace: checkout first.
-      - name: Provision toolchain (g++-10, pinned CMake, OpenSSL 3.0.x)
+      - name: Provision toolchain (g++-11, pinned CMake, OpenSSL 3.0.x)
         uses: ./.github/actions/ubuntu-2004-toolchain
       - name: Fetch pinned dependencies
         run: scripts/fetch_third_party.sh --all
@@ -147,8 +149,8 @@ jobs:
         run: >-
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_C_COMPILER=gcc-10
-          -DCMAKE_CXX_COMPILER=g++-10
+          -DCMAKE_C_COMPILER=gcc-11
+          -DCMAKE_CXX_COMPILER=g++-11
           -DHEYAKI_WARNINGS_AS_ERRORS=OFF
           -DHEYAKI_FETCH_DEPENDENCIES=OFF
           -DHEYAKI_AUTO_INSTALL=OFF

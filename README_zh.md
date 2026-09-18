@@ -110,7 +110,7 @@ SDK 包）
 
 ## 平台支持
 
-| | Linux（Ubuntu 20.04+；GCC 10–13 / Clang） | Windows 10/11（MSVC 2022） |
+| | Linux（Ubuntu 20.04+；GCC 11–13 / Clang） | Windows 10/11（MSVC 2022） |
 | --- | --- | --- |
 | 客户端库与 TUI | ✅ | ✅ |
 | relay 服务端 | ✅（CI 验证平台） | ✅（开发用途） |

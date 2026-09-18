@@ -1,11 +1,13 @@
 name: ubuntu-2004-toolchain
 description: >-
-  Provision a build toolchain inside an ubuntu:20.04 container job: GCC 10
-  from the focal archive, a pinned CMake (the distro one is 3.16; Heyaki
-  needs >= 3.25), and a pinned OpenSSL 3.0.x (focal ships the 1.1 line;
-  Heyaki freezes the 3.x ABI line). Used by the compat-2004 CI job and the
-  linux-sdk release job so release artifacts are built on the oldest
-  supported baseline (glibc 2.31).
+  Provision a build toolchain inside an ubuntu:20.04 container job: GCC 11
+  from the ubuntu-toolchain-r PPA (the pinned executor dependency uses
+  std::atomic wait/notify, which libstdc++ implements from 11.1; the PPA
+  also brings the matching libstdc++ 11 runtime), a pinned CMake (the
+  distro one is 3.16; Heyaki needs >= 3.25), and a pinned OpenSSL 3.0.x
+  (focal ships the 1.1 line; Heyaki freezes the 3.x ABI line). Used by the
+  compat-2004 CI job and the linux-sdk release job so release artifacts are
+  built on the oldest supported baseline (glibc 2.31).
 inputs:
   cmake-version:
     description: Pinned CMake release version
@@ -30,14 +32,17 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Install focal toolchain packages
+    - name: Install focal toolchain packages and GCC 11 (toolchain PPA)
       shell: bash
       run: |
         apt-get update
         apt-get install -y --no-install-recommends \
           ca-certificates git wget make perl pkg-config binutils \
-          build-essential g++-10 python3
-        g++-10 --version | head -1
+          build-essential python3 software-properties-common gnupg
+        add-apt-repository -y ppa:ubuntu-toolchain-r/test
+        apt-get update
+        apt-get install -y --no-install-recommends g++-11
+        g++-11 --version | head -1
     - name: Install pinned CMake (distro CMake is 3.16; Heyaki needs 3.25+)
       shell: bash
       run: |

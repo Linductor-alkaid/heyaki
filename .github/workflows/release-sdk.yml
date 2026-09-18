@@ -26,13 +26,16 @@ permissions:
 
 jobs:
   linux-sdk:
-    # Built on the Ubuntu 20.04 baseline (glibc 2.31, GCC 10) inside a
-    # container so the archives run on 20.04 and every newer distribution;
-    # objects built against older symbol versions link and run fine on
-    # newer libstdc++/glibc. OpenSSL 3 (headers + runtime libs) is bundled
-    # into the archive so consumers on distributions without an OpenSSL 3
-    # package (20.04 ships the 1.1 line) can configure against the SDK
-    # itself via -DOPENSSL_ROOT_DIR=<sdk>.
+    # Built on the Ubuntu 20.04 baseline (glibc 2.31, GCC 11 from the
+    # toolchain PPA) inside a container so the archives run on 20.04 and
+    # every newer distribution. Executables statically link libstdc++ and
+    # libgcc (they use std::atomic wait/notify, a libstdc++ 11 feature that
+    # stock focal does not provide), so bin/ runs on a bare 20.04; the SDK
+    # libraries themselves carry no runtime requirement beyond the
+    # consumer's own toolchain. OpenSSL 3 (headers + runtime libs) is
+    # bundled into the archive so consumers on distributions without an
+    # OpenSSL 3 package (20.04 ships the 1.1 line) can configure against
+    # the SDK itself via -DOPENSSL_ROOT_DIR=<sdk>.
     runs-on: ubuntu-latest
     container:
       image: ubuntu:20.04
@@ -58,7 +61,7 @@ jobs:
         with:
           ref: ${{ env.TAG }}
       # Local composite actions resolve from the workspace: checkout first.
-      - name: Provision toolchain (g++-10, pinned CMake, OpenSSL 3.0.x)
+      - name: Provision toolchain (g++-11, pinned CMake, OpenSSL 3.0.x)
         uses: ./.github/actions/ubuntu-2004-toolchain
       - name: Fetch pinned dependencies
         run: scripts/fetch_third_party.sh --all
@@ -66,8 +69,9 @@ jobs:
         run: >-
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_C_COMPILER=gcc-10
-          -DCMAKE_CXX_COMPILER=g++-10
+          -DCMAKE_C_COMPILER=gcc-11
+          -DCMAKE_CXX_COMPILER=g++-11
+          "-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc"
           -DHEYAKI_WARNINGS_AS_ERRORS=OFF
           -DHEYAKI_FETCH_DEPENDENCIES=OFF
           -DHEYAKI_AUTO_INSTALL=OFF
@@ -84,7 +88,8 @@ jobs:
           cp -a /opt/openssl3/include/openssl "$root/include/"
           cp -a /opt/openssl3/lib/libssl.so* /opt/openssl3/lib/libcrypto.so* "$root/lib/"
           # Compatibility gate: nothing may reference symbol versions beyond
-          # the 20.04 baseline (glibc 2.31 / libstdc++ 3.4.28 from GCC 10).
+          # the 20.04 baseline (glibc 2.31; executables carry no GLIBCXX
+          # references at all thanks to the static libstdc++ link).
           exceeds() {
             [ "$(printf '%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ] && [ "$1" != "$2" ]
           }
