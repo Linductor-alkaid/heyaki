@@ -124,6 +124,39 @@ jobs:
           HEYAKI_M3A_STRESS_EPOCHS: "2"
         run: ctest --test-dir build -C ${{ matrix.build_type }} --output-on-failure --no-tests=error
 
+  compat-2004:
+    # Ubuntu 20.04 compatibility: the oldest supported build baseline
+    # (glibc 2.31, GCC 10, source-built OpenSSL 3). Native 20.04 runners
+    # are retired, so this runs in an ubuntu:20.04 container. Warnings are
+    # not errors here: the tree is validated warning-clean on the GCC 13 /
+    # Clang 17 line, older compilers may word things differently.
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:20.04
+      env:
+        DEBIAN_FRONTEND: noninteractive
+        TZ: Etc/UTC
+    steps:
+      - name: Provision toolchain (g++-10, pinned CMake, OpenSSL 3.0.x)
+        uses: ./.github/actions/ubuntu-2004-toolchain
+      - uses: actions/checkout@v4
+      - name: Fetch pinned dependencies
+        run: scripts/fetch_third_party.sh --all
+      - name: Configure
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=gcc-10
+          -DCMAKE_CXX_COMPILER=g++-10
+          -DHEYAKI_WARNINGS_AS_ERRORS=OFF
+          -DHEYAKI_FETCH_DEPENDENCIES=OFF
+          -DHEYAKI_AUTO_INSTALL=OFF
+          -DOPENSSL_ROOT_DIR=/opt/openssl3
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --no-tests=error
+
   coturn-topology:
     runs-on: ubuntu-24.04
     steps:

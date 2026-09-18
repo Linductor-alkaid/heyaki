@@ -26,7 +26,19 @@ permissions:
 
 jobs:
   linux-sdk:
-    runs-on: ubuntu-24.04
+    # Built on the Ubuntu 20.04 baseline (glibc 2.31, GCC 10) inside a
+    # container so the archives run on 20.04 and every newer distribution;
+    # objects built against older symbol versions link and run fine on
+    # newer libstdc++/glibc. OpenSSL 3 (headers + runtime libs) is bundled
+    # into the archive so consumers on distributions without an OpenSSL 3
+    # package (20.04 ships the 1.1 line) can configure against the SDK
+    # itself via -DOPENSSL_ROOT_DIR=<sdk>.
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:20.04
+      env:
+        DEBIAN_FRONTEND: noninteractive
+        TZ: Etc/UTC
     steps:
       - name: Resolve release tag
         shell: bash
@@ -42,6 +54,8 @@ jobs:
           esac
           echo "TAG=$tag" >> "$GITHUB_ENV"
           echo "VERSION=${tag#v}" >> "$GITHUB_ENV"
+      - name: Provision toolchain (g++-10, pinned CMake, OpenSSL 3.0.x)
+        uses: ./.github/actions/ubuntu-2004-toolchain
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG }}
@@ -51,9 +65,12 @@ jobs:
         run: >-
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=Release
-          -DHEYAKI_WARNINGS_AS_ERRORS=ON
+          -DCMAKE_C_COMPILER=gcc-10
+          -DCMAKE_CXX_COMPILER=g++-10
+          -DHEYAKI_WARNINGS_AS_ERRORS=OFF
           -DHEYAKI_FETCH_DEPENDENCIES=OFF
           -DHEYAKI_AUTO_INSTALL=OFF
+          -DOPENSSL_ROOT_DIR=/opt/openssl3
       - name: Build
         run: cmake --build build --parallel 2
       - name: Install and archive the SDK
@@ -62,6 +79,26 @@ jobs:
           cmake --install build --prefix "$PWD/$root"
           # The install must report the same version as the release tag.
           "./$root/bin/heyaki-relay" --version | grep -F "heyaki-relay ${VERSION} "
+          # Bundle OpenSSL 3 for OpenSSL-1.1 distributions (see job header).
+          cp -a /opt/openssl3/include/openssl "$root/include/"
+          cp -a /opt/openssl3/lib/libssl.so* /opt/openssl3/lib/libcrypto.so* "$root/lib/"
+          # Compatibility gate: nothing may reference symbol versions beyond
+          # the 20.04 baseline (glibc 2.31 / libstdc++ 3.4.28 from GCC 10).
+          exceeds() {
+            [ "$(printf '%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ] && [ "$1" != "$2" ]
+          }
+          versions=$(find "$root/bin" -type f -executable \
+            -exec sh -c 'objdump -T "$1" 2>/dev/null' _ {} \; \
+            | grep -oE 'GLIBCXX_[0-9.]+|GLIBC_[0-9.]+' | sort -Vu || true)
+          max_glibc=$(printf '%s\n' "$versions" | grep '^GLIBC_' | sort -V | tail -1)
+          max_glibcxx=$(printf '%s\n' "$versions" | grep '^GLIBCXX_' | sort -V | tail -1)
+          echo "baseline symbols: ${max_glibc:-none} ${max_glibcxx:-none}"
+          if { [ -n "$max_glibc" ] && exceeds "$max_glibc" "GLIBC_2.31"; } || \
+             { [ -n "$max_glibcxx" ] && exceeds "$max_glibcxx" "GLIBCXX_3.4.28"; }; then
+            echo "symbol versions above the Ubuntu 20.04 baseline:" >&2
+            echo "$versions" >&2
+            exit 1
+          fi
           tar -czf "${root}-sdk.tar.gz" "$root"
           sha256sum "${root}-sdk.tar.gz"
       - name: Upload to the release

@@ -1,0 +1,60 @@
+name: ubuntu-2004-toolchain
+description: >-
+  Provision a build toolchain inside an ubuntu:20.04 container job: GCC 10
+  from the focal archive, a pinned CMake (the distro one is 3.16; Heyaki
+  needs >= 3.25), and a pinned OpenSSL 3.0.x (focal ships the 1.1 line;
+  Heyaki freezes the 3.x ABI line). Used by the compat-2004 CI job and the
+  linux-sdk release job so release artifacts are built on the oldest
+  supported baseline (glibc 2.31).
+inputs:
+  cmake-version:
+    description: Pinned CMake release version
+    required: false
+    default: "3.31.6"
+  cmake-sha256:
+    description: sha256 of the pinned CMake linux-x86_64 tarball
+    required: false
+    default: "5a1133ff103c71eb5120e2cc3de922733e7d8a26a98ae716397e8676adb367bf"
+  openssl-version:
+    description: Pinned OpenSSL 3.0.x version
+    required: false
+    default: "3.0.22"
+  openssl-sha256:
+    description: sha256 of the pinned OpenSSL source tarball
+    required: false
+    default: "67ebca7e50d17383028045486653492195b83db95f8558709701bb47b5c1ef81"
+outputs:
+  openssl-root:
+    description: Prefix of the built OpenSSL 3 (pass as OPENSSL_ROOT_DIR)
+    value: /opt/openssl3
+runs:
+  using: composite
+  steps:
+    - name: Install focal toolchain packages
+      shell: bash
+      run: |
+        apt-get update
+        apt-get install -y --no-install-recommends \
+          ca-certificates git wget make perl pkg-config binutils \
+          build-essential g++-10 python3
+        g++-10 --version | head -1
+    - name: Install pinned CMake (distro CMake is 3.16; Heyaki needs 3.25+)
+      shell: bash
+      run: |
+        wget -q "https://github.com/Kitware/CMake/releases/download/v${{ inputs.cmake-version }}/cmake-${{ inputs.cmake-version }}-linux-x86_64.tar.gz"
+        echo "${{ inputs.cmake-sha256 }}  cmake-${{ inputs.cmake-version }}-linux-x86_64.tar.gz" | sha256sum -c -
+        tar -C /opt -xzf "cmake-${{ inputs.cmake-version }}-linux-x86_64.tar.gz"
+        ln -sf "/opt/cmake-${{ inputs.cmake-version }}-linux-x86_64/bin/cmake" /usr/local/bin/cmake
+        ln -sf "/opt/cmake-${{ inputs.cmake-version }}-linux-x86_64/bin/ctest" /usr/local/bin/ctest
+        cmake --version | head -1
+    - name: Build pinned OpenSSL 3.0.x (focal ships the 1.1 line)
+      shell: bash
+      run: |
+        wget -q "https://github.com/openssl/openssl/releases/download/openssl-${{ inputs.openssl-version }}/openssl-${{ inputs.openssl-version }}.tar.gz"
+        echo "${{ inputs.openssl-sha256 }}  openssl-${{ inputs.openssl-version }}.tar.gz" | sha256sum -c -
+        tar -xzf "openssl-${{ inputs.openssl-version }}.tar.gz"
+        cd "openssl-${{ inputs.openssl-version }}"
+        ./Configure --prefix=/opt/openssl3 --libdir=lib shared -ldl >/dev/null
+        make -j2 >/dev/null
+        make install_sw >/dev/null
+        /opt/openssl3/bin/openssl version

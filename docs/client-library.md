@@ -28,10 +28,11 @@ The archives are built by CI from the release tag (see
 
 | | Linux | Windows |
 | --- | --- | --- |
-| Toolchain | GCC 13+ or Clang 17+ (C++20) | Visual Studio 2022 (MSVC 19.38+), x64 |
+| Distribution / baseline | Ubuntu 20.04 or newer — the SDK is built on the 20.04 baseline (glibc ≥ 2.31, libstdc++ ≥ 3.4.28), so it runs on 20.04 and every newer distribution | Windows 10/11, x64 |
+| Toolchain | GCC 10+ (C++20; Ubuntu 20.04: `g++-10` from the focal archive) — GCC 13 / Clang 17 recommended | Visual Studio 2022 (MSVC 19.38+), x64 |
 | CMake | ≥ 3.25 | ≥ 3.25 |
-| OpenSSL | 3.x development package (`libssl-dev`; ≥ 3.0, < 4.0) | OpenSSL 3.x — headers + import libraries for compiling (e.g. from [slproweb](https://slproweb.com/products/Win32OpenSSL.html) installed to the default location, or set `OPENSSL_ROOT_DIR`); the runtime DLLs ship inside the SDK `bin/` |
-| Runtime | `libssl.so.3` / `libcrypto.so.3` (pull the `openssl` distro package on target machines) | MSVC redistributable (matching VS 2022); `datachannel.dll` and OpenSSL DLLs are in the SDK `bin/` |
+| OpenSSL | 3.x development package (`libssl-dev`; ≥ 3.0, < 4.0) — or use the copy bundled in the SDK (see [Ubuntu 20.04](#ubuntu-2004)) | OpenSSL 3.x — headers + import libraries for compiling (e.g. from [slproweb](https://slproweb.com/products/Win32OpenSSL.html) installed to the default location, or set `OPENSSL_ROOT_DIR`); the runtime DLLs ship inside the SDK `bin/` |
+| Runtime | `libssl.so.3` / `libcrypto.so.3` — system package, or the SDK's bundled copy | MSVC redistributable (matching VS 2022); `datachannel.dll` and OpenSSL DLLs are in the SDK `bin/` |
 
 Everything else — executor, libdatachannel, boost.Beast/Asio headers,
 libsodium, BLAKE3, SQLite, usrsctp, libjuice — is statically inside the SDK
@@ -76,6 +77,38 @@ cmake --build build --config Release
 If OpenSSL is in the default location on Windows, `OPENSSL_ROOT_DIR` can be
 omitted. Do not pass the SDK's `lib/` directory as `CMAKE_PREFIX_PATH` —
 point at the archive root, where `lib/cmake/` lives.
+
+## Ubuntu 20.04
+
+The SDK archives are built inside an `ubuntu:20.04` container (GCC 10,
+pinned CMake, source-built OpenSSL 3.0.x — see
+[.github/actions/ubuntu-2004-toolchain](../.github/actions/ubuntu-2004-toolchain/action.yml)),
+and a CI job builds and runs the full test suite on that baseline, so the
+archives run on 20.04 and newer. What that means for you on a 20.04 machine:
+
+- **Compiler**: install `g++-10` (`sudo apt install g++-10`, in the focal
+  archive) or newer; C++20 support in GCC 9 is incomplete.
+- **CMake**: the distro package is 3.16 — install ≥ 3.25 (Kitware's official
+  tarball or `pip install cmake`).
+- **OpenSSL 3**: focal ships the 1.1 line, and Heyaki freezes the 3.x ABI
+  line. The SDK bundles OpenSSL 3 headers and runtime libraries, so point
+  your configure at the SDK instead of installing one system-wide:
+
+```sh
+cmake -S . -B build   -DCMAKE_PREFIX_PATH=$HOME/heyaki-sdk   -DOPENSSL_ROOT_DIR=$HOME/heyaki-sdk   -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+LD_LIBRARY_PATH=$HOME/heyaki-sdk/lib ./build/my_device_app
+```
+
+  `OPENSSL_ROOT_DIR` makes `find_package(OpenSSL)` (pulled transitively by
+  the heyaki package) resolve the bundled copy; at runtime the loader needs
+  the SDK `lib/` on its path (`LD_LIBRARY_PATH` as above, or bake an rpath
+  with `-DCMAKE_INSTALL_RPATH=$HOME/heyaki-sdk/lib`). On distributions with
+  a system OpenSSL 3 (22.04+) none of this is needed.
+
+Building Heyaki **from source** on 20.04 uses the same recipe the CI job
+runs: `g++-10`, CMake ≥ 3.25, OpenSSL 3 from source, then the normal
+[build steps](#building-the-sdk-from-source-instead).
 
 ## Your first program
 
@@ -169,7 +202,8 @@ in `apps/demo/`.
 | Symptom | Cause and fix |
 | --- | --- |
 | `find_package(heyaki)` reports the package but configure fails on `executor` or `LibDataChannel` | `CMAKE_PREFIX_PATH` points inside `lib/` — point it at the SDK root (the packages live under `lib/cmake/` of that root) |
-| Could not find OpenSSL / wrong version | Linux: install `libssl-dev` from the same 3.x line. Windows: set `-DOPENSSL_ROOT_DIR` to your OpenSSL 3.x prefix; a 4.x install is rejected by the freeze |
+| Could not find OpenSSL / wrong version | Linux: install `libssl-dev` from the same 3.x line, or on Ubuntu 20.04 pass `-DOPENSSL_ROOT_DIR=<sdk>` to use the bundled copy. Windows: set `-DOPENSSL_ROOT_DIR` to your OpenSSL 3.x prefix; a 4.x install is rejected by the freeze |
+| Binary fails on an older distribution with `GLIBC_x.y` / `GLIBCXX_x.y` not found | The binary was not built from the SDK (whose baseline is glibc 2.31 / GLIBCXX 3.4.28) — link against the SDK libraries instead of a locally built copy, or rebuild on the target distribution |
 | App exits at startup with `profile_*` error | The state directory (or a parent) is group/other accessible — `chmod 700` it |
 | Windows: `datachannel-*.dll` or `libssl-3-x64.dll` not found at launch | The SDK `bin/` is not next to the exe / on `PATH` |
 | Link errors about missing `rtc::*` symbols | You linked `heyaki::client` from a hand-rolled copy — use `find_package(heyaki)` targets so `heyaki::transport_webrtc` and its pinned `LibDataChannel` come in transitively |

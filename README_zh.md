@@ -110,7 +110,7 @@ SDK 包）
 
 ## 平台支持
 
-| | Linux（GCC 13+ / Clang） | Windows 10/11（MSVC 2022） |
+| | Linux（Ubuntu 20.04+；GCC 10–13 / Clang） | Windows 10/11（MSVC 2022） |
 | --- | --- | --- |
 | 客户端库与 TUI | ✅ | ✅ |
 | relay 服务端 | ✅（CI 验证平台） | ✅（开发用途） |
@@ -118,8 +118,11 @@ SDK 包）
 | NAT/故障/长稳/基准矩阵 | ✅ CI（netns + coturn 拓扑） | ✅ CI（网络矩阵，含防火墙 profile） |
 | Sanitizer（ASan/UBSan/TSan） | ✅ CI | — |
 
-跨网络拓扑（symmetric NAT、CGNAT、UDP 全封 → TURN/TCP）在 CI 中以真实
-coturn 实例验证；完整覆盖图与已知平台限制见
+发布 SDK 包以 Ubuntu 20.04 基线（glibc 2.31）构建，20.04 及更新发行版均可
+运行；各平台前置条件与 20.04 适配说明见
+[docs/client-library.md](docs/client-library.md)。跨网络拓扑（symmetric NAT、
+CGNAT、UDP 全封 → TURN/TCP）在 CI 中以真实 coturn 实例验证；完整覆盖图与
+已知平台限制见
 [docs/operations/cross-os-matrix.md](docs/operations/cross-os-matrix.md)。
 
 ## 安全

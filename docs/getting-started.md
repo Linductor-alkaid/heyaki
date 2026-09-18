@@ -9,7 +9,7 @@ a first device with the TUI. For configuration details see
 
 | Requirement | Notes |
 | --- | --- |
-| OS | Linux (Ubuntu 24.04 line or newer) or Windows 10/11 with Visual Studio 2022 |
+| OS | Linux (Ubuntu 20.04 or newer — on 20.04 follow the [compatibility notes](client-library.md#ubuntu-2004)) or Windows 10/11 with Visual Studio 2022 |
 | C++ compiler | GCC 13+, Clang 17+ (with libstdc++ 13+), or MSVC 19.38+ — C++20 |
 | CMake | 3.25 or newer |
 | OpenSSL | 3.x (>= 3.0, < 4.0) with development headers |

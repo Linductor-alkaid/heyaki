@@ -116,7 +116,7 @@ caches across session/device churn and deliberate overload
 
 ## Platform support
 
-| | Linux (GCC 13+ / Clang) | Windows 10/11 (MSVC 2022) |
+| | Linux (Ubuntu 20.04+; GCC 10–13 / Clang) | Windows 10/11 (MSVC 2022) |
 | --- | --- | --- |
 | Client libraries & TUI | ✅ | ✅ |
 | Relay server | ✅ (CI-verified platform) | ✅ (development) |
@@ -124,10 +124,13 @@ caches across session/device churn and deliberate overload
 | NAT/fault/soak/bench matrices | ✅ CI (netns + coturn topologies) | ✅ CI (network matrix incl. firewall profiles) |
 | Sanitizers (ASan/UBSan/TSan) | ✅ CI | — |
 
-Cross-network topologies (symmetric NAT, CGNAT, UDP-blocked → TURN/TCP) are
-exercised in CI with real coturn instances; see
-[docs/operations/cross-os-matrix.md](docs/operations/cross-os-matrix.md) for
-the full coverage map and known platform limits.
+Release SDK archives are built on the Ubuntu 20.04 baseline (glibc 2.31)
+so they run on 20.04 and newer; see
+[docs/client-library.md](docs/client-library.md) for per-platform
+prerequisites and the 20.04 notes. Cross-network topologies (symmetric NAT,
+CGNAT, UDP-blocked → TURN/TCP) are exercised in CI with real coturn
+instances; see [docs/operations/cross-os-matrix.md](docs/operations/cross-os-matrix.md)
+for the full coverage map and known platform limits.
 
 ## Security
 
