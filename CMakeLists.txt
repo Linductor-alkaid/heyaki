@@ -300,6 +300,14 @@ if(WIN32)
   target_link_libraries(heyaki_client PRIVATE iphlpapi ws2_32)
 endif()
 heyaki_target_use_pinned_boost_beast(heyaki_client)
+# forkpty() lives in libutil on glibc < 2.34 (the Ubuntu 20.04 baseline);
+# newer glibc merged it into libc and keeps an -lutil stub, so probing and
+# linking is correct on both.
+include(CheckLibraryExists)
+check_library_exists(util forkpty "" HEYAKI_HAVE_LIBUTIL_FORKPTY)
+if(HEYAKI_HAVE_LIBUTIL_FORKPTY)
+  target_link_libraries(heyaki_client PRIVATE util)
+endif()
 heyaki_configure_target(heyaki_client)
 heyaki_enable_executor_exception_adapter_source(src/client/node.cpp)
 heyaki_enable_executor_exception_adapter_source(src/client/relay_wss_client.cpp)
