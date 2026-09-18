@@ -57,4 +57,4 @@ runs:
         ./Configure --prefix=/opt/openssl3 --libdir=lib shared -ldl >/dev/null
         make -j2 >/dev/null
         make install_sw >/dev/null
-        /opt/openssl3/bin/openssl version
+        LD_LIBRARY_PATH=/opt/openssl3/lib /opt/openssl3/bin/openssl version
