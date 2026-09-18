@@ -147,6 +147,13 @@ jobs:
           apt-get update && apt-get install -y --no-install-recommends curl python3
           release_id=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN"             "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/$TAG"             | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
           for asset in heyaki-*-sdk.tar.gz; do
+            # Clobber: the upload API rejects an existing asset name with 422.
+            asset_id=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN"               "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/$release_id/assets"               | python3 -c "import json,sys
+          assets=[a['id'] for a in json.load(sys.stdin) if a['name']=='$asset']
+          print(assets[0] if assets else '')")
+            if [ -n "$asset_id" ]; then
+              curl -fsSL -X DELETE -H "Authorization: Bearer $GH_TOKEN"                 "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/$asset_id"
+            fi
             curl -fsSL -X POST               -H "Authorization: Bearer $GH_TOKEN"               -H "Content-Type: application/octet-stream"               --data-binary "@$asset"               "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/$release_id/assets?name=$asset"
             echo "uploaded: $asset"
           done
