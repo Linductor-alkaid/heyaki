@@ -54,11 +54,12 @@ jobs:
           esac
           echo "TAG=$tag" >> "$GITHUB_ENV"
           echo "VERSION=${tag#v}" >> "$GITHUB_ENV"
-      - name: Provision toolchain (g++-10, pinned CMake, OpenSSL 3.0.x)
-        uses: ./.github/actions/ubuntu-2004-toolchain
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG }}
+      # Local composite actions resolve from the workspace: checkout first.
+      - name: Provision toolchain (g++-10, pinned CMake, OpenSSL 3.0.x)
+        uses: ./.github/actions/ubuntu-2004-toolchain
       - name: Fetch pinned dependencies
         run: scripts/fetch_third_party.sh --all
       - name: Configure (Release, default juice backend)

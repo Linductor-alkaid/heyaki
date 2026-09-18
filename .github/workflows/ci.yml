@@ -137,9 +137,10 @@ jobs:
         DEBIAN_FRONTEND: noninteractive
         TZ: Etc/UTC
     steps:
+      - uses: actions/checkout@v4
+      # Local composite actions resolve from the workspace: checkout first.
       - name: Provision toolchain (g++-10, pinned CMake, OpenSSL 3.0.x)
         uses: ./.github/actions/ubuntu-2004-toolchain
-      - uses: actions/checkout@v4
       - name: Fetch pinned dependencies
         run: scripts/fetch_third_party.sh --all
       - name: Configure
