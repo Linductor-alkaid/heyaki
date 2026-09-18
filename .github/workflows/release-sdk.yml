@@ -72,6 +72,7 @@ jobs:
           -DCMAKE_C_COMPILER=gcc-11
           -DCMAKE_CXX_COMPILER=g++-11
           "-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc"
+          "-DHEYAKI_BUILD_COMMIT=${{ github.sha }}"
           -DHEYAKI_WARNINGS_AS_ERRORS=OFF
           -DHEYAKI_FETCH_DEPENDENCIES=OFF
           -DHEYAKI_AUTO_INSTALL=OFF
@@ -113,7 +114,14 @@ jobs:
       - name: Upload to the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$TAG" heyaki-*-sdk.tar.gz --clobber
+        run: |
+          # The ubuntu:20.04 container image has no gh CLI; upload through
+          # the REST API directly.
+          release_id=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN"             "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/$TAG"             | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+          for asset in heyaki-*-sdk.tar.gz; do
+            curl -fsSL -X POST               -H "Authorization: Bearer $GH_TOKEN"               -H "Content-Type: application/octet-stream"               --data-binary "@$asset"               "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/$release_id/assets?name=$asset"
+            echo "uploaded: $asset"
+          done
 
   windows-sdk:
     runs-on: windows-2025
