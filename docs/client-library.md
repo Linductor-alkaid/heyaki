@@ -80,7 +80,7 @@ point at the archive root, where `lib/cmake/` lives.
 
 ## Ubuntu 20.04
 
-The SDK archives are built inside an `ubuntu:20.04` container (GCC 10,
+The SDK archives are built inside an `ubuntu:20.04` container (GCC 11,
 pinned CMake, source-built OpenSSL 3.0.x — see
 [.github/actions/ubuntu-2004-toolchain](../.github/actions/ubuntu-2004-toolchain/action.yml)),
 and a CI job builds and runs the full test suite on that baseline, so the
