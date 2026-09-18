@@ -82,11 +82,14 @@ jobs:
         run: |
           root="heyaki-${VERSION}-linux-x86_64"
           cmake --install build --prefix "$PWD/$root"
-          # The install must report the same version as the release tag.
-          "./$root/bin/heyaki-relay" --version | grep -F "heyaki-relay ${VERSION} "
           # Bundle OpenSSL 3 for OpenSSL-1.1 distributions (see job header).
           cp -a /opt/openssl3/include/openssl "$root/include/"
           cp -a /opt/openssl3/lib/libssl.so* /opt/openssl3/lib/libcrypto.so* "$root/lib/"
+          # The install must report the same version as the release tag, and
+          # must run using the SDK's own bundled OpenSSL (the installed
+          # binaries carry no rpath) - proving the archive self-contained.
+          LD_LIBRARY_PATH="$PWD/$root/lib" "./$root/bin/heyaki-relay" --version \
+            | grep -F "heyaki-relay ${VERSION} "
           # Compatibility gate: nothing may reference symbol versions beyond
           # the 20.04 baseline (glibc 2.31; executables carry no GLIBCXX
           # references at all thanks to the static libstdc++ link).
