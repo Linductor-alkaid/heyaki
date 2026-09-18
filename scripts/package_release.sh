@@ -93,7 +93,9 @@ fi
 # OpenSSL from a non-system prefix (e.g. the Ubuntu 20.04 compatibility
 # container), its runtime libraries must be on the loader path for the
 # run-in-place verifications below.
-openssl_root="$(sed -n 's/^OPENSSL_ROOT_DIR:PATH=//p' "${build_dir}/CMakeCache.txt" | head -1)"
+# Any cache type: a plain -D pass leaves the entry UNINITIALIZED until
+# find_package(OpenSSL) rewrites it as PATH.
+openssl_root="$(sed -n 's/^OPENSSL_ROOT_DIR:[A-Z]*=//p' "${build_dir}/CMakeCache.txt" | head -1)"
 if [ -n "${openssl_root}" ] && [ -d "${openssl_root}/lib" ]; then
   export LD_LIBRARY_PATH="${openssl_root}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
   echo "== using OpenSSL runtime from ${openssl_root}/lib"
