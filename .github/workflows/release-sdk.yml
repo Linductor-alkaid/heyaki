@@ -116,7 +116,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # The ubuntu:20.04 container image has no gh CLI; upload through
-          # the REST API directly.
+          # the REST API directly. Provision the tools HERE: local composite
+          # actions resolve from the checked-out tag tree, which may lag the
+          # provisioning package list on master.
+          apt-get update && apt-get install -y --no-install-recommends curl python3
           release_id=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN"             "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/$TAG"             | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
           for asset in heyaki-*-sdk.tar.gz; do
             curl -fsSL -X POST               -H "Authorization: Bearer $GH_TOKEN"               -H "Content-Type: application/octet-stream"               --data-binary "@$asset"               "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/$release_id/assets?name=$asset"
