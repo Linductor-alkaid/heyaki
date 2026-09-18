@@ -29,16 +29,18 @@ enrollment, presence, and signaling — while messages, files, and shells flow
 **peer-to-peer over mutually authenticated WebRTC DataChannels**, with TURN as
 the fallback path. The relay never sees user payload bytes.
 
-```text
-            control plane (TLS/WSS)            data plane (P2P DataChannels)
- ┌────────┐ ─────────────────────────▶ ┌──────────┐      ┌─────────────────────┐
- │ device │   enrollment · presence ·  │  relay   │      │  WebRTC / DTLS /    │
- │  (TUI  │ ◀───────────────────────── │ (SQLite) │      │  SCTP, direct or    │
- │ or app)│        signaling           └──────────┘      │  TURN-relayed       │
- └────────┘                                 │            └─────────────────────┘
-     │  ┌────────┐   same LAN: multicast discovery + LAN TLS signaling   │
-     └─▶│ device │◀─────────────────────────────────────────────────────┘
-        └────────┘        (no relay, no STUN, no TURN — works fully offline)
+```mermaid
+flowchart LR
+    D1["Device<br>(TUI or app)"]
+    D2["Device"]
+    R["Relay<br>control plane only"]
+    C["coturn<br>TURN relay"]
+
+    D1 <-- "control plane:<br>enrollment · presence · signaling" --> R
+    D2 <-- "control plane" --> R
+    R -. "short-lived<br>TURN credentials" .-> C
+    D1 <== "data plane: mutually authenticated WebRTC DataChannels<br>(direct or TURN-relayed — the relay never sees payload bytes)" ==> D2
+    D1 -.-|"same LAN only: multicast discovery + LAN TLS signaling<br>(zero infrastructure — works offline)"| D2
 ```
 
 ## Highlights
