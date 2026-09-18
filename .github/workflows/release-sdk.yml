@@ -63,6 +63,21 @@ jobs:
       # Local composite actions resolve from the workspace: checkout first.
       - name: Provision toolchain (g++-11, pinned CMake, OpenSSL 3.0.x)
         uses: ./.github/actions/ubuntu-2004-toolchain
+      - name: Resolve the tag commit
+        # github.sha is the dispatching commit, not the built tree; deref
+        # the (annotated) tag through the API so the SDK stamps the commit
+        # it was actually built from.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag_object=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/ref/tags/$TAG" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["sha"])')
+          commit=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/tags/$tag_object" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["sha"])')
+          echo "TAG_COMMIT=$commit" >> "$GITHUB_ENV"
+          echo "tag $TAG -> commit $commit"
       - name: Fetch pinned dependencies
         run: scripts/fetch_third_party.sh --all
       - name: Configure (Release, default juice backend)
@@ -72,7 +87,7 @@ jobs:
           -DCMAKE_C_COMPILER=gcc-11
           -DCMAKE_CXX_COMPILER=g++-11
           "-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc"
-          "-DHEYAKI_BUILD_COMMIT=${{ github.sha }}"
+          "-DHEYAKI_BUILD_COMMIT=${{ env.TAG_COMMIT }}"
           -DHEYAKI_WARNINGS_AS_ERRORS=OFF
           -DHEYAKI_FETCH_DEPENDENCIES=OFF
           -DHEYAKI_AUTO_INSTALL=OFF
