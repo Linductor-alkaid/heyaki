@@ -131,6 +131,30 @@ M9-09 soak 会话 churn 下 pending/overflow 计数有界。
 由 M9-08 磁盘满注入与 runbook"磁盘满"程序承担；传输层字节数由 `Limits.max_file_bytes`
 （16GiB，协议面）兜底。
 
+## 6a. Gateway profile（`GatewayProfileConfig`，M10-04）
+
+校验：`validate_gateway_profile(s)`（`src/core/gateway_protocol.cpp`）；空 profile 集保持
+gateway 关闭（入站 gateway 流 `unimplemented` 拒绝）。默认值依据：M10 设计 §8 冻结表
+（并发流/dial deadline/prelude/host 与 profile 文法）与 M8/M9 同类配额的既有量级；
+字节/速率/时长上限为 v1.x Gateway beta 前的保守冻结，实测依据待 M10 基准（runbook）
+回填。deny 列表为内置安全常量（0.0.0.0/8、127/8、169.254/16、224/4、255.255.255.255/32、
+100.64/10、::/128、::1/128、fe80::/10、ff00::/8、::ffff:0:0/96——IPv4-mapped 段，防
+mapped 环回绕过）不可配置移除，只可叠加。
+
+| 参数 | 默认 | 硬上限 | 依据 |
+|---|---|---|---|
+| host / profile 名长度 | 253B（LDH/IPv4/IPv6 文法） / 64B `[a-z0-9_.-]` | 同默认（协议 1.3 冻结） | wire protocol §6.3.1 |
+| 每 session 并发 gateway 流 | 8 | 64 | M10 设计 §8 |
+| 每 profile 并发 gateway 流 | 16 | 64 | 双重限制（设计 §3.2） |
+| 每 endpoint profile 数 | —（建议 ≤16） | 64 | M10 设计 §8 |
+| max_profile_bytes | 2GiB | 1TiB | 聚合字节配额 fail-closed |
+| max_profile_bytes_per_second | 16MiB/s | 256MiB/s | 聚合速率配额 |
+| stream_idle_timeout | 300000ms（5min） | 3600000ms | 每流空闲 reset |
+| stream_max_duration | 3600000ms（1h） | 86400000ms（24h） | 每流总时长帽 |
+| dial_deadline | 10000ms | 30000ms | M10 设计 §8（协议冻结） |
+| prelude | 2 字节（仅 status=0） | 同默认 | wire protocol §6.3.1 |
+| 端口 allowlist / allow_internet | 空（拒绝全部）/ false | — | 默认关闭语义（M10-03） |
+
 ## 7. Relay 服务端（`RelayServerConfig`）
 
 校验：`validate_relay_server_config`（`src/relay/relay_config.cpp`）。本轮新增：

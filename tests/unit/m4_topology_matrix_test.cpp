@@ -113,7 +113,8 @@ class M4TopologyMatrixTest : public ::testing::Test {
                         .event_max_subscriptions_per_peer = 0U,
                         .file_receive_roots = {},
                         .file_max_peer_receive_bytes = 0U,
-                        .shell_profiles = {}};
+                        .shell_profiles = {},
+                        .gateway_profiles = {}};
     auto node = Node::create(std::move(config));
     if (!node) {
       return Result<Node*>::failure(*node.error_if());

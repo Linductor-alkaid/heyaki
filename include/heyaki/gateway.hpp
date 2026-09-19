@@ -33,6 +33,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -72,6 +73,16 @@ inline constexpr std::chrono::milliseconds max_gateway_dial_deadline{30000};
 // streams per side; negotiation can only lower it.
 inline constexpr std::size_t default_max_concurrent_gateway_streams = 8U;
 inline constexpr std::size_t hard_max_concurrent_gateway_streams = 64U;
+// Aggregate quota hard caps enforced by validate_gateway_profile (M9-11
+// hard-cap discipline; defaults registered in parameter-freeze.md).
+inline constexpr std::uint64_t max_gateway_profile_bytes_hard =
+    1ULL * 1024ULL * 1024ULL * 1024ULL * 1024ULL;
+inline constexpr std::uint64_t max_gateway_profile_bytes_per_second_hard =
+    256ULL * 1024ULL * 1024ULL;
+inline constexpr std::chrono::milliseconds max_gateway_stream_idle_timeout{
+    3600000};
+inline constexpr std::chrono::milliseconds max_gateway_stream_duration{
+    86400000};
 
 // Hostname grammar: ASCII LDH labels (single label allowed) or an IPv4 /
 // IPv6 literal, 1..253 bytes, no NUL/control/space/underscore characters
@@ -165,5 +176,127 @@ enum class GatewayRefusal : std::uint8_t {
 // Stable token for audit/metric labels of a refusal category.
 [[nodiscard]] std::string_view gateway_refusal_name(
     GatewayRefusal refusal) noexcept;
+
+// ---- IP / CIDR primitives (profile policy inputs, M10-04) ----
+
+// One IP address: 4 bytes (IPv4) or 16 bytes (IPv6), stored host-order in
+// `bytes` (IPv4 occupies the first 4 bytes). Comparable, formattable, and
+// safe for audit records — unlike a peer-supplied hostname it is either a
+// validated literal or a locally resolved address.
+struct GatewayIp {
+  std::array<std::byte, 16U> bytes{};
+  bool v4{true};
+
+  friend constexpr bool operator==(const GatewayIp&, const GatewayIp&) noexcept = default;
+};
+
+[[nodiscard]] std::optional<GatewayIp> parse_gateway_ip(
+    std::string_view literal) noexcept;
+// Canonical text form (dotted quad / compressed IPv6) for validated values.
+[[nodiscard]] std::string format_gateway_ip(const GatewayIp& address);
+
+struct GatewayCidr {
+  GatewayIp address;
+  int prefix_bits{};
+};
+
+[[nodiscard]] std::optional<GatewayCidr> parse_gateway_cidr(
+    std::string_view text) noexcept;
+[[nodiscard]] bool gateway_cidr_contains(const GatewayCidr& cidr,
+                                         const GatewayIp& address) noexcept;
+// True for 0.0.0.0/0 or ::/0 (design 3.2: effective only with
+// allow_internet).
+[[nodiscard]] bool gateway_cidr_is_catch_all(const GatewayCidr& cidr) noexcept;
+
+// ---- Profiles (M10-04) ----
+
+// Human confirmation mode for serving-side gateway opens (design 3.3).
+enum class GatewayConfirmMode : std::uint8_t {
+  never = 0U,
+  first_use = 1U,
+  always = 2U,
+};
+
+// Inclusive TCP port range within 1..65535.
+struct GatewayPortRange {
+  std::uint16_t low{1U};
+  std::uint16_t high{65535U};
+};
+
+struct GatewayProfileConfig {
+  // Logical profile name exposed through the gateway.provide:<profile>
+  // scope (safe_gateway_profile_name grammar).
+  std::string name;
+  // Explicitly enumerated target ranges. A catch-all entry is a
+  // configuration error unless allow_internet is set (no silent wide-open
+  // fallback). Empty list is invalid: a profile must state its targets.
+  std::vector<GatewayCidr> allowed_cidrs;
+  // Extra deny ranges (B's management segments, the relay's address space,
+  // …) stacked on the built-in deny list; deny always wins over allow.
+  std::vector<GatewayCidr> denied_cidrs;
+  // TCP ports this profile may dial. Empty denies everything.
+  std::vector<GatewayPortRange> allowed_ports;
+  // Explicit opt-in for routing through B's internet egress (design 3.2,
+  // default false).
+  bool allow_internet{false};
+  // Dual concurrency caps (design 3.2): per session and per profile.
+  std::size_t max_concurrent_streams_per_session{default_max_concurrent_gateway_streams};
+  std::size_t max_concurrent_streams_per_profile{16U};
+  // Aggregate byte / rate quotas per profile, enforced fail-closed.
+  std::uint64_t max_profile_bytes{2ULL * 1024ULL * 1024ULL * 1024ULL};
+  std::uint64_t max_profile_bytes_per_second{16U * 1024U * 1024U};
+  // Per-stream idle and absolute duration caps; exceeding resets the stream.
+  std::chrono::milliseconds stream_idle_timeout{300000};
+  std::chrono::milliseconds stream_max_duration{3600000};
+  std::chrono::milliseconds dial_deadline{10000};
+  // Serving-side confirmation flow (M10-06 wires the TUI).
+  GatewayConfirmMode confirm{GatewayConfirmMode::never};
+};
+
+// Validates one profile: name grammar, at least one CIDR, catch-all rule,
+// port ranges, quota/timeout bounds against the frozen hard caps. An
+// invalid profile fails node startup — never clamped, never ignored.
+[[nodiscard]] Result<void> validate_gateway_profile(const GatewayProfileConfig& profile);
+
+// Validates a whole configured set: every profile valid, unique names, and
+// the per-endpoint profile count within max_gateway_profiles_per_endpoint_hard.
+[[nodiscard]] Result<void> validate_gateway_profiles(
+    std::span<const GatewayProfileConfig> profiles);
+
+// ---- Admission engine (M10-05, pure policy) ----
+// No I/O, no clock: the caller supplies resolved addresses and live
+// counters, the engine adjudicates and returns the dialable subset. The
+// live gateway.provide:<profile> scope check stays with the caller (it
+// owns the session's authorized scopes).
+
+struct GatewayAdmissionContext {
+  // Concurrent gateway streams currently served to this session / under
+  // the candidate profile.
+  std::size_t streams_active_session{};
+  std::size_t streams_active_profile{};
+  // Aggregate bytes already metered under the profile's lifetime quota.
+  std::uint64_t profile_bytes_used{};
+};
+
+struct GatewayAdmission {
+  bool allowed{false};
+  GatewayRefusal refusal{GatewayRefusal::policy_denied};
+  // Set when allowed: the adjudicating profile (caller re-checks the live
+  // gateway.provide:<name> scope before dialing).
+  const GatewayProfileConfig* profile{nullptr};
+  // The resolved-address subset that survived the deny list and the CIDR
+  // allowlist, in input order. Empty with allowed=false means refused;
+  // the caller dials only these addresses (design 4.3).
+  std::vector<GatewayIp> dial_addresses;
+};
+
+// Adjudicates one inbound GatewayConnect. `resolved` holds every address
+// the (B-side) resolution of `connect.host` produced; for an IP literal
+// that is the literal itself. All grammar checks are assumed done
+// (validate_gateway_connect); the engine decides profile selection, port
+// policy, per-address CIDR/deny policy, and quota admission.
+[[nodiscard]] GatewayAdmission admit_gateway_connection(
+    std::span<const GatewayProfileConfig> profiles, const GatewayConnect& connect,
+    std::span<const GatewayIp> resolved, const GatewayAdmissionContext& context);
 
 }  // namespace heyaki

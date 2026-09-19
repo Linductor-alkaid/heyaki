@@ -6052,6 +6052,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   EventServiceConfig event_service_config{};
   FileServiceConfig file_service_config{};
   ShellServiceConfig shell_service_config{};
+  // M10: validated at Node::create; consumed by the serving-side gateway
+  // service once it lands. Empty keeps the gateway off.
+  std::vector<GatewayProfileConfig> gateway_profiles;
   std::size_t rpc_retry_capacity{64U};
   LanSignalingValidator signaling_validator;
   LanSignalingHandler signaling_handler;
@@ -6271,6 +6274,19 @@ Result<Node> Node::create(NodeConfig config) {
     }
   }
   impl->shell_service_config.profiles = std::move(config.shell_profiles);
+  // M10 gateway configuration: the whole set validates before the node
+  // starts; serving stays off (unimplemented refusals) until the gateway
+  // service lands, but an invalid profile set must fail startup now.
+  {
+    auto valid_gateway_profiles = validate_gateway_profiles(config.gateway_profiles);
+    if (!valid_gateway_profiles) {
+      if (owned_runtime) {
+        (void)owned_runtime->shutdown();
+      }
+      return Result<Node>::failure(*valid_gateway_profiles.error_if());
+    }
+    impl->gateway_profiles = std::move(config.gateway_profiles);
+  }
   // Bind to the Impl's runtime (the local optional was moved into it).
   impl->shell_pty->bind(*impl->runtime, detail::RuntimeAccess::shell_pty_enabled(*impl->runtime));
   // Built-in pull serving: heyaki.file/pull turns a validated request into a

@@ -3,6 +3,7 @@
 #include <heyaki/byte_stream.hpp>
 #include <heyaki/event.hpp>
 #include <heyaki/file.hpp>
+#include <heyaki/gateway.hpp>
 #include <heyaki/lan_directory.hpp>
 #include <heyaki/message.hpp>
 #include <heyaki/pairing_protocol.hpp>
@@ -365,6 +366,12 @@ struct NodeConfig {
   // owned runtime starts the dedicated PTY worker only when a profile is
   // configured. A borrowed runtime must enable it through RuntimeConfig.
   std::vector<ShellProfileConfig> shell_profiles;
+  // ---- M10 gateway proxy ----
+  // Serving-side gateway profiles. EMPTY keeps the gateway off: inbound
+  // gateway STREAM_OPENs reset with `unimplemented`. Every profile is
+  // validated at Node::create; an invalid set fails startup instead of
+  // falling back to a wider policy (M10-04).
+  std::vector<GatewayProfileConfig> gateway_profiles;
 };
 
 // Terminal outcome of one password pairing attempt; `value` holds the

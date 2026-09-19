@@ -1884,7 +1884,8 @@ int run_tui(const Options& options) {
                            .relay_override = std::nullopt,
                            .path_policy_override = std::nullopt,
                            .file_receive_roots = {inbox_root},
-                           .shell_profiles = {}});
+                           .shell_profiles = {},
+                           .gateway_profiles = {}});
   };
   std::optional<heyaki::Node> node;
   auto created_node = make_node();

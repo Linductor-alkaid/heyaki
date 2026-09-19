@@ -17,9 +17,9 @@ profile 允许的 TCP 目标（B 网络节点或经 B 出公网）。L3/TUN 与 
 
 ## 授权与 profile
 
-- [ ] `M10-03` 定义并实现 `gateway.use` / `gateway.provide:<profile>` scope：默认关闭、不进任何标准 pairing 模板；请求 scope、TrustGrant、profile 与本地策略按交集裁决（沿用 M5-12 机制）。
-- [ ] `M10-04` 实现 gateway profile 配置：CIDR 允许列表、端口 allowlist、`allow_internet`（默认 false）、并发流/字节/速率配额、每流空闲与总时长上限、dial deadline、人工确认模式；配置非法时启动失败。
-- [ ] `M10-05` 实现 B 侧准入：scope/profile/CIDR/端口裁决；环回、链路本地、B 自身管理网段与隧道端点的默认 deny 列表；域名在 B 侧解析后逐地址校验；配额满载 fail-closed 拒绝并计数。
+- [x] `M10-03` 定义并实现 `gateway.use` / `gateway.provide:<profile>` scope：默认关闭、不进任何标准 pairing 模板；请求 scope、TrustGrant、profile 与本地策略按交集裁决（沿用 M5-12 机制）。（B 侧每流 live 执行点随 M10-07 服务交付；scope 定义、默认关闭、模板排除回归与交集机制已冻结并测试）
+- [x] `M10-04` 实现 gateway profile 配置：CIDR 允许列表、端口 allowlist、`allow_internet`（默认 false）、并发流/字节/速率配额、每流空闲与总时长上限、dial deadline、人工确认模式；配置非法时启动失败。
+- [ ] `M10-05` 实现 B 侧准入：scope/profile/CIDR/端口裁决；环回、链路本地、B 自身管理网段与隧道端点的默认 deny 列表；域名在 B 侧解析后逐地址校验；配额满载 fail-closed 拒绝并计数。（Round 2 交付纯准入引擎：profile 选择/端口/内置+配置 deny 列表逐地址过滤/并发与字节配额 fail-closed，全部有测试；隧道端点运行时 deny 与拒绝计数随 M10-07/M10-11 落地）
 - [ ] `M10-06` 实现 TUI 同意流与 Gateway 视图：B 侧按 profile 确认模式显示对端与目标范围并允许/拒绝（`first_use` 决定可持久化）；A 侧发起 gateway、查看目标/路径/配额/prelude 延迟与 SOCKS 前端状态。
 
 ## 服务实现
@@ -75,4 +75,39 @@ prelude、冻结 dial/refusal 映射表、探测 oracle 粗粒度合并；§7 �
 plain/gateway STREAM_OPEN、prelude，经生产 codec 生成、configure 期逐字节比对）；fuzz 注册
 `parse_protobuf<GatewayConnect>` + 回归种子；`version_test` 钉死断言 2→3。证据：新测试 27/27、
 `unit|protocol` 标签 34/34、network 标签 15/15（coturn 外部矩阵按既有门控自跳过）、
-fuzz smoke 81 corpus 单元回放，全绿；无生产缺陷。
+fuzz smoke 81 corpus 单元回放，全绿；无生产缺陷。CI run 35452360300 十一 job 终态绿
+（asan 首跑 `SimultaneousSameKindOpensResolveToRegisteredChannel` 为既有 attach-race 抖动，
+重跑绿；本轮改动不触及 transport 层）。
+
+### Round 2（2026-09-19）：M10-04/05 profile 配置与准入引擎（+M10-03 scope 冻结）
+
+生产代码（主循环实现）：
+
+- `include/heyaki/gateway.hpp` / `src/core/gateway_protocol.cpp` 扩展：`GatewayIp`/`GatewayCidr`
+  原语（parse/format/CIDR 逐前缀位 contains/家族隔离/catch-all 判定；format 遵循 RFC 5952 含
+  IPv4-mapped 点分特例）；`GatewayProfileConfig`（CIDR 允许列表、denied_cidrs 叠加段、端口
+  allowlist 空表=全拒、allow_internet 默认 false、每 session/每 profile 双并发帽、聚合字节/速率
+  配额、每流 idle/总时长帽、dial deadline、never/first_use/always 确认模式）；硬上限常量
+  （64/64、1TiB、256MiB/s、1h、24h、30s）；`validate_gateway_profile(s)`（名法/空列表/
+  catch-all 未开 internet/端口/配额/超时全轴拒绝式校验，重名与 64 顶帽）；纯准入引擎
+  `admit_gateway_connection`（profile 选择：空名唯一 profile 或 not_enabled；端口裁决；解析后
+  逐地址：内置 deny 表 → denied_cidrs → allowed_cidrs，存活子集即 dial_addresses；会话/Profile
+  并发与字节配额满载 fail-closed quota_exhausted）。
+- `NodeConfig::gateway_profiles`（空=关闭）+ `Node::create` 校验（非法集合启动失败，错误透传）。
+- 内置 deny 表（不可配置移除）：0.0.0.0/8、127/8、169.254/16、224/4、255.255.255.255/32、
+  100.64/10、::/128、::1/128、fe80::/10、ff00::/8、**::ffff:0:0/96**（IPv4-mapped 段整体 deny，
+  防 mapped 环回绕过——IVA 对抗复验发现，冻结语义：mapped 段全拒、公网目标须原生 v4/v6 形式）。
+- IPv6 文法修复（IVA 抓出三缺陷后主循环修复并经对抗复验）：尾/中 `::` 压缩文法、
+  `ipv6_groups` 尾组末位装配（`::1` 字节错位曾使内置环回 deny 全部失配，安全级）、
+  `format_gateway_ip` 非头部压缩双冒号、`ipv4_octets` 尾点拒绝；quota 拒绝清空 dial_addresses。
+- `docs/operations/parameter-freeze.md` 新增 §6a Gateway profile 冻结表（默认/硬上限/依据，
+  deny 常量成文）；TUI NodeConfig 构造点同步 `.gateway_profiles = {}`。
+
+测试（IVA 三轮：首轮 FAIL 抓出 D1/D2/D3 三生产缺陷 → 主循环修复 → 对抗复验 PASS → mapped-deny
+补测 PASS）：`tests/unit/m10_gateway_policy_test.cpp` 55 例（IP/CIDR 文法与字节布局、
+inet_pton/inet_ntop oracle 交叉 39 万格式扫描、profile 校验全轴 detail token、准入矩阵 18 项
+含内置 deny 11 段与 mapped 段、Node::create 非法拒绝、TUI 模板 gateway 排除、参数冻结钉死）；
+`m9_parameter_freeze_test` 扩 gateway 段；8 个 NodeConfig 穷举初始化测试补新字段。证据：
+55/55 + 27/27（m10_protocol）+ `unit|protocol` 35/35 + asan 预设两 m10 目标无告警。
+残留（随 M10-07/11 闭环）：隧道端点运行时 deny、拒绝原因计数器、B 侧真实 resolver
+（引擎已按"解析后逐地址"契约设计）。

@@ -343,7 +343,8 @@ TEST_F(M9MetricsTest, MetricsSnapshotReflectsAuthenticatedLanSession) {
                       .event_max_subscriptions_per_peer = 0U,
                       .file_receive_roots = {},
                       .file_max_peer_receive_bytes = 0U,
-                      .shell_profiles = {}};
+                      .shell_profiles = {},
+                      .gateway_profiles = {}};
   };
   auto first = Node::create(
       node_config_for(*first_profile.value_if(), "com.example.metrics.first"));

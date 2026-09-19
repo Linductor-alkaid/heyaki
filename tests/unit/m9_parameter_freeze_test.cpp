@@ -15,6 +15,7 @@
 
 #include <heyaki/error.hpp>
 #include <heyaki/file.hpp>
+#include <heyaki/gateway.hpp>
 #include <heyaki/identity.hpp>
 #include <heyaki/node.hpp>
 #include <heyaki/profile_store.hpp>
@@ -221,6 +222,78 @@ TEST(M9ParameterFreeze, RelayServerDefaultsAreFrozen) {
   EXPECT_EQ(config.lease.maximum_lease, 120000ms);
   EXPECT_EQ(config.endpoint_directory.capacity, 4096U);
   EXPECT_EQ(config.endpoint_directory.maximum_ttl, 300000ms);
+}
+
+// M10-04 gateway profile freeze (docs/operations/parameter-freeze.md §6a):
+// serving-side defaults and hard caps. Changing any value must update the
+// freeze table and this test in the same commit.
+
+TEST(M9ParameterFreeze, GatewayProfileDefaultsAreFrozen) {
+  const GatewayProfileConfig profile;
+  EXPECT_EQ(profile.max_concurrent_streams_per_session, 8U);
+  EXPECT_EQ(profile.max_concurrent_streams_per_profile, 16U);
+  EXPECT_EQ(profile.max_profile_bytes, 2ULL * 1024ULL * 1024ULL * 1024ULL);
+  EXPECT_EQ(profile.max_profile_bytes_per_second, 16U * 1024U * 1024U);
+  EXPECT_EQ(profile.stream_idle_timeout, 300000ms);
+  EXPECT_EQ(profile.stream_max_duration, 3600000ms);
+  EXPECT_EQ(profile.dial_deadline, 10000ms);
+  EXPECT_FALSE(profile.allow_internet);
+  EXPECT_EQ(profile.confirm, GatewayConfirmMode::never);
+  // A fresh profile states no targets/policy until configured.
+  EXPECT_TRUE(profile.allowed_cidrs.empty());
+  EXPECT_TRUE(profile.denied_cidrs.empty());
+  EXPECT_TRUE(profile.allowed_ports.empty());
+}
+
+TEST(M9ParameterFreeze, GatewayHardCapsAndLimitsAreFrozen) {
+  EXPECT_EQ(max_gateway_profile_bytes_hard, 1ULL * 1024ULL * 1024ULL * 1024ULL * 1024ULL);
+  EXPECT_EQ(max_gateway_profile_bytes_per_second_hard, 256ULL * 1024ULL * 1024ULL);
+  EXPECT_EQ(max_gateway_stream_idle_timeout, 3600000ms);
+  EXPECT_EQ(max_gateway_stream_duration, 86400000ms);
+  EXPECT_EQ(max_gateway_dial_deadline, 30000ms);
+  EXPECT_EQ(default_gateway_dial_deadline, 10000ms);
+  EXPECT_EQ(hard_max_concurrent_gateway_streams, 64U);
+  EXPECT_EQ(default_max_concurrent_gateway_streams, 8U);
+  EXPECT_EQ(max_gateway_profiles_per_endpoint, 16U);
+  EXPECT_EQ(max_gateway_profiles_per_endpoint_hard, 64U);
+  EXPECT_EQ(max_gateway_host_bytes, 253U);
+  EXPECT_EQ(max_gateway_profile_bytes, 64U);
+}
+
+TEST(M9ParameterFreeze, GatewayProfileCapsRejectOversized) {
+  auto profile = [] {
+    GatewayProfileConfig config;
+    config.name = "office";
+    config.allowed_cidrs = {GatewayCidr{.address = GatewayIp{}, .prefix_bits = 8}};
+    config.allowed_ports = {{.low = 1U, .high = 65535U}};
+    return config;
+  };
+  ASSERT_TRUE(validate_gateway_profile(profile()));
+
+  auto config = profile();
+  config.max_concurrent_streams_per_session =
+      hard_max_concurrent_gateway_streams + 1U;
+  EXPECT_FALSE(validate_gateway_profile(config));
+  config = profile();
+  config.max_concurrent_streams_per_profile =
+      hard_max_concurrent_gateway_streams + 1U;
+  EXPECT_FALSE(validate_gateway_profile(config));
+  config = profile();
+  config.max_profile_bytes = max_gateway_profile_bytes_hard + 1U;
+  EXPECT_FALSE(validate_gateway_profile(config));
+  config = profile();
+  config.max_profile_bytes_per_second =
+      max_gateway_profile_bytes_per_second_hard + 1U;
+  EXPECT_FALSE(validate_gateway_profile(config));
+  config = profile();
+  config.stream_idle_timeout = max_gateway_stream_idle_timeout + 1ms;
+  EXPECT_FALSE(validate_gateway_profile(config));
+  config = profile();
+  config.stream_max_duration = max_gateway_stream_duration + 1ms;
+  EXPECT_FALSE(validate_gateway_profile(config));
+  config = profile();
+  config.dial_deadline = max_gateway_dial_deadline + 1ms;
+  EXPECT_FALSE(validate_gateway_profile(config));
 }
 
 // ---------------------------------------------------------------------------

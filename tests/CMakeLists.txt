@@ -704,6 +704,28 @@ heyaki_add_runtime_test(
   heyaki_m10_protocol heyaki_m10_protocol_tests
   "unit;protocol;gateway;m10;security")
 
+# M10 Round 2: gateway profile configuration (M10-04), the B-side admission
+# engine (M10-05), the NodeConfig gateway_profiles wiring, and the M10-03
+# scope/template exclusion regression against the TUI default pairing lists.
+add_executable(heyaki_m10_gateway_policy_tests unit/m10_gateway_policy_test.cpp)
+heyaki_enable_executor_exception_adapter_source(unit/m10_gateway_policy_test.cpp)
+target_link_libraries(heyaki_m10_gateway_policy_tests PRIVATE
+  heyaki::client
+  executor::executor
+  GTest::gtest_main
+  OpenSSL::SSL)
+heyaki_target_use_pinned_boost_asio(heyaki_m10_gateway_policy_tests)
+heyaki_configure_target(heyaki_m10_gateway_policy_tests)
+target_compile_definitions(heyaki_m10_gateway_policy_tests PRIVATE
+  "HEYAKI_M10_GATEWAY_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}/m10-gateway\""
+  "HEYAKI_M10_TUI_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/../apps/tui\"")
+heyaki_add_runtime_test(
+  heyaki_m10_gateway_policy heyaki_m10_gateway_policy_tests
+  "unit;m10;gateway;security")
+set_tests_properties(heyaki_m10_gateway_policy PROPERTIES
+  RESOURCE_LOCK heyaki_m3a_profile_state
+  TIMEOUT 120)
+
 add_executable(heyaki_m8_service_tests
   unit/m8_codec_test.cpp
   unit/m8_shell_test.cpp
