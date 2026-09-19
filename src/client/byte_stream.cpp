@@ -171,6 +171,8 @@ const StreamId& ByteStreamHandle::stream_id() const noexcept { return id_; }
 
 std::uint32_t ByteStreamHandle::channel_id() const noexcept { return channel_id_; }
 
+bool ByteStreamHandle::is_gateway() const noexcept { return gateway_; }
+
 std::size_t ByteStreamHandle::pending_writes() const noexcept { return writes_.size(); }
 
 std::size_t ByteStreamHandle::pending_reads() const noexcept { return reads_.size(); }
@@ -406,13 +408,75 @@ Result<std::shared_ptr<ByteStreamHandle>> ByteStreamService::open_stream(
   auto stream = std::make_shared<ByteStreamHandle>(*this, random_stream_id(),
                                                    *channel_id_, receive_window_bytes,
                                                    receive_window_frames);
-  auto sent = send_stream_open(*stream);
+  auto sent = send_stream_open(*stream, nullptr);
   if (!sent) {
     return Result<std::shared_ptr<ByteStreamHandle>>::failure(*sent.error_if());
   }
   stream->state_ = StreamState::open;
   streams_.emplace(stream->stream_id(), stream);
   return Result<std::shared_ptr<ByteStreamHandle>>::success(std::move(stream));
+}
+
+Result<std::shared_ptr<ByteStreamHandle>> ByteStreamService::open_gateway_stream(
+    const GatewayConnect& target, std::uint64_t receive_window_bytes,
+    std::uint32_t receive_window_frames) {
+  if (!attached_) {
+    return Result<std::shared_ptr<ByteStreamHandle>>::failure(
+        stream_error(ErrorCode::configuration, "service_not_attached"));
+  }
+  if (receive_window_bytes == 0U || receive_window_frames == 0U) {
+    return Result<std::shared_ptr<ByteStreamHandle>>::failure(
+        stream_error(ErrorCode::configuration, "receive_window_invalid"));
+  }
+  auto valid = validate_gateway_connect(target);
+  if (!valid) {
+    return Result<std::shared_ptr<ByteStreamHandle>>::failure(*valid.error_if());
+  }
+  // M10-02 emission gating: the optional field leaves only on a session that
+  // negotiated gateway_v1 (negotiate_protocol already stripped the bit when
+  // the negotiated minor is below 3). Refuse locally, send nothing.
+  if (!session_.diagnostics().negotiated_capabilities.has(
+          Capability::gateway_v1)) {
+    return Result<std::shared_ptr<ByteStreamHandle>>::failure(
+        stream_error(ErrorCode::protocol, "gateway_not_negotiated"));
+  }
+  if (streams_.size() >= limits_.max_concurrent_streams) {
+    return Result<std::shared_ptr<ByteStreamHandle>>::failure(
+        stream_error(ErrorCode::resource_exhausted, "stream_limit"));
+  }
+  // One dedicated logical stream-domain channel per gateway connection
+  // (design 4.2): its queue bounds the tunnel direction and closing it on
+  // violation cannot disturb another connection's logical channel.
+  auto weak_service = std::make_shared<ByteStreamService*>(this);
+  auto opened = session_.open_business_channel(
+      session::ChannelDomain::stream, session::QueueFullPolicy::reject,
+      stream_channel_frame_capacity, stream_channel_byte_capacity,
+      [weak_service](const FrameView& frame) {
+        if (*weak_service != nullptr) (*weak_service)->handle_frame(frame);
+      });
+  if (!opened) {
+    return Result<std::shared_ptr<ByteStreamHandle>>::failure(*opened.error_if());
+  }
+  const std::uint32_t gateway_channel = *opened.value_if();
+  owned_channels_.push_back(gateway_channel);
+  auto stream = std::make_shared<ByteStreamHandle>(*this, random_stream_id(),
+                                                   gateway_channel,
+                                                   receive_window_bytes,
+                                                   receive_window_frames);
+  stream->gateway_ = true;
+  auto sent = send_stream_open(*stream, &target);
+  if (!sent) {
+    session_.close_business_channel(gateway_channel);
+    std::erase(owned_channels_, gateway_channel);
+    return Result<std::shared_ptr<ByteStreamHandle>>::failure(*sent.error_if());
+  }
+  stream->state_ = StreamState::open;
+  streams_.emplace(stream->stream_id(), stream);
+  return Result<std::shared_ptr<ByteStreamHandle>>::success(std::move(stream));
+}
+
+void ByteStreamService::set_gateway_inbound_handler(GatewayInboundHandler handler) {
+  gateway_inbound_handler_ = std::move(handler);
 }
 
 void ByteStreamService::set_inbound_handler(InboundHandler handler) {
@@ -494,12 +558,24 @@ Result<void> ByteStreamService::send_stream_frame(std::uint32_t channel_id,
   return session_.send_frame(channel_id, klass, std::move(frame));
 }
 
-Result<void> ByteStreamService::send_stream_open(ByteStreamHandle& stream) {
+Result<void> ByteStreamService::send_stream_open(
+    ByteStreamHandle& stream, const GatewayConnect* gateway) {
   std::vector<std::byte> payload;
   proto_codec::append_bytes(payload, 1U,
                             std::span<const std::byte>{stream.id_.data(), stream.id_.size()});
   proto_codec::append_uint(payload, 2U, stream.receive_window_bytes_);
   proto_codec::append_uint(payload, 3U, stream.receive_window_frames_);
+  if (gateway != nullptr) {
+    // Protocol 1.3 optional field: callers must only reach here on a session
+    // that negotiated gateway_v1 (open_gateway_stream enforces the gate), so
+    // a 1.2-or-older peer never receives the field (M10-02).
+    auto body = encode_gateway_connect(*gateway);
+    if (!body) {
+      return Result<void>::failure(*body.error_if());
+    }
+    proto_codec::append_bytes(payload, 4U,
+                              std::span<const std::byte>{*body.value_if()});
+  }
   return send_stream_frame(stream.channel_id_,
                            static_cast<std::uint8_t>(FrameType::stream_open),
                            std::move(payload), session::FrameClass::standard);
@@ -544,6 +620,10 @@ void ByteStreamService::handle_open(const FrameView& frame, std::uint32_t channe
   proto_codec::ProtoReader reader(frame.payload);
   std::optional<std::uint64_t> window_bytes;
   std::optional<std::uint64_t> window_frames;
+  // Protocol 1.3: field 4 is the optional GatewayConnect body. Presence is
+  // captured here without interpreting it — the capability gate must fire on
+  // a 1.2-or-older negotiated session even when the body is unparseable.
+  std::optional<std::span<const std::byte>> gateway_field;
   while (!reader.done()) {
     auto field = reader.next();
     if (!field) return;
@@ -551,6 +631,10 @@ void ByteStreamService::handle_open(const FrameView& frame, std::uint32_t channe
       window_bytes = field.value_if()->integer;
     } else if (field.value_if()->number == 3U && field.value_if()->wire_type == 0U) {
       window_frames = field.value_if()->integer;
+    } else if (field.value_if()->number == 4U &&
+               field.value_if()->wire_type == 2U) {
+      if (gateway_field.has_value()) return;
+      gateway_field = field.value_if()->bytes;
     }
   }
   if (!window_bytes.has_value() || !window_frames.has_value() || *window_bytes == 0U ||
@@ -568,6 +652,69 @@ void ByteStreamService::handle_open(const FrameView& frame, std::uint32_t channe
                             static_cast<std::uint8_t>(FrameType::stream_reset),
                             std::move(payload), session::FrameClass::control);
   };
+  if (gateway_field.has_value()) {
+    // M10-02: a session that did not negotiate gateway_v1 must reject a
+    // gateway-carrying STREAM_OPEN with `protocol` and close only that
+    // channel — the session and every other domain keep running.
+    if (!session_.diagnostics().negotiated_capabilities.has(
+            Capability::gateway_v1)) {
+      session_.fail_business_channel(channel_id,
+                                     transport::CloseReason::protocol_error);
+      return;
+    }
+    auto connect = parse_gateway_connect(*gateway_field);
+    if (!connect) {
+      // Wire-level malformation of the frozen 1.3 schema: same channel-only
+      // protocol rejection as the capability gate.
+      session_.fail_business_channel(channel_id,
+                                     transport::CloseReason::protocol_error);
+      return;
+    }
+    // Grammar problems are admissions, not protocol faults: refuse the
+    // stream (never the channel) with the mapped status and keep the
+    // peer-supplied host out of every error surface.
+    auto valid = validate_gateway_connect(*connect.value_if());
+    if (!valid) {
+      refuse(gateway_refusal_status(GatewayRefusal::invalid_target));
+      return;
+    }
+    if (streams_.size() >= limits_.max_concurrent_streams) {
+      refuse(gateway_refusal_status(GatewayRefusal::quota_exhausted));
+      return;
+    }
+    if (!session_.has_business_channel(channel_id)) {
+      auto weak_service = std::make_shared<ByteStreamService*>(this);
+      auto adopted = session_.adopt_business_channel(
+          channel_id, session::ChannelDomain::stream, session::QueueFullPolicy::reject,
+          stream_channel_frame_capacity, stream_channel_byte_capacity,
+          [weak_service](const FrameView& inbound) {
+            if (*weak_service != nullptr) (*weak_service)->handle_frame(inbound);
+          });
+      if (!adopted) {
+        return;
+      }
+      owned_channels_.push_back(channel_id);
+    }
+    auto stream = std::make_shared<ByteStreamHandle>(
+        *this, *id.value_if(), channel_id, limits_.default_receive_window_bytes,
+        limits_.default_receive_window_frames);
+    stream->state_ = StreamState::open;
+    stream->gateway_ = true;
+    stream->send_credit_bytes_ = *window_bytes;
+    stream->send_credit_frames_ = static_cast<std::uint32_t>(*window_frames);
+    streams_.emplace(stream->stream_id(), stream);
+    grant_initial_credit(*stream);
+    if (gateway_inbound_handler_) {
+      gateway_inbound_handler_(stream, *connect.value_if());
+      return;
+    }
+    // Gateway feature not enabled on this node (default OFF): refuse
+    // explicitly instead of exposing an open tunnel-less stream.
+    stream->state_ = StreamState::reset;
+    streams_.erase(stream->stream_id());
+    refuse(gateway_refusal_status(GatewayRefusal::not_enabled));
+    return;
+  }
   if (streams_.size() >= limits_.max_concurrent_streams) {
     refuse(StableStatus::resource_exhausted);
     return;
@@ -593,21 +740,7 @@ void ByteStreamService::handle_open(const FrameView& frame, std::uint32_t channe
   stream->send_credit_bytes_ = *window_bytes;
   stream->send_credit_frames_ = static_cast<std::uint32_t>(*window_frames);
   streams_.emplace(stream->stream_id(), stream);
-  // Grant the opener its initial send credit: our receive window for this
-  // stream. The OPEN only carried the opener's own receive window, so
-  // without this grant the opener could never send DATA (M5-16).
-  {
-    std::vector<std::byte> credit;
-    proto_codec::append_bytes(credit, 1U,
-                              std::span<const std::byte>{stream->id_.data(),
-                                                         stream->id_.size()});
-    proto_codec::append_uint(credit, 2U, 0U);
-    proto_codec::append_uint(credit, 3U, stream->receive_window_bytes_);
-    proto_codec::append_uint(credit, 4U, stream->receive_window_frames_);
-    (void)send_stream_frame(
-        channel_id, static_cast<std::uint8_t>(FrameType::stream_window_update),
-        std::move(credit), session::FrameClass::control);
-  }
+  grant_initial_credit(*stream);
   if (inbound_handler_) {
     inbound_handler_(stream);
     return;
@@ -616,6 +749,22 @@ void ByteStreamService::handle_open(const FrameView& frame, std::uint32_t channe
   stream->state_ = StreamState::reset;
   streams_.erase(stream->stream_id());
   refuse(StableStatus::permission_denied);
+}
+
+void ByteStreamService::grant_initial_credit(ByteStreamHandle& stream) {
+  // Grant the opener its initial send credit: our receive window for this
+  // stream. The OPEN only carried the opener's own receive window, so
+  // without this grant the opener could never send DATA (M5-16).
+  std::vector<std::byte> credit;
+  proto_codec::append_bytes(credit, 1U,
+                            std::span<const std::byte>{stream.id_.data(),
+                                                       stream.id_.size()});
+  proto_codec::append_uint(credit, 2U, 0U);
+  proto_codec::append_uint(credit, 3U, stream.receive_window_bytes_);
+  proto_codec::append_uint(credit, 4U, stream.receive_window_frames_);
+  (void)send_stream_frame(
+      stream.channel_id_, static_cast<std::uint8_t>(FrameType::stream_window_update),
+      std::move(credit), session::FrameClass::control);
 }
 
 void ByteStreamService::handle_data(const FrameView& frame) {

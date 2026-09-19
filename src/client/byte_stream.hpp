@@ -21,6 +21,7 @@
 
 #include <heyaki/byte_stream.hpp>
 #include <heyaki/error.hpp>
+#include <heyaki/gateway.hpp>
 #include <heyaki/pairing_protocol.hpp>
 
 #include <array>
@@ -120,6 +121,10 @@ class ByteStreamHandle {
   [[nodiscard]] StreamState state() const noexcept;
   [[nodiscard]] const StreamId& stream_id() const noexcept;
   [[nodiscard]] std::uint32_t channel_id() const noexcept;
+  // True when this stream was opened (or accepted) as a gateway proxy
+  // connection (protocol 1.3 gateway field): data byte 0..1 after the
+  // opener's side settles is the 2-byte prelude, not tunnel payload.
+  [[nodiscard]] bool is_gateway() const noexcept;
   [[nodiscard]] StreamWindowSnapshot window() const noexcept;
   [[nodiscard]] std::size_t pending_writes() const noexcept;
   [[nodiscard]] std::size_t pending_reads() const noexcept;
@@ -182,6 +187,7 @@ class ByteStreamHandle {
   std::uint32_t send_credit_frames_{};
   bool fin_sent_{false};
   std::optional<StableStatus> reset_reason_;
+  bool gateway_{false};
   std::vector<std::shared_ptr<PendingWrite>> writes_;
   std::vector<std::shared_ptr<PendingRead>> reads_;
 };
@@ -191,6 +197,14 @@ class ByteStreamService {
  public:
   using InboundHandler =
       std::function<void(const std::shared_ptr<ByteStreamHandle>&)>;
+  // Protocol 1.3 gateway inbound path (M10-01/M10-02): a STREAM_OPEN whose
+  // optional `gateway` field survived the negotiated-capability gate lands
+  // here with the parsed connect request. The handler owns admission and
+  // must reset the stream with gateway_refusal_status() on refusal; an
+  // unset handler refuses with `unimplemented` (gateway default OFF).
+  using GatewayInboundHandler =
+      std::function<void(const std::shared_ptr<ByteStreamHandle>&,
+                         const GatewayConnect&)>;
 
   ByteStreamService(PeerSession& session, ByteStreamLimits limits = {},
                     std::function<std::uint64_t()> wall_clock = {});
@@ -207,9 +221,20 @@ class ByteStreamService {
   // receive window). The peer's inbound callback fires on its side.
   [[nodiscard]] Result<std::shared_ptr<ByteStreamHandle>> open_stream(
       std::uint64_t receive_window_bytes, std::uint32_t receive_window_frames);
+  // Initiates a gateway proxy connection (protocol 1.3): opens a dedicated
+  // logical stream-domain channel for this connection and sends STREAM_OPEN
+  // with the `gateway` field. Fails locally without any wire frame when the
+  // session did not negotiate gateway_v1 (M10-02 emission gating) or the
+  // target fails structural validation.
+  [[nodiscard]] Result<std::shared_ptr<ByteStreamHandle>> open_gateway_stream(
+      const GatewayConnect& target, std::uint64_t receive_window_bytes,
+      std::uint32_t receive_window_frames);
   // Streams the peer initiated land here when set; unset inbound streams are
   // reset with permission_denied.
   void set_inbound_handler(InboundHandler handler);
+  // Gateway-carrying inbound STREAM_OPENs land here when set; unset ones are
+  // reset with unimplemented (the feature is default OFF).
+  void set_gateway_inbound_handler(GatewayInboundHandler handler);
 
   [[nodiscard]] std::size_t active_streams() const noexcept;
   [[nodiscard]] std::vector<StreamId> stream_ids() const;
@@ -225,7 +250,8 @@ class ByteStreamService {
   friend class ByteStreamHandle;
 
   [[nodiscard]] std::uint64_t now() const;
-  [[nodiscard]] Result<void> send_stream_open(ByteStreamHandle& stream);
+  [[nodiscard]] Result<void> send_stream_open(
+      ByteStreamHandle& stream, const GatewayConnect* gateway);
   void handle_frame(const FrameView& frame);
   [[nodiscard]] Result<void> admit_frame(const FrameView& frame);
   void handle_open(const FrameView& frame, std::uint32_t channel_id);
@@ -234,6 +260,9 @@ class ByteStreamService {
   void handle_fin(const FrameView& frame);
   void handle_reset(const FrameView& frame);
   void handle_reset_frame_for(ByteStreamHandle& stream, StableStatus reason);
+  // Sends the initial WINDOW_UPDATE granting the opener send credit for an
+  // inbound stream (M5-16); shared by the plain and gateway open paths.
+  void grant_initial_credit(ByteStreamHandle& stream);
   [[nodiscard]] Result<void> send_stream_frame(std::uint32_t channel_id,
                                                std::uint8_t type,
                                                std::vector<std::byte> payload,
@@ -249,6 +278,7 @@ class ByteStreamService {
   std::vector<std::uint32_t> owned_channels_;
   std::map<StreamId, std::shared_ptr<ByteStreamHandle>> streams_;
   InboundHandler inbound_handler_;
+  GatewayInboundHandler gateway_inbound_handler_;
   bool attached_{false};
 };
 

@@ -2,6 +2,7 @@
 
 #include <heyaki/event.hpp>
 #include <heyaki/file.hpp>
+#include <heyaki/gateway.hpp>
 #include <heyaki/message.hpp>
 #include <heyaki/rpc.hpp>
 #include <heyaki/shell.hpp>
@@ -338,6 +339,31 @@ int main(int argc, char** argv) {
     if (!write_seed(corpus_root / "protobuf-parser", name, seed)) {
       std::cerr << "cannot write protobuf seed " << name << '\n';
       return 1;
+    }
+  }
+
+  // M10-01 gateway seeds: a valid GatewayConnect body from the production
+  // codec plus a truncated variant, feeding the lite-runtime parse of the
+  // frozen 1.3 schema.
+  {
+    const auto gateway_ok = heyaki::encode_gateway_connect(
+        heyaki::GatewayConnect{.host = "intranode.lan",
+                               .port = 443U, .profile = "office"});
+    if (gateway_ok) {
+      auto gateway_truncated = *gateway_ok.value_if();
+      gateway_truncated.pop_back();
+      const std::vector gateway_seeds{
+          std::pair{std::string_view{"gateway-connect"}, *gateway_ok.value_if()},
+          std::pair{std::string_view{"gateway-connect-truncated"},
+                    std::move(gateway_truncated)},
+      };
+      for (const auto& [name, seed] : gateway_seeds) {
+        heyaki::fuzz::protobuf_schema_parser(seed);
+        if (!write_seed(corpus_root / "protobuf-parser", name, seed)) {
+          std::cerr << "cannot write gateway protobuf seed " << name << '\n';
+          return 1;
+        }
+      }
     }
   }
 

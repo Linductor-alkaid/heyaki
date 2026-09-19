@@ -21,6 +21,7 @@
 #include "heyaki/enrollment/v1/enrollment.pb.h"
 #include "heyaki/event/v1/event.pb.h"
 #include "heyaki/file/v1/file.pb.h"
+#include "heyaki/gateway/v1/gateway.pb.h"
 #include "heyaki/message/v1/message.pb.h"
 #include "heyaki/pairing/v1/pairing.pb.h"
 #include "heyaki/relay/v1/relay_control.pb.h"
@@ -614,6 +615,9 @@ void protobuf_schema_parser(std::span<const std::byte> input) {
   parse_protobuf<protocol::event::v1::EventItem>(input);
   parse_protobuf<protocol::event::v1::EventUnsubscribe>(input);
   parse_protobuf<protocol::stream::v1::StreamOpen>(input);
+  // M10-01: the frozen GatewayConnect body rides StreamOpen's optional field
+  // 4; the lite runtime parse must stay crash-free and re-serializable.
+  parse_protobuf<protocol::gateway::v1::GatewayConnect>(input);
   parse_protobuf<protocol::stream::v1::WindowUpdate>(input);
   parse_protobuf<protocol::stream::v1::StreamFinish>(input);
   parse_protobuf<protocol::stream::v1::StreamReset>(input);

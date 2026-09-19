@@ -1,6 +1,6 @@
 # M10：Gateway 代理服务
 
-> - 状态：未开始
+> - 状态：进行中（Round 1 协议 1.3 变更单已冻结，2026-09-19）
 > - 所属计划：[Heyaki MVP 至 v1 实施TODO 计划](heyaki-implementation-plan.md)
 > - 前置：M5 | 建议发布点：v1.1 Gateway beta（不进入 v1.0 发布门禁）
 > - 设计依据：[Gateway 代理服务设计](../design/gateway-service.md)、
@@ -12,8 +12,8 @@ profile 允许的 TCP 目标（B 网络节点或经 B 出公网）。L3/TUN 与 
 
 ## 协议 1.3 change control
 
-- [ ] `M10-01` 冻结 protocol 1.3 变更单并更新 wire protocol 文档与 golden vectors：capability bit 13 `gateway_v1`（要求 negotiated minor ≥ 3）、`StreamOpen` 可选 `gateway` 字段、`heyaki.protocol.gateway.v1.GatewayConnect` schema、2 字节 prelude 编码与 dial 错误到 `StableStatusCode` 的映射表；不新增帧类型。
-- [ ] `M10-02` 版本互通回归：未协商出 bit 13 的会话收到携带 `gateway` 字段的 `STREAM_OPEN` 时按 `protocol` 拒绝并仅关闭该通道；1.2 及更旧对端将字段视为未知可选字段跳过，行为不受影响。
+- [x] `M10-01` 冻结 protocol 1.3 变更单并更新 wire protocol 文档与 golden vectors：capability bit 13 `gateway_v1`（要求 negotiated minor ≥ 3）、`StreamOpen` 可选 `gateway` 字段、`heyaki.protocol.gateway.v1.GatewayConnect` schema、2 字节 prelude 编码与 dial 错误到 `StableStatusCode` 的映射表；不新增帧类型。
+- [x] `M10-02` 版本互通回归：未协商出 bit 13 的会话收到携带 `gateway` 字段的 `STREAM_OPEN` 时按 `protocol` 拒绝并仅关闭该通道；1.2 及更旧对端将字段视为未知可选字段跳过，行为不受影响。
 
 ## 授权与 profile
 
@@ -38,3 +38,41 @@ profile 允许的 TCP 目标（B 网络节点或经 B 出公网）。L3/TUN 与 
 - [ ] 集成（netns）：A（网段 1）—B（网段 1+2）—目标（网段 2）拓扑、B 出公网路径、强制 TURN 数据路径下行为与计量正确；SOCKS5 前端经 curl/浏览器端到端，且 B 网络 split-DNS 域名由 B 侧解析验证。
 - [ ] 资源与公平性：gateway 满载时 control/Shell 延迟达标（复用 M5 加权调度 benchmark）；持续过载下队列与 RSS 保持上限，reset/reject 计数与统计一致；关闭测试证明活跃流被 reset、本地 socket 回收、无 detached 工作。
 - [ ] 安全：经 gateway 的连接探测受速率限制与配额约束；错误映射粗粒度（不区分 refused/unreachable/filtered）；审计与日志不含未校验目标 host 自由文本与 B 网络拓扑。
+
+## 实施记录
+
+### Round 1（2026-09-19）：M10-01/M10-02 protocol 1.3 变更单冻结
+
+生产代码（主循环实现）：
+
+- 协议升 1.3：`include/heyaki/protocol.hpp` 新增 `Capability::gateway_v1`（bit 13）、
+  `protocol_1_3_capability_bits`、`known_capability_bits`、`current_protocol_version{1,3}`；
+  `src/core/protocol.cpp` `capabilities_for_version` minor≥3 分支；根 CMake 协议版本 3。
+- 新 schema `proto/heyaki/gateway/v1/gateway.proto`（`GatewayConnect{host,port,profile}`）与
+  `stream.proto` 的 `StreamOpen.gateway = 4` 可选字段；`tests/protocol/CheckProtocolSources.cmake`
+  登记 gateway 契约与 domain。
+- 新公共面 `include/heyaki/gateway.hpp` + `src/core/gateway_protocol.cpp`：scope helper
+  （`gateway.use` / `gateway.provide:<profile>`）、`GatewayConnect` 镜像与严格 codec（未知字段/
+  重复/缺字段拒绝）、host 文法（LDH/IPv4/IPv6 字面量、253 字节、禁 NUL/控制/空格/下划线/首尾
+  连字符或点）、profile 文法（`[a-z0-9_.-]` 64 字节）、2 字节 prelude 编解码（仅 0 合法）、
+  `GatewayRefusal` 九类 → `StableStatusCode` 冻结映射与稳定 token 名、设计 §8 冻结限额常量。
+- `src/client/byte_stream.{hpp,cpp}`：A 侧 `open_gateway_stream`（每连接专用 stream 域逻辑
+  通道；未协商 bit 13 本地拒绝、不发帧——M10-02 发射门控；`is_gateway()` 标记）；B 侧
+  `handle_open` 解析 field 4：未协商 bit 13 或 body wire 级畸形 → `fail_business_channel`
+  仅关该通道（会话存活）；文法非法 → 流级 RESET(permission_denied)；无消费者 →
+  RESET(unimplemented)（默认关闭）；新增 `set_gateway_inbound_handler` 供 Round 3 网关服务
+  接管准入；`grant_initial_credit` 提取共用。普通流路径零变化（未知可选字段仍跳过）。
+
+文档：wire protocol 文档升 1.3 基线（§4 bit 13、新 §6.3.1 gateway 流语义：发射/接收门控、
+prelude、冻结 dial/refusal 映射表、探测 oracle 粗粒度合并；§7 增 m10 vectors）；`proto/README.md`
+登记 gateway schema 与生产 codec 归属。
+
+测试（IVA 独立验证 PASS，2026-09-19）：`tests/unit/m10_protocol_test.cpp` 27 例（host/profile
+文法全表、严格 codec、prelude、映射表快照、版本钳制/required 位回归、环回双会话 8 场景：
+1.3 端到端、对 1.2 对端本地门控零发帧、无 handler unimplemented、min=2 会话注入 field-4 OPEN
+仅关通道且 ping 存活、畸形 body 同前、文法非法流级 permission_denied、普通流回归、1.2 未知
+可选字段跳过）；golden vectors `tests/vectors/m10-golden-vectors.json`（GatewayConnect 两种、
+plain/gateway STREAM_OPEN、prelude，经生产 codec 生成、configure 期逐字节比对）；fuzz 注册
+`parse_protobuf<GatewayConnect>` + 回归种子；`version_test` 钉死断言 2→3。证据：新测试 27/27、
+`unit|protocol` 标签 34/34、network 标签 15/15（coturn 外部矩阵按既有门控自跳过）、
+fuzz smoke 81 corpus 单元回放，全绿；无生产缺陷。

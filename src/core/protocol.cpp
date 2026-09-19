@@ -67,8 +67,11 @@ std::uint64_t capabilities_for_version(ProtocolVersion version) noexcept {
   if (version.minor == 0U) {
     return protocol_1_0_capability_bits;
   }
-  return version.minor == 1U ? protocol_1_1_capability_bits
-                             : protocol_1_2_capability_bits;
+  if (version.minor == 1U) {
+    return protocol_1_1_capability_bits;
+  }
+  return version.minor == 2U ? protocol_1_2_capability_bits
+                             : protocol_1_3_capability_bits;
 }
 
 Result<NegotiatedProtocol> negotiate_protocol(const ProtocolHello& local,

@@ -5,11 +5,18 @@ package heyaki.protocol.stream.v1;
 option optimize_for = LITE_RUNTIME;
 
 import "heyaki/common/v1/common.proto";
+import "heyaki/gateway/v1/gateway.proto";
 
 message StreamOpen {
   bytes stream_id = 1;
   uint64 receive_window_bytes = 2;
   uint32 receive_window_frames = 3;
+  // Protocol 1.3 (M10-01): opens the stream as a gateway proxy connection.
+  // Senders must gate emission on the negotiated gateway_v1 capability
+  // (bit 13, negotiated minor >= 3); receivers that did not negotiate it
+  // reject the frame with `protocol` and close only this logical channel.
+  // 1.2-and-older peers treat the field as an unknown optional field.
+  heyaki.protocol.gateway.v1.GatewayConnect gateway = 4;
 }
 
 message WindowUpdate {

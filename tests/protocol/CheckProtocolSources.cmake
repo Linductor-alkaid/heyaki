@@ -26,6 +26,9 @@ foreach(schema_contract IN ITEMS
     "signaling|bytes owner_dtls_fingerprint = 6"
     "session|bytes signaling_transcript_sha256 = 7"
     "file|message FileReject"
+    "gateway|message GatewayConnect"
+    "gateway|bytes host = 1"
+    "stream|heyaki.protocol.gateway.v1.GatewayConnect gateway = 4"
     "shell|message ShellEof"
     "shell|message ShellError"
     "shell|message ShellClose")
@@ -103,7 +106,7 @@ foreach(required_file IN ITEMS
 endforeach()
 
 set(protocol_domains
-  common discovery enrollment signaling session pairing message rpc event stream file shell)
+  common discovery enrollment signaling session pairing message rpc event stream file shell gateway)
 foreach(domain IN LISTS protocol_domains)
   set(schema "${HEYAKI_PROTO_DIR}/heyaki/${domain}/v1/${domain}.proto")
   if(NOT EXISTS "${schema}")

@@ -90,6 +90,9 @@ file(READ "${HEYAKI_M1_GOLDEN_VECTOR_FILE}" HEYAKI_M1_GOLDEN_VECTOR_JSON)
 set(HEYAKI_M3A_GOLDEN_VECTOR_FILE
   "${CMAKE_CURRENT_SOURCE_DIR}/vectors/m3a-lan-golden-vectors.json")
 file(READ "${HEYAKI_M3A_GOLDEN_VECTOR_FILE}" HEYAKI_M3A_GOLDEN_VECTOR_JSON)
+set(HEYAKI_M10_GOLDEN_VECTOR_FILE
+  "${CMAKE_CURRENT_SOURCE_DIR}/vectors/m10-golden-vectors.json")
+file(READ "${HEYAKI_M10_GOLDEN_VECTOR_FILE}" HEYAKI_M10_GOLDEN_VECTOR_JSON)
 
 function(heyaki_read_golden_json output_variable)
   string(JSON value ERROR_VARIABLE json_error GET
@@ -107,6 +110,16 @@ function(heyaki_read_m3a_golden_json output_variable)
   if(json_error)
     message(FATAL_ERROR
       "Cannot read ${HEYAKI_M3A_GOLDEN_VECTOR_FILE} at '${ARGN}': ${json_error}")
+  endif()
+  set(${output_variable} "${value}" PARENT_SCOPE)
+endfunction()
+
+function(heyaki_read_m10_golden_json output_variable)
+  string(JSON value ERROR_VARIABLE json_error GET
+    "${HEYAKI_M10_GOLDEN_VECTOR_JSON}" ${ARGN})
+  if(json_error)
+    message(FATAL_ERROR
+      "Cannot read ${HEYAKI_M10_GOLDEN_VECTOR_FILE} at '${ARGN}': ${json_error}")
   endif()
   set(${output_variable} "${value}" PARENT_SCOPE)
 endfunction()
@@ -157,6 +170,21 @@ endforeach()
 heyaki_read_m3a_golden_json(M3A_HELLO_CANONICAL_HEX canonical_lan_hello canonical_hex)
 heyaki_read_m3a_golden_json(M3A_HELLO_SIGNATURE_HEX canonical_lan_hello signature_hex)
 
+# M10-01 gateway golden vectors: frozen at configure time from
+# tests/vectors/m10-golden-vectors.json (see docs/design/heyaki-wire-protocol.md §7).
+heyaki_read_m10_golden_json(M10_PROTOCOL_MAJOR protocol major)
+heyaki_read_m10_golden_json(M10_PROTOCOL_MINOR protocol minor)
+heyaki_read_m10_golden_json(M10_GATEWAY_CONNECT_HEX gateway_connect bytes_hex)
+heyaki_read_m10_golden_json(M10_GATEWAY_CONNECT_NO_PROFILE_HEX
+  gateway_connect_no_profile bytes_hex)
+heyaki_read_m10_golden_json(M10_STREAM_OPEN_ID_HEX stream_open stream_id_hex)
+heyaki_read_m10_golden_json(M10_STREAM_OPEN_WINDOW_BYTES stream_open receive_window_bytes)
+heyaki_read_m10_golden_json(M10_STREAM_OPEN_WINDOW_FRAMES
+  stream_open receive_window_frames)
+heyaki_read_m10_golden_json(M10_STREAM_OPEN_PLAIN_HEX stream_open plain_hex)
+heyaki_read_m10_golden_json(M10_STREAM_OPEN_GATEWAY_HEX stream_open gateway_hex)
+heyaki_read_m10_golden_json(M10_PRELUDE_CONNECTED_HEX prelude_connected_hex)
+
 set(HEYAKI_TEST_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${HEYAKI_TEST_GENERATED_DIR}")
 configure_file(
@@ -166,6 +194,10 @@ configure_file(
 configure_file(
   vectors/m3a_lan_golden_vectors.hpp.in
   "${HEYAKI_TEST_GENERATED_DIR}/m3a_lan_golden_vectors.hpp"
+  @ONLY)
+configure_file(
+  vectors/m10_golden_vectors.hpp.in
+  "${HEYAKI_TEST_GENERATED_DIR}/m10_golden_vectors.hpp"
   @ONLY)
 
 function(heyaki_add_runtime_test test_name target_name labels)
@@ -653,6 +685,25 @@ heyaki_add_runtime_test(
 set_tests_properties(heyaki_m9_security_regression PROPERTIES
   TIMEOUT 60)
 
+# M10-01/M10-02: protocol 1.3 gateway change-sheet surfaces — GatewayConnect
+# grammar/codec/prelude/refusal mapping, capability negotiation, golden
+# vectors, and the ByteStream gateway send/receive gates over the loopback
+# session harness.
+add_executable(heyaki_m10_protocol_tests unit/m10_protocol_test.cpp)
+target_link_libraries(heyaki_m10_protocol_tests PRIVATE
+  heyaki::client
+  heyaki::core
+  GTest::gtest_main)
+target_include_directories(heyaki_m10_protocol_tests PRIVATE
+  "${HEYAKI_TEST_GENERATED_DIR}"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/client"
+  "${CMAKE_CURRENT_SOURCE_DIR}/unit")
+heyaki_configure_target(heyaki_m10_protocol_tests)
+heyaki_add_runtime_test(
+  heyaki_m10_protocol heyaki_m10_protocol_tests
+  "unit;protocol;gateway;m10;security")
+
 add_executable(heyaki_m8_service_tests
   unit/m8_codec_test.cpp
   unit/m8_shell_test.cpp
@@ -831,7 +882,7 @@ set_tests_properties(heyaki_m3b_relay PROPERTIES
 
 set(heyaki_public_header_sources)
 foreach(public_header IN ITEMS
-    error identity ids lan_directory lan_protocol limits node operation password profile_store protocol relay_enrollment_client relay_wss_control runtime secret_backend
+    error gateway identity ids lan_directory lan_protocol limits node operation password profile_store protocol relay_enrollment_client relay_wss_control runtime secret_backend
     security session_protocol signaling_protocol signaling_replay_cache signing time version wire)
   set(header_source
     "${HEYAKI_TEST_GENERATED_DIR}/${public_header}_header_standalone.cpp")

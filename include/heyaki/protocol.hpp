@@ -33,6 +33,7 @@ enum class Capability : std::uint64_t {
   lan_discovery_v1 = 1ULL << 10U,
   lan_signaling_v1 = 1ULL << 11U,
   session_restart_v1 = 1ULL << 12U,
+  gateway_v1 = 1ULL << 13U,
 };
 
 inline constexpr std::uint64_t protocol_1_0_capability_bits =
@@ -57,9 +58,18 @@ inline constexpr std::uint64_t protocol_1_1_capability_bits =
 inline constexpr std::uint64_t protocol_1_2_capability_bits =
     protocol_1_1_capability_bits |
     static_cast<std::uint64_t>(Capability::session_restart_v1);
-inline constexpr std::uint64_t known_capability_bits = protocol_1_2_capability_bits;
+// Protocol 1.3 adds the optional gateway proxy capability: STREAM_OPEN may
+// carry the `heyaki.protocol.gateway.v1.GatewayConnect gateway = 4` field,
+// turning the stream into a dial-through L4 proxy connection announced by
+// a 2-byte prelude (M10-01 change sheet). A peer below 1.3 never negotiates
+// the bit and must reject a gateway-carrying STREAM_OPEN with `protocol`
+// on that channel only.
+inline constexpr std::uint64_t protocol_1_3_capability_bits =
+    protocol_1_2_capability_bits |
+    static_cast<std::uint64_t>(Capability::gateway_v1);
+inline constexpr std::uint64_t known_capability_bits = protocol_1_3_capability_bits;
 
-inline constexpr ProtocolVersion current_protocol_version{1U, 2U};
+inline constexpr ProtocolVersion current_protocol_version{1U, 3U};
 
 // Lowest minor whose capability set contains the LAN discovery/signaling
 // bits: LAN presence and hello admission accepts same-major peers at or above

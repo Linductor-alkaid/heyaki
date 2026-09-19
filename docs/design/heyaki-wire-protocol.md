@@ -1,11 +1,13 @@
 # Heyaki Wire Protocol v1
 
-> Status: protocol 1.2 baseline, implemented through M7 — pairing/ByteStream frames delivered by
+> Status: protocol 1.3 baseline — pairing/ByteStream frames delivered by
 > M5 (2026-08-28), message/unary-RPC frames by M6 (2026-08-29), event/file frames by M7
 > (2026-08-31); the shell frame family below was delivered with M8
-> (2026-09-03)
+> (2026-09-03); the protocol 1.3 gateway change sheet (capability bit 13,
+> `StreamOpen.gateway`, gateway prelude and refusal mapping) was frozen with
+> M10-01 (2026-09-19)
 >
-> Protocol version: 1.2
+> Protocol version: 1.3
 >
 > Incompatible changes require a protocol major increment.
 
@@ -13,11 +15,14 @@ This document is normative for Heyaki framing, identifiers, negotiation, signed 
 per-domain state handling. The schemas under `proto/heyaki/*/v1` are normative for Protobuf fields.
 The words MUST, MUST NOT, SHOULD, and MAY describe interoperability requirements.
 
-Protocol 1.1 added optional serverless LAN discovery and TLS signaling binding. Protocol 1.2 adds
+Protocol 1.1 added optional serverless LAN discovery and TLS signaling binding. Protocol 1.2 added
 the optional session-restart renegotiation (capability `session_restart_v1`, frames `0x06`-`0x08`,
-section 2.3). The 1.0/1.1 framing, identifiers, signed objects, schemas, and state transitions
-remain unchanged. Older peers ignore the new optional capability bits and never receive restart
-frames; a newer peer MUST NOT infer the restart capability from a negotiated older session.
+section 2.3). Protocol 1.3 adds the optional restricted L4 gateway proxy (capability `gateway_v1`
+bit 13, the optional `StreamOpen.gateway` field, section 6.3.1); it adds NO frame type — the v1
+frame value table stays closed since 1.2. The 1.0-1.2 framing, identifiers, signed objects,
+schemas, and state transitions remain unchanged. Older peers ignore the new optional capability
+bits and never receive restart frames or gateway-carrying opens; a newer peer MUST NOT infer the
+restart or gateway capability from a negotiated older session.
 
 ## 1. Primitive encodings
 
@@ -284,8 +289,9 @@ does not support, negotiation fails explicitly with `protocol`; unknown optional
 
 Capability bits v1 are: enrollment `0`, signaling `1`, session `2`, pairing `3`, message `4`, unary RPC
 `5`, event `6`, byte stream `7`, file `8`, shell `9`, `lan_discovery_v1` `10`, `lan_signaling_v1`
-`11`, and `session_restart_v1` `12`. Bits 10 and 11 require negotiated minor version 1 or newer;
-bit 12 requires negotiated minor version 2 or newer. A schema field
+`11`, `session_restart_v1` `12`, and `gateway_v1` `13`. Bits 10 and 11 require negotiated minor
+version 1 or newer; bit 12 requires negotiated minor version 2 or newer; bit 13 requires negotiated
+minor version 3 or newer. A schema field
 being parseable does not enable its behavior without the corresponding negotiated capability.
 
 Heyaki parsers reject unknown fields instead of skipping them, because every
@@ -511,6 +517,54 @@ transition, or data offset overflow yields stable `protocol` status at the small
 Malformed control/session binding closes the session; a service-state failure closes only its logical
 channel. No parser loops waiting on an already complete invalid input.
 
+### 6.3.1 Gateway proxy streams (protocol 1.3, frozen by the M10-01 change sheet)
+
+A gateway stream is an ordinary stream (identical state machine, windows, FIN/RESET semantics)
+opened by a `STREAM_OPEN` whose optional field 4 carries a
+`heyaki.protocol.gateway.v1.GatewayConnect` body (`host` 1-253 ASCII bytes — an LDH hostname or an
+IPv4/IPv6 literal — `port` 1-65535, `profile` 0-64 bytes of `[a-z0-9_.-]`). No new frame type
+exists.
+
+- **Emission gate.** A sender MUST NOT emit field 4 unless the session negotiated `gateway_v1`
+  (bit 13; implies negotiated minor ≥ 3). A 1.2-or-older receiver treats the field as an unknown
+  optional field of `StreamOpen` (proto3 skip), so N-1 peers are unaffected — but a conforming 1.3
+  peer never sends it to them (M10-02 interop contract).
+- **Reception gate.** A receiver that did NOT negotiate `gateway_v1` and receives a
+  `STREAM_OPEN` carrying field 4 MUST reject it with `protocol` and close only that logical
+  channel (the session and every other domain keep running). A wire-level malformed
+  `GatewayConnect` body on a gateway-capable session is the same channel-only `protocol`
+  rejection; the schema has no unknown optional fields at 1.3.
+- **Host/profile grammar failures are admissions, not protocol faults**: the receiver refuses the
+  stream (RESET with the mapped status below) rather than closing the channel, and MUST NOT copy
+  the peer-supplied host into any error, log, or audit field that has not passed grammar
+  validation (a stable token replaces it — `safe_detail` discipline).
+- **Prelude.** After the serving side's admission succeeds and the local dial connects, its first
+  `STREAM_DATA` frame on the stream is exactly 2 payload bytes at offset 0-1: a U16 big-endian
+  status where `0` = connected. The prelude counts as ordinary stream bytes; tunnel payload
+  follows from offset 2. There is no legal nonzero prelude value — dial failures and refusals
+  never send a prelude — so a receiver MUST treat a nonzero prelude as a protocol violation of the
+  stream mapping and reset the stream with `protocol`. The opening side's client API MUST NOT
+  report "connected" before a valid prelude.
+- **Dial/refusal mapping (frozen).** The serving side answers refusals and failures with
+  `STREAM_RESET` carrying exactly:
+
+| Serving-side outcome | `STREAM_RESET` status |
+| --- | --- |
+| gateway field on a session without negotiated `gateway_v1` | `protocol` (channel-only close; no stream exists yet) |
+| wire-malformed `GatewayConnect` body | `protocol` (channel-only close) |
+| host/port/profile grammar failure | `permission_denied` |
+| `gateway.provide:<profile>` scope not granted | `permission_denied` |
+| target outside the profile CIDR/port allowlist, or inside the default deny list (loopback, link-local, management ranges, tunnel endpoints) | `permission_denied` |
+| concurrent-stream or profile quota exhausted | `resource_exhausted` |
+| gateway feature disabled / no profile configured | `unimplemented` |
+| local dial failed (refused, unreachable, filtered — deliberately merged, no oracle) | `unavailable` |
+| dial deadline expired | `deadline_exceeded` |
+| local gateway machinery failure before dial | `internal` |
+
+  The mapping is deliberately coarse: receivers MUST NOT distinguish refused from unreachable or
+  filtered dials (probing-oracle mitigation). Each active gateway connection uses its own non-zero
+  logical `stream`-domain channel; channel domain discipline (section 6.1) applies unchanged.
+
 ### 6.4 LAN discovery and TLS hello
 
 Protocol 1.1 LAN discovery uses UDP port `49189`, IPv4 organization-local group `239.192.72.89`, and
@@ -574,5 +628,7 @@ signaling connection.
 encoding, Ed25519 signature over that canonical offer, Protobuf Lite envelope bytes, and complete frame
 bytes for the protocol 1.0 N-1 baseline. `tests/vectors/m3a-lan-golden-vectors.json` contains the
 protocol 1.1 discovery constants plus canonical `LAN_PRESENCE` and `LAN_HELLO` bytes and Ed25519
-signatures. Tests read both files at configure time and compare exact bytes. Implementations must not
-normalize or reserialize the expected values before comparison.
+signatures. `tests/vectors/m10-golden-vectors.json` contains the protocol 1.3 gateway vectors: the
+`StreamOpen` bytes with and without the `gateway` field, the `GatewayConnect` body encoding, and the
+2-byte connected prelude. Tests read the files at configure time and compare exact bytes.
+Implementations must not normalize or reserialize the expected values before comparison.

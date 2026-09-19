@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package heyaki.protocol.gateway.v1;
+
+option optimize_for = LITE_RUNTIME;
+
+// Frozen by the protocol 1.3 change sheet (M10-01): carried as the optional
+// `gateway = 4` field of heyaki.protocol.stream.v1.StreamOpen. Sessions that
+// did not negotiate the gateway_v1 capability must reject a STREAM_OPEN
+// carrying this field with `protocol` and close only that logical channel.
+message GatewayConnect {
+  bytes host = 1;      // ASCII hostname (LDH) or IPv4/IPv6 literal, 1-253 bytes
+  uint32 port = 2;     // 1-65535
+  string profile = 3;  // optional profile name, ASCII [a-z0-9_.-], 1-64 bytes
+}

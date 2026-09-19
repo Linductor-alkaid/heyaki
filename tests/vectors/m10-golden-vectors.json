@@ -1,0 +1,27 @@
+{
+  "format": "heyaki-m10-gateway-golden-vectors-v1",
+  "protocol": {
+    "major": 1,
+    "minor": 3
+  },
+  "gateway_connect": {
+    "host": "intranode.lan",
+    "port": 443,
+    "profile": "office",
+    "bytes_hex": "0a0d696e7472616e6f64652e6c616e10bb031a066f6666696365"
+  },
+  "gateway_connect_no_profile": {
+    "host": "10.20.30.40",
+    "port": 8080,
+    "profile": "",
+    "bytes_hex": "0a0b31302e32302e33302e343010903f"
+  },
+  "stream_open": {
+    "stream_id_hex": "01010101010101010101010101010102",
+    "receive_window_bytes": 262144,
+    "receive_window_frames": 64,
+    "plain_hex": "0a1001010101010101010101010101010102108080101840",
+    "gateway_hex": "0a1001010101010101010101010101010102108080101840221a0a0d696e7472616e6f64652e6c616e10bb031a066f6666696365"
+  },
+  "prelude_connected_hex": "0000"
+}

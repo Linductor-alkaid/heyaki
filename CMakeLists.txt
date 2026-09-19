@@ -196,7 +196,7 @@ if(NOT HEYAKI_SANITIZER STREQUAL "none" AND
 endif()
 
 set(HEYAKI_PROTOCOL_VERSION_MAJOR 1)
-set(HEYAKI_PROTOCOL_VERSION_MINOR 2)
+set(HEYAKI_PROTOCOL_VERSION_MINOR 3)
 set(HEYAKI_BUILD_FEATURE_RELAY ${HEYAKI_BUILD_APPS})
 set(HEYAKI_BUILD_FEATURE_TUI ${HEYAKI_BUILD_APPS})
 set(HEYAKI_BUILD_FEATURE_ZSTD OFF)
@@ -211,6 +211,7 @@ add_library(heyaki_core
   src/core/event_protocol.cpp
   src/core/file_protocol.cpp
   src/core/frame_stream.cpp
+  src/core/gateway_protocol.cpp
   src/core/identity.cpp
   src/core/ids.cpp
   src/core/lan_protocol.cpp

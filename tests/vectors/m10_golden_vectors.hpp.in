@@ -1,0 +1,22 @@
+#pragma once
+
+#include <cstdint>
+#include <string_view>
+
+namespace heyaki::test_vectors::m10 {
+
+inline constexpr std::uint32_t protocol_major = @M10_PROTOCOL_MAJOR@U;
+inline constexpr std::uint32_t protocol_minor = @M10_PROTOCOL_MINOR@U;
+inline constexpr std::string_view gateway_connect_hex = "@M10_GATEWAY_CONNECT_HEX@";
+inline constexpr std::string_view gateway_connect_no_profile_hex =
+    "@M10_GATEWAY_CONNECT_NO_PROFILE_HEX@";
+inline constexpr std::string_view stream_open_id_hex = "@M10_STREAM_OPEN_ID_HEX@";
+inline constexpr std::uint64_t stream_open_window_bytes = @M10_STREAM_OPEN_WINDOW_BYTES@U;
+inline constexpr std::uint32_t stream_open_window_frames =
+    @M10_STREAM_OPEN_WINDOW_FRAMES@U;
+inline constexpr std::string_view stream_open_plain_hex = "@M10_STREAM_OPEN_PLAIN_HEX@";
+inline constexpr std::string_view stream_open_gateway_hex =
+    "@M10_STREAM_OPEN_GATEWAY_HEX@";
+inline constexpr std::string_view prelude_connected_hex = "@M10_PRELUDE_CONNECTED_HEX@";
+
+}  // namespace heyaki::test_vectors::m10
