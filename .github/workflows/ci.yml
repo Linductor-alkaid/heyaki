@@ -158,6 +158,12 @@ jobs:
       - name: Build
         run: cmake --build build --parallel 2
       - name: Test
+        # The container shares two slower vCPUs with the provisioning-built
+        # toolchain; the TUI enrollment driver's 60s window (Round 16) is
+        # tight enough there to exhaust both bounded attempts on loaded
+        # runners - widen it through the designed knob.
+        env:
+          HEYAKI_TUI_DRIVE_TIMEOUT_S: "120"
         run: ctest --test-dir build --output-on-failure --no-tests=error
 
   coturn-topology:
