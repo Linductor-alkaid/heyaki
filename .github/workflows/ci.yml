@@ -4,6 +4,14 @@ on:
   push:
   pull_request:
 
+env:
+  # Loaded-runner budget for the TUI-driven network harnesses (the
+  # designed knob from Round 16; 043bdc2/8a360d2 raised it per-job for
+  # compat-2004 and run 35525647216 showed the OTHER TUI harness jobs
+  # exhaust it too — workflow-level covers every lane).
+  HEYAKI_TUI_DRIVE_TIMEOUT_S: "240"
+  HEYAKI_TUI_SESSION_TIMEOUT_S: "180"
+
 jobs:
   linux:
     runs-on: ubuntu-24.04
@@ -158,16 +166,6 @@ jobs:
       - name: Build
         run: cmake --build build --parallel 2
       - name: Test
-        # The container shares two slower vCPUs with the provisioning-built
-        # toolchain; the TUI enrollment driver's 60s window (Round 16) is
-        # tight enough there to exhaust both bounded attempts on loaded
-        # runners - widen it through the designed knob. 043bdc2 raised it
-        # to 120s; one loaded runner host (run 35517368622, both attempts,
-        # rerun included) still exhausted it - double again rather than
-        # depending on host luck.
-        env:
-          HEYAKI_TUI_DRIVE_TIMEOUT_S: "240"
-          HEYAKI_TUI_SESSION_TIMEOUT_S: "180"
         run: ctest --test-dir build --output-on-failure --no-tests=error
 
   coturn-topology:
