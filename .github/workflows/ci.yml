@@ -161,9 +161,12 @@ jobs:
         # The container shares two slower vCPUs with the provisioning-built
         # toolchain; the TUI enrollment driver's 60s window (Round 16) is
         # tight enough there to exhaust both bounded attempts on loaded
-        # runners - widen it through the designed knob.
+        # runners - widen it through the designed knob. 043bdc2 raised it
+        # to 120s; one loaded runner host (run 35517368622, both attempts,
+        # rerun included) still exhausted it - double again rather than
+        # depending on host luck.
         env:
-          HEYAKI_TUI_DRIVE_TIMEOUT_S: "120"
+          HEYAKI_TUI_DRIVE_TIMEOUT_S: "240"
         run: ctest --test-dir build --output-on-failure --no-tests=error
 
   coturn-topology:
