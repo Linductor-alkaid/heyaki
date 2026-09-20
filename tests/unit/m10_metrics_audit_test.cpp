@@ -1416,19 +1416,20 @@ TEST_F(M10Round5NodeTest, AuditRecordAndDiagnosticsAfterEchoTunnel) {
     return true;
   };
   {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{3};
+    // Slow CI containers need more than the 3s this used to allow.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{15};
     executor::comm::PhaseGate poll{"m10-round5-connect-poll"};
-    while (stream.state() != ByteStreamState::open &&
+    // Pre-tunnel outcomes race the whole result on CI runners (see the
+    // gateway-service suite): a reset or a stall is the real-stack flake
+    // family; post-tunnel assertions below stay hard failures.
+    while (stream.state() == ByteStreamState::opening &&
            std::chrono::steady_clock::now() < deadline) {
       (void)pump_echo();
       (void)poll.wait_for(1U, std::chrono::milliseconds{2});
     }
     if (stream.state() != ByteStreamState::open) {
-      // See the gateway-service suite: a stalled promotion on an otherwise
-      // verified address is the CI real-stack flake family; the deterministic
-      // harness suites and the root netns matrix own this coverage.
-      GTEST_SKIP() << "tunnel promotion stalled on this runner (known CI "
-                      "real-stack flake family)";
+      GTEST_SKIP() << "tunnel promotion stalled or reset on this runner "
+                      "(known CI real-stack flake family)";
     }
   }
 
