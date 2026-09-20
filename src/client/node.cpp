@@ -4968,7 +4968,35 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   void restart_session_changed(const DeviceEndpointKey& peer,
                                const PeerSessionDiagnostics& diagnostics) {
     auto iterator = session_restarts.find(peer);
-    if (iterator == session_restarts.end()) return;
+    if (iterator == session_restarts.end()) {
+      // A completed restart's SUCCESSOR session reports here for the rest
+      // of its life: a close must run the same teardown as the normal
+      // path, otherwise per-session services (stream/gateway) outlive the
+      // PeerSession they reference and ~Node use-after-frees.
+      if (diagnostics.state == PeerSessionState::closed) {
+        teardown_peer_services(peer);
+        if (!peers_closed) {
+          // Mutating peer_attempts here is safe only outside close_peers'
+          // own iteration over that map (shutdown sets peers_closed first).
+          const auto attempt_id = peer_attempt_by_endpoint.find(peer);
+          if (attempt_id != peer_attempt_by_endpoint.end()) {
+            auto attempt = peer_attempts.find(attempt_id->second);
+            if (attempt != peer_attempts.end()) {
+              attempt->second.snapshot.state = NodePeerSessionState::closed;
+              finished_peer_sessions.push_back(peer_session_snapshot(attempt->second));
+              while (finished_peer_sessions.size() > lan.diagnostic_capacity) {
+                finished_peer_sessions.pop_front();
+              }
+              peer_attempts.erase(attempt);
+            }
+            peer_attempt_by_endpoint.erase(attempt_id);
+          }
+        }
+        notify_pairing_failure(peer, diagnostics.last_error);
+        publish_peer_sessions();
+      }
+      return;
+    }
     switch (diagnostics.state) {
       case PeerSessionState::authenticated:
         complete_session_restart(peer);
@@ -6027,6 +6055,23 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       }
     }
     rpc_retry_queue.clear();
+    // Remaining per-peer services (event/file/shell/gateway/stream) are
+    // normally torn down by each session's close observer — but a restart
+    // SUCCESSOR session's observer is restart_session_changed, which no-ops
+    // once its restart record is gone. Tear every service map down here
+    // explicitly (teardown_peer_services is idempotent per peer) so no
+    // service outlives the PeerSession it references.
+    {
+      std::set<DeviceEndpointKey> served_peers;
+      for (const auto& [peer, service] : event_services) served_peers.insert(peer);
+      for (const auto& [peer, service] : file_services) served_peers.insert(peer);
+      for (const auto& [peer, service] : shell_services) served_peers.insert(peer);
+      for (const auto& [peer, service] : gateway_services) served_peers.insert(peer);
+      for (const auto& [peer, service] : stream_services) served_peers.insert(peer);
+      for (const auto& peer : served_peers) {
+        teardown_peer_services(peer);
+      }
+    }
     // Move the restart records out before closing them: the session's close
     // observer reenters through restart_session_changed -> abort_session_
     // restart, which erases from session_restarts and would invalidate the

@@ -4,6 +4,7 @@
 // prints a machine-readable MATRIX_RESULT line describing the outcome. The
 // binary never talks to coturn itself; the driver script owns the topology.
 #include <heyaki/message.hpp>
+#include <heyaki/metrics.hpp>
 #include <heyaki/node.hpp>
 #include <heyaki/rpc.hpp>
 #include <heyaki/password.hpp>
@@ -12,12 +13,15 @@
 #include <heyaki/relay_enrollment_client.hpp>
 #include <heyaki/runtime.hpp>
 
+#include "socks_frontend.hpp"
+
 #include <executor/comm.hpp>
 
 #include <openssl/hmac.h>
 #include <openssl/sha.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -26,10 +30,14 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include <csignal>
 
 #ifndef _WIN32
 // Crash-reporter plumbing: POSIX signals plus glibc backtraces. The coturn
@@ -473,7 +481,317 @@ struct RunOptions {
   std::uint64_t bench_file_bytes{0U};
   std::uint64_t bench_file_multi_bytes{8U * 1024U * 1024U};
   std::size_t bench_shell_pings{20U};
+  // ---- M10 Round 6 gateway scenarios ----
+  // Responder: serve one "lan" gateway profile over these CIDRs (comma
+  // separated per flag, flag repeatable; ports fully allowed; confirm never,
+  // no confirm sink). The serving side keeps working as a normal responder.
+  std::vector<std::string> gateway_serve_cidrs;
+  // Initiator: after authentication open one gateway tunnel and require a
+  // 64-byte echo round trip (host/port parsed at flag time).
+  std::string gateway_echo_host;
+  std::uint16_t gateway_echo_port{0U};
+  // Initiator: serve a loopback SOCKS5 CONNECT frontend bridging the peer's
+  // gateway until SIGTERM/budget expiry.
+  std::uint16_t gateway_socks_port{0U};
+  // Either role: print the heyaki_gateway_* families from the Prometheus
+  // export before exiting (script grep surface).
+  bool gateway_metrics{false};
+  // Profile name stamped onto gateway opens (must match the responder's
+  // --gateway-serve profile, which is always "lan").
+  std::string gateway_profile{"lan"};
+  // Responder: PeerPathPolicy::GatewayPaths::direct_only — refuse gateway
+  // opens while the session rides TURN (path_policy scenario).
+  bool gateway_direct_only{false};
 };
+
+// ---- M10 Round 6 gateway scenarios -----------------------------------------
+// SIGTERM/SIGINT latch for --gateway-socks: the harness kills the process
+// once its curl probes are done; the handler only flips a sig_atomic flag
+// that the keep-alive loop polls (async-signal-safe, no allocation).
+volatile std::sig_atomic_t g_gateway_socks_stop = 0;
+void request_gateway_socks_stop(int) { g_gateway_socks_stop = 1; }
+
+// Prints every heyaki_gateway_* line of the Prometheus export so topology
+// scripts can assert the family presence and counter values with grep.
+void print_gateway_metric_lines(const heyaki::Node& node) {
+  const auto text = heyaki::format_node_metrics_prometheus(node.metrics());
+  std::string_view remaining = text;
+  while (!remaining.empty()) {
+    const auto eol = remaining.find('\n');
+    const auto line = remaining.substr(0, eol == std::string_view::npos
+                                             ? remaining.size()
+                                             : eol);
+    if (line.find("heyaki_gateway_") != std::string_view::npos) {
+      std::cout << line << '\n';
+    }
+    if (eol == std::string_view::npos) break;
+    remaining.remove_prefix(eol + 1U);
+  }
+}
+
+// One gateway echo round trip (initiator side): open_gateway_stream to the
+// flag target, wait for the one-shot on_connected (the dial->prelude
+// latency), push 64 deterministic bytes, and require them echoed back
+// verbatim. GATEWAY_METRIC carries the verdict; failure detail tokens are
+// stable (addresses and free text never enter them) so scripts can gate.
+void run_gateway_echo(heyaki::Node& node, const heyaki::DeviceEndpointKey& peer,
+                      const RunOptions& options) {
+  // Completion events cross the node strand into this loop through one
+  // bounded channel (copies only — a late completion after an early return
+  // must never touch a dead stack). One outstanding read at a time.
+  struct GatewayEchoEvent {
+    int kind{0};  // 0=connected 1=write-done 2=read-done
+    int code{0};
+    std::size_t bytes{0};
+    std::array<std::byte, 256U> data{};
+  };
+  executor::comm::ChannelOptions event_options;
+  event_options.capacity = 64U;
+  event_options.name = "heyaki-m4-matrix-gateway-events";
+  const auto events =
+      std::make_shared<executor::comm::MpscChannel<GatewayEchoEvent>>(
+          std::move(event_options));
+  const auto fail = [](const char* detail, int code) {
+    std::cout << "GATEWAY_METRIC name=echo_roundtrip_ms value=0 ok=0 detail="
+              << detail << " code=" << code << '\n';
+  };
+  std::cout << "MATRIX_PHASE gateway-echo-begin\n";
+  const auto begin_us = steady_micros_now();
+  std::uint64_t connected_us = 0U;
+  heyaki::NodeGatewayStreamOptions stream_options;
+  stream_options.on_connected =
+      [events](heyaki::Result<void> result) {
+        GatewayEchoEvent event;
+        event.kind = 0;
+        event.code =
+            result ? 0 : static_cast<int>(result.error_if()->code());
+        event.bytes = steady_micros_now();
+        (void)events->try_send(std::move(event));
+      };
+  auto opened = node.open_gateway_stream(
+      peer,
+      heyaki::GatewayConnect{.host = options.gateway_echo_host,
+                             .port = options.gateway_echo_port,
+                             .profile = options.gateway_profile},
+      stream_options);
+  if (!opened) {
+    fail("open_failed", static_cast<int>(opened.error_if()->code()));
+    return;
+  }
+  heyaki::ByteStream stream{std::move(*opened.value_if())};
+  // Dial deadline default is now+10s; the wait covers it with margin.
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds{25000};
+  int connect_code = 0;
+  bool connected = false;
+  bool connect_failed = false;
+  while (std::chrono::steady_clock::now() < deadline) {
+    GatewayEchoEvent event;
+    while (events->try_receive(event)) {
+      if (event.kind == 0) {
+        connected_us = event.bytes;
+        connect_code = event.code;
+        connected = event.code == 0;
+        connect_failed = event.code != 0;
+      }
+    }
+    if (connected || connect_failed) break;
+    executor::comm::PhaseGate poll{"heyaki-m4-matrix-gateway-connect"};
+    (void)poll.wait_for(1U, std::chrono::milliseconds{5});
+  }
+  if (connect_failed) {
+    fail("connect_failed", connect_code);
+    stream.reset(heyaki::StableStatus::cancelled);
+    return;
+  }
+  if (!connected) {
+    fail("connect_timeout", 0);
+    stream.reset(heyaki::StableStatus::cancelled);
+    return;
+  }
+  // 64 deterministic bytes; the serving side's echo must return them all.
+  const auto payload = std::make_shared<std::vector<std::byte>>(64U);
+  for (std::size_t index = 0U; index < payload->size(); ++index) {
+    (*payload)[index] = static_cast<std::byte>((0x40U + index * 7U) & 0x7FU);
+  }
+  stream.async_write(
+      std::span<const std::byte>{payload->data(), payload->size()},
+      [events](heyaki::ByteStreamIoResult result) {
+        GatewayEchoEvent event;
+        event.kind = 1;
+        event.code =
+            result.error.has_value()
+                ? static_cast<int>(result.error->code())
+                : 0;
+        (void)events->try_send(std::move(event));
+      });
+  bool write_ok = false;
+  bool write_failed = false;
+  int write_code = 0;
+  while (std::chrono::steady_clock::now() < deadline &&
+         !write_ok && !write_failed) {
+    GatewayEchoEvent event;
+    while (events->try_receive(event)) {
+      if (event.kind == 1) {
+        write_ok = event.code == 0;
+        write_failed = event.code != 0;
+        write_code = event.code;
+      }
+    }
+    if (write_ok || write_failed) break;
+    executor::comm::PhaseGate poll{"heyaki-m4-matrix-gateway-write"};
+    (void)poll.wait_for(1U, std::chrono::milliseconds{5});
+  }
+  if (write_failed || !write_ok) {
+    fail(write_failed ? "write_failed" : "write_timeout", write_code);
+    stream.reset(heyaki::StableStatus::cancelled);
+    return;
+  }
+  // Echo read-back: keep exactly one read outstanding until 64 bytes land.
+  std::vector<std::byte> echoed;
+  const auto read_buffer =
+      std::make_shared<std::array<std::byte, 256U>>();
+  const auto post_read = [&]() {
+    stream.async_read_some(
+        std::span<std::byte>{read_buffer->data(), read_buffer->size()},
+        [events, read_buffer](heyaki::ByteStreamIoResult result) {
+          GatewayEchoEvent event;
+          event.kind = 2;
+          event.code =
+              result.error.has_value()
+                  ? static_cast<int>(result.error->code())
+                  : 0;
+          event.bytes = result.bytes;
+          if (result.bytes > 0U && result.bytes <= read_buffer->size()) {
+            std::copy_n(read_buffer->begin(),
+                        static_cast<std::ptrdiff_t>(result.bytes),
+                        event.data.begin());
+          }
+          (void)events->try_send(std::move(event));
+        });
+  };
+  post_read();
+  bool read_failed = false;
+  int read_code = 0;
+  while (std::chrono::steady_clock::now() < deadline && echoed.size() < 64U &&
+         !read_failed) {
+    GatewayEchoEvent event;
+    bool rearm = false;
+    while (events->try_receive(event)) {
+      if (event.kind == 2) {
+        if (event.code != 0) {
+          read_failed = true;
+          read_code = event.code;
+        } else if (event.bytes == 0U) {
+          read_failed = true;  // clean EOF before the echo completed
+          read_code = -1;
+        } else {
+          echoed.insert(echoed.end(), event.data.begin(),
+                        event.data.begin() +
+                            static_cast<std::ptrdiff_t>(
+                                std::min(event.bytes, event.data.size())));
+          rearm = echoed.size() < 64U;
+        }
+      }
+    }
+    if (read_failed) break;
+    if (rearm) post_read();
+    executor::comm::PhaseGate poll{"heyaki-m4-matrix-gateway-read"};
+    (void)poll.wait_for(1U, std::chrono::milliseconds{5});
+  }
+  if (read_failed) {
+    fail(read_code < 0 ? "stream_closed_early" : "read_failed", read_code);
+    stream.reset(heyaki::StableStatus::cancelled);
+    return;
+  }
+  if (echoed.size() < 64U) {
+    fail("read_timeout", 0);
+    stream.reset(heyaki::StableStatus::cancelled);
+    return;
+  }
+  if (echoed != *payload) {
+    fail("echo_mismatch", 0);
+    stream.reset(heyaki::StableStatus::cancelled);
+    return;
+  }
+  stream.reset(heyaki::StableStatus::cancelled);
+  std::cout << "GATEWAY_METRIC name=echo_roundtrip_ms value="
+            << (connected_us > begin_us ? (connected_us - begin_us) / 1000U
+                                        : 0U)
+            << " ok=1 bytes=64\n";
+  std::cout << "MATRIX_PHASE gateway-echo-end\n";
+}
+
+// Loopback SOCKS5 CONNECT frontend (initiator side): bridges the peer's
+// gateway through 127.0.0.1:<port> until SIGTERM/SIGINT, peer-session loss,
+// or the run budget expires; GATEWAY_SOCKS_SUMMARY carries the frontend
+// counters the harness gates on (connects_succeeded and byte totals).
+void run_gateway_socks(heyaki::Node& node, heyaki::Runtime& runtime,
+                       const heyaki::DeviceEndpointKey& peer,
+                       const RunOptions& options,
+                       std::chrono::steady_clock::time_point budget_deadline) {
+#ifndef _WIN32
+  struct sigaction stop_action {};
+  stop_action.sa_handler = request_gateway_socks_stop;
+  sigaction(SIGTERM, &stop_action, nullptr);
+  sigaction(SIGINT, &stop_action, nullptr);
+#endif
+  heyaki::socks::SocksFrontendConfig config;
+  config.bind_address = "127.0.0.1";
+  config.port = options.gateway_socks_port;
+  config.max_concurrent_connections = 16U;
+  config.profile = options.gateway_profile;
+  config.connect_deadline = std::chrono::milliseconds{15000};
+  auto frontend =
+      heyaki::socks::SocksFrontend::create(node, runtime, peer, config);
+  if (!frontend) {
+    std::cout << "GATEWAY_SOCKS_ERROR detail=create_failed code="
+              << static_cast<int>(frontend.error_if()->code()) << '\n';
+    return;
+  }
+  const auto started = (*frontend.value_if())->start();
+  if (!started) {
+    std::cout << "GATEWAY_SOCKS_ERROR detail=start_failed code="
+              << static_cast<int>(started.error_if()->code()) << '\n';
+    return;
+  }
+  const auto bound = (*frontend.value_if())->stats().bound_port;
+  std::cout << "GATEWAY_SOCKS_READY port=" << bound << '\n';
+  const auto peer_session_alive = [&node, &peer] {
+    const auto sessions = node.peer_sessions();
+    return std::any_of(sessions.begin(), sessions.end(),
+                       [&peer](const auto& session) {
+                         return session.peer == peer &&
+                                session.state ==
+                                    heyaki::NodePeerSessionState::authenticated;
+                       });
+  };
+  while (g_gateway_socks_stop == 0) {
+    if (std::chrono::steady_clock::now() >= budget_deadline) {
+      std::cout << "MATRIX_PHASE gateway-socks-budget-expired\n";
+      break;
+    }
+    if (!peer_session_alive()) {
+      std::cout << "MATRIX_PHASE gateway-socks-peer-session-lost\n";
+      break;
+    }
+    executor::comm::PhaseGate poll{"heyaki-m4-matrix-gateway-socks"};
+    (void)poll.wait_for(1U, std::chrono::milliseconds{100});
+  }
+  executor::comm::PhaseGate settle{"heyaki-m4-matrix-gateway-socks-stats"};
+  (void)settle.wait_for(1U, std::chrono::milliseconds{50});
+  const auto stats = (*frontend.value_if())->stats();
+  std::cout << "GATEWAY_SOCKS_SUMMARY"
+            << " accepted=" << stats.accepted
+            << " handshakes_failed=" << stats.handshakes_failed
+            << " connects_succeeded=" << stats.connects_succeeded
+            << " connects_failed=" << stats.connects_failed
+            << " bytes_from_clients=" << stats.bytes_from_clients
+            << " bytes_to_clients=" << stats.bytes_to_clients
+            << " connections_active=" << stats.connections_active
+            << " listening=" << (stats.listening ? 1 : 0) << '\n';
+  (*frontend.value_if())->stop();
+}
 
 int run_node(const std::filesystem::path& database, std::string_view application_id,
              const std::string& relay_url, const std::filesystem::path& ca_file,
@@ -566,6 +884,10 @@ int run_node(const std::filesystem::path& database, std::string_view application
   if (options.srflx_only) {
     policy.allow_ipv4_host = false;
   }
+  if (options.gateway_direct_only) {
+    // M10-11 path policy: refuse gateway opens while the session rides TURN.
+    policy.gateway_paths = heyaki::PeerPathPolicy::GatewayPaths::direct_only;
+  }
 
   // M7: both matrix roles host an "inbox" root beside their profile and a
   // small source file the initiator pushes across the topology under test.
@@ -602,6 +924,20 @@ int run_node(const std::filesystem::path& database, std::string_view application
   m7_root.name = "inbox";
   m7_root.directory = m7_state_dir / "inbox";
   std::filesystem::create_directories(m7_root.directory, m7_dir_ec);
+  // M10 Round 6: --gateway-socks lends the node an executor-owned runtime so
+  // the SOCKS frontend shares the node's Asio context (the TUI's
+  // owned-runtime pattern; no second worker). Every other mode keeps the
+  // node-internal runtime, so existing scenarios are untouched.
+  std::optional<heyaki::Runtime> gateway_runtime_host;
+  if (options.gateway_socks_port != 0U) {
+    auto runtime_created = heyaki::Runtime::create_owned(heyaki::RuntimeConfig{});
+    if (!runtime_created) {
+      std::cerr << "runtime create failed: "
+                << runtime_created.error_if()->safe_detail() << '\n';
+      return 1;
+    }
+    gateway_runtime_host.emplace(std::move(*runtime_created.value_if()));
+  }
   heyaki::NodeConfig config;
   config.profile = profiled;
   config.application_id = std::string{application_id};
@@ -611,6 +947,28 @@ int run_node(const std::filesystem::path& database, std::string_view application
   }
   config.path_policy_override = policy;
   config.file_receive_roots = {m7_root};
+  if (options.gateway_socks_port != 0U) {
+    config.runtime = &*gateway_runtime_host;
+  }
+  if (!options.gateway_serve_cidrs.empty()) {
+    // One "lan" profile: the given CIDRs, all TCP ports, confirm=never (no
+    // confirm sink). The profile is validated at Node::create — an invalid
+    // CIDR list fails startup instead of degrading the policy.
+    heyaki::GatewayProfileConfig gateway_profile;
+    gateway_profile.name = options.gateway_profile.empty()
+                               ? std::string{"lan"}
+                               : options.gateway_profile;
+    gateway_profile.allowed_ports = {heyaki::GatewayPortRange{1U, 65535U}};
+    for (const auto& cidr_text : options.gateway_serve_cidrs) {
+      const auto cidr = heyaki::parse_gateway_cidr(cidr_text);
+      if (!cidr.has_value()) {
+        std::cerr << "--gateway-serve CIDR rejected by policy parser\n";
+        return 1;
+      }
+      gateway_profile.allowed_cidrs.push_back(*cidr);
+    }
+    config.gateway_profiles = {std::move(gateway_profile)};
+  }
   if (options.bench_shell) {
     // M9-10 shell contention: the serving side exposes one fixed interactive
     // shell profile; the wire carries no executable override (M8-01), so the
@@ -1924,13 +2282,34 @@ int run_node(const std::filesystem::path& database, std::string_view application
   }
   if (authenticated) {
     std::cout << "MATRIX_PHASE authenticated\n";
+    // M10 Round 6 gateway scenarios (initiator side): echo rides the
+    // authenticated session and then falls through to the regular m6/m7
+    // exercise; socks consumes the rest of the budget and skips it.
+    const bool gateway_socks_mode =
+        options.role == "initiator" && options.gateway_socks_port != 0U;
+    if (options.role == "initiator" &&
+        (options.gateway_echo_port != 0U || gateway_socks_mode)) {
+      heyaki::DeviceEndpointKey gateway_peer{};
+      for (const auto& session : node.value_if()->peer_sessions()) {
+        if (session.state == heyaki::NodePeerSessionState::authenticated) {
+          gateway_peer = session.peer;
+          break;
+        }
+      }
+      if (options.gateway_echo_port != 0U) {
+        run_gateway_echo(*node.value_if(), gateway_peer, options);
+      } else {
+        run_gateway_socks(*node.value_if(), *gateway_runtime_host, gateway_peer,
+                          options, begin + total_budget);
+      }
+    }
     // M6 exercise (initiator side): one peer_acked message and one unary RPC
     // through the public API on whatever data path the session negotiated.
     // The services attach asynchronously after authorization, so wait for the
     // service diagnostics to confirm them before exercising; a relay-restart
     // churn scenario may drop the session mid-exercise, which reports as
     // m6=0/-1 rather than a topology failure.
-    if (options.role == "initiator") {
+    if (options.role == "initiator" && !gateway_socks_mode) {
       if (options.bench_initiator) {
         // M9-10: the bench suite replaces the one-shot m6/m7 exercise and
         // feeds the shared outcome mailboxes itself.
@@ -2002,6 +2381,13 @@ int run_node(const std::filesystem::path& database, std::string_view application
               << " tls_port=" << snapshot.tls.listen_port
               << " pending_signaling="
               << snapshot.resources.signaling_callbacks_in_flight << '\n';
+    // Deterministic failure path for the gateway echo scenario when the
+    // session never authenticated: the script gates on ok=0 + the stable
+    // no-session token.
+    if (options.role == "initiator" && options.gateway_echo_port != 0U) {
+      std::cout << "GATEWAY_METRIC name=echo_roundtrip_ms value=0 ok=0"
+                   " detail=no-session\n";
+    }
   }
   bool final_message_acked = false;
   int final_rpc_status = -1;
@@ -2011,6 +2397,20 @@ int run_node(const std::filesystem::path& database, std::string_view application
   (void)m6_rpc_status.try_load(final_rpc_status);
   (void)m7_event_received.try_load(final_event_received);
   (void)m7_file_committed.try_load(final_file_committed);
+  if (options.gateway_metrics) {
+    // Serving-side counters republish on the node's periodic diagnostics
+    // tick; give a just-closed tunnel a bounded settle so the export
+    // reflects it before the process exits. The direct_only path-policy
+    // scenario expects refusals instead of traffic, so it skips the wait.
+    if (options.role == "responder" && !options.gateway_serve_cidrs.empty() &&
+        !options.gateway_direct_only) {
+      (void)wait_until([&] {
+        return node.value_if()->metrics().services.gateway.bytes_from_tunnel >
+               0U;
+      }, std::chrono::milliseconds{5000});
+    }
+    print_gateway_metric_lines(*node.value_if());
+  }
   std::cout << "MATRIX_RESULT authenticated=" << (authenticated ? 1 : 0)
             << " data_path=" << data_path << " duration_ms=" << elapsed
             << " attempted=" << (attempted ? 1 : 0)
@@ -2056,7 +2456,17 @@ int usage() {
             << "      [--bench-msg-n N] [--bench-rpc-n N] [--bench-rpc-concurrent-n N]\n"
             << "      [--bench-rpc-window N] [--bench-fanout-n N] [--bench-file-bytes N]\n"
             << "      [--bench-file-multi-bytes N] [--bench-shell-pings N]  (M9-10)\n"
-            << "      [--bench-responder] [--bench-shell]  (responder; M9-10)\n";
+            << "      [--bench-responder] [--bench-shell]  (responder; M9-10)\n"
+            << "      [--gateway-serve CIDR[,CIDR...]]  (responder; M10 gateway\n"
+            << "            profile \\\"lan\\\" over the given targets; flag repeatable)\n"
+            << "      [--gateway-echo HOST:PORT]  (initiator; 64-byte echo tunnel)\n"
+            << "      [--gateway-socks PORT]  (initiator; loopback SOCKS5 frontend\n"
+            << "            until SIGTERM/budget; needs the heyaki::socks link)\n"
+            << "      [--gateway-metrics]  (print heyaki_gateway_* export lines)\n"
+            << "      [--gateway-profile NAME]  (default lan; must match the\n"
+            << "            responder profile AND the seeded gateway.provide scope)\n"
+            << "      [--gateway-direct-only]  (responder; refuse gateway while\n"
+            << "            the session rides TURN)  (M10 Round 6)\n";
   return 2;
 }
 
@@ -2156,8 +2566,12 @@ int main(int argc, char** argv) {
     }
     // Grants canonicalize to a sorted, deduplicated scope list. shell.open:bench
     // is inert unless a bench participant calls the M8 shell API (M9-10).
+    // The M10 gateway scopes are inert unless a scenario opens a gateway
+    // stream: gateway.use gates the initiator's opens, gateway.provide:lan
+    // gates the responder's "lan" profile (the --gateway-serve default name).
   const std::vector<std::string> scopes = {"event.subscribe:*", "file.pull:inbox",
-                                        "file.push:inbox",   "matrix.connect",
+                                        "file.push:inbox",   "gateway.provide:lan",
+                                        "gateway.use",       "matrix.connect",
                                         "message.send",      "rpc.device.read",
                                         "shell.open:bench"};
     auto forward =
@@ -2274,6 +2688,55 @@ int main(int argc, char** argv) {
         options.bench_file_multi_bytes = parse_u64(argv[++index]);
       } else if (flag == "--bench-shell-pings" && index + 1 < argc) {
         options.bench_shell_pings = static_cast<std::size_t>(parse_u64(argv[++index]));
+      } else if (flag == "--gateway-serve" && index + 1 < argc) {
+        // Comma-separated CIDR list per flag; the flag repeats.
+        std::string_view list{argv[++index]};
+        while (!list.empty()) {
+          const auto comma = list.find(',');
+          const auto item = list.substr(0, comma == std::string_view::npos
+                                               ? list.size()
+                                               : comma);
+          if (!item.empty()) {
+            options.gateway_serve_cidrs.emplace_back(item);
+          }
+          if (comma == std::string_view::npos) break;
+          list.remove_prefix(comma + 1U);
+        }
+      } else if (flag == "--gateway-echo" && index + 1 < argc) {
+        const std::string target{argv[++index]};
+        const auto separator = target.rfind(':');
+        if (separator == std::string::npos) {
+          std::cerr << "--gateway-echo requires HOST:PORT\n";
+          return usage();
+        }
+        options.gateway_echo_host = target.substr(0U, separator);
+        const auto port = parse_u64(target.substr(separator + 1U));
+        if (options.gateway_echo_host.empty() || port == 0U || port > 65535U) {
+          std::cerr << "--gateway-echo requires a non-empty host and port 1..65535\n";
+          return usage();
+        }
+        if (!heyaki::valid_gateway_host(options.gateway_echo_host)) {
+          std::cerr << "--gateway-echo host failed the gateway host grammar\n";
+          return usage();
+        }
+        options.gateway_echo_port = static_cast<std::uint16_t>(port);
+      } else if (flag == "--gateway-socks" && index + 1 < argc) {
+        const auto port = parse_u64(argv[++index]);
+        if (port == 0U || port > 65535U) {
+          std::cerr << "--gateway-socks requires port 1..65535\n";
+          return usage();
+        }
+        options.gateway_socks_port = static_cast<std::uint16_t>(port);
+      } else if (flag == "--gateway-metrics") {
+        options.gateway_metrics = true;
+      } else if (flag == "--gateway-profile" && index + 1 < argc) {
+        options.gateway_profile = argv[++index];
+        if (!heyaki::safe_gateway_profile_name(options.gateway_profile)) {
+          std::cerr << "--gateway-profile failed the profile name grammar\n";
+          return usage();
+        }
+      } else if (flag == "--gateway-direct-only") {
+        options.gateway_direct_only = true;
       } else {
         return usage();
       }
@@ -2337,6 +2800,29 @@ int main(int argc, char** argv) {
     // dangling flag here keeps scenario scripts honest.
     if (!options.turn.has_value() && options.turn_transport != "udp") {
       std::cerr << "--turn-transport requires --turn\n";
+      return usage();
+    }
+    // ---- M10 Round 6 gateway flag contracts ----
+    if (!options.gateway_serve_cidrs.empty() && options.role != "responder") {
+      std::cerr << "--gateway-serve requires --role responder\n";
+      return usage();
+    }
+    if ((options.gateway_echo_port != 0U || options.gateway_socks_port != 0U) &&
+        options.role != "initiator") {
+      std::cerr << "--gateway-echo/--gateway-socks require --role initiator\n";
+      return usage();
+    }
+    if (options.gateway_echo_port != 0U && options.gateway_socks_port != 0U) {
+      std::cerr << "--gateway-echo and --gateway-socks are exclusive scenarios\n";
+      return usage();
+    }
+    if (options.gateway_direct_only && options.gateway_serve_cidrs.empty()) {
+      std::cerr << "--gateway-direct-only needs --gateway-serve to matter\n";
+      return usage();
+    }
+    if ((options.gateway_echo_port != 0U || options.gateway_socks_port != 0U) &&
+        (options.soak_cycles > 0U || options.bench_initiator)) {
+      std::cerr << "gateway scenarios cannot ride the soak/bench loops\n";
       return usage();
     }
     return run_node(argv[2], argv[3], argv[4], std::filesystem::path{argv[5]},

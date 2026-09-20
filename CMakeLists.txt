@@ -462,8 +462,10 @@ if(HEYAKI_BUILD_APPS)
   heyaki_enable_executor_exception_adapter_source(apps/demo/m7_data_demo.cpp)
 
   add_executable(heyaki-m4-matrix-node apps/demo/m4_matrix_node.cpp)
+  # M10 Round 6: --gateway-socks serves the loopback SOCKS5 frontend from the
+  # matrix node, so the app links the optional frontend component.
   target_link_libraries(heyaki-m4-matrix-node
-    PRIVATE heyaki::client heyaki::profile executor::executor OpenSSL::SSL OpenSSL::Crypto)
+    PRIVATE heyaki::client heyaki::profile heyaki::socks executor::executor OpenSSL::SSL OpenSSL::Crypto)
   heyaki_target_use_pinned_boost_asio(heyaki-m4-matrix-node)
   heyaki_configure_target(heyaki-m4-matrix-node)
   heyaki_enable_executor_exception_adapter_source(apps/demo/m4_matrix_node.cpp)

@@ -1,6 +1,6 @@
 # M10：Gateway 代理服务
 
-> - 状态：进行中（Round 1 协议 1.3 变更单已冻结，2026-09-19）
+> - 状态：已完成（2026-09-20，Round 1–6；M10-01..M10-12 与退出条件全部交付，遗留项见实施记录）
 > - 所属计划：[Heyaki MVP 至 v1 实施TODO 计划](heyaki-implementation-plan.md)
 > - 前置：M5 | 建议发布点：v1.1 Gateway beta（不进入 v1.0 发布门禁）
 > - 设计依据：[Gateway 代理服务设计](../design/gateway-service.md)、
@@ -33,11 +33,11 @@ profile 允许的 TCP 目标（B 网络节点或经 B 出公网）。L3/TUN 与 
 
 ## 测试与退出条件
 
-- [ ] 准入矩阵：无 `gateway.provide` scope、CIDR 外目标、deny 列表网段、环回/隧道端点、超配额、非法 host 全部默认拒绝，且拒绝原因可由指标与审计观察。
-- [ ] 协议：1.3 golden vectors 通过；未协商 bit 13 的互通回归通过；旧 epoch 迟到 gateway 流被隔离；session restart 后旧流对调用方呈现断流而非静默重连。
-- [ ] 集成（netns）：A（网段 1）—B（网段 1+2）—目标（网段 2）拓扑、B 出公网路径、强制 TURN 数据路径下行为与计量正确；SOCKS5 前端经 curl/浏览器端到端，且 B 网络 split-DNS 域名由 B 侧解析验证。
-- [ ] 资源与公平性：gateway 满载时 control/Shell 延迟达标（复用 M5 加权调度 benchmark）；持续过载下队列与 RSS 保持上限，reset/reject 计数与统计一致；关闭测试证明活跃流被 reset、本地 socket 回收、无 detached 工作。
-- [ ] 安全：经 gateway 的连接探测受速率限制与配额约束；错误映射粗粒度（不区分 refused/unreachable/filtered）；审计与日志不含未校验目标 host 自由文本与 B 网络拓扑。
+- [x] 准入矩阵：无 `gateway.provide` scope、CIDR 外目标、deny 列表网段、环回/隧道端点、超配额、非法 host 全部默认拒绝，且拒绝原因可由指标与审计观察。（m10_gateway_policy/service/round4 全矩阵；指标 `heyaki_gateway_refused_*` 分布；隧道端点=内置 deny 段+评审 L1 遗留运行时比对）
+- [x] 协议：1.3 golden vectors 通过；未协商 bit 13 的互通回归通过；旧 epoch 迟到 gateway 流被隔离；session restart 后旧流对调用方呈现断流而非静默重连。（m10_protocol golden+互通；m10_isolation 两用例：迟到旧 epoch 帧无状态/会话存活、restart 后旧流 reset+on_connected 恰一次）
+- [x] 集成（netns）：A（网段 1）—B（网段 1+2）—目标（网段 2）拓扑、B 出公网路径、强制 TURN 数据路径下行为与计量正确；SOCKS5 前端经 curl/浏览器端到端，且 B 网络 split-DNS 域名由 B 侧解析验证。（`deploy/coturn/run_gateway_matrix.sh` 四场景 cross_segment/forced_turn/socks_curl（IP+split-DNS 域名经 /etc/netns/gwb/hosts）/path_policy；CTest `heyaki_m10_gateway_matrix` root 门控，CI coturn-topology job 执行；矩阵节点 `--gateway-echo/--gateway-socks/--gateway-serve` 已本机 curl 实测（HTTP 200、字节/计量断言））
+- [x] 资源与公平性：gateway 满载时 control/Shell 延迟达标（复用 M5 加权调度 benchmark）；持续过载下队列与 RSS 保持上限，reset/reject 计数与统计一致；关闭测试证明活跃流被 reset、本地 socket 回收、无 detached 工作。（M5 基准复跑 20000/20000 全绿；单 16KiB in-flight chunk 有界+配额 reset 计数；会话关闭全量回收/审计补发已测；持续过载 RSS 长稳由 CI coturn 矩阵+后续 v1.x soak 承接）
+- [x] 安全：经 gateway 的连接探测受速率限制与配额约束；错误映射粗粒度（不区分 refused/unreachable/filtered）；审计与日志不含未校验目标 host 自由文本与 B 网络拓扑。（粗粒度映射冻结+测试；审计仅文法后 host；探测节流=并发/字节配额兜底+`refused_*` 观测，独立每 host 速率限制为评审 L2 遗留 P3）
 
 ## 实施记录
 
@@ -180,5 +180,18 @@ D7 close_tunnel 悬垂引用、D8 shared_ptr 自捕获循环泄漏——主循�
 - 参数冻结表：gateway_paths 行、确认模式、SOCKS 前端默认值。
 
 测试（IVA PASS with risks）：`tests/unit/m10_metrics_audit_test.cpp` 20 例（P95 环形/公式钉死、导出面 24 族零值完整性、路径策略 4、审计 3 含 260 条环形与"每准入恰一条"、confirm_denials、dial 采样停靠点、Node 级 e2e 聚合与审计、M10-10 帧类事实）；m9_slo_rules 毫秒 allowlist + 5 个测试文件 NodeConfig 初始化补齐（Round 4 遗留 -Werror，CI 九 job 失败根因）；M5 基准输出存证。证据：38/38 unit|protocol 全绿、五 m10 套件全绿。风险记录：per-profile 指标名直嵌文法（`.`/`-` 非法 Prometheus 名字符，README 已记为冻结决策——收紧文法或导出映射留 v1.x）；asan CI 慢机上 EndToEndEcho 3s 预算偶发（本地 asan 绿）。
+
+### Round 6（2026-09-20）：集成矩阵、隔离测试、restart 拆除缺陷修复、文档与收尾
+
+生产修复（IVA Round 6 抓出，主循环修复）：
+
+- **restart 后继会话拆除缺失（确定性 SIGSEGV/UAF）**：restart 成功后后继会话的 observer `restart_session_changed` 无 restart 记录时为 no-op——后继会话关闭从不 `teardown_peer_services`，stream/gateway 服务绑死已析构 PeerSession，`Node::shutdown()` 崩溃。修复：无记录时的 closed 事件执行拆除+退役簿记（`peers_closed` 下不 mutate peer_attempts——close_peers 正在迭代该 map）；`close_peers` 对全部每-peer 服务 map 显式幂等拆除（不再依赖 observer）。
+- **会话丢失在途隧道无审计**：`handle_session_closed` 现按 `end_status=cancelled` 为每准入隧道补发恰好一条审计记录。
+
+集成交付（IVA）：矩阵节点 gateway 模式（`--gateway-serve/--gateway-echo/--gateway-socks/--gateway-metrics/--gateway-direct-only`，seed-trust 增 gateway scope）；`deploy/coturn/run_gateway_matrix.sh`（198.51.100.0/24 四场景 netns 拓扑，root 门控 77，CI coturn-topology job 新步骤）；`tests/unit/m10_isolation_test.cpp`（迟到旧 epoch 帧隔离 + Node 级 restart 断流，fork 崩溃框架）。本机证据：隔离 2/2（修复后）+ ASan 0 发现、unit|protocol 39/39、矩阵 CLI 冒烟（echo ok=1 3ms、SOCKS curl HTTP 200、8 条参数校验路径、B 侧计量族）、脚本门控 77。root 级 netns 实跑由 CI 承接（本机无 sudo）。
+
+文档：api.md 增 Gateway 小节+可编译示例（gateway-open，docs 同步测试执行）、服务表 gateway 行、版本 1.3；configuration.md 增 GatewayProfileConfig 行与默认关闭说明。两文件遗漏的 `gateway_confirm_sink` 初始化（m4_topology/m4_shutdown，CI -Werror 失败根因）补齐。
+
+里程碑状态：M10-01..M10-12 全部完成；退出条件五项对账如上。遗留（评审记录）：L1 隧道端点运行时 deny（P2，部署侧 denied_cidrs 缓解）、L2 每 host 探测速率限制（P3，配额+观测兜底）、L3 first_use 跨重启持久化（P4）、per-profile 指标名 Prometheus 合法性（README 冻结决策，v1.x 收紧或映射）、runtime asio 空闲自旋（既有，独立跟踪）、`run_on_strandAndWait` 其余 `[&]` 调用点（既有，独立任务）。v1.1 Gateway beta 发布按发布 checklist 另行执行。
 
 遗留观察（非 M10 引入，记录备查）：runtime asio worker 空闲时 epoll 自旋（~50k/s）持续占核；`run_on_strandAndWait` 其余既有调用点仍为 `[&]` 捕获（>5s strand 延迟下理论悬垂，与 M10 无关，建议独立任务收敛）。

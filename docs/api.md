@@ -235,6 +235,7 @@ serving side).
 | Events | `subscribe_events` / `publish_event` (+ local topic bridge) | Publisher-direct fan-out; exact or segment-prefix patterns; per-subscriber QoS `keep_latest` or `reliable_live`; bounded staging with drop/lag counters |
 | Files | `push_file` / `pull_file`, pause/resume/cancel | Manifest → bitmap accept → bounded-window chunks → BLAKE3 verify → fsync → atomic rename; resumable by `TransferId`; receive roots are explicit allowlists with per-peer quotas |
 | Shell | `open_shell` / input / resize / signal / eof / `close_shell` | Default-off serving side (explicit `ShellProfileConfig` list); live `shell.open:<profile>` scope; content-free audit records; TERM→grace→kill escalation |
+| Gateway | `open_gateway_stream` (+ optional SOCKS5 frontend) | Protocol 1.3 (`gateway_v1`); default-off both sides; live `gateway.use` (initiator) / `gateway.provide:<profile>` (server); see the gateway subsection below |
 
 File logical names are validated by a strict grammar (sync-tested):
 
@@ -255,6 +256,74 @@ int main() {
 
 `apps/demo/m6_message_rpc_demo.cpp` and `apps/demo/m7_data_demo.cpp` are the
 complete worked examples (semantics with two live devices).
+
+### Gateway proxy (M10, protocol 1.3)
+
+A gateway stream is an ordinary `ByteStream` to the caller: the first two
+received bytes (the frozen prelude) are consumed internally, reads begin
+with tunnel payload, and `state()` stays `opening` until the serving side
+confirmed the dial — `NodeGatewayStreamOptions::on_connected` fires
+exactly once with the outcome (or the reset's stable status as
+`gateway_connect_failed_<status>`).
+
+```heyaki-cpp gateway-open
+#include <heyaki/gateway.hpp>
+#include <heyaki/node.hpp>
+
+#include <iostream>
+
+int main() {
+  // Any Node from Node::create works (see node-lifecycle above). `peer`
+  // must be an authorized DeviceEndpointKey of a serving peer whose
+  // session negotiated gateway_v1 (protocol 1.3) and whose grant carries
+  // gateway.use; without an authorized session the call fails locally.
+  // This example runs without a profile store, so creation fails with a
+  // stable code; a real node supplies .profile (see node-lifecycle).
+  heyaki::NodeConfig config;   // every field has a default; see above
+  auto created = heyaki::Node::create(std::move(config));
+  if (!created) {
+    std::cout << "node-create " << created.error_if()->safe_detail() << '\n';
+    return 0;
+  }
+
+  heyaki::Node node{std::move(*created.value_if())};
+  const heyaki::DeviceEndpointKey peer{};   // an authorized serving peer
+  heyaki::GatewayConnect target{.host = "intranode.lan", .port = 443};
+
+  // Without an authorized session the open fails locally (peer required).
+  auto opened = node.open_gateway_stream(peer, target);
+  std::cout << (opened ? "unexpected" : opened.error_if()->safe_detail())
+            << '\n';
+
+  // With a session: state() stays `opening` until the 2-byte prelude
+  // (consumed internally) confirms the dial; on_connected fires once.
+  heyaki::NodeGatewayStreamOptions options;
+  options.on_connected = [](heyaki::Result<void> outcome) {
+    std::cout << (outcome ? "connected" : outcome.error_if()->safe_detail())
+              << '\n';
+  };
+  auto stream = node.open_gateway_stream(peer, target, options);
+  if (stream) {
+    // Movable handle; reads begin with tunnel payload (prelude consumed).
+    heyaki::ByteStream tunneled{std::move(*stream.value_if())};
+    std::cout << heyaki::byte_stream_state_name(tunneled.state()) << '\n';
+  }
+  return 0;
+}
+```
+
+Serving side: configure `NodeConfig::gateway_profiles` (validated at
+`Node::create`; an invalid set refuses startup) and grant
+`gateway.provide:<profile>`; every open re-checks the live scope, the
+profile's CIDR/port allowlists (post-resolution, per address; a builtin
+deny list covering loopback/link-local/multicast/CGNAT/IPv4-mapped ranges
+cannot be removed), concurrency/byte/idle/duration quotas, and — for
+`first_use`/`always` profiles — the operator confirmation sink (30s
+fail-closed). Audit records (`Node::gateway_audit_records()`) carry only
+grammar-validated targets and counters. The optional SOCKS5 CONNECT
+frontend (`heyaki::socks::SocksFrontend`, links `heyaki::socks`) binds
+loopback by default and passes domain targets through verbatim so the
+serving side resolves them.
 
 ## Metrics
 
@@ -278,7 +347,7 @@ capabilities — applications never handle TURN secrets.
 
 ## Protocol compatibility
 
-- Wire protocol version is `{1, 2}`; negotiation takes the intersection
+- Wire protocol version is `{1, 3}`; negotiation takes the intersection
   (`negotiate_protocol`): same major required, minor = min, capabilities
   intersected, required bits double-checked.
 - **Parsers reject unknown fields** (canonical signed objects — skipping a

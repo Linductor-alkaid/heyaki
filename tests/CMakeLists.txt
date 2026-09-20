@@ -812,6 +812,33 @@ set_tests_properties(heyaki_m10_metrics_audit PROPERTIES
   RESOURCE_LOCK heyaki_m3a_profile_state
   TIMEOUT 300)
 
+# M10 Round 6: protocol isolation across the session-restart epoch boundary
+# for gateway streams — late old-epoch STREAM_* frames on the restarted
+# session are dropped without state, the retired stream resets with its
+# pending I/O (M5-18), on_connected never refires, and the epoch-2 successor
+# serves a fresh gateway stream.
+add_executable(heyaki_m10_isolation_tests unit/m10_isolation_test.cpp)
+heyaki_enable_executor_exception_adapter_source(unit/m10_isolation_test.cpp)
+target_link_libraries(heyaki_m10_isolation_tests PRIVATE
+  heyaki::client
+  executor::executor
+  GTest::gtest_main
+  OpenSSL::SSL)
+heyaki_target_use_pinned_boost_asio(heyaki_m10_isolation_tests)
+heyaki_configure_target(heyaki_m10_isolation_tests)
+target_include_directories(heyaki_m10_isolation_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/client"
+  "${CMAKE_CURRENT_SOURCE_DIR}/unit")
+target_compile_definitions(heyaki_m10_isolation_tests PRIVATE
+  "HEYAKI_M10_ISOLATION_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}/m10-isolation\"")
+heyaki_add_runtime_test(
+  heyaki_m10_isolation heyaki_m10_isolation_tests
+  "unit;m10;gateway;protocol")
+set_tests_properties(heyaki_m10_isolation PROPERTIES
+  RESOURCE_LOCK heyaki_m3a_profile_state
+  TIMEOUT 300)
+
 add_executable(heyaki_m8_service_tests
   unit/m8_codec_test.cpp
   unit/m8_shell_test.cpp
@@ -1355,6 +1382,22 @@ if(HEYAKI_BUILD_APPS)
       --demo-bin "$<TARGET_FILE:heyaki-m3b-relay-demo>")
   set_tests_properties(heyaki_m9_fault_matrix PROPERTIES
     LABELS "relay;network;fault;m9"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 1500)
+
+  # M10 Round 6 gateway matrix: netns topology where the gateway client can
+  # reach the target ONLY through the serving node's gateway proxy (direct
+  # path DROPed). Echo tunnel, forced-TURN tunnel, SOCKS5 curl (IP + split
+  # DNS), and the direct_only path-policy refusal. Root-gated; skips with 77.
+  add_test(
+    NAME heyaki_m10_gateway_matrix
+    COMMAND "${HEYAKI_BASH_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/../deploy/coturn/run_gateway_matrix.sh"
+      --relay-bin "$<TARGET_FILE:heyaki-relay>"
+      --matrix-bin "$<TARGET_FILE:heyaki-m4-matrix-node>"
+      --demo-bin "$<TARGET_FILE:heyaki-m3b-relay-demo>")
+  set_tests_properties(heyaki_m10_gateway_matrix PROPERTIES
+    LABELS "network;m10;gateway"
     SKIP_RETURN_CODE 77
     TIMEOUT 1500)
 

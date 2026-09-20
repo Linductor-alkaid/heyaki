@@ -120,7 +120,8 @@ class M4ShutdownMatrixTest : public ::testing::Test {
                         .file_receive_roots = {},
                         .file_max_peer_receive_bytes = 0U,
                         .shell_profiles = {},
-                        .gateway_profiles = {}};
+                        .gateway_profiles = {},
+                        .gateway_confirm_sink = {}};
     auto node = Node::create(std::move(config));
     if (!node) {
       return Result<Node*>::failure(*node.error_if());

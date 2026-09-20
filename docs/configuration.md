@@ -127,6 +127,16 @@ validators:
 | `ByteStreamLimits` | `validate_byte_stream_limits` | Stream windows, concurrent streams, pending I/O |
 | `SignalingCoordinatorConfig` | `SignalingCoordinator::create` | Attempt table, candidates, TTLs, inbound rate limits |
 | Service attach configs | `attach()` on each service | Per-service queues, fan-out caps, RPC concurrency, shell profiles |
+| `GatewayProfileConfig` | `validate_gateway_profiles` (at `Node::create`) | Serving-side gateway profiles: CIDR allow/deny lists, port allowlist, `allow_internet`, concurrency/byte/rate quotas, idle/duration caps, dial deadline, confirmation mode |
+
+Gateway serving stays **off** until `NodeConfig::gateway_profiles` lists
+profiles AND the pairing grant carries `gateway.provide:<profile>`; the
+same is true per-connection for the initiator's `gateway.use` — neither
+scope is part of any standard pairing template. The TUI accepts
+`--gateway-profile NAME=CIDR[,CIDR...]` (repeatable) and
+`--gateway-confirm never|first_use|always` (see `--help`); profile
+semantics and the builtin deny list are frozen in
+[operations/parameter-freeze.md](operations/parameter-freeze.md) §6a.
 
 Sync-tested example — construct a `RuntimeConfig`, tighten one bound, and
 validate (compiled and executed by `heyaki_m9_docs_examples`):

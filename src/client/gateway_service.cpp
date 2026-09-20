@@ -139,6 +139,21 @@ Result<void> GatewayService::attach() {
 
 void GatewayService::handle_session_closed() {
   for (auto& [id, tunnel] : tunnels_) {
+    // M10-12: every tunnel that entered admission leaves exactly one
+    // audit record — session loss is no exception.
+    if (audit_sink_ != nullptr) {
+      audit_sink_(audit_context_,
+                  GatewayAuditRecord{
+                      .initiator = tunnel->initiator,
+                      .profile = tunnel->profile_name,
+                      .target_host = tunnel->target_host,
+                      .target_port = tunnel->target_port,
+                      .started_unix_ms = tunnel->opened_unix_ms,
+                      .ended_unix_ms = now(),
+                      .bytes_from_tunnel = tunnel->bytes_from_tunnel,
+                      .bytes_to_tunnel = tunnel->bytes_to_tunnel,
+                      .end_status = StableStatus::cancelled});
+    }
     tunnel->finished = true;
     boost::asio::post(io_strand_, [tunnel] {
       if (tunnel->socket) {
