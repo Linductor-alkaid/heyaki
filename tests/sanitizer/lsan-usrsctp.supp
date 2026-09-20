@@ -1,0 +1,9 @@
+# The pinned libdatachannel v0.23.2 (usrsctp dep) retains its SCTP send
+# buffer when a datachannel open message races connection teardown
+# (sctp_copy_it_in <- SctpTransport::trySendMessage). The 368-byte/2-alloc
+# window is internal to the third-party stack — Heyaki frames appear only
+# as the caller — and is timing-dependent (CI runs 35532962788/35539819653:
+# asan green on other runners, failing on the shutdown matrix and m3a).
+# Frame-based suppression, narrowly scoped to the usrsctp allocation site;
+# Heyaki-owned leaks are NOT covered by this file.
+leak:sctp_copy_it_in
