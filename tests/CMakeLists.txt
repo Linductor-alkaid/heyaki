@@ -1264,11 +1264,11 @@ if(HEYAKI_BUILD_APPS)
   set_tests_properties(heyaki_m3b_relay_onboarding_harness PROPERTIES
     LABELS "network;relay;tui;security"
     SKIP_RETURN_CODE 77
-    # The inner TUI driver carries its own timeout, so the outer budget only
-    # needs to absorb slow runners: the supply-chain job runs the full suite
-    # from -g binaries (an order bigger) and drew the full 120s twice on
-    # 2026-09-18. Match the m4 session harness headroom.
-    TIMEOUT 240)
+    # The inner TUI driver carries its own timeout (workflow env
+    # HEYAKI_TUI_DRIVE_TIMEOUT_S=240, two bounded attempts), so the outer
+    # budget must EXCEED the inner worst case plus process startup: the
+    # supply-chain job hit the exact 240.1s boundary on run 35528352360.
+    TIMEOUT 560)
 
   add_test(
     NAME heyaki_m4_tui_session_harness

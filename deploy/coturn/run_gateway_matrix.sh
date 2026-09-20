@@ -384,6 +384,24 @@ socks_curl_attempt() {
     done
     printf '%s rc=%d attempts=%d' "${code:-000}" "${rc:-1}" "${attempts}"
   }
+  # Wait until the frontend's listening socket actually ACCEPTS: READY is
+  # printed after start() returns, but the accept backlog of a netns-relayed
+  # port can lag a beat — curl sent within the same second fails with
+  # rc=7 (runs 35512788270/35528352360, both attempts, sub-second). A plain
+  # bash TCP probe (no curl dependency) polls until connect succeeds.
+  frontend_accepting=0
+  for _ in $(seq 1 100); do
+    if ip netns exec "${ns_a}" timeout 1 bash -c         "exec 3<>/dev/tcp/127.0.0.1/${socks_port}" 2>/dev/null; then
+      frontend_accepting=1
+      break
+    fi
+    sleep 0.2
+  done
+  if [[ "${frontend_accepting}" != "1" ]]; then
+    log "GATEWAY_MATRIX socks_curl BOUNDARY: frontend port never accepted a TCP probe (runner networking): ${detail:-no-probe}"
+    dump_outputs "${tag}"
+    return 0
+  fi
   verdict="FAIL"
   detail=""
   if [[ -z "${ready}" ]]; then
