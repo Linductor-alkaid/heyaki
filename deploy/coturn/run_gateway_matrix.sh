@@ -323,30 +323,33 @@ log "TOPOLOGY_OK relay=${host_gw}:${relay_port} turnA=${turn_a_ip}:${turn_port} 
 
 # ---- helpers ------------------------------------------------------------
 socks_curl_attempt() {
-  # One full socks_curl attempt (own participants, echo/http servers).
+  # One full socks_curl attempt. `local tag` keeps every attempt's profile
+  # databases and output files distinct — a retry over the same sqlite
+  # paths makes init-profile refuse and, under set -e, kills the harness.
   # Sets socks_attempt_failed=1 on FAIL; callers decide retries.
+  local tag="socks${1:-1}"
   ip netns exec "${ns_t}" python3 -m http.server "${http_port}" \
     --bind 0.0.0.0 >"${work_dir}/http-server.log" 2>&1 &
   http_pid=$!
   wait_for "${ns_b}" "${client_t}" "${http_port}"
-  prepare_participants socks
+  prepare_participants "${tag}"
   sleep 4
-  run_in "${ns_b}" "${work_dir}/socks-b.out" \
-    run "${work_dir}/socks-b.sqlite" matrix.second \
+  run_in "${ns_b}" "${work_dir}/${tag}-b.out" \
+    run "${work_dir}/${tag}-b.sqlite" matrix.second \
     "wss://${host_gw}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" 75000 \
     --role responder --gateway-serve "${serve_cidr}" \
     --authenticate-budget-ms 25000 &
   responder_pid=$!
-  run_in "${ns_a}" "${work_dir}/socks-a.out" \
-    run "${work_dir}/socks-a.sqlite" matrix.first \
+  run_in "${ns_a}" "${work_dir}/${tag}-a.out" \
+    run "${work_dir}/${tag}-a.sqlite" matrix.first \
     "wss://${host_gw}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" 70000 \
     --role initiator --gateway-socks "${socks_port}" \
     --authenticate-budget-ms 25000 &
   initiator_pid=$!
   ready=""
   for _ in $(seq 1 300); do
-    if grep -q '^GATEWAY_SOCKS_READY' "${work_dir}/socks-a.out" 2>/dev/null; then
-      ready=$(sed -n 's/^GATEWAY_SOCKS_READY //p' "${work_dir}/socks-a.out" | tail -1)
+    if grep -q '^GATEWAY_SOCKS_READY' "${work_dir}/${tag}-a.out" 2>/dev/null; then
+      ready=$(sed -n 's/^GATEWAY_SOCKS_READY //p' "${work_dir}/${tag}-a.out" | tail -1)
       break
     fi
     if ! kill -0 "${initiator_pid}" 2>/dev/null; then
@@ -404,7 +407,7 @@ socks_curl_attempt() {
   term_and_reap "${responder_pid}" 10 || true
   initiator_pid=""
   responder_pid=""
-  summary=$(sed -n 's/^GATEWAY_SOCKS_SUMMARY //p' "${work_dir}/socks-a.out" | tail -1)
+  summary=$(sed -n 's/^GATEWAY_SOCKS_SUMMARY //p' "${work_dir}/${tag}-a.out" | tail -1)
   connects=$(printf '%s\n' "${summary}" | tr ' ' '\n' |
     sed -n 's/^connects_succeeded=//p' | head -1)
   if [[ -z "${summary}" ]]; then
@@ -413,7 +416,7 @@ socks_curl_attempt() {
     # never ran); 137 = SIGKILL (OOM or outside killer). The tail shows
     # whether the node reached the gateway-socks-stop-signal marker.
     log "SOCKS_SUMMARY_MISSING initiator_exit=${initiator_status} last-initiator-output:"
-    tail -n 8 "${work_dir}/socks-a.out" 2>/dev/null || true
+    tail -n 8 "${work_dir}/${tag}-a.out" 2>/dev/null || true
   fi
   if [[ "${verdict}" == "OK" ]]; then
     # 0 = fully graceful. 143 WITH a printed summary = the stop path ran
@@ -426,7 +429,7 @@ socks_curl_attempt() {
       log "GATEWAY_MATRIX socks_curl OK: ip_and_dns_200=1 connects_succeeded=${connects} clean_exit=${initiator_status}"
     else
       log "GATEWAY_MATRIX socks_curl FAIL: connects_succeeded=${connects:-missing} initiator_exit=${initiator_status} summary=${summary:-missing}"
-      dump_outputs socks
+      dump_outputs "${tag}"
       socks_attempt_failed=1
     fi
   elif [[ -n "${connects}" && "${connects}" -ge 1 &&
@@ -445,14 +448,14 @@ socks_curl_attempt() {
       [[ -e "${attempt_log}" ]] || continue
       log "SOCKS_CURL_STDERR ${attempt_log##*/}: $(tail -n 2 "${attempt_log}" | tr '\n' ' ')"
     done
-    dump_outputs socks
+    dump_outputs "${tag}"
   else
     log "GATEWAY_MATRIX socks_curl FAIL: ${detail:-unknown} initiator_exit=${initiator_status} connects_succeeded=${connects:-missing} summary=${summary:-missing}"
     for attempt_log in "${work_dir}"/socks-curl-attempt*.stderr; do
       [[ -e "${attempt_log}" ]] || continue
       log "SOCKS_CURL_STDERR ${attempt_log##*/}: $(tail -n 2 "${attempt_log}" | tr '\n' ' ')"
     done
-    dump_outputs socks
+    dump_outputs "${tag}"
     socks_attempt_failed=1
   fi
   kill -TERM "${http_pid}" 2>/dev/null || true
@@ -697,7 +700,7 @@ for scenario in "${scenarios[@]}"; do
       # accepting a FAIL.
       for socks_attempt in 1 2; do
         socks_attempt_failed=0
-        socks_curl_attempt
+        socks_curl_attempt "${socks_attempt}"
         if [[ "${socks_attempt_failed}" == "0" ]]; then
           break
         fi
