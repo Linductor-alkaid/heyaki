@@ -57,8 +57,10 @@
 #include <utility>
 #include <vector>
 
+#ifndef _WIN32
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 namespace heyaki {
 namespace {
@@ -1743,8 +1745,23 @@ struct TuiRunResult {
 };
 
 TuiRunResult run_tui(const std::string& arguments) {
-  const std::string command = "\"" + std::string{HEYAKI_TUI_BINARY} + "\" " + arguments +
-                              " 2>/dev/null";
+#ifdef _WIN32
+  const std::string command =
+      "\"" + std::string{HEYAKI_TUI_BINARY} + "\" " + arguments + " 2>nul";
+  TuiRunResult result;
+  FILE* pipe = ::_popen(command.c_str(), "r");
+  if (pipe == nullptr) {
+    return result;
+  }
+  std::array<char, 256U> chunk{};
+  while (std::fgets(chunk.data(), static_cast<int>(chunk.size()), pipe) != nullptr) {
+    result.stdout_text += chunk.data();
+  }
+  result.exit_code = ::_pclose(pipe);
+  return result;
+#else
+  const std::string command =
+      "\"" + std::string{HEYAKI_TUI_BINARY} + "\" " + arguments + " 2>/dev/null";
   TuiRunResult result;
   FILE* pipe = ::popen(command.c_str(), "r");
   if (pipe == nullptr) {
@@ -1757,6 +1774,7 @@ TuiRunResult run_tui(const std::string& arguments) {
   const int status = ::pclose(pipe);
   result.exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
   return result;
+#endif
 }
 
 class M10Round4TuiCliTest : public ::testing::Test {

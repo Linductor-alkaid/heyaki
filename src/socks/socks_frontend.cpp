@@ -460,29 +460,29 @@ void SocksFrontend::State::pump_tunnel_to_client(
   connection->stream->async_read_some(
       std::span<std::byte>{buffer->data(), buffer->size()},
       [weak = weak_from_this(), connection, buffer](ByteStreamIoResult result) {
+        // Node-context completion: everything below touches strand-owned
+        // state (stats, socket, connections), so hop first.
         auto self = weak.lock();
         if (!self || connection->closed) return;
-        if (result.error.has_value()) {
-          self->close_connection(connection);
-          return;
-        }
-        if (result.bytes == 0U) {
-          // Tunnel half-closed: propagate EOF to the client.
-          boost::asio::post(self->strand, [connection] {
+        boost::asio::post(self->strand, [weak, connection, buffer,
+                                         result = std::move(result)]() mutable {
+          auto self = weak.lock();
+          if (!self || connection->closed) return;
+          if (result.error.has_value()) {
+            self->close_connection(connection);
+            return;
+          }
+          if (result.bytes == 0U) {
+            // Tunnel half-closed: propagate EOF to the client.
             boost::system::error_code ignored;
             connection->socket.shutdown(
                 boost::asio::ip::tcp::socket::shutdown_send, ignored);
-          });
-          return;
-        }
-        connection->stats.bytes_to_clients += result.bytes;
-        boost::asio::post(self->strand, [weak, connection, buffer,
-                                         total = result.bytes] {
-          auto self = weak.lock();
-          if (!self || connection->closed) return;
+            return;
+          }
+          connection->stats.bytes_to_clients += result.bytes;
           boost::asio::async_write(
               connection->socket,
-              boost::asio::buffer(buffer->data(), total),
+              boost::asio::buffer(buffer->data(), result.bytes),
               [weak, connection](boost::system::error_code error, std::size_t) {
                 auto self = weak.lock();
                 if (!self || connection->closed) return;

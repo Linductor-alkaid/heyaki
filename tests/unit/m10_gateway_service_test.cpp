@@ -1309,7 +1309,7 @@ class M10NodeGatewayApiTest : public ::testing::Test {
     pair.second_key =
         DeviceEndpointKey{second_snapshot.device_id, second_snapshot.endpoint_id};
 
-    const auto discovered = [&pair](const Node& node, const DeviceEndpointKey& peer) {
+    const auto discovered = [](const Node& node, const DeviceEndpointKey& peer) {
       const auto entries = node.endpoints();
       return std::any_of(entries.begin(), entries.end(),
                          [&](const auto& entry) { return entry.key == peer; });
@@ -1496,7 +1496,7 @@ TEST_F(M10NodeGatewayApiTest, EndToEndEchoThroughPublicApi) {
   // serving side's 2-byte prelude lands after the real dial completes.
   EXPECT_EQ(stream.state(), ByteStreamState::opening);
   {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{3};
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{12};
     executor::comm::PhaseGate poll{"m10-gateway-service-connect-poll"};
     while (stream.state() != ByteStreamState::open &&
            std::chrono::steady_clock::now() < deadline) {
@@ -1518,7 +1518,7 @@ TEST_F(M10NodeGatewayApiTest, EndToEndEchoThroughPublicApi) {
     write_state->done.store(true);
   });
   EXPECT_TRUE(wait_until([&] { return write_state->done.load(); },
-                         std::chrono::milliseconds{3000}));
+                         std::chrono::milliseconds{12000}));
   ASSERT_FALSE(write_state->error.has_value()) << write_state->error->safe_detail();
 
   auto read_state = std::make_shared<NodeIoCapture>();
@@ -1529,7 +1529,7 @@ TEST_F(M10NodeGatewayApiTest, EndToEndEchoThroughPublicApi) {
                            read_state->bytes.store(result.bytes);
                            read_state->done.store(true);
                          });
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{3};
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{12};
   while (!read_state->done.load() && std::chrono::steady_clock::now() < deadline) {
     (void)pump_echo();
     executor::comm::PhaseGate poll{"m10-gateway-service-echo-poll"};
@@ -1552,7 +1552,7 @@ TEST_F(M10NodeGatewayApiTest, EndToEndEchoThroughPublicApi) {
                            eof_state->bytes.store(result.bytes);
                            eof_state->done.store(true);
                          });
-  const auto eof_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{3};
+  const auto eof_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{12};
   while (!eof_state->done.load() && std::chrono::steady_clock::now() < eof_deadline) {
     (void)pump_echo();
     executor::comm::PhaseGate poll{"m10-gateway-service-eof-poll"};

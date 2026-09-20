@@ -1302,7 +1302,7 @@ class M10Round5NodeTest : public ::testing::Test {
     pair.second_key =
         DeviceEndpointKey{second_snapshot.device_id, second_snapshot.endpoint_id};
 
-    const auto discovered = [&pair](const Node& node, const DeviceEndpointKey& peer) {
+    const auto discovered = [](const Node& node, const DeviceEndpointKey& peer) {
       const auto entries = node.endpoints();
       return std::any_of(entries.begin(), entries.end(),
                          [&](const auto& entry) { return entry.key == peer; });
