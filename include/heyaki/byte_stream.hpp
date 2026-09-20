@@ -52,6 +52,11 @@ struct ByteStreamWindow {
 
 // One stream bound to the lifetime of its session: streams never survive a
 // session loss (M5-18); recovery belongs to higher-level protocols.
+//
+// Threading: streams obtained from Node marshal every operation onto the
+// node's execution context; completions always fire on that context.
+// I/O buffers passed as spans must stay valid until the handler fires.
+// Synchronous accessors block briefly (bounded) when called off-context.
 class ByteStream {
  public:
   using ReadHandler = std::function<void(ByteStreamIoResult)>;
@@ -80,14 +85,18 @@ class ByteStream {
   // Fail this stream only; the session keeps running.
   void reset(StableStatus reason);
 
-  [[nodiscard]] ByteStreamState state() const noexcept;
-  [[nodiscard]] ByteStreamWindow window() const noexcept;
-  [[nodiscard]] std::size_t pending_writes() const noexcept;
-  [[nodiscard]] std::size_t pending_reads() const noexcept;
+  [[nodiscard]] ByteStreamState state() const;
+  [[nodiscard]] ByteStreamWindow window() const;
+  [[nodiscard]] std::size_t pending_writes() const;
+  [[nodiscard]] std::size_t pending_reads() const;
 
   // Internal: wraps a type-erased stream handle owned by the session layer.
-  // Applications receive streams from Node, never construct them.
-  [[nodiscard]] static ByteStream adopt(std::shared_ptr<void> erased_handle);
+  // Applications receive streams from Node, never construct them. The
+  // optional poster marshals operations onto the owning execution context
+  // (Node supplies it; see the threading note above).
+  [[nodiscard]] static ByteStream adopt(
+      std::shared_ptr<void> erased_handle,
+      std::function<bool(std::function<void()>)> op_poster = {});
 
   // Opaque implementation type, defined inside the library.
   class Impl;

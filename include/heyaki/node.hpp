@@ -386,6 +386,16 @@ struct NodeByteStreamOptions {
   std::uint32_t receive_window_frames{64U};
 };
 
+// Options for Node::open_gateway_stream. `dial_deadline_unix_milliseconds`
+// is an ABSOLUTE unix deadline for the serving side's 2-byte prelude (0
+// keeps the frozen 10-second default computed at call time); expiry resets
+// the stream with deadline_exceeded (M10-08).
+struct NodeGatewayStreamOptions {
+  std::uint64_t receive_window_bytes{256U * 1024U};
+  std::uint32_t receive_window_frames{64U};
+  std::uint64_t dial_deadline_unix_milliseconds{0U};
+};
+
 // ---- M7 remote events & file transfer ----
 // One local fan-out message bridged at the device boundary (M7-05): the
 // local counterpart of a remote EventItemBody with deliberately distinct
@@ -672,6 +682,17 @@ class Node {
       const NodeByteStreamOptions& options = {});
   void set_byte_stream_inbound_handler(
       std::function<void(const DeviceEndpointKey&, ByteStream)> handler);
+
+  // ---- M10 gateway proxy (public API, initiator side) ----
+  // Opens one gateway proxy connection: STREAM_OPEN carrying the frozen
+  // gateway field (protocol 1.3; the session must have negotiated
+  // gateway_v1 and hold the gateway.use scope). The returned stream is an
+  // ordinary ByteStream whose first received bytes were the 2-byte prelude,
+  // consumed internally — caller reads begin with tunnel payload, and the
+  // dial deadline / refusal surface as a stream reset (M10-08).
+  [[nodiscard]] Result<ByteStream> open_gateway_stream(
+      const DeviceEndpointKey& peer, GatewayConnect target,
+      const NodeGatewayStreamOptions& options = {});
 
   // ---- M6 message & unary RPC (public API) ----
   // Sends one typed message to an authorized peer. Fails immediately with

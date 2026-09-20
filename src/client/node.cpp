@@ -3,6 +3,7 @@
 #include "runtime_access.hpp"
 
 #include "byte_stream.hpp"
+#include "gateway_service.hpp"
 #include "event_service.hpp"
 #include "file_service.hpp"
 #include "shell_service.hpp"
@@ -3018,7 +3019,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
          .local_identity = &identity,
          .peer_public_key = iterator->second.peer_public_key,
          .local_protocol = {.version = current_protocol_version,
-                            .supported = {protocol_1_2_capability_bits},
+                            .supported = {protocol_1_3_capability_bits},
                             .required = {static_cast<std::uint64_t>(Capability::session)}},
          .expires_unix_milliseconds = expires,
          .now_unix_milliseconds = unix_milliseconds_now(),
@@ -3307,28 +3308,45 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     return Result<void>::success();
   }
 
-  Result<std::shared_ptr<ByteStreamHandle>> open_stream_strand(
-      DeviceEndpointKey peer, std::uint64_t receive_window_bytes,
-      std::uint32_t receive_window_frames) {
+  // Lazily creates (and attaches) the per-peer ByteStreamService; shared
+  // by open_stream_strand and the gateway serving path (M10-07).
+  ByteStreamService* ensure_stream_service(const DeviceEndpointKey& peer,
+                                           PeerSession* explicit_session) {
     auto* attempt = authenticated_attempt(peer);
     if (attempt == nullptr || attempt->session == nullptr) {
-      return Result<std::shared_ptr<ByteStreamHandle>>::failure(
-          node_error(ErrorCode::pairing_required, "session_not_authorized"));
+      return nullptr;
     }
+    auto* session = explicit_session != nullptr ? explicit_session
+                                                : attempt->session.get();
     auto& service = stream_services[peer];
     if (!service) {
-      service = std::make_unique<ByteStreamService>(*attempt->session);
+      service = std::make_unique<ByteStreamService>(*session);
       auto attached = service->attach();
       if (!attached) {
         stream_services.erase(peer);
-        return Result<std::shared_ptr<ByteStreamHandle>>::failure(*attached.error_if());
+        update_snapshot([&](NodeSnapshot& snapshot) {
+          snapshot.last_error = *attached.error_if();
+        });
+        return nullptr;
       }
       service->set_inbound_handler(
           [weak = weak_from_this(), peer](const std::shared_ptr<ByteStreamHandle>& stream) {
             auto self = weak.lock();
             if (!self || !self->stream_inbound_handler) return;
-            self->stream_inbound_handler(peer, make_public_byte_stream(stream));
+            self->stream_inbound_handler(
+                peer, make_public_byte_stream(stream, self->stream_op_poster()));
           });
+    }
+    return service.get();
+  }
+
+  Result<std::shared_ptr<ByteStreamHandle>> open_stream_strand(
+      DeviceEndpointKey peer, std::uint64_t receive_window_bytes,
+      std::uint32_t receive_window_frames) {
+    auto* service = ensure_stream_service(peer, nullptr);
+    if (service == nullptr) {
+      return Result<std::shared_ptr<ByteStreamHandle>>::failure(
+          node_error(ErrorCode::pairing_required, "session_not_authorized"));
     }
     return service->open_stream(receive_window_bytes, receive_window_frames);
   }
@@ -3399,6 +3417,30 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         boost::asio::post(self->strand, std::move(task));
       }
       // A dead node drops the completion: its sessions and channels are gone.
+    };
+  }
+
+  // Poster for public ByteStream operations (M10 threading fix): every op
+  // marshals onto the node strand — the same context the transport
+  // callbacks and the maintenance tick drive the stream service from.
+  // Inline execution when already on the strand keeps handler-context
+  // callers deadlock-free; a dead node or a failed post reports false so
+  // the facade completes the call with a cancellation outcome.
+  ByteStreamOpPoster stream_op_poster() {
+    auto weak = weak_from_this();
+    return [weak](std::function<void()> task) -> bool {
+      auto self = weak.lock();
+      if (!self) return false;
+      try {
+        if (self->strand.running_in_this_thread()) {
+          task();
+          return true;
+        }
+        boost::asio::post(self->strand, std::move(task));
+        return true;
+      } catch (...) {
+        return false;
+      }
     };
   }
 
@@ -3609,6 +3651,41 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       service->set_audit_sink(&Node::Impl::shell_audit_sink, this);
       shell_services.emplace(peer, std::move(service));
     }
+    if (!gateway_services.contains(peer)) {
+      // Serving side (M10-07): only with an explicitly configured profile
+      // set — the default stays off and inbound gateway opens reset with
+      // `unimplemented` from the ByteStream path.
+      if (!gateway_profiles.empty()) {
+        auto* streams = ensure_stream_service(peer, session.get());
+        if (streams == nullptr) {
+          return;
+        }
+        auto io = detail::RuntimeAccess::io_executor(*runtime);
+        if (!io) {
+          update_snapshot([&](NodeSnapshot& snapshot) {
+            snapshot.last_error = *io.error_if();
+          });
+          return;
+        }
+        GatewayServiceConfig gateway_config;
+        gateway_config.profiles = gateway_profiles;
+        auto service = std::make_shared<GatewayService>(
+            *session, *streams, std::move(gateway_config), *io.value_if(),
+            service_strand_poster(),
+            [session](std::string_view scope) {
+              return session_scope_covers(*session, scope);
+            },
+            unix_milliseconds_now);
+        auto attached = service->attach();
+        if (!attached) {
+          update_snapshot([&](NodeSnapshot& snapshot) {
+            snapshot.last_error = *attached.error_if();
+          });
+          return;
+        }
+        gateway_services.emplace(peer, std::move(service));
+      }
+    }
   }
 
   // Finalizes the services of one peer session: pending messages become
@@ -3617,6 +3694,13 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   // ByteStream services die with their session (M5-18) and are released
   // here as well.
   void teardown_peer_services(const DeviceEndpointKey& peer) {
+    // Gateway tunnels first: they hold references into the stream service.
+    const auto gateway_entry = gateway_services.find(peer);
+    if (gateway_entry != gateway_services.end()) {
+      auto service = gateway_entry->second;
+      gateway_services.erase(gateway_entry);
+      service->handle_session_closed();
+    }
     stream_services.erase(peer);
     const auto message = message_services.find(peer);
     if (message != message_services.end()) {
@@ -4019,6 +4103,15 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     }
     for (auto& [peer, service] : shell_services) {
       service->prune();
+    }
+    // M10: gateway idle/duration sweeps and the A-side dial-deadline check
+    // ride the same tick (a silent peer sends no frames to trigger
+    // check_deadlines on its own).
+    for (auto& [peer, service] : gateway_services) {
+      service->prune();
+    }
+    for (auto& [peer, service] : stream_services) {
+      service->check_deadlines();
     }
     // Retries whose deadline passed while no session existed finalize now.
     for (auto queue_entry = rpc_retry_queue.begin();
@@ -4712,7 +4805,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
          .local_identity = &identity,
          .peer_public_key = restart.context.peer_public_key,
          .local_protocol = {.version = current_protocol_version,
-                            .supported = {protocol_1_2_capability_bits},
+                            .supported = {protocol_1_3_capability_bits},
                             .required = {static_cast<std::uint64_t>(Capability::session)}},
          .expires_unix_milliseconds = unix_milliseconds_now() + 60'000U,
          .now_unix_milliseconds = unix_milliseconds_now(),
@@ -4851,7 +4944,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     attempt.timeline = restart->timeline;
     attempt.transport = restart->transport;
     attempt.session = restart->session;
-    attempt.negotiated_capabilities = CapabilitySet{protocol_1_2_capability_bits};
+    attempt.negotiated_capabilities = CapabilitySet{protocol_1_3_capability_bits};
     const auto request_id = restart->request_id;
     peer_attempts.emplace(request_id, std::move(attempt));
     peer_attempt_by_endpoint[peer] = request_id;
@@ -6039,6 +6132,10 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   std::shared_ptr<ShellPtyCoordinator> shell_pty{std::make_shared<ShellPtyCoordinator>()};
   NodeShellEventObserver shell_event_observer;
   std::deque<ShellAuditRecord> shell_audit_log;
+  // ---- M10 gateway proxy ----
+  // Serving-side tunnels per authorized peer; empty unless the node was
+  // configured with gateway profiles (default off).
+  std::map<DeviceEndpointKey, std::shared_ptr<GatewayService>> gateway_services;
   // Bounded pairing audit history (M9-03); events carry the wire pairing
   // RequestId and GrantId as correlation ids, never the password.
   std::deque<PairingAuditEvent> pairing_audit_log;
@@ -6579,13 +6676,71 @@ Result<ByteStream> Node::open_byte_stream(const DeviceEndpointKey& peer,
   if (!opened) {
     return Result<ByteStream>::failure(*opened.error_if());
   }
-  return Result<ByteStream>::success(make_public_byte_stream(*opened.value_if()));
+  return Result<ByteStream>::success(
+      make_public_byte_stream(*opened.value_if(), impl_->stream_op_poster()));
 }
 
 void Node::set_byte_stream_inbound_handler(
     std::function<void(const DeviceEndpointKey&, ByteStream)> handler) {
   if (!impl_) return;
   impl_->stream_inbound_handler = std::move(handler);
+}
+
+Result<ByteStream> Node::open_gateway_stream(const DeviceEndpointKey& peer,
+                                             GatewayConnect target,
+                                             const NodeGatewayStreamOptions& options) {
+  if (!impl_) {
+    return Result<ByteStream>::failure(
+        node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  if (peer.device_id.is_zero() || peer.endpoint_id.is_zero()) {
+    return Result<ByteStream>::failure(
+        node_error(ErrorCode::configuration, "stream_peer_invalid"));
+  }
+  auto valid = validate_gateway_connect(target);
+  if (!valid) {
+    return Result<ByteStream>::failure(*valid.error_if());
+  }
+  if (options.receive_window_bytes == 0U || options.receive_window_frames == 0U) {
+    return Result<ByteStream>::failure(
+        node_error(ErrorCode::configuration, "stream_window_invalid"));
+  }
+  Result<std::shared_ptr<ByteStreamHandle>> opened =
+      Result<std::shared_ptr<ByteStreamHandle>>::failure(
+          node_error(ErrorCode::internal, "gateway_open_no_result"));
+  impl_->run_on_strandAndWait([&](Impl& impl) {
+    auto* attempt = impl.authenticated_attempt(peer);
+    if (attempt == nullptr || attempt->session == nullptr) {
+      opened = Result<std::shared_ptr<ByteStreamHandle>>::failure(
+          node_error(ErrorCode::pairing_required, "session_not_authorized"));
+      return;
+    }
+    // Initiator scope gate (M10-03): gateway.use must be in the session's
+    // live scope set before any gateway field leaves this node.
+    if (!impl.session_scope_covers(*attempt->session, gateway_use_scope)) {
+      opened = Result<std::shared_ptr<ByteStreamHandle>>::failure(
+          node_error(ErrorCode::permission, "gateway_use_scope_missing"));
+      return;
+    }
+    auto* service = impl.ensure_stream_service(peer, nullptr);
+    if (service == nullptr) {
+      opened = Result<std::shared_ptr<ByteStreamHandle>>::failure(
+          node_error(ErrorCode::pairing_required, "session_not_authorized"));
+      return;
+    }
+    const auto deadline = options.dial_deadline_unix_milliseconds != 0U
+                              ? options.dial_deadline_unix_milliseconds
+                              : unix_milliseconds_now() +
+                                    static_cast<std::uint64_t>(
+                                        default_gateway_dial_deadline.count());
+    opened = service->open_gateway_stream(target, options.receive_window_bytes,
+                                          options.receive_window_frames, deadline);
+  });
+  if (!opened) {
+    return Result<ByteStream>::failure(*opened.error_if());
+  }
+  return Result<ByteStream>::success(
+      make_public_byte_stream(*opened.value_if(), impl_->stream_op_poster()));
 }
 
 Result<MessageId> Node::send_message(const DeviceEndpointKey& peer,

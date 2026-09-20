@@ -726,6 +726,34 @@ set_tests_properties(heyaki_m10_gateway_policy PROPERTIES
   RESOURCE_LOCK heyaki_m3a_profile_state
   TIMEOUT 120)
 
+# M10 Round 3: the B-side GatewayService (M10-07) and the A-side
+# open_gateway_stream public API (M10-08) — initiator prelude semantics and
+# dial deadline, admission/refusal accounting over the loopback session
+# harness, real dials against a local echo target, injected-clock
+# idle/duration/quota sweeps, session-close cleanup, and Node-level local
+# validation plus the gateway.use scope gate over an authenticated LAN pair.
+add_executable(heyaki_m10_gateway_service_tests unit/m10_gateway_service_test.cpp)
+heyaki_enable_executor_exception_adapter_source(unit/m10_gateway_service_test.cpp)
+target_link_libraries(heyaki_m10_gateway_service_tests PRIVATE
+  heyaki::client
+  executor::executor
+  GTest::gtest_main
+  OpenSSL::SSL)
+heyaki_target_use_pinned_boost_asio(heyaki_m10_gateway_service_tests)
+heyaki_configure_target(heyaki_m10_gateway_service_tests)
+target_include_directories(heyaki_m10_gateway_service_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/client"
+  "${CMAKE_CURRENT_SOURCE_DIR}/unit")
+target_compile_definitions(heyaki_m10_gateway_service_tests PRIVATE
+  "HEYAKI_M10_SERVICE_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}/m10-gateway-service\"")
+heyaki_add_runtime_test(
+  heyaki_m10_gateway_service heyaki_m10_gateway_service_tests
+  "unit;m10;gateway;concurrency")
+set_tests_properties(heyaki_m10_gateway_service PROPERTIES
+  RESOURCE_LOCK heyaki_m3a_profile_state
+  TIMEOUT 180)
+
 add_executable(heyaki_m8_service_tests
   unit/m8_codec_test.cpp
   unit/m8_shell_test.cpp

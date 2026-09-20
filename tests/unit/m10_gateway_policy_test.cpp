@@ -17,8 +17,15 @@
 
 // Platform RFC 5952 oracle: the resolver's own inet_pton/inet_ntop are used
 // as an independent second opinion on parse bytes and canonical text, so a
-// shared bug cannot hide on both sides of a comparison.
+// shared bug cannot hide on both sides of a comparison. The oracle needs
+// POSIX <arpa/inet.h>, which MSVC does not provide: on Windows (and whenever
+// HEYAKI_TEST_NO_POSIX_INET is defined, which lets any platform compile the
+// oracle-off configuration for verification) the oracle-backed comparisons
+// are skipped while every pure grammar and policy assertion still runs.
+#if !defined(_WIN32) && !defined(HEYAKI_TEST_NO_POSIX_INET)
+#define HEYAKI_TEST_POSIX_INET 1
 #include <arpa/inet.h>
+#endif
 
 #include <array>
 #include <cctype>
@@ -1014,7 +1021,11 @@ TEST(M10GatewayScopeExclusion, TuiDefaultTemplatesContainNoGatewayScopes) {
 // The three production defects fixed this round are re-verified here with
 // hand-built canonical byte layouts and the platform resolver (inet_pton /
 // inet_ntop) instead of the production parser, so the checks cannot pass
-// vacuously through a bug shared with the code under test.
+// vacuously through a bug shared with the code under test. The resolver
+// oracle is POSIX-only (HEYAKI_TEST_POSIX_INET, see the include guard at
+// the top of this file): on Windows the oracle comparisons are skipped and
+// the pure-oracle test GTEST_SKIPs, while every hand-built byte layout,
+// grammar, and admission assertion below still runs.
 
 GatewayIp v6_from_groups(const std::array<std::uint16_t, 8U>& groups) {
   GatewayIp address;
@@ -1028,6 +1039,7 @@ GatewayIp v6_from_groups(const std::array<std::uint16_t, 8U>& groups) {
 
 // Bytes a real B-side resolver would hand the admission engine for an IPv6
 // literal; false means the platform itself rejects the literal.
+#ifdef HEYAKI_TEST_POSIX_INET
 bool system_v6_bytes(std::string_view literal,
                      std::array<std::uint8_t, 16U>& out) {
   const std::string text{literal};
@@ -1050,6 +1062,7 @@ std::string system_v6_text(const GatewayIp& address) {
   }
   return std::string{result};
 }
+#endif  // HEYAKI_TEST_POSIX_INET
 
 std::string groups_to_text(const std::array<std::uint16_t, 8U>& groups) {
   static constexpr char hex[] = "0123456789abcdef";
@@ -1107,6 +1120,7 @@ TEST(M10GatewayD1Fix, MappedLiteralBytesAreTenZerosThenTail) {
   expected[15] = std::byte{0x01U};
   EXPECT_EQ(mapped->bytes, expected);
 
+#ifdef HEYAKI_TEST_POSIX_INET
   // The deny literals themselves must byte-match the platform oracle.
   for (const auto* literal : {"::", "::1", "fe80::1", "ff02::1"}) {
     std::array<std::uint8_t, 16U> system_bytes{};
@@ -1119,11 +1133,15 @@ TEST(M10GatewayD1Fix, MappedLiteralBytesAreTenZerosThenTail) {
           << "byte " << index << " of " << literal;
     }
   }
+#endif  // HEYAKI_TEST_POSIX_INET
 }
 
 // D1/D3 cross-check: accept/reject agreement plus byte equality with
 // inet_pton over the deny-list literals and adversarial compression forms.
 TEST(M10GatewayParseOracle, AgreesWithInetPtonOnV6Literals) {
+#ifndef HEYAKI_TEST_POSIX_INET
+  GTEST_SKIP() << "inet_pton oracle unavailable (MSVC has no arpa/inet.h)";
+#else
   const std::vector<std::string_view> literals{
       "::",       "::1",           "::2",            "fe80::",
       "fe80::1",  "fe80::1%eth0",  "ff00::",         "ff02::1",
@@ -1150,6 +1168,7 @@ TEST(M10GatewayParseOracle, AgreesWithInetPtonOnV6Literals) {
       }
     }
   }
+#endif  // HEYAKI_TEST_POSIX_INET
 }
 
 // D4 (Round 2 supplement): IPv4-mapped IPv6 targets must not dodge the
@@ -1181,6 +1200,7 @@ TEST(M10GatewayAdmission, BuiltinDenyListCoversIpv4MappedTargets) {
     const auto resolved = parse_gateway_ip(literal);
     ASSERT_TRUE(resolved.has_value()) << label << " literal=" << literal;
     ASSERT_FALSE(resolved->v4) << label << " must be v6-family bytes";
+#ifdef HEYAKI_TEST_POSIX_INET
     // Tie the parsed bytes to the platform oracle so the check cannot pass
     // through a parser bug shared with production.
     std::array<std::uint8_t, 16U> system_bytes{};
@@ -1190,6 +1210,7 @@ TEST(M10GatewayAdmission, BuiltinDenyListCoversIpv4MappedTargets) {
                 static_cast<std::byte>(system_bytes[index]))
           << "byte " << index << " of " << literal;
     }
+#endif  // HEYAKI_TEST_POSIX_INET
     const auto admission = admit_gateway_connection(
         profiles, connect_request(literal, 443U, "internet"),
         std::vector<GatewayIp>{*resolved}, idle_context());
@@ -1300,7 +1321,13 @@ TEST(M10GatewayFormatOracle, SweepMatchesSystemNtopAndRoundTrips) {
     }
     const GatewayIp address = v6_from_groups(groups);
     const std::string text = format_gateway_ip(address);
+#if defined(HEYAKI_TEST_POSIX_INET)
     const std::string system_text = system_v6_text(address);
+#else
+    // No platform oracle: only the structural and round-trip checks below
+    // run (they are all oracle-independent).
+    const std::string system_text;
+#endif
     std::string reason;
 
     if (text.size() > 39U) {
@@ -1333,6 +1360,7 @@ TEST(M10GatewayFormatOracle, SweepMatchesSystemNtopAndRoundTrips) {
     if (reason.empty() && (!reparsed.has_value() || *reparsed != address)) {
       reason = "production parser round-trip mismatch";
     }
+#if defined(HEYAKI_TEST_POSIX_INET)
     if (reason.empty()) {
       std::array<std::uint8_t, 16U> system_bytes{};
       if (!system_v6_bytes(text, system_bytes)) {
@@ -1347,6 +1375,7 @@ TEST(M10GatewayFormatOracle, SweepMatchesSystemNtopAndRoundTrips) {
         }
       }
     }
+#endif  // HEYAKI_TEST_POSIX_INET
     // glibc prints the deprecated IPv4-compatible range (words[0..5] all
     // zero, words[6] nonzero) as "::a.b.c.d"; RFC 5952 discourages that
     // form, heyaki keeps pure IPv6 notation there, so that range is exempt
@@ -1359,9 +1388,12 @@ TEST(M10GatewayFormatOracle, SweepMatchesSystemNtopAndRoundTrips) {
       if (reason.empty() && text.find('.') != std::string::npos) {
         reason = "used the deprecated IPv4-compatible dotted form";
       }
-    } else if (reason.empty() && text != system_text) {
+    }
+#if defined(HEYAKI_TEST_POSIX_INET)
+    else if (reason.empty() && text != system_text) {
       reason = "canonical text differs from inet_ntop";
     }
+#endif  // HEYAKI_TEST_POSIX_INET
     if (!reason.empty()) {
       ++failures;
       ADD_FAILURE() << groups_to_text(groups) << ": text=\"" << text
@@ -1388,11 +1420,13 @@ TEST(M10GatewayFormatOracle, IPv4SweepMatchesSystemNtopAndRoundTrips) {
       address.bytes[octet] = static_cast<std::byte>(alphabet[digits[octet]]);
     }
     const std::string text = format_gateway_ip(address);
+#if defined(HEYAKI_TEST_POSIX_INET)
     char system_text[INET_ADDRSTRLEN] = {};
     const void* raw = static_cast<const void*>(address.bytes.data());
     ASSERT_NE(::inet_ntop(AF_INET, raw, system_text, sizeof system_text),
               nullptr);
     EXPECT_EQ(text, std::string{system_text});
+#endif  // HEYAKI_TEST_POSIX_INET
     const auto reparsed = parse_gateway_ip(text);
     ASSERT_TRUE(reparsed.has_value()) << text;
     EXPECT_TRUE(*reparsed == address) << text;
@@ -1422,10 +1456,12 @@ TEST(M10GatewayD3Fix, LeadingAndTrailingDotsRejectedEverywhere) {
   // The well-formed counterpart still parses.
   EXPECT_TRUE(parse_gateway_cidr("1.2.3.4/32").has_value());
   EXPECT_TRUE(valid_gateway_host("1.2.3.4"));
+#if defined(HEYAKI_TEST_POSIX_INET)
   // Platform oracle agreement on the dot-edged forms.
   unsigned char scratch[4] = {};
   EXPECT_NE(::inet_pton(AF_INET, "1.2.3.4.", scratch), 1);
   EXPECT_NE(::inet_pton(AF_INET, ".1.2.3.4", scratch), 1);
+#endif  // HEYAKI_TEST_POSIX_INET
 }
 
 // Incidental fix: the two quota refusal branches must clear dial_addresses

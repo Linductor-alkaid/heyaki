@@ -641,30 +641,28 @@ Result<void> validate_gateway_profiles(std::span<const GatewayProfileConfig> pro
   return Result<void>::success();
 }
 
+const GatewayProfileConfig* resolve_gateway_profile(
+    std::span<const GatewayProfileConfig> profiles, std::string_view name) noexcept {
+  if (name.empty()) {
+    return profiles.size() == 1U ? &profiles.front() : nullptr;
+  }
+  for (const auto& candidate : profiles) {
+    if (candidate.name == name) {
+      return &candidate;
+    }
+  }
+  return nullptr;
+}
+
 GatewayAdmission admit_gateway_connection(
     std::span<const GatewayProfileConfig> profiles, const GatewayConnect& connect,
     std::span<const GatewayIp> resolved, const GatewayAdmissionContext& context) {
   GatewayAdmission admission;
-  const GatewayProfileConfig* profile = nullptr;
-  if (connect.profile.empty()) {
-    // Empty profile means the serving side picks its unambiguous default.
-    if (profiles.size() == 1U) {
-      profile = &profiles.front();
-    } else {
-      admission.refusal = GatewayRefusal::not_enabled;
-      return admission;
-    }
-  } else {
-    for (const auto& candidate : profiles) {
-      if (candidate.name == connect.profile) {
-        profile = &candidate;
-        break;
-      }
-    }
-    if (profile == nullptr) {
-      admission.refusal = GatewayRefusal::policy_denied;
-      return admission;
-    }
+  const GatewayProfileConfig* profile = resolve_gateway_profile(profiles, connect.profile);
+  if (profile == nullptr) {
+    admission.refusal = connect.profile.empty() ? GatewayRefusal::not_enabled
+                                                : GatewayRefusal::policy_denied;
+    return admission;
   }
   const bool port_allowed =
       std::any_of(profile->allowed_ports.begin(), profile->allowed_ports.end(),

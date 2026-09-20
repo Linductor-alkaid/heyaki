@@ -290,6 +290,15 @@ struct GatewayAdmission {
   std::vector<GatewayIp> dial_addresses;
 };
 
+// Selects the adjudicating profile for a connect request: an explicit name
+// must match a configured profile; an empty name resolves only when exactly
+// one profile is configured (nullptr otherwise, engine refuses
+// not_enabled). Shared by the admission engine and the serving service so
+// selection cannot drift between them.
+[[nodiscard]] const GatewayProfileConfig* resolve_gateway_profile(
+    std::span<const GatewayProfileConfig> profiles,
+    std::string_view name) noexcept;
+
 // Adjudicates one inbound GatewayConnect. `resolved` holds every address
 // the (B-side) resolution of `connect.host` produced; for an IP literal
 // that is the literal itself. All grammar checks are assumed done

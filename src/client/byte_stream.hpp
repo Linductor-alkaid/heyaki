@@ -188,6 +188,15 @@ class ByteStreamHandle {
   bool fin_sent_{false};
   std::optional<StableStatus> reset_reason_;
   bool gateway_{false};
+  // Initiator side of a gateway connection (M10-08): the first two received
+  // bytes are the frozen prelude (wire 6.3.1) — consumed and validated
+  // internally, never surfaced to the caller; reads pend until it lands.
+  bool gateway_initiator_{false};
+  bool gateway_prelude_pending_{false};
+  std::size_t gateway_prelude_received_{0U};
+  std::array<std::byte, gateway_prelude_bytes> gateway_prelude_{};
+  // Absolute unix-millisecond deadline for the prelude to arrive; 0 = none.
+  std::uint64_t gateway_dial_deadline_{0U};
   std::vector<std::shared_ptr<PendingWrite>> writes_;
   std::vector<std::shared_ptr<PendingRead>> reads_;
 };
@@ -225,10 +234,13 @@ class ByteStreamService {
   // logical stream-domain channel for this connection and sends STREAM_OPEN
   // with the `gateway` field. Fails locally without any wire frame when the
   // session did not negotiate gateway_v1 (M10-02 emission gating) or the
-  // target fails structural validation.
+  // target fails structural validation. `dial_deadline_unix_milliseconds`
+  // bounds the wait for the serving side's 2-byte prelude (0 = no deadline);
+  // expiry resets the stream with deadline_exceeded.
   [[nodiscard]] Result<std::shared_ptr<ByteStreamHandle>> open_gateway_stream(
       const GatewayConnect& target, std::uint64_t receive_window_bytes,
-      std::uint32_t receive_window_frames);
+      std::uint32_t receive_window_frames,
+      std::uint64_t dial_deadline_unix_milliseconds = 0U);
   // Streams the peer initiated land here when set; unset inbound streams are
   // reset with permission_denied.
   void set_inbound_handler(InboundHandler handler);
@@ -283,8 +295,17 @@ class ByteStreamService {
 };
 
 // Internal factory used by Node to wrap a stream handle in the public
-// facade type (defined in byte_stream_facade.cpp).
+// facade type (defined in byte_stream_facade.cpp). `poster`, when set,
+// marshals every public operation onto the execution context that owns
+// the stream's service (the node strand): transport-driven sweeps and
+// caller-driven ops then touch the handle state from one context only.
+// The poster executes inline when already on that context (no deadlock
+// for callers inside handlers) and returns false when the task could not
+// be dispatched (node gone / post failed), letting the facade complete
+// the call with a cancellation outcome instead.
+using ByteStreamOpPoster = std::function<bool(std::function<void()>)>;
 [[nodiscard]] ByteStream make_public_byte_stream(
-    std::shared_ptr<ByteStreamHandle> handle);
+    std::shared_ptr<ByteStreamHandle> handle,
+    ByteStreamOpPoster poster = {});
 
 }  // namespace heyaki

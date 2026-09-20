@@ -266,6 +266,7 @@ heyaki_configure_target(heyaki_profile)
 
 add_library(heyaki_client
   src/client/byte_stream.cpp
+  src/client/gateway_service.cpp
   src/client/byte_stream_facade.cpp
   src/client/connection_attempt.cpp
   src/client/event_service.cpp

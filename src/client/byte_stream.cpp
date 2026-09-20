@@ -419,7 +419,7 @@ Result<std::shared_ptr<ByteStreamHandle>> ByteStreamService::open_stream(
 
 Result<std::shared_ptr<ByteStreamHandle>> ByteStreamService::open_gateway_stream(
     const GatewayConnect& target, std::uint64_t receive_window_bytes,
-    std::uint32_t receive_window_frames) {
+    std::uint32_t receive_window_frames, std::uint64_t dial_deadline_unix_milliseconds) {
   if (!attached_) {
     return Result<std::shared_ptr<ByteStreamHandle>>::failure(
         stream_error(ErrorCode::configuration, "service_not_attached"));
@@ -464,6 +464,9 @@ Result<std::shared_ptr<ByteStreamHandle>> ByteStreamService::open_gateway_stream
                                                    receive_window_bytes,
                                                    receive_window_frames);
   stream->gateway_ = true;
+  stream->gateway_initiator_ = true;
+  stream->gateway_prelude_pending_ = true;
+  stream->gateway_dial_deadline_ = dial_deadline_unix_milliseconds;
   auto sent = send_stream_open(*stream, &target);
   if (!sent) {
     session_.close_business_channel(gateway_channel);
@@ -519,7 +522,19 @@ void ByteStreamService::fail_all(const Error& error) {
 
 void ByteStreamService::check_deadlines() {
   const auto now_value = now();
+  // Gateway dial deadlines can RESET (and therefore erase) the stream from
+  // `streams_` mid-sweep; collect the expired ones first and finish them
+  // after the iteration (finish_stream erases from the map).
+  std::vector<std::shared_ptr<ByteStreamHandle>> expired;
   for (auto& [id, stream] : streams_) {
+    // Gateway dial deadline (M10-08): no prelude in time means the serving
+    // side never confirmed the dial — reset with the stable timeout status
+    // instead of leaving the caller's reads pending forever.
+    if (stream->gateway_initiator_ && stream->gateway_prelude_pending_ &&
+        stream->gateway_dial_deadline_ != 0U &&
+        now_value > stream->gateway_dial_deadline_) {
+      expired.push_back(stream);
+    }
     for (auto it = stream->reads_.begin(); it != stream->reads_.end();) {
       if ((*it)->deadline.has_value() && now_value > *(*it)->deadline) {
         auto read = *it;
@@ -543,6 +558,11 @@ void ByteStreamService::check_deadlines() {
         continue;
       }
       ++it;
+    }
+  }
+  for (auto& stream : expired) {
+    if (streams_.contains(stream->stream_id())) {
+      handle_reset_frame_for(*stream, StableStatus::deadline_exceeded);
     }
   }
 }
@@ -802,8 +822,36 @@ void ByteStreamService::handle_data(const FrameView& frame) {
   stream.receive_window_remaining_bytes_ -= data.size();
   stream.receive_window_remaining_frames_ -= 1U;
   stream.next_receive_offset_ += data.size();
-  stream.receive_buffered_bytes_ += data.size();
-  stream.receive_chunks_.emplace_back(data.begin(), data.end());
+  // Gateway initiator side (M10-08): the first two received bytes are the
+  // frozen prelude (wire 6.3.1). Window and offset accounting above charge
+  // the full frame; the prelude itself is consumed and validated here and
+  // never reaches the caller — reads stay pending until a valid prelude
+  // lands, so the API cannot report "connected" earlier (design 4.2).
+  std::span<const std::byte> deliverable = data;
+  if (stream.gateway_initiator_ && stream.gateway_prelude_pending_) {
+    const std::size_t needed = gateway_prelude_bytes - stream.gateway_prelude_received_;
+    const std::size_t take = std::min(needed, data.size());
+    for (std::size_t index = 0U; index < take; ++index) {
+      stream.gateway_prelude_[stream.gateway_prelude_received_ + index] = data[index];
+    }
+    stream.gateway_prelude_received_ += take;
+    deliverable = data.subspan(take);
+    if (stream.gateway_prelude_received_ == gateway_prelude_bytes) {
+      stream.gateway_prelude_pending_ = false;
+      auto prelude = parse_gateway_prelude(std::span<const std::byte>{
+          stream.gateway_prelude_.data(), gateway_prelude_bytes});
+      if (!prelude) {
+        // Nonzero prelude status (or short/long frame shape reaching here
+        // later): there is no legal nonzero value — dial failures reset.
+        handle_reset_frame_for(stream, StableStatus::protocol_error);
+        return;
+      }
+    }
+  }
+  stream.receive_buffered_bytes_ += deliverable.size();
+  if (!deliverable.empty()) {
+    stream.receive_chunks_.emplace_back(deliverable.begin(), deliverable.end());
+  }
   stream.try_dispatch_reads();
   if (stream.fin_received_ && stream.next_receive_offset_ == stream.final_receive_offset_ &&
       stream.receive_chunks_.empty()) {
