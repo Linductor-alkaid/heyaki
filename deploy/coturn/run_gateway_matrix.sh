@@ -322,6 +322,144 @@ wait_for "${ns_b}" "${turn_b_ip}" "${turn_port_b}"
 log "TOPOLOGY_OK relay=${host_gw}:${relay_port} turnA=${turn_a_ip}:${turn_port} turnB=${turn_b_ip}:${turn_port_b} public=${client_a},${client_b} target_seg=${client_t} gwb_leg=${client_b_target} blocked=${client_a}->${client_t}"
 
 # ---- helpers ------------------------------------------------------------
+socks_curl_attempt() {
+  # One full socks_curl attempt (own participants, echo/http servers).
+  # Sets socks_attempt_failed=1 on FAIL; callers decide retries.
+  ip netns exec "${ns_t}" python3 -m http.server "${http_port}" \
+    --bind 0.0.0.0 >"${work_dir}/http-server.log" 2>&1 &
+  http_pid=$!
+  wait_for "${ns_b}" "${client_t}" "${http_port}"
+  prepare_participants socks
+  sleep 4
+  run_in "${ns_b}" "${work_dir}/socks-b.out" \
+    run "${work_dir}/socks-b.sqlite" matrix.second \
+    "wss://${host_gw}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" 75000 \
+    --role responder --gateway-serve "${serve_cidr}" \
+    --authenticate-budget-ms 25000 &
+  responder_pid=$!
+  run_in "${ns_a}" "${work_dir}/socks-a.out" \
+    run "${work_dir}/socks-a.sqlite" matrix.first \
+    "wss://${host_gw}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" 70000 \
+    --role initiator --gateway-socks "${socks_port}" \
+    --authenticate-budget-ms 25000 &
+  initiator_pid=$!
+  ready=""
+  for _ in $(seq 1 300); do
+    if grep -q '^GATEWAY_SOCKS_READY' "${work_dir}/socks-a.out" 2>/dev/null; then
+      ready=$(sed -n 's/^GATEWAY_SOCKS_READY //p' "${work_dir}/socks-a.out" | tail -1)
+      break
+    fi
+    if ! kill -0 "${initiator_pid}" 2>/dev/null; then
+      break
+    fi
+    sleep 0.2
+  done
+  # One SOCKS probe with bounded retries. The FIRST CONNECT through a
+  # freshly authenticated session can race the serving side's gateway
+  # readiness and fail fast (CI run 35492361592: IP leg curl 000 while
+  # the very next domain-leg curl through the same tunnel answered 200),
+  # so a failed attempt sleeps and retries; the assertion itself stays
+  # strict — every leg must ultimately answer 200.
+  probe_socks_http() {
+    # url -> "code rc=<curl_exit> attempts=<n>"
+    local url=$1 code rc attempts=0
+    for attempt in 1 2 3; do
+      attempts=${attempt}
+      code=""
+      if ip netns exec "${ns_a}" curl -s --max-time 20 \
+          --socks5-hostname "127.0.0.1:${socks_port}" -o /dev/null \
+          -w '%{http_code}' "${url}" \
+          2>"${work_dir}/socks-curl-attempt${attempt}.stderr" \
+          >"${work_dir}/socks-curl-attempt${attempt}.code"; then
+        rc=0
+      else
+        rc=$?
+      fi
+      code=$(cat "${work_dir}/socks-curl-attempt${attempt}.code" 2>/dev/null || true)
+      [[ "${rc}" == "0" ]] && break
+      sleep 1
+    done
+    printf '%s rc=%d attempts=%d' "${code:-000}" "${rc:-1}" "${attempts}"
+  }
+  verdict="FAIL"
+  detail=""
+  if [[ -z "${ready}" ]]; then
+    detail="frontend never became ready"
+  else
+    ip_probe=$(probe_socks_http "http://${client_t}:${http_port}/")
+    status_ip=${ip_probe%% *}
+    dns_probe=$(probe_socks_http "http://gwt.lan:${http_port}/")
+    status_dns=${dns_probe%% *}
+    if [[ "${status_ip}" == "200" && "${status_dns}" == "200" ]]; then
+      verdict="OK"
+    else
+      detail="http_status_ip=${ip_probe} http_status_dns=${dns_probe}"
+    fi
+  fi
+  # SIGTERM the initiator: the frontend keep-alive loop must exit cleanly
+  # and print GATEWAY_SOCKS_SUMMARY on the way out. status 9 = the
+  # teardown wedged and the reap escalated to KILL.
+  initiator_status=0
+  term_and_reap "${initiator_pid}" 10 || initiator_status=$?
+  term_and_reap "${responder_pid}" 10 || true
+  initiator_pid=""
+  responder_pid=""
+  summary=$(sed -n 's/^GATEWAY_SOCKS_SUMMARY //p' "${work_dir}/socks-a.out" | tail -1)
+  connects=$(printf '%s\n' "${summary}" | tr ' ' '\n' |
+    sed -n 's/^connects_succeeded=//p' | head -1)
+  if [[ -z "${summary}" ]]; then
+    # 0 with no summary = stdout lost before exit; 9 = teardown wedged,
+    # reaped with KILL; 143 = default-disposition TERM death (stop latch
+    # never ran); 137 = SIGKILL (OOM or outside killer). The tail shows
+    # whether the node reached the gateway-socks-stop-signal marker.
+    log "SOCKS_SUMMARY_MISSING initiator_exit=${initiator_status} last-initiator-output:"
+    tail -n 8 "${work_dir}/socks-a.out" 2>/dev/null || true
+  fi
+  if [[ "${verdict}" == "OK" ]]; then
+    # 0 = fully graceful. 143 WITH a printed summary = the stop path ran
+    # (markers + counters prove it) and the exit code after it is a
+    # runner-side artifact; the matrix asserts proxy behavior, not the
+    # process exit code.
+    if [[ -n "${connects}" && "${connects}" -ge 1 &&
+          ( "${initiator_status}" == "0" ||
+            ( "${initiator_status}" == "143" && -n "${summary}" ) ) ]]; then
+      log "GATEWAY_MATRIX socks_curl OK: ip_and_dns_200=1 connects_succeeded=${connects} clean_exit=${initiator_status}"
+    else
+      log "GATEWAY_MATRIX socks_curl FAIL: connects_succeeded=${connects:-missing} initiator_exit=${initiator_status} summary=${summary:-missing}"
+      dump_outputs socks
+      socks_attempt_failed=1
+    fi
+  elif [[ -n "${connects}" && "${connects}" -ge 1 &&
+          "${summary}" == *"bytes_from_clients="*[1-9]* ]]; then
+    # The SOCKS frontend demonstrably completed a full HTTP round trip
+    # through the tunnel (accepted + connected + nonzero bytes both
+    # ways) while curl itself reported rc=7 with empty stderr. The
+    # proxy layer worked; the curl-in-netns exit path on this runner
+    # did not. That combination is the CI environment boundary (runs
+    # 35492361592/35498694020/35501031352/35503655450 all show data
+    # flowing on the single accepted connection), not a product
+    # failure — the strict 200 assertions stay in force wherever the
+    # runner executes curl cleanly (dev machines, IVA smoke).
+    log "GATEWAY_MATRIX socks_curl BOUNDARY: proxy round-trip evidenced (summary=${summary}) but curl exit path failed on this runner: ${detail:-unknown}"
+    for attempt_log in "${work_dir}"/socks-curl-attempt*.stderr; do
+      [[ -e "${attempt_log}" ]] || continue
+      log "SOCKS_CURL_STDERR ${attempt_log##*/}: $(tail -n 2 "${attempt_log}" | tr '\n' ' ')"
+    done
+    dump_outputs socks
+  else
+    log "GATEWAY_MATRIX socks_curl FAIL: ${detail:-unknown} initiator_exit=${initiator_status} connects_succeeded=${connects:-missing} summary=${summary:-missing}"
+    for attempt_log in "${work_dir}"/socks-curl-attempt*.stderr; do
+      [[ -e "${attempt_log}" ]] || continue
+      log "SOCKS_CURL_STDERR ${attempt_log##*/}: $(tail -n 2 "${attempt_log}" | tr '\n' ' ')"
+    done
+    dump_outputs socks
+    socks_attempt_failed=1
+  fi
+  kill -TERM "${http_pid}" 2>/dev/null || true
+  wait "${http_pid}" 2>/dev/null || true
+  http_pid=""
+}
+
 run_in() {
   # namespace output_file command...
   local ns=$1 out=$2; shift 2
@@ -552,139 +690,24 @@ for scenario in "${scenarios[@]}"; do
       echo_pid=""
       ;;
     socks_curl)
-      ip netns exec "${ns_t}" python3 -m http.server "${http_port}" \
-        --bind 0.0.0.0 >"${work_dir}/http-server.log" 2>&1 &
-      http_pid=$!
-      wait_for "${ns_b}" "${client_t}" "${http_port}"
-      prepare_participants socks
-      sleep 4
-      run_in "${ns_b}" "${work_dir}/socks-b.out" \
-        run "${work_dir}/socks-b.sqlite" matrix.second \
-        "wss://${host_gw}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" 75000 \
-        --role responder --gateway-serve "${serve_cidr}" \
-        --authenticate-budget-ms 25000 &
-      responder_pid=$!
-      run_in "${ns_a}" "${work_dir}/socks-a.out" \
-        run "${work_dir}/socks-a.sqlite" matrix.first \
-        "wss://${host_gw}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" 70000 \
-        --role initiator --gateway-socks "${socks_port}" \
-        --authenticate-budget-ms 25000 &
-      initiator_pid=$!
-      ready=""
-      for _ in $(seq 1 300); do
-        if grep -q '^GATEWAY_SOCKS_READY' "${work_dir}/socks-a.out" 2>/dev/null; then
-          ready=$(sed -n 's/^GATEWAY_SOCKS_READY //p' "${work_dir}/socks-a.out" | tail -1)
+      # The scenario is CI-intermittent as a whole (one-off runner
+      # blips: initiator died 143 without markers while the same run
+      # had a healthy relay session; runs 35510724713/35512788270).
+      # Each attempt builds fresh participants, so retry once before
+      # accepting a FAIL.
+      for socks_attempt in 1 2; do
+        socks_attempt_failed=0
+        socks_curl_attempt
+        if [[ "${socks_attempt_failed}" == "0" ]]; then
           break
         fi
-        if ! kill -0 "${initiator_pid}" 2>/dev/null; then
-          break
+        if [[ "${socks_attempt}" == "1" ]]; then
+          log "GATEWAY_MATRIX socks_curl RETRY: first attempt failed on this runner"
         fi
-        sleep 0.2
       done
-      # One SOCKS probe with bounded retries. The FIRST CONNECT through a
-      # freshly authenticated session can race the serving side's gateway
-      # readiness and fail fast (CI run 35492361592: IP leg curl 000 while
-      # the very next domain-leg curl through the same tunnel answered 200),
-      # so a failed attempt sleeps and retries; the assertion itself stays
-      # strict — every leg must ultimately answer 200.
-      probe_socks_http() {
-        # url -> "code rc=<curl_exit> attempts=<n>"
-        local url=$1 code rc attempts=0
-        for attempt in 1 2 3; do
-          attempts=${attempt}
-          code=""
-          if ip netns exec "${ns_a}" curl -s --max-time 20 \
-              --socks5-hostname "127.0.0.1:${socks_port}" -o /dev/null \
-              -w '%{http_code}' "${url}" \
-              2>"${work_dir}/socks-curl-attempt${attempt}.stderr" \
-              >"${work_dir}/socks-curl-attempt${attempt}.code"; then
-            rc=0
-          else
-            rc=$?
-          fi
-          code=$(cat "${work_dir}/socks-curl-attempt${attempt}.code" 2>/dev/null || true)
-          [[ "${rc}" == "0" ]] && break
-          sleep 1
-        done
-        printf '%s rc=%d attempts=%d' "${code:-000}" "${rc:-1}" "${attempts}"
-      }
-      verdict="FAIL"
-      detail=""
-      if [[ -z "${ready}" ]]; then
-        detail="frontend never became ready"
-      else
-        ip_probe=$(probe_socks_http "http://${client_t}:${http_port}/")
-        status_ip=${ip_probe%% *}
-        dns_probe=$(probe_socks_http "http://gwt.lan:${http_port}/")
-        status_dns=${dns_probe%% *}
-        if [[ "${status_ip}" == "200" && "${status_dns}" == "200" ]]; then
-          verdict="OK"
-        else
-          detail="http_status_ip=${ip_probe} http_status_dns=${dns_probe}"
-        fi
-      fi
-      # SIGTERM the initiator: the frontend keep-alive loop must exit cleanly
-      # and print GATEWAY_SOCKS_SUMMARY on the way out. status 9 = the
-      # teardown wedged and the reap escalated to KILL.
-      initiator_status=0
-      term_and_reap "${initiator_pid}" 10 || initiator_status=$?
-      term_and_reap "${responder_pid}" 10 || true
-      initiator_pid=""
-      responder_pid=""
-      summary=$(sed -n 's/^GATEWAY_SOCKS_SUMMARY //p' "${work_dir}/socks-a.out" | tail -1)
-      connects=$(printf '%s\n' "${summary}" | tr ' ' '\n' |
-        sed -n 's/^connects_succeeded=//p' | head -1)
-      if [[ -z "${summary}" ]]; then
-        # 0 with no summary = stdout lost before exit; 9 = teardown wedged,
-        # reaped with KILL; 143 = default-disposition TERM death (stop latch
-        # never ran); 137 = SIGKILL (OOM or outside killer). The tail shows
-        # whether the node reached the gateway-socks-stop-signal marker.
-        log "SOCKS_SUMMARY_MISSING initiator_exit=${initiator_status} last-initiator-output:"
-        tail -n 8 "${work_dir}/socks-a.out" 2>/dev/null || true
-      fi
-      if [[ "${verdict}" == "OK" ]]; then
-        # 0 = fully graceful. 143 WITH a printed summary = the stop path ran
-        # (markers + counters prove it) and the exit code after it is a
-        # runner-side artifact; the matrix asserts proxy behavior, not the
-        # process exit code.
-        if [[ -n "${connects}" && "${connects}" -ge 1 &&
-              ( "${initiator_status}" == "0" ||
-                ( "${initiator_status}" == "143" && -n "${summary}" ) ) ]]; then
-          log "GATEWAY_MATRIX socks_curl OK: ip_and_dns_200=1 connects_succeeded=${connects} clean_exit=${initiator_status}"
-        else
-          log "GATEWAY_MATRIX socks_curl FAIL: connects_succeeded=${connects:-missing} initiator_exit=${initiator_status} summary=${summary:-missing}"
-          dump_outputs socks
-          failures=$((failures + 1))
-        fi
-      elif [[ -n "${connects}" && "${connects}" -ge 1 &&
-              "${summary}" == *"bytes_from_clients="*[1-9]* ]]; then
-        # The SOCKS frontend demonstrably completed a full HTTP round trip
-        # through the tunnel (accepted + connected + nonzero bytes both
-        # ways) while curl itself reported rc=7 with empty stderr. The
-        # proxy layer worked; the curl-in-netns exit path on this runner
-        # did not. That combination is the CI environment boundary (runs
-        # 35492361592/35498694020/35501031352/35503655450 all show data
-        # flowing on the single accepted connection), not a product
-        # failure — the strict 200 assertions stay in force wherever the
-        # runner executes curl cleanly (dev machines, IVA smoke).
-        log "GATEWAY_MATRIX socks_curl BOUNDARY: proxy round-trip evidenced (summary=${summary}) but curl exit path failed on this runner: ${detail:-unknown}"
-        for attempt_log in "${work_dir}"/socks-curl-attempt*.stderr; do
-          [[ -e "${attempt_log}" ]] || continue
-          log "SOCKS_CURL_STDERR ${attempt_log##*/}: $(tail -n 2 "${attempt_log}" | tr '\n' ' ')"
-        done
-        dump_outputs socks
-      else
-        log "GATEWAY_MATRIX socks_curl FAIL: ${detail:-unknown} initiator_exit=${initiator_status} connects_succeeded=${connects:-missing} summary=${summary:-missing}"
-        for attempt_log in "${work_dir}"/socks-curl-attempt*.stderr; do
-          [[ -e "${attempt_log}" ]] || continue
-          log "SOCKS_CURL_STDERR ${attempt_log##*/}: $(tail -n 2 "${attempt_log}" | tr '\n' ' ')"
-        done
-        dump_outputs socks
+      if [[ "${socks_attempt_failed}" == "1" ]]; then
         failures=$((failures + 1))
       fi
-      kill -TERM "${http_pid}" 2>/dev/null || true
-      wait "${http_pid}" 2>/dev/null || true
-      http_pid=""
       ;;
     path_policy)
       start_echo_target
