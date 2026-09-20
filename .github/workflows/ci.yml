@@ -167,6 +167,7 @@ jobs:
         # depending on host luck.
         env:
           HEYAKI_TUI_DRIVE_TIMEOUT_S: "240"
+          HEYAKI_TUI_SESSION_TIMEOUT_S: "180"
         run: ctest --test-dir build --output-on-failure --no-tests=error
 
   coturn-topology:

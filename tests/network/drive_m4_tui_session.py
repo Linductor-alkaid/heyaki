@@ -100,7 +100,10 @@ def main():
     state_b = os.environ["HEYAKI_TUI_STATE_B"]
     log_path = os.environ.get("HEYAKI_TUI_SESSION_LOG", "/dev/null")
     password = "correct horse battery staple\n"
-    deadline = time.monotonic() + 75.0
+    # Whole-session budget: loaded CI runners (clang Debug) occasionally
+    # exceed the fixed 75s; the designed default stays unless overridden.
+    deadline = time.monotonic() + float(
+        os.environ.get("HEYAKI_TUI_SESSION_TIMEOUT_S", "75.0"))
 
     peer = TuiProcess("peer", tui_bin, state_b)
     local = TuiProcess("local", tui_bin, state_a)

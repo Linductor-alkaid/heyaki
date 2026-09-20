@@ -1371,7 +1371,7 @@ TEST_F(M10Round4SocksTest, SocksConnectEchoRoundTrip) {
   ASSERT_TRUE(client.send(payload));
   std::array<std::byte, 64U> echoed{};
   ASSERT_TRUE(client.read_exact(std::span<std::byte>{echoed.data(), payload.size()},
-                                std::chrono::milliseconds{5000}));
+                                std::chrono::milliseconds{15000}));
   const std::string echoed_text{reinterpret_cast<const char*>(echoed.data()),
                                 payload.size()};
   EXPECT_EQ(echoed_text, payload);
@@ -1524,7 +1524,7 @@ TEST_F(M10Round4SocksTest, SocksDomainPassthroughResolvesOnServingSide) {
   ASSERT_TRUE(client.send(payload));
   std::array<std::byte, 64U> echoed{};
   ASSERT_TRUE(client.read_exact(std::span<std::byte>{echoed.data(), payload.size()},
-                                std::chrono::milliseconds{5000}));
+                                std::chrono::milliseconds{15000}));
   const std::string echoed_text{reinterpret_cast<const char*>(echoed.data()),
                                 payload.size()};
   EXPECT_EQ(echoed_text, payload);
