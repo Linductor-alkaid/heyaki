@@ -84,7 +84,7 @@ void socket_write_all(
     }
     socket->async_write_some(
         boost::asio::buffer(buffer->data() + state->offset, total - state->offset),
-        [socket, buffer, total, state, on_done, on_error](
+        [socket, state, on_done, on_error](
             const boost::system::error_code& error, std::size_t written) mutable {
           if (error) {
             auto failed = std::move(on_error);
@@ -104,10 +104,12 @@ GatewayService::GatewayService(PeerSession& session, ByteStreamService& streams,
                                GatewayServiceConfig config,
                                boost::asio::any_io_executor io, NodePoster poster,
                                ScopeCheck scope_check,
-                               std::function<std::uint64_t()> wall_clock)
+                               std::function<std::uint64_t()> wall_clock,
+                               GatewayConfirmSink confirm_sink)
     : session_(session),
       streams_(streams),
       config_(std::move(config)),
+      confirm_sink_(std::move(confirm_sink)),
       io_strand_(boost::asio::make_strand(std::move(io))),
       poster_(std::move(poster)),
       scope_check_(std::move(scope_check)),
@@ -145,7 +147,6 @@ void GatewayService::handle_session_closed() {
         tunnel->socket->close(ignored);
       }
       if (tunnel->dial_timer) {
-        boost::system::error_code ignored;
         tunnel->dial_timer->cancel();
       }
     });
@@ -161,7 +162,17 @@ void GatewayService::prune() {
     const auto next = std::next(it);
     const auto& tunnel = it->second;
     const auto profile = tunnel->profile;
-    if (profile != nullptr &&
+    // Pending confirmations auto-deny on the fixed deadline so an
+    // unanswered operator cannot wedge the profile's concurrency slots.
+    if (tunnel->awaiting_confirm &&
+        current - tunnel->opened_unix_ms >
+            static_cast<std::uint64_t>(gateway_confirm_deadline.count())) {
+      tunnel->awaiting_confirm = false;
+      refuse_open(tunnel->stream, tunnel, GatewayRefusal::policy_denied);
+      it = next;
+      continue;
+    }
+    if (profile != nullptr && !tunnel->awaiting_confirm &&
         current - tunnel->opened_unix_ms >
             static_cast<std::uint64_t>(profile->stream_max_duration.count())) {
       ++stats_.duration_timeout_resets;
@@ -217,18 +228,78 @@ void GatewayService::handle_gateway_open(const std::shared_ptr<ByteStreamHandle>
     refuse_open(stream, nullptr, GatewayRefusal::scope_denied);
     return;
   }
+  begin_tunnel(stream, connect, profile);
+}
+
+void GatewayService::begin_tunnel(const std::shared_ptr<ByteStreamHandle>& stream,
+                                  const GatewayConnect& connect,
+                                  const GatewayProfileConfig* profile) {
   auto tunnel = std::make_shared<Tunnel>(stream->stream_id());
   tunnel->stream = stream;
   tunnel->profile = profile;
   tunnel->profile_name = profile->name;
   tunnel->opened_unix_ms = now();
   tunnel->last_activity_unix_ms = tunnel->opened_unix_ms;
+  tunnel->pending_connect = connect;
   // Reserve the concurrency slot before any async work so parallel opens
   // cannot overshoot the caps (fail-closed admission, M10-05).
   tunnels_.emplace(tunnel->id, tunnel);
   usage_[profile->name].active += 1U;
   stats_.tunnels_active = tunnels_.size();
 
+  const bool must_ask =
+      profile->confirm == GatewayConfirmMode::always ||
+      (profile->confirm == GatewayConfirmMode::first_use &&
+       !confirmed_profiles_.contains(profile->name));
+  if (must_ask) {
+    if (!confirm_sink_) {
+      // Nobody can answer: fail closed rather than dial unconfirmed.
+      refuse_open(stream, tunnel, GatewayRefusal::policy_denied);
+      return;
+    }
+    ask_confirmation(tunnel, connect);
+    return;
+  }
+  dispatch_after_confirm(tunnel);
+}
+
+void GatewayService::ask_confirmation(const std::shared_ptr<Tunnel>& tunnel,
+                                      const GatewayConnect& connect) {
+  tunnel->awaiting_confirm = true;
+  const auto weak = weak_from_this();
+  const auto decider = [weak, tunnel](bool allowed) {
+    // May be invoked from any thread (the TUI main loop): marshal back.
+    if (auto self = weak.lock()) {
+      self->poster_([weak, tunnel, allowed] {
+        if (auto self = weak.lock()) {
+          self->on_confirm_decided(tunnel, allowed);
+        }
+      });
+    }
+  };
+  confirm_sink_(GatewayConfirmRequest{.peer_device = config_.peer_device,
+                                      .profile = tunnel->profile_name,
+                                      .host = connect.host,
+                                      .port = connect.port},
+                std::move(decider));
+}
+
+void GatewayService::on_confirm_decided(const std::shared_ptr<Tunnel>& tunnel,
+                                        bool allowed) {
+  if (tunnel->finished || !tunnel->awaiting_confirm) return;
+  tunnel->awaiting_confirm = false;
+  if (!allowed) {
+    refuse_open(tunnel->stream, tunnel, GatewayRefusal::policy_denied);
+    return;
+  }
+  if (tunnel->profile->confirm == GatewayConfirmMode::first_use) {
+    confirmed_profiles_.insert(tunnel->profile_name);
+  }
+  dispatch_after_confirm(tunnel);
+}
+
+void GatewayService::dispatch_after_confirm(const std::shared_ptr<Tunnel>& tunnel) {
+  const auto& connect = tunnel->pending_connect;
   const auto literal = parse_gateway_ip(connect.host);
   if (literal.has_value()) {
     continue_admission(
@@ -239,7 +310,7 @@ void GatewayService::handle_gateway_open(const std::shared_ptr<ByteStreamHandle>
   // Hostname: resolution belongs to the serving side (design 4.3) and is
   // bounded by the profile's dial deadline (the connect phase gets its own
   // bounded budget, so the whole open stays bounded by 2x dial_deadline).
-  const auto deadline_ms = profile->dial_deadline;
+  const auto deadline_ms = tunnel->profile->dial_deadline;
   auto weak = weak_from_this();
   auto strand = io_strand_;
   boost::asio::post(strand, [weak, strand, tunnel, connect, deadline_ms] {
@@ -252,7 +323,6 @@ void GatewayService::handle_gateway_open(const std::shared_ptr<ByteStreamHandle>
                           const boost::system::error_code& error) {
       if (tunnel->finished || error) return;
       *timed_out = true;
-      boost::system::error_code ignored;
       resolver->cancel();
       if (tunnel->socket) tunnel->socket->cancel();
     });
@@ -362,7 +432,6 @@ void GatewayService::dispatch_dial(const std::shared_ptr<Tunnel>& tunnel,
     timer->async_wait([socket, timer, tunnel, state](const boost::system::error_code& error) {
       if (tunnel->finished || error) return;
       state->timed_out = true;
-      boost::system::error_code ignored;
       socket->cancel();
     });
     auto poster = [weak](std::function<void()> task) {
@@ -401,7 +470,6 @@ void GatewayService::dispatch_dial(const std::shared_ptr<Tunnel>& tunnel,
                              poster](const boost::system::error_code& error) mutable {
                               if (tunnel->finished) return;
                               if (!error) {
-                                boost::system::error_code ignored;
                                 timer->cancel();
                                 tunnel->socket = socket;
                                 poster([weak, tunnel] {
@@ -633,7 +701,6 @@ void GatewayService::close_tunnel(std::shared_ptr<Tunnel> tunnel, StableStatus r
       tunnel->socket->close(ignored);
     }
     if (tunnel->dial_timer) {
-      boost::system::error_code ignored;
       tunnel->dial_timer->cancel();
     }
   });

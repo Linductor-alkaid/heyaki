@@ -372,6 +372,12 @@ struct NodeConfig {
   // validated at Node::create; an invalid set fails startup instead of
   // falling back to a wider policy (M10-04).
   std::vector<GatewayProfileConfig> gateway_profiles;
+  // Serving-side confirmation sink (design 3.3): asked for profiles whose
+  // confirm mode is first_use/always; an unanswered request auto-denies
+  // after 30s (fail-closed). The decider may be invoked from any thread.
+  // A null sink with a confirming profile refuses every such open.
+  std::function<void(const GatewayConfirmRequest&, std::function<void(bool)>)>
+      gateway_confirm_sink;
 };
 
 // Terminal outcome of one password pairing attempt; `value` holds the
@@ -389,11 +395,15 @@ struct NodeByteStreamOptions {
 // Options for Node::open_gateway_stream. `dial_deadline_unix_milliseconds`
 // is an ABSOLUTE unix deadline for the serving side's 2-byte prelude (0
 // keeps the frozen 10-second default computed at call time); expiry resets
-// the stream with deadline_exceeded (M10-08).
+// the stream with deadline_exceeded (M10-08). `on_connected`, when set,
+// fires exactly once on the node context once the outcome is known
+// (success after the prelude validated, or the reset's stable status as an
+// error) — the SOCKS frontend uses it to time its reply.
 struct NodeGatewayStreamOptions {
   std::uint64_t receive_window_bytes{256U * 1024U};
   std::uint32_t receive_window_frames{64U};
   std::uint64_t dial_deadline_unix_milliseconds{0U};
+  std::function<void(Result<void>)> on_connected;
 };
 
 // ---- M7 remote events & file transfer ----

@@ -33,6 +33,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -307,5 +308,22 @@ struct GatewayAdmission {
 [[nodiscard]] GatewayAdmission admit_gateway_connection(
     std::span<const GatewayProfileConfig> profiles, const GatewayConnect& connect,
     std::span<const GatewayIp> resolved, const GatewayAdmissionContext& context);
+
+// ---- Human confirmation (design 3.3, M10-06) ----
+// One confirmation request shown to the serving-side operator before the
+// tunnel dials; `host` has already passed the frozen grammar validation
+// (safe-detail discipline). Sinks answer asynchronously through the
+// decider, which may be invoked from any thread. Profiles with
+// confirm==never never ask; an unanswered request auto-denies after 30s.
+struct GatewayConfirmRequest {
+  // Requesting peer identity for the operator's prompt (design 3.3).
+  DeviceId peer_device;
+  std::string profile;
+  std::string host;
+  std::uint16_t port{};
+};
+using GatewayConfirmSink =
+    std::function<void(const GatewayConfirmRequest&, std::function<void(bool)>)>;
+inline constexpr std::chrono::milliseconds gateway_confirm_deadline{30000};
 
 }  // namespace heyaki

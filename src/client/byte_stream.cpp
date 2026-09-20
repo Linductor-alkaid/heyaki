@@ -419,7 +419,8 @@ Result<std::shared_ptr<ByteStreamHandle>> ByteStreamService::open_stream(
 
 Result<std::shared_ptr<ByteStreamHandle>> ByteStreamService::open_gateway_stream(
     const GatewayConnect& target, std::uint64_t receive_window_bytes,
-    std::uint32_t receive_window_frames, std::uint64_t dial_deadline_unix_milliseconds) {
+    std::uint32_t receive_window_frames, std::uint64_t dial_deadline_unix_milliseconds,
+    std::function<void(Result<void>)> on_connected) {
   if (!attached_) {
     return Result<std::shared_ptr<ByteStreamHandle>>::failure(
         stream_error(ErrorCode::configuration, "service_not_attached"));
@@ -467,13 +468,18 @@ Result<std::shared_ptr<ByteStreamHandle>> ByteStreamService::open_gateway_stream
   stream->gateway_initiator_ = true;
   stream->gateway_prelude_pending_ = true;
   stream->gateway_dial_deadline_ = dial_deadline_unix_milliseconds;
+  stream->gateway_connected_handler_ = std::move(on_connected);
+  // `opening` until the serving side's prelude validates (M10-08): callers
+  // observe connecting, not connected; writes still queue harmlessly.
+  stream->state_ = StreamState::opening;
   auto sent = send_stream_open(*stream, &target);
   if (!sent) {
     session_.close_business_channel(gateway_channel);
     std::erase(owned_channels_, gateway_channel);
     return Result<std::shared_ptr<ByteStreamHandle>>::failure(*sent.error_if());
   }
-  stream->state_ = StreamState::open;
+  // Stays `opening`: the prelude validation in handle_data is the only
+  // thing that promotes a gateway initiator stream to `open`.
   streams_.emplace(stream->stream_id(), stream);
   return Result<std::shared_ptr<ByteStreamHandle>>::success(std::move(stream));
 }
@@ -503,6 +509,16 @@ std::shared_ptr<ByteStreamHandle> ByteStreamService::stream(const StreamId& id) 
 
 void ByteStreamService::fail_all(const Error& error) {
   for (auto& [id, stream] : streams_) {
+    // Session loss before a gateway prelude: fire the one-shot connect
+    // failure (M10-08) alongside the pending I/O completions.
+    if (stream->gateway_initiator_ && !stream->gateway_connected_fired_ &&
+        stream->gateway_connected_handler_) {
+      stream->gateway_connected_fired_ = true;
+      auto handler = std::move(stream->gateway_connected_handler_);
+      stream->gateway_connected_handler_ = nullptr;
+      handler(Result<void>::failure(
+          Error{ErrorCode::cancelled, "byte_stream", "gateway_connect_closed"}));
+    }
     for (auto& read : stream->reads_) {
       if (read->handler) {
         auto handler = std::move(read->handler);
@@ -846,6 +862,17 @@ void ByteStreamService::handle_data(const FrameView& frame) {
         handle_reset_frame_for(stream, StableStatus::protocol_error);
         return;
       }
+      // Connected (M10-08): the gateway stream promotes from `opening`
+      // only on a valid prelude; the one-shot handler reports it.
+      if (stream.state_ == StreamState::opening) {
+        stream.state_ = StreamState::open;
+      }
+      if (stream.gateway_connected_handler_ && !stream.gateway_connected_fired_) {
+        stream.gateway_connected_fired_ = true;
+        auto handler = std::move(stream.gateway_connected_handler_);
+        stream.gateway_connected_handler_ = nullptr;
+        handler(Result<void>::success());
+      }
     }
   }
   stream.receive_buffered_bytes_ += deliverable.size();
@@ -946,6 +973,16 @@ void ByteStreamService::handle_reset(const FrameView& frame) {
   if (found == streams_.end()) return;
   auto& stream = *found->second;
   if (stream.state_ == StreamState::reset) return;
+  // Record the wire reason (gateway connect failures surface it through
+  // the one-shot connected handler; ordinary streams ignore it).
+  proto_codec::ProtoReader reader(frame.payload);
+  while (!reader.done()) {
+    auto field = reader.next();
+    if (!field) break;
+    if (field.value_if()->number == 2U && field.value_if()->wire_type == 0U) {
+      stream.reset_reason_ = static_cast<StableStatus>(field.value_if()->integer);
+    }
+  }
   // An exact repeated RESET is idempotent (wire 6.3).
   finish_stream(stream, StreamState::reset);
 }
@@ -967,6 +1004,21 @@ void ByteStreamService::handle_reset_frame_for(ByteStreamHandle& stream,
 
 void ByteStreamService::finish_stream(ByteStreamHandle& stream, StreamState terminal) {
   stream.state_ = terminal;
+  // Gateway initiator that never reached a prelude: report the one-shot
+  // connect failure alongside the normal terminal handling.
+  if (stream.gateway_initiator_ && !stream.gateway_connected_fired_ &&
+      stream.gateway_connected_handler_) {
+    stream.gateway_connected_fired_ = true;
+    auto handler = std::move(stream.gateway_connected_handler_);
+    stream.gateway_connected_handler_ = nullptr;
+    handler(Result<void>::failure(
+        terminal == StreamState::closed || terminal == StreamState::half_closed_remote
+            ? Error{ErrorCode::cancelled, "byte_stream", "gateway_connect_closed"}
+            : Error{ErrorCode::remote_error, "byte_stream",
+                    std::string{"gateway_connect_failed_"} +
+                        std::to_string(static_cast<unsigned>(
+                            stream.reset_reason_.value_or(StableStatus::unspecified)))}));
+  }
   const bool clean_end =
       terminal == StreamState::closed || terminal == StreamState::half_closed_remote;
   for (auto& read : stream.reads_) {

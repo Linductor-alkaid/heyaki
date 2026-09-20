@@ -783,8 +783,24 @@ TEST(M10ByteStream, GatewayStreamEndToEndOnNegotiated13) {
   EXPECT_EQ(inbound[0].second.profile, "office");
   EXPECT_TRUE(inbound[0].first->is_gateway());
   EXPECT_EQ(inbound[0].first->state(), StreamState::open);
-  // The opener's local handle is flagged gateway too.
+  // The opener's local handle is flagged gateway too, and — until the
+  // serving side's 2-byte prelude lands — stays `opening` (M10-08: open
+  // means connected, not merely "STREAM_OPEN sent").
   EXPECT_TRUE((*stream.value_if())->is_gateway());
+  EXPECT_EQ((*stream.value_if())->state(), StreamState::opening);
+
+  // The prelude is the only thing that promotes the initiator: deliver it
+  // from the serving side and the stream must reach `open` (and stay there
+  // for further payload).
+  const auto prelude = encode_gateway_prelude(gateway_prelude_connected);
+  bool prelude_written = false;
+  inbound[0].first->async_write(
+      std::span<const std::byte>{prelude.data(), prelude.size()},
+      [&prelude_written](StreamIoResult result) {
+        if (!result.error.has_value()) prelude_written = true;
+      });
+  harness.pump_all();
+  ASSERT_TRUE(prelude_written);
   EXPECT_EQ((*stream.value_if())->state(), StreamState::open);
 }
 

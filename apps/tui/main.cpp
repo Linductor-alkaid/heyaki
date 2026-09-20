@@ -10,11 +10,14 @@
 #include "device_view.hpp"
 
 #include <heyaki/byte_stream.hpp>
+#include <heyaki/gateway.hpp>
 #include <heyaki/message.hpp>
 #include <heyaki/rpc.hpp>
 #include <heyaki/shell.hpp>
 #include <heyaki/shell_terminal.hpp>
 #include <heyaki/trust_grant.hpp>
+
+#include "socks_frontend.hpp"
 
 #include <atomic>
 #include <iomanip>
@@ -60,6 +63,10 @@ struct Options {
   bool version{false};
   bool status_only{false};
   bool help{false};
+  // M10-06: serving-side gateway profiles from the command line
+  // (--gateway-profile name=cidr[,cidr...], repeatable).
+  std::vector<heyaki::GatewayProfileConfig> gateway_profiles;
+  heyaki::GatewayConfirmMode gateway_confirm{heyaki::GatewayConfirmMode::never};
 };
 
 struct UiBridge {
@@ -145,6 +152,22 @@ struct UiState {
       event_channel_options<ShellEventView>(128U, "heyaki-tui-shell-events")};
   std::deque<ShellEventView> shell_events;
 
+  // ---- M10 gateway view state ----
+  // Confirm prompts arrive on the node strand; the interactive loop drains
+  // them here and answers through the carried decider (any thread).
+  struct GatewayConfirmPrompt {
+    heyaki::GatewayConfirmRequest request;
+    std::function<void(bool)> decide;
+  };
+  executor::comm::MpscChannel<GatewayConfirmPrompt> gateway_confirm_channel{
+      event_channel_options<GatewayConfirmPrompt>(8U,
+                                                  "heyaki-tui-gateway-confirms")};
+  std::deque<GatewayConfirmPrompt> gateway_confirms;
+  // Optional local SOCKS5 frontend bound to one peer's session (M10-09).
+  std::shared_ptr<heyaki::socks::SocksFrontend> socks_frontend;
+  heyaki::DeviceEndpointKey socks_peer{};
+  std::string socks_last_error;
+
   // Render-loop-owned display buffers; single-threaded after the drain.
   std::deque<InboundMessage> inbound_messages;
   std::deque<AckEvent> ack_events;
@@ -204,6 +227,16 @@ struct UiState {
         shell_events.pop_front();
       }
     }
+    GatewayConfirmPrompt confirm;
+    while (gateway_confirm_channel.try_receive(confirm)) {
+      gateway_confirms.push_back(std::move(confirm));
+      while (gateway_confirms.size() > 8U) {
+        // Overflow denies the oldest prompt (fail-closed, bounded queue).
+        auto dropped = std::move(gateway_confirms.front());
+        gateway_confirms.pop_front();
+        if (dropped.decide) dropped.decide(false);
+      }
+    }
   }
 
  private:
@@ -239,7 +272,57 @@ std::optional<Options> parse_options(int argc, char** argv) {
       options.help = true;
     } else if (argument == "--profile" && index + 1 < argc) {
       options.profile_name = argv[++index];
+    } else if (argument == "--gateway-profile" && index + 1 < argc) {
+      // name=cidr[,cidr...] — every listed target range is allowed on all
+      // ports; internet egress stays off unless a /0 is explicitly absent.
+      const std::string_view spec{argv[++index]};
+      const auto equals = spec.find('=');
+      if (equals == std::string_view::npos) {
+        return std::nullopt;
+      }
+      heyaki::GatewayProfileConfig profile;
+      profile.name = std::string{spec.substr(0U, equals)};
+      profile.confirm = options.gateway_confirm;
+      std::string_view rest = spec.substr(equals + 1U);
+      while (!rest.empty()) {
+        const auto comma = rest.find(',');
+        const auto cidr_text = rest.substr(0U, comma);
+        auto cidr = heyaki::parse_gateway_cidr(cidr_text);
+        if (!cidr.has_value()) {
+          return std::nullopt;
+        }
+        profile.allowed_cidrs.push_back(*cidr);
+        rest = comma == std::string_view::npos ? std::string_view{}
+                                               : rest.substr(comma + 1U);
+      }
+      if (profile.allowed_cidrs.empty()) {
+        return std::nullopt;
+      }
+      // All ports by default; operators narrow through the struct API.
+      profile.allowed_ports.push_back(heyaki::GatewayPortRange{});
+      options.gateway_profiles.push_back(std::move(profile));
+    } else if (argument == "--gateway-confirm" && index + 1 < argc) {
+      const std::string_view mode{argv[++index]};
+      if (mode == "never") {
+        options.gateway_confirm = heyaki::GatewayConfirmMode::never;
+      } else if (mode == "first_use") {
+        options.gateway_confirm = heyaki::GatewayConfirmMode::first_use;
+      } else if (mode == "always") {
+        options.gateway_confirm = heyaki::GatewayConfirmMode::always;
+      } else {
+        return std::nullopt;
+      }
+      for (auto& profile : options.gateway_profiles) {
+        profile.confirm = options.gateway_confirm;
+      }
     } else {
+      return std::nullopt;
+    }
+  }
+  if (!options.gateway_profiles.empty()) {
+    const auto valid =
+        heyaki::validate_gateway_profiles(options.gateway_profiles);
+    if (!valid) {
       return std::nullopt;
     }
   }
@@ -247,7 +330,9 @@ std::optional<Options> parse_options(int argc, char** argv) {
 }
 
 void print_usage() {
-  std::cout << "usage: heyaki-tui [--profile NAME] [--status] [--version]\n";
+  std::cout << "usage: heyaki-tui [--profile NAME] [--status] [--version]\n"
+               "                  [--gateway-profile NAME=CIDR[,CIDR...]]...\n"
+               "                  [--gateway-confirm never|first_use|always]\n";
 }
 
 heyaki::Result<std::string> read_secret(std::string_view prompt) {
@@ -676,6 +761,134 @@ void run_stream_view(const heyaki::DeviceEndpointKey& peer,
       std::cout << "stream reset\n";
     } else {
       std::cout << "stream command unknown\n";
+    }
+  }
+}
+
+// M10-06: gateway view (A side). Opens gateway connections to the selected
+// peer, shows the prelude latency (dial P95 input), and hosts the optional
+// local SOCKS5 frontend for that peer's session (M10-09).
+void run_gateway_view(const heyaki::DeviceEndpointKey& peer, heyaki::Node& node,
+                      heyaki::Runtime& runtime, UiState& state) {
+  std::cout << "\nGATEWAY device=" << heyaki::to_string(peer.device_id)
+            << "\ncommands [open HOST PORT [PROFILE]|socks [PORT]|socks-stop|"
+               "socks-status|exit]\n";
+  bool in_view = true;
+  while (in_view) {
+    std::cout << "gateway> " << std::flush;
+    std::string line;
+    if (!std::getline(std::cin, line)) return;
+    std::istringstream input{line};
+    std::string command;
+    input >> command;
+    if (command == "exit") {
+      in_view = false;
+    } else if (command == "open") {
+      std::string host;
+      unsigned port = 0U;
+      std::string profile;
+      input >> host >> port >> profile;
+      if (host.empty() || port == 0U || port > 65535U) {
+        std::cout << "usage: open HOST PORT [PROFILE]\n";
+        continue;
+      }
+      heyaki::GatewayConnect target{.host = host,
+                                    .port = static_cast<std::uint16_t>(port),
+                                    .profile = profile};
+      const auto opened_at = std::chrono::steady_clock::now();
+      auto outcome = std::make_shared<std::optional<heyaki::Result<void>>>();
+      std::atomic<bool> settled{false};
+      heyaki::NodeGatewayStreamOptions options;
+      options.on_connected = [outcome, &settled](heyaki::Result<void> result) {
+        *outcome = std::move(result);
+        settled.store(true);
+      };
+      auto opened = node.open_gateway_stream(peer, target, options);
+      if (!opened) {
+        std::cout << "gateway open failed: "
+                  << opened.error_if()->safe_detail() << "\n";
+        continue;
+      }
+      // Bounded wait for the prelude (connect confirmation, M10-08).
+      while (!settled.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{20});
+        if (std::chrono::steady_clock::now() - opened_at >
+            std::chrono::seconds{12}) {
+          break;
+        }
+      }
+      if (!settled.load() || !outcome->has_value() || !(*outcome)->has_value()) {
+        std::cout << "gateway connect failed: "
+                  << (outcome->has_value() ? (*outcome)->error_if()->safe_detail()
+                                           : std::string{"connect_timeout"})
+                  << "\n";
+        continue;
+      }
+      const auto latency = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - opened_at);
+      std::cout << "gateway connected prelude_latency_ms=" << latency.count()
+                << " (first read byte is tunnel payload)\n";
+      run_stream_view(peer, std::move(*opened.value_if()));
+    } else if (command == "socks") {
+      unsigned port = 1080U;
+      input >> port;
+      if (port == 0U || port > 65535U) {
+        std::cout << "usage: socks [PORT]\n";
+        continue;
+      }
+      if (state.socks_frontend) {
+        std::cout << "socks already running (socks-stop first)\n";
+        continue;
+      }
+      heyaki::socks::SocksFrontendConfig config;
+      config.port = static_cast<std::uint16_t>(port);
+      auto frontend = heyaki::socks::SocksFrontend::create(node, runtime, peer,
+                                                           config);
+      if (!frontend) {
+        state.socks_last_error = frontend.error_if()->safe_detail();
+        std::cout << "socks start failed: " << state.socks_last_error << "\n";
+        continue;
+      }
+      const auto started = (*frontend.value_if())->start();
+      if (!started) {
+        state.socks_last_error = started.error_if()->safe_detail();
+        std::cout << "socks start failed: " << state.socks_last_error << "\n";
+        continue;
+      }
+      state.socks_frontend = *frontend.value_if();
+      state.socks_peer = peer;
+      state.socks_last_error.clear();
+      std::cout << "socks listening 127.0.0.1:"
+                << (*frontend.value_if())->stats().bound_port
+                << " (domains resolve on the serving side)\n";
+    } else if (command == "socks-stop") {
+      if (!state.socks_frontend) {
+        std::cout << "socks not running\n";
+        continue;
+      }
+      state.socks_frontend->stop();
+      state.socks_frontend.reset();
+      std::cout << "socks stopped\n";
+    } else if (command == "socks-status") {
+      if (!state.socks_frontend) {
+        std::cout << "socks not running"
+                  << (state.socks_last_error.empty()
+                          ? std::string{}
+                          : " last_error=" + state.socks_last_error)
+                  << "\n";
+        continue;
+      }
+      const auto stats = state.socks_frontend->stats();
+      std::cout << "socks 127.0.0.1:" << stats.bound_port
+                << " active=" << stats.connections_active
+                << " accepted=" << stats.accepted
+                << " connect_ok=" << stats.connects_succeeded
+                << " connect_failed=" << stats.connects_failed
+                << " handshake_failed=" << stats.handshakes_failed
+                << " bytes_in=" << stats.bytes_from_clients
+                << " bytes_out=" << stats.bytes_to_clients << "\n";
+    } else {
+      std::cout << "gateway command unknown\n";
     }
   }
 }
@@ -1441,7 +1654,8 @@ std::filesystem::path file_inbox_root(std::string_view profile_name) {
   return base.parent_path() / "files" / std::string{profile_name} / "inbox";
 }
 
-void run_command(std::string line, heyaki::Node& node, UiState& state, bool& running,
+void run_command(std::string line, heyaki::Node& node, heyaki::Runtime& runtime,
+                 UiState& state, bool& running,
                  const std::filesystem::path& file_inbox) {
   std::istringstream input(std::move(line));
   std::string command;
@@ -1641,6 +1855,13 @@ void run_command(std::string line, heyaki::Node& node, UiState& state, bool& run
     // safe VT rendering, exit status).
     run_shell_view(*peer, node, state);
     state.command_status = "shell-view-closed";
+    state.command_error.reset();
+    return;
+  }
+  if (command == "gateway") {
+    // M10-06: gateway view (open/prelude latency, SOCKS5 frontend control).
+    run_gateway_view(*peer, node, runtime, state);
+    state.command_status = "gateway-view-closed";
     state.command_error.reset();
     return;
   }
@@ -1869,23 +2090,43 @@ int run_tui(const Options& options) {
   const auto file_inbox = file_inbox_root(options.profile_name);
   std::error_code inbox_ec;
   std::filesystem::create_directories(file_inbox, inbox_ec);
+  UiState state;
+  // M10-09: the TUI owns the runtime and lends it to the Node so the SOCKS
+  // frontend can share the executor-owned Asio context (no second worker).
+  auto runtime_created = heyaki::Runtime::create_owned(heyaki::RuntimeConfig{});
+  if (!runtime_created) {
+    render_uninitialized(options.profile_name, *runtime_created.error_if());
+    return 1;
+  }
+  std::optional<heyaki::Runtime> runtime_host{std::move(*runtime_created.value_if())};
+  auto* state_for_sink = &state;
   auto make_node = [&]() {
     heyaki::FileRootConfig inbox_root;
     inbox_root.name = "inbox";
     inbox_root.directory = file_inbox;
-    return heyaki::Node::create(
-        heyaki::NodeConfig{.profile = &*profile,
-                           .runtime = nullptr,
-                           .application_id = std::string{application_id},
-                           .lan_override = std::nullopt,
-                           .runtime_config = heyaki::RuntimeConfig{},
-                           .signaling_validator = {},
-                           .signaling_handler = {},
-                           .relay_override = std::nullopt,
-                           .path_policy_override = std::nullopt,
-                           .file_receive_roots = {inbox_root},
-                           .shell_profiles = {},
-                           .gateway_profiles = {}});
+    heyaki::NodeConfig config{.profile = &*profile,
+                              .runtime = &*runtime_host,
+                              .application_id = std::string{application_id},
+                              .lan_override = std::nullopt,
+                              .runtime_config = heyaki::RuntimeConfig{},
+                              .signaling_validator = {},
+                              .signaling_handler = {},
+                              .relay_override = std::nullopt,
+                              .path_policy_override = std::nullopt,
+                              .file_receive_roots = {inbox_root},
+                              .shell_profiles = {},
+                              .gateway_profiles = options.gateway_profiles,
+                              .gateway_confirm_sink = {}};
+    if (!options.gateway_profiles.empty()) {
+      config.gateway_confirm_sink =
+          [state_for_sink](const heyaki::GatewayConfirmRequest& request,
+                           std::function<void(bool)> decide) {
+            // Runs on the node context; the interactive loop answers.
+            (void)state_for_sink->gateway_confirm_channel.try_send(
+                UiState::GatewayConfirmPrompt{request, std::move(decide)});
+          };
+    }
+    return heyaki::Node::create(std::move(config));
   };
   std::optional<heyaki::Node> node;
   auto created_node = make_node();
@@ -1895,7 +2136,6 @@ int run_tui(const Options& options) {
   }
   node.emplace(std::move(*created_node.value_if()));
 
-  UiState state;
   if (options.status_only) {
     const auto relay_enabled = node->snapshot().relay.enabled;
     if (relay_enabled) {
@@ -1985,8 +2225,19 @@ int run_tui(const Options& options) {
     state.render_max = std::max(state.render_max, render_duration);
     std::cout << "\ncommand [refresh|relay|metrics|connect N|close N|pair N|"
                  "trust N|revoke N M|rotate-password|rotate-password-revoke|"
-                 "stream N|msg N|rpc N|file N|event N|shell N|quit]> "
+                 "stream N|msg N|rpc N|file N|event N|shell N|gateway N|quit]> "
               << std::flush;
+    // M10-06: a pending serving-side confirmation takes over the prompt —
+    // an unanswered request auto-denies after the fixed deadline.
+    state.drain_service_events();
+    if (!state.gateway_confirms.empty()) {
+      const auto& prompt = state.gateway_confirms.front();
+      std::cout << "\ngateway confirm peer="
+                << heyaki::to_string(prompt.request.peer_device)
+                << " profile=" << prompt.request.profile
+                << " target=" << prompt.request.host << ":"
+                << prompt.request.port << " [yes|no]> " << std::flush;
+    }
     std::string line;
     if (!std::getline(std::cin, line)) {
       break;
@@ -1994,6 +2245,18 @@ int run_tui(const Options& options) {
     std::istringstream probe{line};
     std::string first_command;
     probe >> first_command;
+    if (!state.gateway_confirms.empty() &&
+        (first_command == "yes" || first_command == "no")) {
+      auto prompt = std::move(state.gateway_confirms.front());
+      state.gateway_confirms.pop_front();
+      if (prompt.decide) {
+        prompt.decide(first_command == "yes");
+      }
+      state.command_status =
+          first_command == "yes" ? "gateway-allowed" : "gateway-denied";
+      state.command_error.reset();
+      continue;
+    }
     if (first_command == "relay") {
       auto enrolled = enroll_relay_from_tui(*profile, options.profile_name);
       if (!enrolled) {
@@ -2037,7 +2300,14 @@ int run_tui(const Options& options) {
       state.command_error.reset();
       continue;
     }
-    run_command(std::move(line), *node, state, running, file_inbox);
+    run_command(std::move(line), *node, *runtime_host, state, running,
+                file_inbox);
+  }
+  // The SOCKS frontend rides the runtime's executor: release it before the
+  // runtime host dies (UiState outlives it by declaration order).
+  if (state.socks_frontend) {
+    state.socks_frontend->stop();
+    state.socks_frontend.reset();
   }
   bridge->events.close();
   const auto shutdown = node->shutdown();

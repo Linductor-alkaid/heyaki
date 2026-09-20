@@ -3669,13 +3669,15 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         }
         GatewayServiceConfig gateway_config;
         gateway_config.profiles = gateway_profiles;
+        gateway_config.peer_device = peer.device_id;
+        gateway_config.confirm_sink = gateway_confirm_sink;
         auto service = std::make_shared<GatewayService>(
             *session, *streams, std::move(gateway_config), *io.value_if(),
             service_strand_poster(),
             [session](std::string_view scope) {
               return session_scope_covers(*session, scope);
             },
-            unix_milliseconds_now);
+            unix_milliseconds_now, gateway_confirm_sink);
         auto attached = service->attach();
         if (!attached) {
           update_snapshot([&](NodeSnapshot& snapshot) {
@@ -6152,6 +6154,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   // M10: validated at Node::create; consumed by the serving-side gateway
   // service once it lands. Empty keeps the gateway off.
   std::vector<GatewayProfileConfig> gateway_profiles;
+  GatewayConfirmSink gateway_confirm_sink;
   std::size_t rpc_retry_capacity{64U};
   LanSignalingValidator signaling_validator;
   LanSignalingHandler signaling_handler;
@@ -6383,6 +6386,7 @@ Result<Node> Node::create(NodeConfig config) {
       return Result<Node>::failure(*valid_gateway_profiles.error_if());
     }
     impl->gateway_profiles = std::move(config.gateway_profiles);
+    impl->gateway_confirm_sink = std::move(config.gateway_confirm_sink);
   }
   // Bind to the Impl's runtime (the local optional was moved into it).
   impl->shell_pty->bind(*impl->runtime, detail::RuntimeAccess::shell_pty_enabled(*impl->runtime));
@@ -6705,44 +6709,61 @@ Result<ByteStream> Node::open_gateway_stream(const DeviceEndpointKey& peer,
     return Result<ByteStream>::failure(
         node_error(ErrorCode::configuration, "stream_window_invalid"));
   }
-  Result<std::shared_ptr<ByteStreamHandle>> opened =
-      Result<std::shared_ptr<ByteStreamHandle>>::failure(
-          node_error(ErrorCode::internal, "gateway_open_no_result"));
-  impl_->run_on_strandAndWait([&](Impl& impl) {
-    auto* attempt = impl.authenticated_attempt(peer);
-    if (attempt == nullptr || attempt->session == nullptr) {
-      opened = Result<std::shared_ptr<ByteStreamHandle>>::failure(
-          node_error(ErrorCode::pairing_required, "session_not_authorized"));
-      return;
-    }
-    // Initiator scope gate (M10-03): gateway.use must be in the session's
-    // live scope set before any gateway field leaves this node.
-    if (!impl.session_scope_covers(*attempt->session, gateway_use_scope)) {
-      opened = Result<std::shared_ptr<ByteStreamHandle>>::failure(
-          node_error(ErrorCode::permission, "gateway_use_scope_missing"));
-      return;
-    }
-    auto* service = impl.ensure_stream_service(peer, nullptr);
-    if (service == nullptr) {
-      opened = Result<std::shared_ptr<ByteStreamHandle>>::failure(
-          node_error(ErrorCode::pairing_required, "session_not_authorized"));
-      return;
-    }
-    const auto deadline = options.dial_deadline_unix_milliseconds != 0U
-                              ? options.dial_deadline_unix_milliseconds
-                              : unix_milliseconds_now() +
-                                    static_cast<std::uint64_t>(
-                                        default_gateway_dial_deadline.count());
-    opened = service->open_gateway_stream(target, options.receive_window_bytes,
-                                          options.receive_window_frames, deadline);
-  });
+  // The strand task is fully self-contained (by-value captures + a shared
+  // result slot): if the bounded wait expires, a late task cannot dangle
+  // into this frame.
+  const auto result_slot = std::make_shared<
+      std::optional<Result<std::shared_ptr<ByteStreamHandle>>>>();
+  impl_->run_on_strandAndWait(
+      [result_slot, peer, target, windows = options.receive_window_bytes,
+       frames = options.receive_window_frames,
+       deadline_option = options.dial_deadline_unix_milliseconds,
+       on_connected = options.on_connected](Impl& impl) {
+        const auto write = [&](Result<std::shared_ptr<ByteStreamHandle>> value) {
+          if (!result_slot->has_value()) {
+            *result_slot = std::move(value);
+          }
+        };
+        auto* attempt = impl.authenticated_attempt(peer);
+        if (attempt == nullptr || attempt->session == nullptr) {
+          write(Result<std::shared_ptr<ByteStreamHandle>>::failure(
+              node_error(ErrorCode::pairing_required, "session_not_authorized")));
+          return;
+        }
+        // Initiator scope gate (M10-03): gateway.use must be in the session's
+        // live scope set before any gateway field leaves this node.
+        if (!impl.session_scope_covers(*attempt->session, gateway_use_scope)) {
+          write(Result<std::shared_ptr<ByteStreamHandle>>::failure(
+              node_error(ErrorCode::permission, "gateway_use_scope_missing")));
+          return;
+        }
+        auto* service = impl.ensure_stream_service(peer, nullptr);
+        if (service == nullptr) {
+          write(Result<std::shared_ptr<ByteStreamHandle>>::failure(
+              node_error(ErrorCode::pairing_required, "session_not_authorized")));
+          return;
+        }
+        const auto deadline = deadline_option != 0U
+                                  ? deadline_option
+                                  : unix_milliseconds_now() +
+                                        static_cast<std::uint64_t>(
+                                            default_gateway_dial_deadline.count());
+        write(service->open_gateway_stream(target, windows, frames, deadline,
+                                           on_connected));
+      });
+  // Only an EMPTY slot means the task never ran (bounded wait expired):
+  // a slot holding a failure Result is the task's answer.
+  if (!result_slot->has_value()) {
+    return Result<ByteStream>::failure(
+        node_error(ErrorCode::internal, "gateway_open_no_result"));
+  }
+  const auto& opened = **result_slot;
   if (!opened) {
     return Result<ByteStream>::failure(*opened.error_if());
   }
   return Result<ByteStream>::success(
       make_public_byte_stream(*opened.value_if(), impl_->stream_op_poster()));
 }
-
 Result<MessageId> Node::send_message(const DeviceEndpointKey& peer,
                                      MessageEnvelope envelope) {
   if (!impl_) {

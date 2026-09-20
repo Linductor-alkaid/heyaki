@@ -330,6 +330,24 @@ target_compile_features(heyaki_services PUBLIC cxx_std_20)
 target_link_libraries(heyaki_services PUBLIC heyaki::client)
 heyaki_configure_target(heyaki_services)
 
+# M10-09: optional SOCKS5 CONNECT frontend. A convenience LEAF outside the
+# core dependency closure (nothing in heyaki_client references it): apps
+# link it only when they expose a SOCKS entry point. Uses the public Node
+# API plus the in-repo runtime accessor for the executor-owned Asio
+# executor — no private protocol.
+add_library(heyaki_socks src/socks/socks_frontend.cpp)
+add_library(heyaki::socks ALIAS heyaki_socks)
+set_target_properties(heyaki_socks PROPERTIES EXPORT_NAME socks
+  OUTPUT_NAME heyaki_socks)
+target_compile_features(heyaki_socks PUBLIC cxx_std_20)
+target_include_directories(heyaki_socks PUBLIC
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/socks")
+target_link_libraries(heyaki_socks
+  PUBLIC heyaki::client executor::executor)
+heyaki_configure_target(heyaki_socks)
+heyaki_target_use_pinned_boost_beast(heyaki_socks)
+heyaki_enable_executor_exception_adapter_source(src/socks/socks_frontend.cpp)
+
 add_library(heyaki_transport_webrtc
   src/transport/webrtc/module.cpp
   src/transport/webrtc/webrtc_transport_session.cpp)
@@ -419,7 +437,8 @@ if(HEYAKI_BUILD_APPS)
 
   add_executable(heyaki-tui apps/tui/main.cpp)
   target_link_libraries(heyaki-tui PRIVATE
-    heyaki_tui_setup heyaki::services executor::executor)
+    heyaki_tui_setup heyaki::services heyaki::socks executor::executor)
+  heyaki_target_use_pinned_boost_beast(heyaki-tui)
   heyaki_configure_target(heyaki-tui)
   heyaki_enable_executor_exception_adapter_source(apps/tui/main.cpp)
 

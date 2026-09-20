@@ -341,6 +341,22 @@ struct CapturedRead {
   std::vector<std::byte> data;
 };
 
+// Heap-anchored capture for one-shot write completions: handlers completed
+// by fail_all during service teardown must not reference caller frames.
+struct WriteCapture {
+  bool done{false};
+  std::optional<Error> error;
+};
+
+// Heap-anchored capture for public-stream (node context) I/O completions:
+// cross-thread, so the done flag is atomic and `error`/`bytes` are written
+// before it flips.
+struct NodeIoCapture {
+  std::atomic<bool> done{false};
+  std::atomic<std::size_t> bytes{0U};
+  std::optional<Error> error;
+};
+
 class M10GatewayServiceTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -452,26 +468,21 @@ class M10GatewayServiceTest : public ::testing::Test {
   }
 
   [[nodiscard]] bool write_all(ByteStreamHandle& stream, std::string_view text) {
-    bool done = false;
-    std::optional<Error> error;
-    stream.async_write(as_bytes(text), [&](StreamIoResult result) {
-      done = true;
-      error = result.error;
-    });
-    pair_->pump_all();
-    return done && !error.has_value();
+    return write_bytes(stream, as_bytes(text));
   }
 
   [[nodiscard]] bool write_bytes(ByteStreamHandle& stream,
                                  std::span<const std::byte> data) {
-    bool done = false;
-    std::optional<Error> error;
-    stream.async_write(data, [&](StreamIoResult result) {
-      done = true;
-      error = result.error;
+    // Heap-anchored capture: a write that never completes in the test body
+    // is completed by fail_all during service teardown (after the caller's
+    // frame is gone), so the handler must not reference frame locals.
+    auto capture = std::make_shared<WriteCapture>();
+    stream.async_write(data, [capture](StreamIoResult result) {
+      capture->done = true;
+      capture->error = result.error;
     });
     pair_->pump_all();
-    return done && !error.has_value();
+    return capture->done && !capture->error.has_value();
   }
 
   static std::uint64_t refusals_of(const GatewayService& service,
@@ -526,17 +537,17 @@ GatewayProfileConfig profile_for(const std::string& name,
 // ---- A-side prelude semantics (M10-08) ---------------------------------------
 
 TEST_F(M10GatewayServiceTest, InitiatorPreludeConsumedBeforePayload) {
-  std::vector<std::shared_ptr<ByteStreamHandle>> inbound;
+  auto inbound = std::make_shared<std::vector<std::shared_ptr<ByteStreamHandle>>>();
   right_->set_gateway_inbound_handler(
-      [&](const std::shared_ptr<ByteStreamHandle>& stream, const GatewayConnect&) {
-        inbound.push_back(stream);
+      [inbound](const std::shared_ptr<ByteStreamHandle>& stream, const GatewayConnect&) {
+        inbound->push_back(stream);
       });
   auto opened = open_from_a({.host = "203.0.113.9", .port = 443, .profile = "office"});
   ASSERT_TRUE(opened);
   auto stream = *opened.value_if();
   ASSERT_TRUE(stream->is_gateway());
   pair_->pump_all();
-  ASSERT_EQ(inbound.size(), 1U);
+  ASSERT_EQ(inbound->size(), 1U);
 
   // A read pends before anything arrived and must not complete.
   auto read = pend_read(*stream, 64U);
@@ -546,7 +557,7 @@ TEST_F(M10GatewayServiceTest, InitiatorPreludeConsumedBeforePayload) {
   // The connected prelude alone must still not satisfy the read: the API may
   // not report "connected" (or any data) before tunnel payload exists.
   const auto prelude = encode_gateway_prelude(gateway_prelude_connected);
-  ASSERT_TRUE(write_bytes(*inbound[0],
+  ASSERT_TRUE(write_bytes(*(*inbound)[0],
                           std::span<const std::byte>{prelude.data(), prelude.size()}));
   pair_->pump_all();
   EXPECT_FALSE(read->completed);
@@ -555,7 +566,7 @@ TEST_F(M10GatewayServiceTest, InitiatorPreludeConsumedBeforePayload) {
   EXPECT_EQ(stream->window().next_receive_offset, prelude.size());
   EXPECT_EQ(stream->window().receive_buffered_bytes, 0U);
 
-  ASSERT_TRUE(write_all(*inbound[0], "PAYLOAD"));
+  ASSERT_TRUE(write_all(*(*inbound)[0], "PAYLOAD"));
   pair_->pump_all();
   ASSERT_TRUE(read->completed);
   EXPECT_FALSE(read->error.has_value());
@@ -568,28 +579,28 @@ TEST_F(M10GatewayServiceTest, InitiatorPreludeConsumedBeforePayload) {
 }
 
 TEST_F(M10GatewayServiceTest, InitiatorSplitPreludeAcrossFramesStillValid) {
-  std::vector<std::shared_ptr<ByteStreamHandle>> inbound;
+  auto inbound = std::make_shared<std::vector<std::shared_ptr<ByteStreamHandle>>>();
   right_->set_gateway_inbound_handler(
-      [&](const std::shared_ptr<ByteStreamHandle>& stream, const GatewayConnect&) {
-        inbound.push_back(stream);
+      [inbound](const std::shared_ptr<ByteStreamHandle>& stream, const GatewayConnect&) {
+        inbound->push_back(stream);
       });
   auto opened = open_from_a({.host = "203.0.113.9", .port = 443, .profile = "office"});
   ASSERT_TRUE(opened);
   auto stream = *opened.value_if();
   pair_->pump_all();
-  ASSERT_EQ(inbound.size(), 1U);
+  ASSERT_EQ(inbound->size(), 1U);
   auto read = pend_read(*stream, 64U);
 
   // First byte of the prelude, then (second prelude byte + payload).
   const std::vector<std::byte> first{std::byte{0x00U}};
-  ASSERT_TRUE(write_bytes(*inbound[0], std::span<const std::byte>{first}));
+  ASSERT_TRUE(write_bytes(*(*inbound)[0], std::span<const std::byte>{first}));
   pair_->pump_all();
   EXPECT_FALSE(read->completed);
   EXPECT_EQ(stream->window().next_receive_offset, 1U);
 
   const std::vector<std::byte> second{std::byte{0x00U}, std::byte{'P'},
                                       std::byte{'A'}, std::byte{'Y'}};
-  ASSERT_TRUE(write_bytes(*inbound[0], std::span<const std::byte>{second}));
+  ASSERT_TRUE(write_bytes(*(*inbound)[0], std::span<const std::byte>{second}));
   pair_->pump_all();
   ASSERT_TRUE(read->completed);
   EXPECT_FALSE(read->error.has_value());
@@ -613,15 +624,17 @@ TEST_F(M10GatewayServiceTest, InitiatorReadStaysPendedWithoutPrelude) {
   (void)gate.wait_for(1U, std::chrono::milliseconds{100});
   pair_->pump_all();
   EXPECT_FALSE(read->completed);
-  EXPECT_EQ(stream->state(), StreamState::open);
+  // M10-08: without a prelude the initiator never promotes past `opening`
+  // (open_gateway_stream reports connecting, not connected).
+  EXPECT_EQ(stream->state(), StreamState::opening);
   EXPECT_EQ(stream->pending_reads(), 1U);
 }
 
 TEST_F(M10GatewayServiceTest, InitiatorNonzeroPreludeResetsProtocolError) {
-  std::vector<std::shared_ptr<ByteStreamHandle>> inbound;
+  auto inbound = std::make_shared<std::vector<std::shared_ptr<ByteStreamHandle>>>();
   right_->set_gateway_inbound_handler(
-      [&](const std::shared_ptr<ByteStreamHandle>& stream, const GatewayConnect&) {
-        inbound.push_back(stream);
+      [inbound](const std::shared_ptr<ByteStreamHandle>& stream, const GatewayConnect&) {
+        inbound->push_back(stream);
         const std::vector<std::byte> bad_prelude{std::byte{0x00U}, std::byte{0x01U}};
         (void)stream->async_write(std::span<const std::byte>{bad_prelude},
                                   [](StreamIoResult) {});
@@ -641,8 +654,8 @@ TEST_F(M10GatewayServiceTest, InitiatorNonzeroPreludeResetsProtocolError) {
   EXPECT_EQ(read->bytes, 0U);
   // The initiator's local reset travels back and fails the serving-side
   // stream as well.
-  ASSERT_EQ(inbound.size(), 1U);
-  EXPECT_EQ(inbound[0]->state(), StreamState::reset);
+  ASSERT_EQ(inbound->size(), 1U);
+  EXPECT_EQ((*inbound)[0]->state(), StreamState::reset);
   EXPECT_EQ(left_->active_streams(), 0U);
 }
 
@@ -665,7 +678,7 @@ TEST_F(M10GatewayServiceTest, InitiatorDialDeadlineSemanticsWithoutSweep) {
 
   now_ms_ = kNow + 1'000'000U;
   left_->check_deadlines();  // no dated stream exists: nothing to erase
-  EXPECT_EQ(undated_stream->state(), StreamState::open);
+  EXPECT_EQ(undated_stream->state(), StreamState::opening);
   EXPECT_FALSE(undated_read->completed);
 
   // Boundary: at exactly the deadline the sweep must not fire (strictly
@@ -677,8 +690,10 @@ TEST_F(M10GatewayServiceTest, InitiatorDialDeadlineSemanticsWithoutSweep) {
   pair_->pump_all();
   now_ms_ = kNow + 5000U;
   left_->check_deadlines();  // both streams unexpired at this instant
-  EXPECT_EQ((*boundary.value_if())->state(), StreamState::open);
-  EXPECT_EQ(undated_stream->state(), StreamState::open);
+  // No prelude ever arrived (the B-side handler is a no-op): both streams
+  // legitimately remain `opening`, not reset.
+  EXPECT_EQ((*boundary.value_if())->state(), StreamState::opening);
+  EXPECT_EQ(undated_stream->state(), StreamState::opening);
 }
 
 // ---- B-side admission / refusal ----------------------------------------------
@@ -800,7 +815,9 @@ TEST_F(M10GatewayServiceTest, ConcurrencyCapAdmitsFirstRefusesSecond) {
   ASSERT_TRUE(first);
   auto first_stream = *first.value_if();
   spin(6);
-  ASSERT_EQ(first_stream->state(), StreamState::open)
+  // Admitted but still mid-dial (TEST-NET-3 never answers, so no prelude):
+  // the initiator stays `opening` while the serving side holds the tunnel.
+  ASSERT_EQ(first_stream->state(), StreamState::opening)
       << "with an unused cap of 1 the first gateway open must be admitted";
   ASSERT_EQ(gw_->stats().tunnels_active, 1U);
   EXPECT_EQ(gw_->stats().refusals[static_cast<std::size_t>(
@@ -834,10 +851,10 @@ TEST_F(M10GatewayServiceTest, ConcurrencyCapTwoAdmitsExactlyTwo) {
   auto first = open_from_a({.host = "203.0.113.1", .port = 80, .profile = "office"});
   ASSERT_TRUE(first);
   auto first_stream = *first.value_if();
-  ASSERT_TRUE(spin_until([&] { return first_stream->state() == StreamState::open; },
-                         2000))
+  // Admitted but mid-dial (no prelude ever lands from TEST-NET-3): poll the
+  // serving-side admission, not the initiator state (which stays `opening`).
+  ASSERT_TRUE(spin_until([&] { return gw_->stats().tunnels_active == 1U; }, 2000))
       << "with an unused cap of 2 the first gateway open must be admitted";
-  ASSERT_EQ(gw_->stats().tunnels_active, 1U);
 
   // The second concurrent open still sees one pre-existing tunnel (1 < 2),
   // so it is admitted too — the candidate's own reservation is excluded
@@ -845,8 +862,7 @@ TEST_F(M10GatewayServiceTest, ConcurrencyCapTwoAdmitsExactlyTwo) {
   auto second = open_from_a({.host = "203.0.113.2", .port = 80, .profile = "office"});
   ASSERT_TRUE(second);
   auto second_stream = *second.value_if();
-  ASSERT_TRUE(spin_until([&] { return second_stream->state() == StreamState::open; },
-                         2000))
+  ASSERT_TRUE(spin_until([&] { return gw_->stats().tunnels_active == 2U; }, 2000))
       << "cap=2 must admit a second concurrent tunnel (an effective cap of "
          "N-1 would refuse it)";
   EXPECT_EQ(gw_->stats().tunnels_active, 2U);
@@ -874,8 +890,9 @@ TEST_F(M10GatewayServiceTest, ConcurrencyCapTwoAdmitsExactlyTwo) {
   EXPECT_EQ(fourth_stream->state(), StreamState::reset);
   EXPECT_EQ(refusals_of(*gw_, GatewayRefusal::quota_exhausted), 2U);
   EXPECT_EQ(gw_->stats().tunnels_active, 2U);
-  EXPECT_EQ(first_stream->state(), StreamState::open);
-  EXPECT_EQ(second_stream->state(), StreamState::open);
+  // Both admitted tunnels are mid-dial without a prelude: still `opening`.
+  EXPECT_EQ(first_stream->state(), StreamState::opening);
+  EXPECT_EQ(second_stream->state(), StreamState::opening);
 }
 
 // ---- Real dial e2e -----------------------------------------------------------
@@ -1068,7 +1085,8 @@ TEST_F(M10GatewayServiceTest, PruneIdleIgnoresDialingTunnel) {
   EXPECT_EQ(gw_->stats().idle_timeout_resets, 0U);
   EXPECT_EQ(gw_->stats().duration_timeout_resets, 0U);
   EXPECT_EQ(gw_->stats().tunnels_active, 1U);
-  EXPECT_EQ(stream->state(), StreamState::open);
+  // Mid-dial, no prelude yet: the initiator remains `opening`.
+  EXPECT_EQ(stream->state(), StreamState::opening);
 }
 
 TEST_F(M10GatewayServiceTest, PruneIdleResetsConnectedTunnel) {
@@ -1235,7 +1253,8 @@ class M10NodeGatewayApiTest : public ::testing::Test {
                       .file_receive_roots = {},
                       .file_max_peer_receive_bytes = 0U,
                       .shell_profiles = {},
-                      .gateway_profiles = std::move(gateway_profiles)};
+                      .gateway_profiles = std::move(gateway_profiles),
+                      .gateway_confirm_sink = {}};
     return Node::create(std::move(config));
   }
 
@@ -1468,68 +1487,80 @@ TEST_F(M10NodeGatewayApiTest, EndToEndEchoThroughPublicApi) {
                               ? opened.error_if()->safe_detail()
                               : std::string{"unknown"});
   ByteStream stream{std::move(*opened.value_if())};
-  EXPECT_EQ(stream.state(), ByteStreamState::open);
-
   // One bounded thread-free pump for the echo target side.
   auto pump_echo = [&]() {
     (void)io.poll();
     return true;
   };
+  // M10-08: the stream opens as `opening` and promotes only when the
+  // serving side's 2-byte prelude lands after the real dial completes.
+  EXPECT_EQ(stream.state(), ByteStreamState::opening);
+  {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{3};
+    executor::comm::PhaseGate poll{"m10-gateway-service-connect-poll"};
+    while (stream.state() != ByteStreamState::open &&
+           std::chrono::steady_clock::now() < deadline) {
+      (void)pump_echo();
+      (void)poll.wait_for(1U, std::chrono::milliseconds{2});
+    }
+    ASSERT_EQ(stream.state(), ByteStreamState::open)
+        << "prelude never promoted the initiator stream to open";
+  }
 
-  std::atomic<bool> write_done{false};
-  std::optional<Error> write_error;  // set before write_done flips
-  stream.async_write(as_bytes("HELLO-NODE"), [&](ByteStreamIoResult result) {
-    if (result.error.has_value()) write_error = result.error;
-    write_done.store(true);
+  // All I/O capture state below is heap-anchored (shared_ptr captured by
+  // value): these handlers complete on the node context and, on a failing
+  // path, survive the test frame until node shutdown fires them — they must
+  // never reference this frame. The `error` field is always written before
+  // the `done` flag flips.
+  auto write_state = std::make_shared<NodeIoCapture>();
+  stream.async_write(as_bytes("HELLO-NODE"), [write_state](ByteStreamIoResult result) {
+    if (result.error.has_value()) write_state->error = result.error;
+    write_state->done.store(true);
   });
-  EXPECT_TRUE(wait_until([&] { return write_done.load(); },
+  EXPECT_TRUE(wait_until([&] { return write_state->done.load(); },
                          std::chrono::milliseconds{3000}));
-  ASSERT_FALSE(write_error.has_value()) << write_error->safe_detail();
+  ASSERT_FALSE(write_state->error.has_value()) << write_state->error->safe_detail();
 
-  std::atomic<std::size_t> received{0U};
-  std::atomic<bool> read_done{false};
-  std::optional<Error> read_error;
+  auto read_state = std::make_shared<NodeIoCapture>();
   auto buffer = std::make_shared<std::array<std::byte, 64U>>();
   stream.async_read_some(std::span<std::byte>{buffer->data(), buffer->size()},
-                         [&, buffer](ByteStreamIoResult result) {
-                           if (result.error.has_value()) read_error = result.error;
-                           received.store(result.bytes);
-                           read_done.store(true);
+                         [read_state, buffer](ByteStreamIoResult result) {
+                           if (result.error.has_value()) read_state->error = result.error;
+                           read_state->bytes.store(result.bytes);
+                           read_state->done.store(true);
                          });
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{3};
-  while (!read_done.load() && std::chrono::steady_clock::now() < deadline) {
+  while (!read_state->done.load() && std::chrono::steady_clock::now() < deadline) {
     (void)pump_echo();
     executor::comm::PhaseGate poll{"m10-gateway-service-echo-poll"};
     (void)poll.wait_for(1U, std::chrono::milliseconds{2});
   }
-  ASSERT_TRUE(read_done.load()) << "echo never reached the public stream";
-  ASSERT_FALSE(read_error.has_value()) << read_error->safe_detail();
-  ASSERT_EQ(received.load(), 10U);
+  ASSERT_TRUE(read_state->done.load()) << "echo never reached the public stream";
+  ASSERT_FALSE(read_state->error.has_value()) << read_state->error->safe_detail();
+  ASSERT_EQ(read_state->bytes.load(), 10U);
   const std::string echoed{reinterpret_cast<const char*>(buffer->data()),
-                            received.load()};
+                            read_state->bytes.load()};
   EXPECT_EQ(echoed, "HELLO-NODE");
 
   // Half-close propagates to the target and back as a clean EOF.
   ASSERT_TRUE(stream.shutdown_write());
-  std::atomic<bool> eof_seen{false};
-  std::atomic<std::size_t> eof_bytes{0U};
-  std::optional<Error> eof_error;
+  auto eof_state = std::make_shared<NodeIoCapture>();
   auto eof_buffer = std::make_shared<std::array<std::byte, 16U>>();
   stream.async_read_some(std::span<std::byte>{eof_buffer->data(), eof_buffer->size()},
-                         [&, eof_buffer](ByteStreamIoResult result) {
-                           if (result.error.has_value()) eof_error = result.error;
-                           eof_bytes.store(result.bytes);
-                           eof_seen.store(true);
+                         [eof_state, eof_buffer](ByteStreamIoResult result) {
+                           if (result.error.has_value()) eof_state->error = result.error;
+                           eof_state->bytes.store(result.bytes);
+                           eof_state->done.store(true);
                          });
   const auto eof_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{3};
-  while (!eof_seen.load() && std::chrono::steady_clock::now() < eof_deadline) {
+  while (!eof_state->done.load() && std::chrono::steady_clock::now() < eof_deadline) {
     (void)pump_echo();
     executor::comm::PhaseGate poll{"m10-gateway-service-eof-poll"};
     (void)poll.wait_for(1U, std::chrono::milliseconds{2});
   }
-  ASSERT_TRUE(eof_seen.load()) << "clean EOF never reached the public stream";
-  ASSERT_FALSE(eof_error.has_value()) << eof_error->safe_detail();
-  EXPECT_EQ(eof_bytes.load(), 0U);
+  ASSERT_TRUE(eof_state->done.load()) << "clean EOF never reached the public stream";
+  ASSERT_FALSE(eof_state->error.has_value()) << eof_state->error->safe_detail();
+  EXPECT_EQ(eof_state->bytes.load(), 0U);
 
   EXPECT_TRUE(pair.first.value().shutdown().stopped);
   EXPECT_TRUE(pair.second.value().shutdown().stopped);
@@ -1539,16 +1570,15 @@ TEST_F(M10NodeGatewayApiTest, EndToEndEchoThroughPublicApi) {
 // not arrive before dial_deadline must be RESET(deadline_exceeded) by the
 // deadline sweep, and its pending read must complete with an error.
 //
-// DEFECT (deliberately last so the rest of the suite stays observable):
-// ByteStreamService::check_deadlines (src/client/byte_stream.cpp) iterates
-// `streams_` with a range-for while the gateway dial-deadline branch calls
-// handle_reset_frame_for -> finish_stream, which erases the current element
-// from that same map. The subsequent iterator increment is undefined
-// behaviour and crashes the process (SIGSEGV inside std::_Rb_tree_increment;
-// ASAN reports the use-after-free). The Node 500ms prune tick drives the
-// same function, so any real initiator whose dial deadline expires hits
-// this. Expected: stream reset + pending read error, process intact.
-// Separate suite so this crash-demonstrating test registers (and therefore
+// Regression guard: ByteStreamService::check_deadlines
+// (src/client/byte_stream.cpp) previously iterated `streams_` with a
+// range-for while the gateway dial-deadline branch called
+// handle_reset_frame_for -> finish_stream, erasing the current element
+// mid-iteration (SIGSEGV under ASAN). The sweep now collects expired
+// streams first and finishes them after the iteration; this test keeps
+// demonstrating the destructive half (reset + read error + surviving
+// undated sibling) so a regression of the iterator handling fails here.
+// Separate suite so this sweep-demonstrating test registers (and therefore
 // runs) after every other suite in this file, keeping their results
 // observable.
 class M10GatewayDialDeadlineSweepTest : public M10GatewayServiceTest {};
@@ -1576,7 +1606,9 @@ TEST_F(M10GatewayDialDeadlineSweepTest, InitiatorDialDeadlineSweepResetsStream) 
   ASSERT_TRUE(dated_read->error.has_value());
   EXPECT_EQ(dated_read->error->code(), ErrorCode::cancelled);
   EXPECT_EQ(dated_read->error->safe_detail(), "stream_reset");
-  EXPECT_EQ(undated_stream->state(), StreamState::open);
+  // The undated stream never received a prelude (no-op B-side handler), so
+  // it survives the sweep still `opening`.
+  EXPECT_EQ(undated_stream->state(), StreamState::opening);
   EXPECT_FALSE(undated_read->completed);
 }
 

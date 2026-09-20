@@ -20,13 +20,13 @@ profile 允许的 TCP 目标（B 网络节点或经 B 出公网）。L3/TUN 与 
 - [x] `M10-03` 定义并实现 `gateway.use` / `gateway.provide:<profile>` scope：默认关闭、不进任何标准 pairing 模板；请求 scope、TrustGrant、profile 与本地策略按交集裁决（沿用 M5-12 机制）。（B 侧每流 live 执行点随 M10-07 服务交付；scope 定义、默认关闭、模板排除回归与交集机制已冻结并测试）
 - [x] `M10-04` 实现 gateway profile 配置：CIDR 允许列表、端口 allowlist、`allow_internet`（默认 false）、并发流/字节/速率配额、每流空闲与总时长上限、dial deadline、人工确认模式；配置非法时启动失败。
 - [ ] `M10-05` 实现 B 侧准入：scope/profile/CIDR/端口裁决；环回、链路本地、B 自身管理网段与隧道端点的默认 deny 列表；域名在 B 侧解析后逐地址校验；配额满载 fail-closed 拒绝并计数。（Round 2 交付纯准入引擎：profile 选择/端口/内置+配置 deny 列表逐地址过滤/并发与字节配额 fail-closed，全部有测试；隧道端点运行时 deny 与拒绝计数随 M10-07/M10-11 落地）
-- [ ] `M10-06` 实现 TUI 同意流与 Gateway 视图：B 侧按 profile 确认模式显示对端与目标范围并允许/拒绝（`first_use` 决定可持久化）；A 侧发起 gateway、查看目标/路径/配额/prelude 延迟与 SOCKS 前端状态。
+- [x] `M10-06` 实现 TUI 同意流与 Gateway 视图：B 侧按 profile 确认模式显示对端与目标范围并允许/拒绝（`first_use` 决定可持久化）；A 侧发起 gateway、查看目标/路径/配额/prelude 延迟与 SOCKS 前端状态。（B 侧：`GatewayConfirmSink` + 30s 无应答自动拒绝 fail-closed + first_use 会话级记忆（跨重启持久化 v1.x）+ TUI `gateway confirm ... [yes|no]` 提示；A 侧：`gateway N` 视图 open/prelude 延迟/进入 stream 视图 + SOCKS 前端 socks/socks-stop/socks-status；CLI `--gateway-profile NAME=CIDR[,...]`/`--gateway-confirm`；路径/配额完整视图随 M10-11 指标交付）
 
 ## 服务实现
 
 - [x] `M10-07` 实现 B 侧 `GatewayService`：`STREAM_OPEN(gateway)` 准入后在 executor 托管 Asio runtime 上本地 dial；拨号成功发送 prelude（status=0），失败/拒绝发送携带映射 status 的 `STREAM_RESET`；此后双向字节搬运复用 M5 stream 状态机。（每连接专用 stream 域逻辑通道、每方向单 16KiB in-flight chunk 有界搬运、逐地址拨号与 deadline、EOF 半关传播、idle/duration/字节配额清扫、会话关闭全量回收）
 - [x] `M10-08` 实现 A 侧 `open_gateway_stream(peer, host, port, deadline)`：prelude 到达前处于 connecting，成功返回普通 `ByteStream`，失败/超时返回稳定错误码并 reset；遵守公共 Result/cancellation 语义。（公共 API `Node::open_gateway_stream(peer, GatewayConnect, NodeGatewayStreamOptions)`；prelude 内部消费、dial deadline RESET(deadline_exceeded)、`gateway.use` 会话级 scope 门）
-- [ ] `M10-09` 实现可选 SOCKS5 前端：用户态、默认仅绑定 loopback、仅 `CONNECT`；域名目标（ATYP=0x03）原样透传由 B 侧解析；不进核心库依赖闭包，通过公共 API 工作。
+- [x] `M10-09` 实现可选 SOCKS5 前端：用户态、默认仅绑定 loopback、仅 `CONNECT`；域名目标（ATYP=0x03）原样透传由 B 侧解析；不进核心库依赖闭包，通过公共 API 工作。（`src/socks/socks_frontend.{hpp,cpp}` 独立组件库 `heyaki_socks`：RFC 1928 子集 VER5/NO-AUTH/CONNECT、loopback:1080 默认、每向 16KiB 单 chunk、EOF 半关、并发帽 fail-closed；阻塞 open 经 executor 通用池发起避免与单 asio worker 自死锁；域名透传经 IVA 假域名→B 解析失败→REP 0x01 验证）
 - [ ] `M10-10` 背压与调度：gateway 通道权重不高于 event/file；隧道↔本地 socket 搬运有界缓冲，满载 reset 该流并计数，drop 语义显式配置且可观测。
 - [ ] `M10-11` 路径策略与计量：`PeerPathPolicy` 增加 `gateway_paths` 约束（TURN 路径允许/限速/禁止）；gateway 活跃流数、准入结果分布、按 profile 字节/速率、TURN 路径占比、dial P95 接入指标。
 - [ ] `M10-12` 审计与 threat model：五元组、时长、双向字节与结束原因入审计；目标 host 未通过校验以稳定 token 替换（safe_detail 纪律）；threat model 增补 gateway 条目（防火墙内侧、SSRF、探测 oracle、公网滥用、环回、资源耗尽）并完成评审。
@@ -154,3 +154,17 @@ D7 close_tunnel 悬垂引用、D8 shared_ptr 自捕获循环泄漏——主循�
 本机验证编译+运行）。证据：debug 28/28+55/55+27/27+27/27、unit|protocol 36/36（m3a 本机高负载
 下偶发已知时序家族、单套稳定绿、CI 为准）、asan/LSAN 0 发现、tsan service 套件 0 race
 （修复前 4-10 条）。
+
+### Round 4（2026-09-20）：M10-09 SOCKS5 前端 + M10-06 TUI 与确认流 + M10-08 connecting 显式化
+
+生产代码（主循环实现）：
+
+- **发起侧 connecting 语义**：`open_gateway_stream` 增 `on_connected` 一次性回调（prelude 验证通过→success；prelude 前终结→`remote_error/gateway_connect_failed_<status>`（RESET reason 现解析记录）或会话关闭 `cancelled/gateway_connect_closed`，含 `fail_all` 路径）；发起侧流 state 在 prelude 前=`opening`（调用方不得提前视为已连接）。`NodeGatewayStreamOptions.on_connected` 公共透传。
+- **B 侧确认流（M10-06 核心）**：公共 `GatewayConfirmRequest{peer_device,profile,host,port}` + `GatewayConfirmSink`（decider 任意线程、服务编组回 node strand）；profile.confirm never/first_use/always——always 每次询问、first_use 会话级记忆（跨重启持久化 v1.x）、无 sink 时 fail-closed 拒绝；pending 确认占并发槽、30s 无应答 prune 自动拒绝；awaiting 隧道不受 idle/duration 清扫。`NodeConfig::gateway_confirm_sink` 接线。
+- **SOCKS5 前端（M10-09）**：新组件库 `heyaki_socks`（`src/socks/socks_frontend.{hpp,cpp}`，核心库零依赖它）：RFC 1928 子集（VER5、仅 NO-AAUTH、仅 CONNECT；非 CONNECT→REP 0x07、坏 ATYP→0x08、无 NO-AUTH→0xFF）；ATYP=3 域名原样透传（B 侧解析）、ATYP 1/4 二进制直构；loopback:1080 默认；每向 16KiB 单 chunk、EOF 半关传播；`on_connected` 决定 REP 时机；并发帽满直接断开；**阻塞 open 经 `RuntimeAccess::dispatch_general`（executor 通用池）发起**——runtime 的 asio 上下文单 worker，前端 strand 内联调 Node API 会自死锁到 5s 有界等待超时；stats 经 strand 快照。
+- **TUI（M10-06）**：自建 owned Runtime 借给 Node（SOCKS 前端共用 executor、退出顺序 SOCKS→node→runtime）；`gateway N` 视图（open 显示 prelude 延迟后进 stream 视图；socks/socks-stop/socks-status）；主循环 `gateway confirm peer=... [yes|no]` 提示（MpscChannel 传递，溢出最旧自动拒绝）；CLI `--gateway-profile NAME=CIDR[,...]`（可重复）与 `--gateway-confirm`（非法配置 usage 拒绝）。
+- **缺陷修复（IVA 两轮抓出后主循环修复）**：D1 `fail_all` 触发一次性 connect 失败；D2 SOCKS open 单 asio 线程自死锁+晚到任务悬垂（dispatch_general + 自包含结果槽，`Node::open_gateway_stream` strand 任务改全按值捕获）；P1 前端写完成 lambda 未锚定 buffer（UAF，公共 span 契约）；P2 结果槽误用 `Result::has_value()` 丢弃失败结果；clang -Werror（未用捕获/变量）。
+- 参数冻结表 §6a 增确认模式与 SOCKS 前端默认值。
+
+测试（IVA 三轮：首轮 FAIL 抓 D1/D2；修复复验轮抓出 P1/P2 与测试自身栈生命周期 bug；末轮 PASS）：`tests/unit/m10_round4_test.cpp` 20 用例（opening/on_connected 语义 4、确认流 8：never/always/first_use 记忆/deny 释放槽/无 sink fail-closed/30s 超时自动拒/awaiting 免 idle、SOCKS：握手拒绝+容量+stop、真实 CONNECT echo 往返+字节统计、假域名→B 解析失败→REP 0x01、TUI CLI 解析 3）；Round 3 套件 8 处旧 open 语义断言更新。证据：round4 19P+1 环境跳过、gateway_service 27/27、protocol 27/27、policy 55/55、unit|protocol 37/37（单套偶发为负载 flake，单独重跑稳定绿）、asan 双套件 0 发现、tsan round4 0 race（唯一历史发现即已修 P1）。
+遗留观察（非 M10 引入，记录备查）：runtime asio worker 空闲时 epoll 自旋（~50k/s）持续占核；`run_on_strandAndWait` 其余既有调用点仍为 `[&]` 捕获（>5s strand 延迟下理论悬垂，与 M10 无关，建议独立任务收敛）。

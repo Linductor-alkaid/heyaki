@@ -197,6 +197,10 @@ class ByteStreamHandle {
   std::array<std::byte, gateway_prelude_bytes> gateway_prelude_{};
   // Absolute unix-millisecond deadline for the prelude to arrive; 0 = none.
   std::uint64_t gateway_dial_deadline_{0U};
+  // Fires once when the prelude validates (success) or the stream dies
+  // first (error); node/session context.
+  std::function<void(Result<void>)> gateway_connected_handler_;
+  bool gateway_connected_fired_{false};
   std::vector<std::shared_ptr<PendingWrite>> writes_;
   std::vector<std::shared_ptr<PendingRead>> reads_;
 };
@@ -236,11 +240,16 @@ class ByteStreamService {
   // session did not negotiate gateway_v1 (M10-02 emission gating) or the
   // target fails structural validation. `dial_deadline_unix_milliseconds`
   // bounds the wait for the serving side's 2-byte prelude (0 = no deadline);
-  // expiry resets the stream with deadline_exceeded.
+  // expiry resets the stream with deadline_exceeded. The stream reports
+  // `opening` until the prelude lands (M10-08: the caller must not treat it
+  // as connected earlier); `on_connected` — when set — fires exactly once
+  // on the session context with the connect outcome (prelude validated, or
+  // the reset reason as an error).
   [[nodiscard]] Result<std::shared_ptr<ByteStreamHandle>> open_gateway_stream(
       const GatewayConnect& target, std::uint64_t receive_window_bytes,
       std::uint32_t receive_window_frames,
-      std::uint64_t dial_deadline_unix_milliseconds = 0U);
+      std::uint64_t dial_deadline_unix_milliseconds = 0U,
+      std::function<void(Result<void>)> on_connected = {});
   // Streams the peer initiated land here when set; unset inbound streams are
   // reset with permission_denied.
   void set_inbound_handler(InboundHandler handler);

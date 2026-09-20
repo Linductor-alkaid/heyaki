@@ -154,6 +154,8 @@ mapped 环回绕过）不可配置移除，只可叠加。
 | dial_deadline | 10000ms | 30000ms | M10 设计 §8（协议冻结） |
 | prelude | 2 字节（仅 status=0） | 同默认 | wire protocol §6.3.1 |
 | 端口 allowlist / allow_internet | 空（拒绝全部）/ false | — | 默认关闭语义（M10-03） |
+| 确认模式 confirm | never | — | first_use/always 需 TUI sink；30s 无应答自动拒绝（fail-closed） |
+| SOCKS5 前端（`SocksFrontendConfig`，M10-09） | 127.0.0.1:1080、并发 16、connect deadline 15s | 并发 1024、deadline 30s | 仅 loopback、仅 CONNECT、域名原样透传；不进核心库闭包 |
 
 ## 7. Relay 服务端（`RelayServerConfig`）
 

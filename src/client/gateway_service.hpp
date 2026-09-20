@@ -36,6 +36,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -45,6 +46,9 @@ struct GatewayServiceConfig {
   // Validated at Node::create (M10-04); an empty set never constructs a
   // GatewayService — inbound gateway opens reset with `unimplemented`.
   std::vector<GatewayProfileConfig> profiles;
+  // Identity of the remote peer this service serves (confirm prompts).
+  DeviceId peer_device;
+  GatewayConfirmSink confirm_sink;
 };
 
 // Counters for M10-11 groundwork (metrics export lands with that task).
@@ -74,7 +78,8 @@ class GatewayService final : public std::enable_shared_from_this<GatewayService>
   GatewayService(PeerSession& session, ByteStreamService& streams,
                  GatewayServiceConfig config, boost::asio::any_io_executor io,
                  NodePoster poster, ScopeCheck scope_check,
-                 std::function<std::uint64_t()> wall_clock);
+                 std::function<std::uint64_t()> wall_clock,
+                 GatewayConfirmSink confirm_sink = {});
   // Closes every local socket (on the io strand) and drops the registry
   // before the raw session references dangle.
   ~GatewayService();
@@ -109,6 +114,10 @@ class GatewayService final : public std::enable_shared_from_this<GatewayService>
     std::uint64_t bytes_from_tunnel{0};
     std::uint64_t bytes_to_tunnel{0};
     bool finished{false};      // node strand: tunnel left the registry
+    // Awaiting the human confirmation decision (design 3.3); the connect
+    // request is parked until the decider runs or the deadline denies.
+    bool awaiting_confirm{false};
+    GatewayConnect pending_connect;
     // Node-strand state (set when the dial continuation lands):
     bool socket_connected{false};
     // io strand only:
@@ -118,6 +127,16 @@ class GatewayService final : public std::enable_shared_from_this<GatewayService>
 
   void handle_gateway_open(const std::shared_ptr<ByteStreamHandle>& stream,
                            const GatewayConnect& connect);
+  // Runs one confirmed/pending open through admission: reserve the slot,
+  // optionally park on the confirm sink, then resolve+dial.
+  void begin_tunnel(const std::shared_ptr<ByteStreamHandle>& stream,
+                    const GatewayConnect& connect, const GatewayProfileConfig* profile);
+  void ask_confirmation(const std::shared_ptr<Tunnel>& tunnel,
+                        const GatewayConnect& connect);
+  void on_confirm_decided(const std::shared_ptr<Tunnel>& tunnel, bool allowed);
+  // Post-confirmation path: literal targets go straight to admission,
+  // hostnames resolve on the io strand.
+  void dispatch_after_confirm(const std::shared_ptr<Tunnel>& tunnel);
   // Node strand: runs the scope check + admission engine once addresses
   // are known, then either refuses (stream reset) or dispatches the dial.
   void continue_admission(const std::shared_ptr<Tunnel>& tunnel,
@@ -158,11 +177,15 @@ class GatewayService final : public std::enable_shared_from_this<GatewayService>
   PeerSession& session_;
   ByteStreamService& streams_;
   GatewayServiceConfig config_;
+  GatewayConfirmSink confirm_sink_;
   boost::asio::strand<boost::asio::any_io_executor> io_strand_;
   NodePoster poster_;
   ScopeCheck scope_check_;
   std::function<std::uint64_t()> wall_clock_;
   std::map<StreamId, std::shared_ptr<Tunnel>> tunnels_;
+  // first_use confirmations remembered per profile for this session
+  // (cross-restart persistence is deferred to the v1.x policy store).
+  std::set<std::string> confirmed_profiles_;
   // Live per-profile accounting feeding the admission context.
   struct ProfileUsage {
     std::size_t active{0};

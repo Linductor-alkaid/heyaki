@@ -754,6 +754,38 @@ set_tests_properties(heyaki_m10_gateway_service PROPERTIES
   RESOURCE_LOCK heyaki_m3a_profile_state
   TIMEOUT 180)
 
+# M10 Round 4: initiator opening/on_connected semantics (M10-08), the
+# serving-side human confirmation flow (M10-06), the SOCKS5 CONNECT frontend
+# (M10-09) over a Node pair with a real borrowed Runtime, and TUI CLI parse
+# smoke against the built heyaki-tui binary.
+add_executable(heyaki_m10_round4_tests unit/m10_round4_test.cpp)
+heyaki_enable_executor_exception_adapter_source(unit/m10_round4_test.cpp)
+target_link_libraries(heyaki_m10_round4_tests PRIVATE
+  heyaki::client
+  heyaki::socks
+  executor::executor
+  GTest::gtest_main
+  OpenSSL::SSL)
+heyaki_target_use_pinned_boost_asio(heyaki_m10_round4_tests)
+heyaki_configure_target(heyaki_m10_round4_tests)
+target_include_directories(heyaki_m10_round4_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/client"
+  "${CMAKE_CURRENT_SOURCE_DIR}/unit")
+target_compile_definitions(heyaki_m10_round4_tests PRIVATE
+  "HEYAKI_M10_ROUND4_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}/m10-round4\"")
+if(HEYAKI_BUILD_APPS)
+  target_compile_definitions(heyaki_m10_round4_tests PRIVATE
+    "HEYAKI_TUI_BINARY=\"$<TARGET_FILE:heyaki-tui>\"")
+  add_dependencies(heyaki_m10_round4_tests heyaki-tui)
+endif()
+heyaki_add_runtime_test(
+  heyaki_m10_round4 heyaki_m10_round4_tests
+  "unit;m10;gateway;socks")
+set_tests_properties(heyaki_m10_round4 PROPERTIES
+  RESOURCE_LOCK heyaki_m3a_profile_state
+  TIMEOUT 300)
+
 add_executable(heyaki_m8_service_tests
   unit/m8_codec_test.cpp
   unit/m8_shell_test.cpp
