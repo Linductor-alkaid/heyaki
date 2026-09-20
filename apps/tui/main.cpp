@@ -2317,6 +2317,14 @@ int run_tui(const Options& options) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  // Unbuffered stdout: the TUI is driven over a PTY by the network
+  // harnesses (pexpect-style read loops wait for exact prompt fragments);
+  // glibc block-buffers stdout whenever it is not a terminal, and a
+  // buffered first screen makes those drivers time out with an empty
+  // transcript (CI runs 35517368622/35525647216/35532962788 — zero
+  // occurrences of the first-screen text in the dumped output). The
+  // matrix node has carried the same line since M4.
+  std::cout << std::unitbuf;
   const auto options = parse_options(argc, argv);
   if (!options) {
     print_usage();
