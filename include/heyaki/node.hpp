@@ -134,6 +134,17 @@ struct PeerPathPolicy {
   // Restricts ICE to relayed candidates so the data path must traverse TURN.
   // Requires at least one allowed TURN class and one TURN server.
   bool force_turn_data_path{false};
+  // M10-11: gateway traffic constraint on the session's arbitrated data
+  // path. `allow` (default) rides whatever path ICE selected; `direct_only`
+  // refuses gateway opens while the session traverses TURN; `turn_limited`
+  // allows the TURN path with the profile's aggregate rate quota as the
+  // bound (per-profile rates derive from the exported byte counters).
+  enum class GatewayPaths : std::uint8_t {
+    allow = 0U,
+    direct_only = 1U,
+    turn_limited = 2U,
+  };
+  GatewayPaths gateway_paths{GatewayPaths::allow};
   std::vector<NodeIceServer> ice_servers;
 };
 
@@ -456,6 +467,7 @@ struct NodeServiceDiagnostics {
   EventServiceStats event;
   FileServiceStats file;
   ShellServiceStats shell;
+  GatewayServiceStats gateway;
   std::size_t message_pending_acks{};
   std::size_t rpc_pending_calls{};
   std::size_t rpc_retry_queue{};
@@ -465,6 +477,12 @@ struct NodeServiceDiagnostics {
   std::size_t file_sessions{};
   std::size_t file_paused_transfers{};
   std::size_t shell_sessions{};
+  std::size_t gateway_sessions{};
+  // M10-11: gateway bytes attributed to sessions whose CURRENT data path
+  // traverses TURN (sampled at aggregation; the share derives on dashboards)
+  // plus the tunnel/session counts on TURN paths.
+  std::uint64_t gateway_bytes_on_turn_paths{};
+  std::size_t gateway_tunnels_on_turn_paths{};
 };
 
 // ---- Device metrics export (M9-01) ----
@@ -812,6 +830,9 @@ class Node {
   // Bounded serving-side audit history (initiator, profile, times, exit
   // code, byte counts; no terminal content, M8-07).
   [[nodiscard]] std::vector<ShellAuditRecord> shell_audit_records() const;
+  // Bounded serving-side gateway audit history (M10-12): one record per
+  // tunnel that entered admission, with validated targets only.
+  [[nodiscard]] std::vector<GatewayAuditRecord> gateway_audit_records() const;
 
   [[nodiscard]] NodeShutdownReport shutdown();
 

@@ -130,3 +130,13 @@ section in the same change:
 - **Completeness**: families render unconditionally from zero-value
   aggregates, so `absent()`-style alerting and schema diffing work; a
   missing family means the exporter changed, not that traffic is zero.
+- **M10 gateway families (2026-09-20)**: `heyaki_gateway_*` follows the
+  same rules; the dial-latency gauge `heyaki_gateway_dial_p95_milliseconds`
+  joins the millisecond allowlist. Per-profile families
+  (`heyaki_gateway_profile_<name>_*`) derive their series names from the
+  frozen profile-name grammar `[a-z0-9_.-]` (bounded at 64 profiles), so
+  scrape cardinality stays bounded without labels; profile byte *rates*
+  are `rate()` over the `_total` counters, not separate families. TURN-path
+  attribution (`heyaki_gateway_bytes_on_turn_paths`) samples the session's
+  CURRENT path at aggregation time — an approximation documented here, not
+  a per-byte path tag.

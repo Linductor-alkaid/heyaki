@@ -168,6 +168,7 @@ void GatewayService::prune() {
         current - tunnel->opened_unix_ms >
             static_cast<std::uint64_t>(gateway_confirm_deadline.count())) {
       tunnel->awaiting_confirm = false;
+      ++stats_.confirm_denials;
       refuse_open(tunnel->stream, tunnel, GatewayRefusal::policy_denied);
       it = next;
       continue;
@@ -234,6 +235,14 @@ void GatewayService::handle_gateway_open(const std::shared_ptr<ByteStreamHandle>
 void GatewayService::begin_tunnel(const std::shared_ptr<ByteStreamHandle>& stream,
                                   const GatewayConnect& connect,
                                   const GatewayProfileConfig* profile) {
+  // M10-11 path policy: direct_only refuses gateway traffic while the
+  // session's arbitrated path traverses TURN.
+  if (config_.deny_on_turn_path && config_.on_turn_path &&
+      config_.on_turn_path()) {
+    ++stats_.path_rejected;
+    refuse_open(stream, nullptr, GatewayRefusal::policy_denied);
+    return;
+  }
   auto tunnel = std::make_shared<Tunnel>(stream->stream_id());
   tunnel->stream = stream;
   tunnel->profile = profile;
@@ -241,6 +250,9 @@ void GatewayService::begin_tunnel(const std::shared_ptr<ByteStreamHandle>& strea
   tunnel->opened_unix_ms = now();
   tunnel->last_activity_unix_ms = tunnel->opened_unix_ms;
   tunnel->pending_connect = connect;
+  tunnel->initiator = config_.peer_device;
+  tunnel->target_host = connect.host;
+  tunnel->target_port = connect.port;
   // Reserve the concurrency slot before any async work so parallel opens
   // cannot overshoot the caps (fail-closed admission, M10-05).
   tunnels_.emplace(tunnel->id, tunnel);
@@ -289,6 +301,7 @@ void GatewayService::on_confirm_decided(const std::shared_ptr<Tunnel>& tunnel,
   if (tunnel->finished || !tunnel->awaiting_confirm) return;
   tunnel->awaiting_confirm = false;
   if (!allowed) {
+    ++stats_.confirm_denials;
     refuse_open(tunnel->stream, tunnel, GatewayRefusal::policy_denied);
     return;
   }
@@ -520,6 +533,15 @@ void GatewayService::on_prelude_written(const std::shared_ptr<Tunnel>& tunnel,
     close_tunnel(tunnel, StableStatus::internal, false);
     return;
   }
+  // Dial latency sample (open received -> prelude on the wire, M10-11).
+  const auto opened = tunnel->opened_unix_ms;
+  const auto current = now();
+  if (current >= opened) {
+    const auto elapsed = current - opened;
+    record_gateway_dial_sample(
+        stats_, static_cast<std::uint32_t>(
+                    std::min<std::uint64_t>(elapsed, 0xFFFFFFFFU)));
+  }
   start_pumps(tunnel);
 }
 
@@ -671,8 +693,23 @@ void GatewayService::on_tunnel_bytes(const std::shared_ptr<Tunnel>& tunnel,
   auto usage = usage_.find(tunnel->profile_name);
   if (usage != usage_.end()) {
     usage->second.bytes += from_tunnel + to_tunnel;
+    usage->second.bytes_from_tunnel += from_tunnel;
+    usage->second.bytes_to_tunnel += to_tunnel;
   }
   tunnel->last_activity_unix_ms = now();
+}
+
+std::vector<GatewayProfileUsageSnapshot> GatewayService::profile_usage() const {
+  std::vector<GatewayProfileUsageSnapshot> snapshot;
+  snapshot.reserve(usage_.size());
+  for (const auto& [name, usage] : usage_) {
+    snapshot.push_back(GatewayProfileUsageSnapshot{
+        .profile = name,
+        .active_tunnels = usage.active,
+        .bytes_from_tunnel = usage.bytes_from_tunnel,
+        .bytes_to_tunnel = usage.bytes_to_tunnel});
+  }
+  return snapshot;
 }
 
 void GatewayService::on_dial_failed(const std::shared_ptr<Tunnel>& tunnel,
@@ -710,6 +747,19 @@ void GatewayService::close_tunnel(std::shared_ptr<Tunnel> tunnel, StableStatus r
     usage->second.active -= 1U;
   }
   stats_.tunnels_active = tunnels_.size();
+  if (audit_sink_ != nullptr) {
+    audit_sink_(audit_context_,
+                GatewayAuditRecord{
+                    .initiator = tunnel->initiator,
+                    .profile = tunnel->profile_name,
+                    .target_host = tunnel->target_host,
+                    .target_port = tunnel->target_port,
+                    .started_unix_ms = tunnel->opened_unix_ms,
+                    .ended_unix_ms = now(),
+                    .bytes_from_tunnel = tunnel->bytes_from_tunnel,
+                    .bytes_to_tunnel = tunnel->bytes_to_tunnel,
+                    .end_status = reason});
+  }
 }
 
 void GatewayService::refuse_open(const std::shared_ptr<ByteStreamHandle>& stream,

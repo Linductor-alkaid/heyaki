@@ -309,8 +309,67 @@ struct GatewayAdmission {
     std::span<const GatewayProfileConfig> profiles, const GatewayConnect& connect,
     std::span<const GatewayIp> resolved, const GatewayAdmissionContext& context);
 
-// ---- Human confirmation (design 3.3, M10-06) ----
-// One confirmation request shown to the serving-side operator before the
+// ---- Serving-side service stats (M10-11) ----
+// Per-profile byte accounting for the metrics export (rates derive from
+// the counters via the usual rate() window, not a second family).
+struct GatewayProfileUsageSnapshot {
+  std::string profile;
+  std::size_t active_tunnels{};
+  std::uint64_t bytes_from_tunnel{};
+  std::uint64_t bytes_to_tunnel{};
+};
+
+// Counters/gauges the node aggregates per serving-side gateway service.
+// Refusals are indexed by GatewayRefusal (gateway_refusal_name labels).
+struct GatewayServiceStats {
+  static constexpr std::size_t dial_sample_window = 256U;
+  std::array<std::uint64_t,
+             static_cast<std::size_t>(GatewayRefusal::local_failure) + 1U>
+      refusals{};
+  std::uint64_t opens_received{0};
+  std::uint64_t dials_succeeded{0};
+  std::uint64_t dials_failed{0};
+  std::uint64_t bytes_from_tunnel{0};  // A -> target
+  std::uint64_t bytes_to_tunnel{0};    // target -> A
+  std::uint64_t tunnels_closed_clean{0};
+  std::uint64_t idle_timeout_resets{0};
+  std::uint64_t duration_timeout_resets{0};
+  std::uint64_t byte_quota_resets{0};
+  std::uint64_t confirm_denials{0};
+  std::uint64_t path_rejected{0};
+  std::size_t tunnels_active{0};
+  // Recent dial latencies (open received -> prelude written), for the
+  // exported P95 approximation over the bounded window.
+  std::array<std::uint32_t, dial_sample_window> dial_samples{};
+  std::size_t dial_samples_count{0};
+  std::size_t dial_samples_next{0};
+  std::vector<GatewayProfileUsageSnapshot> profile_usage;
+};
+
+// Records one dial latency sample into the bounded ring.
+void record_gateway_dial_sample(GatewayServiceStats& stats,
+                                std::uint32_t milliseconds) noexcept;
+// 95th percentile of the recorded dial window (0 when empty).
+[[nodiscard]] std::uint32_t gateway_dial_p95(
+    const GatewayServiceStats& stats) noexcept;
+
+// ---- Audit (M10-12) ----
+// One record per gateway tunnel that entered admission. `target_host` is
+// always the grammar-validated form (wire-malformed opens never reach the
+// service; safe_detail discipline keeps unvalidated text out of records).
+struct GatewayAuditRecord {
+  DeviceId initiator;
+  std::string profile;
+  std::string target_host;
+  std::uint16_t target_port{};
+  std::uint64_t started_unix_ms{};
+  std::uint64_t ended_unix_ms{};
+  std::uint64_t bytes_from_tunnel{};
+  std::uint64_t bytes_to_tunnel{};
+  StableStatus end_status{StableStatus::unspecified};
+};
+
+// ---- Human confirmation (design 3.3, M10-06) ----// One confirmation request shown to the serving-side operator before the
 // tunnel dials; `host` has already passed the frozen grammar validation
 // (safe-detail discipline). Sinks answer asynchronously through the
 // decider, which may be invoked from any thread. Profiles with

@@ -3512,6 +3512,16 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     }
   }
 
+  static void gateway_audit_sink(void* context, GatewayAuditRecord record) {
+    // Runs on the service's context (the node strand): append in place.
+    auto& impl = *static_cast<Node::Impl*>(context);
+    constexpr std::size_t kGatewayAuditCapacity = 256U;
+    impl.gateway_audit_log.push_back(std::move(record));
+    while (impl.gateway_audit_log.size() > kGatewayAuditCapacity) {
+      impl.gateway_audit_log.pop_front();
+    }
+  }
+
   static void pairing_audit_sink(void* context, const PairingAuditEvent& event) {
     // evaluate/accept_grant fire from session callbacks on the node strand,
     // but revoke/rotate are invoked on the public API caller's thread, so the
@@ -3671,6 +3681,23 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         gateway_config.profiles = gateway_profiles;
         gateway_config.peer_device = peer.device_id;
         gateway_config.confirm_sink = gateway_confirm_sink;
+        // M10-11: translate PeerPathPolicy::gateway_paths — direct_only
+        // refuses gateway opens while the session rides TURN.
+        gateway_config.deny_on_turn_path =
+            path_policy.gateway_paths == PeerPathPolicy::GatewayPaths::direct_only;
+        if (gateway_config.deny_on_turn_path) {
+          gateway_config.on_turn_path = [this, peer_key = peer] {
+            const auto sessions = peer_session_snapshots.load().value;
+            for (const auto& session : sessions) {
+              if (session.peer != peer_key) continue;
+              const auto path = session.data_path;
+              return path == NodeDataPathKind::turn_udp ||
+                     path == NodeDataPathKind::turn_tcp ||
+                     path == NodeDataPathKind::turn_tls;
+            }
+            return false;
+          };
+        }
         auto service = std::make_shared<GatewayService>(
             *session, *streams, std::move(gateway_config), *io.value_if(),
             service_strand_poster(),
@@ -3685,6 +3712,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
           });
           return;
         }
+        service->set_audit_sink(&Node::Impl::gateway_audit_sink, this);
         gateway_services.emplace(peer, std::move(service));
       }
     }
@@ -4001,6 +4029,67 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     diagnostics.event_sessions = event_services.size();
     diagnostics.file_sessions = file_services.size();
     diagnostics.shell_sessions = shell_services.size();
+    diagnostics.gateway_sessions = gateway_services.size();
+    // M10-11: aggregate gateway counters, merge dial windows, per-profile
+    // usage, and attribute bytes to sessions currently riding TURN.
+    const auto sessions = peer_session_snapshots.load().value;
+    const auto path_of = [&](const DeviceEndpointKey& peer_key) {
+      for (const auto& session : sessions) {
+        if (session.peer == peer_key) return session.data_path;
+      }
+      return NodeDataPathKind::unknown;
+    };
+    for (const auto& [peer_key, service] : gateway_services) {
+      const auto& service_stats = service->stats();
+      auto& gateway = diagnostics.gateway;
+      for (std::size_t category = 0U;
+           category < gateway.refusals.size(); ++category) {
+        gateway.refusals[category] += service_stats.refusals[category];
+      }
+      gateway.opens_received += service_stats.opens_received;
+      gateway.dials_succeeded += service_stats.dials_succeeded;
+      gateway.dials_failed += service_stats.dials_failed;
+      gateway.bytes_from_tunnel += service_stats.bytes_from_tunnel;
+      gateway.bytes_to_tunnel += service_stats.bytes_to_tunnel;
+      gateway.tunnels_closed_clean += service_stats.tunnels_closed_clean;
+      gateway.idle_timeout_resets += service_stats.idle_timeout_resets;
+      gateway.duration_timeout_resets += service_stats.duration_timeout_resets;
+      gateway.byte_quota_resets += service_stats.byte_quota_resets;
+      gateway.confirm_denials += service_stats.confirm_denials;
+      gateway.path_rejected += service_stats.path_rejected;
+      gateway.tunnels_active += service_stats.tunnels_active;
+      for (std::size_t index = 0U; index < service_stats.dial_samples_count;
+           ++index) {
+        const std::size_t slot = (service_stats.dial_samples_next +
+                                  GatewayServiceStats::dial_sample_window -
+                                  service_stats.dial_samples_count + index) %
+                                 GatewayServiceStats::dial_sample_window;
+        record_gateway_dial_sample(gateway, service_stats.dial_samples[slot]);
+      }
+      for (const auto& usage : service->profile_usage()) {
+        auto found = std::find_if(
+            gateway.profile_usage.begin(), gateway.profile_usage.end(),
+            [&usage](const GatewayProfileUsageSnapshot& existing) {
+              return existing.profile == usage.profile;
+            });
+        if (found == gateway.profile_usage.end()) {
+          gateway.profile_usage.push_back(usage);
+        } else {
+          found->active_tunnels += usage.active_tunnels;
+          found->bytes_from_tunnel += usage.bytes_from_tunnel;
+          found->bytes_to_tunnel += usage.bytes_to_tunnel;
+        }
+      }
+      const auto path = path_of(peer_key);
+      const bool on_turn = path == NodeDataPathKind::turn_udp ||
+                           path == NodeDataPathKind::turn_tcp ||
+                           path == NodeDataPathKind::turn_tls;
+      if (on_turn) {
+        diagnostics.gateway_bytes_on_turn_paths +=
+            service_stats.bytes_from_tunnel + service_stats.bytes_to_tunnel;
+        diagnostics.gateway_tunnels_on_turn_paths += service_stats.tunnels_active;
+      }
+    }
     for (auto& [peer, book] : transfer_books) {
       (void)peer;
       for (const auto& [id, entry] : book->entries()) {
@@ -6134,6 +6223,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   std::shared_ptr<ShellPtyCoordinator> shell_pty{std::make_shared<ShellPtyCoordinator>()};
   NodeShellEventObserver shell_event_observer;
   std::deque<ShellAuditRecord> shell_audit_log;
+  // Bounded gateway audit history (M10-12); records carry only validated
+  // targets and counters — never unvalidated free text.
+  std::deque<GatewayAuditRecord> gateway_audit_log;
   // ---- M10 gateway proxy ----
   // Serving-side tunnels per authorized peer; empty unless the node was
   // configured with gateway profiles (default off).
@@ -7342,6 +7434,17 @@ std::vector<ShellAuditRecord> Node::shell_audit_records() const {
   std::vector<ShellAuditRecord> records;
   impl_->run_on_strandAndWait(
       [&](Impl& impl) { records.assign(impl.shell_audit_log.begin(), impl.shell_audit_log.end()); });
+  return records;
+}
+
+std::vector<GatewayAuditRecord> Node::gateway_audit_records() const {
+  if (!impl_) {
+    return {};
+  }
+  std::vector<GatewayAuditRecord> records;
+  impl_->run_on_strandAndWait([&](Impl& impl) {
+    records.assign(impl.gateway_audit_log.begin(), impl.gateway_audit_log.end());
+  });
   return records;
 }
 

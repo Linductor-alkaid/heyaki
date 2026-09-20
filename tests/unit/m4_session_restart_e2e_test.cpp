@@ -149,7 +149,8 @@ NodeConfig restart_node_config(ProfileStore& profile,
                         .file_receive_roots = {},
                         .file_max_peer_receive_bytes = 0U,
                         .shell_profiles = {},
-                        .gateway_profiles = {}};
+                        .gateway_profiles = {},
+                        .gateway_confirm_sink = {}};
 }
 
 std::optional<NodePeerSessionSnapshot> active_session(const Node& node,

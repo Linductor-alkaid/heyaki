@@ -24,6 +24,16 @@
 >
 > Scope: device library, LAN discovery/signaling, `heyaki-relay`, coturn integration, ProfileStore,
 > and TUI
+> 
+> The M10 gateway proxy (delivered 2026-09-20, protocol 1.3 `gateway_v1`, serving off unless
+> profiles are configured) adds the gateway rows below: admission is an intersection of the
+> live `gateway.provide:<profile>` scope, the frozen profile policy (CIDR/port allowlists,
+> per-session/per-profile concurrency, byte quotas, idle/duration caps), a non-removable
+> builtin deny list (loopback, link-local, unspecified, multicast, CGNAT, and the whole
+`::ffff:0:0/96` IPv4-mapped segment), post-resolution per-address adjudication, a coarse
+> dial-error mapping (no refused/unreachable/filtered oracle), optional operator
+> confirmation with a fail-closed 30s deadline, and a content-free audit trail carrying
+> only grammar-validated targets; see `m10-gateway-security-review.md`.
 
 ## 1. Assets and trust boundaries
 
@@ -64,6 +74,7 @@ profile can act as that device.
 | Resource exhaustion | huge length, queue/window fill, connection churn, decompression bomb, diagnostic flood | validate lengths before allocation, centralized hard limits, admission rejection, byte and count quotas, reserved control capacity, expanded-size limits, bounded diagnostics |
 | Path traversal | absolute paths, `..`, NUL, Windows device names, symlink race | logical names only, receive-root mapping, platform canonicalization, handle-relative safe open, quotas, temporary non-executable file, fsync and atomic rename |
 | Malicious terminal data | escape injection, clipboard/OSC abuse, oversized control sequence, secret capture | vetted bounded VT parser, command/OSC allowlist, raw content excluded from logs, Remote Shell off by default, restricted profile and process tree limits |
+| Authorized gateway peer (inside-the-firewall reach) | lateral movement to B-network targets, SSRF toward loopback/management/tunnel endpoints, connection-probing oracle, public-egress abuse | explicit CIDR/port allowlists with `allow_internet` off by default, builtin deny list incl. IPv4-mapped segment, per-address checks after B-side resolution, dual concurrency caps, byte/rate quotas, idle/duration caps, live `gateway.provide:<profile>` scope per open, coarse dial-error mapping, operator confirmation (first_use/always) with fail-closed timeout, full audit of validated targets |
 | Supply-chain compromise | moved tag, malicious generated source, unexpected link closure | commit pins, recursive pin verification, generated files confined to build tree, SBOM/license inventory, dependency review and reproducible release provenance |
 
 ## 3. Secret and logging policy

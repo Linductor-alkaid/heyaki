@@ -348,7 +348,8 @@ NodeConfig policy_node_config(ProfileStore& profile, std::string application_id,
                         .file_receive_roots = {},
                         .file_max_peer_receive_bytes = 0U,
                         .shell_profiles = {},
-                        .gateway_profiles = {}};
+                        .gateway_profiles = {},
+                        .gateway_confirm_sink = {}};
 }
 
 TEST_F(M4PathPolicyNodeTest, NodeCreateFailsFastOnInvalidPolicyOverride) {

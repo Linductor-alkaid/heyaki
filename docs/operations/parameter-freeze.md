@@ -156,6 +156,7 @@ mapped 环回绕过）不可配置移除，只可叠加。
 | 端口 allowlist / allow_internet | 空（拒绝全部）/ false | — | 默认关闭语义（M10-03） |
 | 确认模式 confirm | never | — | first_use/always 需 TUI sink；30s 无应答自动拒绝（fail-closed） |
 | SOCKS5 前端（`SocksFrontendConfig`，M10-09） | 127.0.0.1:1080、并发 16、connect deadline 15s | 并发 1024、deadline 30s | 仅 loopback、仅 CONNECT、域名原样透传；不进核心库闭包 |
+| PeerPathPolicy.gateway_paths（M10-11） | allow（随仲裁路径） | direct_only / turn_limited 两态 | direct_only 在 TURN 路径上拒绝 gateway open；turn_limited 以 profile 速率配额为界 |
 
 ## 7. Relay 服务端（`RelayServerConfig`）
 

@@ -786,6 +786,32 @@ set_tests_properties(heyaki_m10_round4 PROPERTIES
   RESOURCE_LOCK heyaki_m3a_profile_state
   TIMEOUT 300)
 
+# M10 Round 5: gateway metrics & path policy (M10-11: dial-sample ring/P95,
+# export families, TURN-path refusal, confirm_denials) and the bounded audit
+# trail (M10-12) at the service and Node level, plus the M10-10 scheduling
+# evidence facts (STREAM_DATA frame class).
+add_executable(heyaki_m10_metrics_audit_tests unit/m10_metrics_audit_test.cpp)
+heyaki_enable_executor_exception_adapter_source(unit/m10_metrics_audit_test.cpp)
+target_link_libraries(heyaki_m10_metrics_audit_tests PRIVATE
+  heyaki::client
+  executor::executor
+  GTest::gtest_main
+  OpenSSL::SSL)
+heyaki_target_use_pinned_boost_asio(heyaki_m10_metrics_audit_tests)
+heyaki_configure_target(heyaki_m10_metrics_audit_tests)
+target_include_directories(heyaki_m10_metrics_audit_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/client"
+  "${CMAKE_CURRENT_SOURCE_DIR}/unit")
+target_compile_definitions(heyaki_m10_metrics_audit_tests PRIVATE
+  "HEYAKI_M10_METRICS_AUDIT_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}/m10-metrics-audit\"")
+heyaki_add_runtime_test(
+  heyaki_m10_metrics_audit heyaki_m10_metrics_audit_tests
+  "unit;m10;gateway;metrics")
+set_tests_properties(heyaki_m10_metrics_audit PROPERTIES
+  RESOURCE_LOCK heyaki_m3a_profile_state
+  TIMEOUT 300)
+
 add_executable(heyaki_m8_service_tests
   unit/m8_codec_test.cpp
   unit/m8_shell_test.cpp

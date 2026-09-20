@@ -49,31 +49,23 @@ struct GatewayServiceConfig {
   // Identity of the remote peer this service serves (confirm prompts).
   DeviceId peer_device;
   GatewayConfirmSink confirm_sink;
+  // M10-11: PeerPathPolicy::direct_only translated by the Node — refuse
+  // gateway opens while the session's arbitrated path traverses TURN.
+  bool deny_on_turn_path{false};
+  std::function<bool()> on_turn_path;
 };
 
-// Counters for M10-11 groundwork (metrics export lands with that task).
-// Refusals are indexed by GatewayRefusal (gateway_refusal_name for labels).
-struct GatewayServiceStats {
-  std::array<std::uint64_t,
-             static_cast<std::size_t>(GatewayRefusal::local_failure) + 1U>
-      refusals{};
-  std::uint64_t opens_received{0};
-  std::uint64_t dials_succeeded{0};
-  std::uint64_t dials_failed{0};
-  std::uint64_t bytes_from_tunnel{0};  // A -> target
-  std::uint64_t bytes_to_tunnel{0};    // target -> A
-  std::uint64_t tunnels_closed_clean{0};
-  std::uint64_t idle_timeout_resets{0};
-  std::uint64_t duration_timeout_resets{0};
-  std::uint64_t byte_quota_resets{0};
-  std::size_t tunnels_active{0};
-};
+// Counters for the metrics export live in the public
+// heyaki::GatewayServiceStats (include/heyaki/gateway.hpp, M10-11).
 
 class GatewayService final : public std::enable_shared_from_this<GatewayService> {
  public:
   using ScopeCheck = std::function<bool(std::string_view)>;
   // Posts a task onto the node strand (the session's execution context).
   using NodePoster = std::function<void(std::function<void()>)>;
+  // Audit sink (M10-12): static trampoline + opaque context, invoked on the
+  // service's context when a tunnel terminates.
+  using AuditSink = void (*)(void* context, GatewayAuditRecord record);
 
   GatewayService(PeerSession& session, ByteStreamService& streams,
                  GatewayServiceConfig config, boost::asio::any_io_executor io,
@@ -89,12 +81,18 @@ class GatewayService final : public std::enable_shared_from_this<GatewayService>
 
   // Installs the gateway inbound handler on the session's ByteStreamService.
   [[nodiscard]] Result<void> attach();
+  void set_audit_sink(AuditSink sink, void* context) {
+    audit_sink_ = sink;
+    audit_context_ = context;
+  }
   // Session loss: reset-owned state, close every socket, no detached work.
   void handle_session_closed();
   // Idle/duration sweeps and byte-quota enforcement (node maintenance tick).
   void prune();
 
   [[nodiscard]] const GatewayServiceStats& stats() const noexcept { return stats_; }
+  // Per-profile byte accounting snapshot (M10-11 export input).
+  [[nodiscard]] std::vector<GatewayProfileUsageSnapshot> profile_usage() const;
 
  private:
   // One gateway connection. Node-strand fields (stream, timestamps,
@@ -118,6 +116,10 @@ class GatewayService final : public std::enable_shared_from_this<GatewayService>
     // request is parked until the decider runs or the deadline denies.
     bool awaiting_confirm{false};
     GatewayConnect pending_connect;
+    // Audit inputs captured at admission (grammar-validated host only).
+    DeviceId initiator{};
+    std::string target_host;
+    std::uint16_t target_port{};
     // Node-strand state (set when the dial continuation lands):
     bool socket_connected{false};
     // io strand only:
@@ -183,13 +185,18 @@ class GatewayService final : public std::enable_shared_from_this<GatewayService>
   ScopeCheck scope_check_;
   std::function<std::uint64_t()> wall_clock_;
   std::map<StreamId, std::shared_ptr<Tunnel>> tunnels_;
+  AuditSink audit_sink_{nullptr};
+  void* audit_context_{nullptr};
   // first_use confirmations remembered per profile for this session
   // (cross-restart persistence is deferred to the v1.x policy store).
   std::set<std::string> confirmed_profiles_;
-  // Live per-profile accounting feeding the admission context.
+  // Live per-profile accounting feeding the admission context and the
+  // metrics snapshot.
   struct ProfileUsage {
     std::size_t active{0};
     std::uint64_t bytes{0};
+    std::uint64_t bytes_from_tunnel{0};
+    std::uint64_t bytes_to_tunnel{0};
   };
   std::map<std::string, ProfileUsage> usage_;
   GatewayServiceStats stats_;

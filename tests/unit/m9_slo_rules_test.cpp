@@ -439,6 +439,10 @@ TEST(M9SloRulesTest, MetricFamiliesFollowNamingConventions) {
       "heyaki_connectivity_connect_duration_milliseconds_max",
       "heyaki_transport_rtt_milliseconds_sum",
       "heyaki_transport_rtt_milliseconds_max",
+      // M10-11: gateway dial-latency gauge (bounded sample window); the
+      // millisecond decision is recorded in deploy/observability/README.md
+      // alongside the other device-side duration families.
+      "heyaki_gateway_dial_p95_milliseconds",
   };
 
   for (const auto& exported : exports) {

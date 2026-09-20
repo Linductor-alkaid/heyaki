@@ -4,6 +4,7 @@
 // `_total` suffix per the exposition format; enums and booleans map to
 // numeric gauges via their underlying integer values.
 
+#include <heyaki/gateway.hpp>
 #include <heyaki/metrics.hpp>
 
 #include "core/metrics_text_writer.hpp"
@@ -593,6 +594,75 @@ void write_file_section(MetricsWriter& writer, const FileServiceStats& file) {
                  "Partial temp/state cleanups after failures.");
 }
 
+void write_gateway_section(MetricsWriter& writer,
+                           const NodeServiceDiagnostics& services) {
+  const auto& gateway = services.gateway;
+  writer.gauge("heyaki_gateway_sessions", services.gateway_sessions,
+               "Authorized peer sessions with a serving-side gateway service.");
+  writer.gauge("heyaki_gateway_tunnels_active", gateway.tunnels_active,
+               "Active gateway tunnels (dedicated logical channels).");
+  writer.counter("heyaki_gateway_opens_received_total", gateway.opens_received,
+                 "Gateway STREAM_OPENs admitted past the capability gate.");
+  for (std::size_t category = 0U; category < gateway.refusals.size();
+       ++category) {
+    const auto refusal = static_cast<GatewayRefusal>(category);
+    writer.counter(
+        "heyaki_gateway_refused_" + std::string{gateway_refusal_name(refusal)} +
+            "_total",
+        gateway.refusals[category],
+        "Gateway opens refused before dial (admission distribution).");
+  }
+  writer.counter("heyaki_gateway_path_rejected_total", gateway.path_rejected,
+                 "Gateway opens refused by the data-path policy (TURN).");
+  writer.counter("heyaki_gateway_confirm_denials_total", gateway.confirm_denials,
+                 "Gateway opens denied by operator confirmation or its timeout.");
+  writer.counter("heyaki_gateway_dials_succeeded_total", gateway.dials_succeeded,
+                 "Gateway dials that reached the prelude.");
+  writer.counter("heyaki_gateway_dials_failed_total", gateway.dials_failed,
+                 "Gateway dials that failed or timed out.");
+  writer.counter("heyaki_gateway_bytes_from_tunnel_total",
+                 gateway.bytes_from_tunnel,
+                 "Gateway bytes tunneled from the peer toward targets.");
+  writer.counter("heyaki_gateway_bytes_to_tunnel_total", gateway.bytes_to_tunnel,
+                 "Gateway bytes tunneled from targets toward the peer.");
+  writer.counter("heyaki_gateway_tunnels_closed_clean_total",
+                 gateway.tunnels_closed_clean,
+                 "Gateway tunnels closed without a reset.");
+  writer.counter("heyaki_gateway_idle_timeout_resets_total",
+                 gateway.idle_timeout_resets,
+                 "Gateway tunnels reset by idle timeout.");
+  writer.counter("heyaki_gateway_duration_timeout_resets_total",
+                 gateway.duration_timeout_resets,
+                 "Gateway tunnels reset by the absolute duration cap.");
+  writer.counter("heyaki_gateway_byte_quota_resets_total",
+                 gateway.byte_quota_resets,
+                 "Gateway tunnels reset by the profile byte quota.");
+  writer.gauge("heyaki_gateway_dial_p95_milliseconds", gateway_dial_p95(gateway),
+               "P95 gateway dial latency (open to prelude) over the recent "
+               "bounded sample window.");
+  writer.gauge("heyaki_gateway_bytes_on_turn_paths",
+               services.gateway_bytes_on_turn_paths,
+               "Gateway bytes attributed to sessions currently routed through "
+               "TURN (sampled at aggregation).");
+  writer.gauge("heyaki_gateway_tunnels_on_turn_paths",
+               services.gateway_tunnels_on_turn_paths,
+               "Gateway tunnels on sessions currently routed through TURN.");
+  for (const auto& usage : gateway.profile_usage) {
+    // Profile names are frozen to [a-z0-9_.-] by the config grammar.
+    writer.counter("heyaki_gateway_profile_" + usage.profile +
+                       "_bytes_from_tunnel_total",
+                   usage.bytes_from_tunnel,
+                   "Per-profile gateway bytes from the peer toward targets.");
+    writer.counter("heyaki_gateway_profile_" + usage.profile +
+                       "_bytes_to_tunnel_total",
+                   usage.bytes_to_tunnel,
+                   "Per-profile gateway bytes from targets toward the peer.");
+    writer.gauge("heyaki_gateway_profile_" + usage.profile + "_tunnels_active",
+                 usage.active_tunnels,
+                 "Per-profile active gateway tunnels.");
+  }
+}
+
 void write_shell_section(MetricsWriter& writer, const ShellServiceStats& shell) {
   writer.counter("heyaki_shell_opens_received_total", shell.opens_received,
                  "Shell open requests received.");
@@ -683,6 +753,7 @@ void write_services_section(MetricsWriter& writer,
   write_event_section(writer, services.event);
   write_file_section(writer, services.file);
   write_shell_section(writer, services.shell);
+  write_gateway_section(writer, services);
   writer.gauge("heyaki_services_message_pending_acks",
                services.message_pending_acks,
                "Messages awaiting peer acks.");

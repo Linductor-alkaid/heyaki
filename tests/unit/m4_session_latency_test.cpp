@@ -129,7 +129,8 @@ TEST_F(M4SessionLatencyTest, DirectHostSessionEstablishmentP95UnderThreeSeconds)
                         .file_receive_roots = {},
                         .file_max_peer_receive_bytes = 0U,
                         .shell_profiles = {},
-                        .gateway_profiles = {}};
+                        .gateway_profiles = {},
+                        .gateway_confirm_sink = {}};
     };
     NodeConfig first_config = node_config_for(*first_profile.value_if(),
                                               "com.example.latency.first");

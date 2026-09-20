@@ -27,9 +27,9 @@ profile 允许的 TCP 目标（B 网络节点或经 B 出公网）。L3/TUN 与 
 - [x] `M10-07` 实现 B 侧 `GatewayService`：`STREAM_OPEN(gateway)` 准入后在 executor 托管 Asio runtime 上本地 dial；拨号成功发送 prelude（status=0），失败/拒绝发送携带映射 status 的 `STREAM_RESET`；此后双向字节搬运复用 M5 stream 状态机。（每连接专用 stream 域逻辑通道、每方向单 16KiB in-flight chunk 有界搬运、逐地址拨号与 deadline、EOF 半关传播、idle/duration/字节配额清扫、会话关闭全量回收）
 - [x] `M10-08` 实现 A 侧 `open_gateway_stream(peer, host, port, deadline)`：prelude 到达前处于 connecting，成功返回普通 `ByteStream`，失败/超时返回稳定错误码并 reset；遵守公共 Result/cancellation 语义。（公共 API `Node::open_gateway_stream(peer, GatewayConnect, NodeGatewayStreamOptions)`；prelude 内部消费、dial deadline RESET(deadline_exceeded)、`gateway.use` 会话级 scope 门）
 - [x] `M10-09` 实现可选 SOCKS5 前端：用户态、默认仅绑定 loopback、仅 `CONNECT`；域名目标（ATYP=0x03）原样透传由 B 侧解析；不进核心库依赖闭包，通过公共 API 工作。（`src/socks/socks_frontend.{hpp,cpp}` 独立组件库 `heyaki_socks`：RFC 1928 子集 VER5/NO-AUTH/CONNECT、loopback:1080 默认、每向 16KiB 单 chunk、EOF 半关、并发帽 fail-closed；阻塞 open 经 executor 通用池发起避免与单 asio worker 自死锁；域名透传经 IVA 假域名→B 解析失败→REP 0x01 验证）
-- [ ] `M10-10` 背压与调度：gateway 通道权重不高于 event/file；隧道↔本地 socket 搬运有界缓冲，满载 reset 该流并计数，drop 语义显式配置且可观测。
-- [ ] `M10-11` 路径策略与计量：`PeerPathPolicy` 增加 `gateway_paths` 约束（TURN 路径允许/限速/禁止）；gateway 活跃流数、准入结果分布、按 profile 字节/速率、TURN 路径占比、dial P95 接入指标。
-- [ ] `M10-12` 审计与 threat model：五元组、时长、双向字节与结束原因入审计；目标 host 未通过校验以稳定 token 替换（safe_detail 纪律）；threat model 增补 gateway 条目（防火墙内侧、SSRF、探测 oracle、公网滥用、环回、资源耗尽）并完成评审。
+- [x] `M10-10` 背压与调度：gateway 通道权重不高于 event/file；隧道↔本地 socket 搬运有界缓冲，满载 reset 该流并计数，drop 语义显式配置且可观测。（证据：STREAM_DATA 恒以 FrameClass::bulk 显式发送（pump_writes，权重 1 与 file/event 同级）；每方向单 16KiB in-flight chunk 有界 by construction，隧道排不动→窗口耗尽→idle/duration 清扫 reset 并计数；M5 调度基准复跑 control=20000/bulk=20000、max_bulk_between_control=0 全绿）
+- [x] `M10-11` 路径策略与计量：`PeerPathPolicy` 增加 `gateway_paths` 约束（TURN 路径允许/限速/禁止）；gateway 活跃流数、准入结果分布、按 profile 字节/速率、TURN 路径占比、dial P95 接入指标。（`GatewayPaths{allow,direct_only,turn_limited}`——direct_only 在 TURN 路径拒绝并计 path_rejected，turn_limited 以 profile 速率配额为界；指标族：活跃/会话 gauge、9 类拒绝+path/confirm 计数、双向字节 counter、per-profile 字节（rate() 取速率）与活跃 gauge、TURN 路径归属 gauge（聚合时按会话当前路径采样）、dial P95（256 样本环）毫秒 gauge；m9_slo_rules 毫秒 allowlist 与 observability README 同步）
+- [x] `M10-12` 审计与 threat model：五元组、时长、双向字节与结束原因入审计；目标 host 未通过校验以稳定 token 替换（safe_detail 纪律）；threat model 增补 gateway 条目（防火墙内侧、SSRF、探测 oracle、公网滥用、环回、资源耗尽）并完成评审。（`GatewayAuditRecord` + 服务终态发射 + Node 256 环形 + `gateway_audit_records()`；host 恒为文法校验后值、文法外输入从不进服务层；threat-model baseline 段+对手行；评审记录 `docs/security/m10-gateway-security-review.md`——通过无 P0/P1，遗留 L1 隧道端点运行时 deny（P2，netns 轮闭环）、L2 每 host 速率限制（P3）、L3 first_use 跨重启持久化（P4））
 
 ## 测试与退出条件
 
@@ -167,4 +167,18 @@ D7 close_tunnel 悬垂引用、D8 shared_ptr 自捕获循环泄漏——主循�
 - 参数冻结表 §6a 增确认模式与 SOCKS 前端默认值。
 
 测试（IVA 三轮：首轮 FAIL 抓 D1/D2；修复复验轮抓出 P1/P2 与测试自身栈生命周期 bug；末轮 PASS）：`tests/unit/m10_round4_test.cpp` 20 用例（opening/on_connected 语义 4、确认流 8：never/always/first_use 记忆/deny 释放槽/无 sink fail-closed/30s 超时自动拒/awaiting 免 idle、SOCKS：握手拒绝+容量+stop、真实 CONNECT echo 往返+字节统计、假域名→B 解析失败→REP 0x01、TUI CLI 解析 3）；Round 3 套件 8 处旧 open 语义断言更新。证据：round4 19P+1 环境跳过、gateway_service 27/27、protocol 27/27、policy 55/55、unit|protocol 37/37（单套偶发为负载 flake，单独重跑稳定绿）、asan 双套件 0 发现、tsan round4 0 race（唯一历史发现即已修 P1）。
+### Round 5（2026-09-20）：M10-10/11/12 调度证据、指标与路径策略、审计与威胁模型
+
+生产代码（主循环实现）：
+
+- **M10-11 指标**：`GatewayServiceStats` 升公共（新增 confirm_denials/path_rejected/256 样本 dial 环/profile_usage）；`record_gateway_dial_sample`/`gateway_dial_p95`（窗口 P95）；`NodeServiceDiagnostics` 增 gateway 聚合（求和+环形合并+per-profile 按名合并+TURN 路径归属：会话 data_path∈turn_* 时字节/隧道计入 on_turn 字段，聚合时采样）；metrics.cpp `write_gateway_section` 20 静态族+per-profile 动态族（文法 [a-z0-9_.-] 嵌名、无标签有界基数）；observability README 记 M10 约定（毫秒 allowlist、rate() 取速率、TURN 归属为采样近似）。
+- **M10-11 路径策略**：`PeerPathPolicy::GatewayPaths{allow,direct_only,turn_limited}`（默认 allow）；node 翻译 direct_only→`deny_on_turn_path`+会话快照回调；`begin_tunnel` 拒绝并计 `path_rejected`（RESET permission_denied，无槽占用）。
+- **M10-12 审计**：公共 `GatewayAuditRecord`；GatewayService `set_audit_sink` + 终态发射（initiator/profile/文法后 host:port/起止/双向字节/StableStatus）；Node 256 环形 + `gateway_audit_records()`；被拒 open 不产生记录（计数在指标）。
+- **M10-12 威胁模型**：threat-model baseline 增补 M10 段+对手表 gateway 行；评审记录 `docs/security/m10-gateway-security-review.md`（七条对账全绿；遗留 L1 隧道端点运行时 deny P2、L2 每 host 速率限制 P3、L3 first_use 持久化 P4）。
+- **通道泄漏修复（IVA 抓出）**：gateway 连接的专用逻辑通道在流终态释放（finish_stream + 无消费者拒绝路径）——修复前同会话第 16 次顺序 open 因 `open_channel_limit` 失败。
+- **M10-10 证据**：STREAM_DATA 显式 bulk（权重 1=file/event）；M5 调度基准复跑全绿（control/bulk 各 20000、control 从不落后）。
+- 参数冻结表：gateway_paths 行、确认模式、SOCKS 前端默认值。
+
+测试（IVA PASS with risks）：`tests/unit/m10_metrics_audit_test.cpp` 20 例（P95 环形/公式钉死、导出面 24 族零值完整性、路径策略 4、审计 3 含 260 条环形与"每准入恰一条"、confirm_denials、dial 采样停靠点、Node 级 e2e 聚合与审计、M10-10 帧类事实）；m9_slo_rules 毫秒 allowlist + 5 个测试文件 NodeConfig 初始化补齐（Round 4 遗留 -Werror，CI 九 job 失败根因）；M5 基准输出存证。证据：38/38 unit|protocol 全绿、五 m10 套件全绿。风险记录：per-profile 指标名直嵌文法（`.`/`-` 非法 Prometheus 名字符，README 已记为冻结决策——收紧文法或导出映射留 v1.x）；asan CI 慢机上 EndToEndEcho 3s 预算偶发（本地 asan 绿）。
+
 遗留观察（非 M10 引入，记录备查）：runtime asio worker 空闲时 epoll 自旋（~50k/s）持续占核；`run_on_strandAndWait` 其余既有调用点仍为 `[&]` 捕获（>5s strand 延迟下理论悬垂，与 M10 无关，建议独立任务收敛）。

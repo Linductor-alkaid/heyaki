@@ -291,7 +291,8 @@ NodeConfig node_config(ProfileStore& profile, std::string application_id,
                         .file_receive_roots = {},
                         .file_max_peer_receive_bytes = 0U,
                         .shell_profiles = {},
-                        .gateway_profiles = {}};
+                        .gateway_profiles = {},
+                        .gateway_confirm_sink = {}};
 }
 
 RequestId request_id(std::uint8_t tag) {

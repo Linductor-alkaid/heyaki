@@ -749,6 +749,10 @@ void ByteStreamService::handle_open(const FrameView& frame, std::uint32_t channe
     stream->state_ = StreamState::reset;
     streams_.erase(stream->stream_id());
     refuse(gateway_refusal_status(GatewayRefusal::not_enabled));
+    // Release the dedicated channel the connection occupied (leak guard
+    // for refused opens on gateway-disabled nodes).
+    std::erase(owned_channels_, channel_id);
+    session_.close_business_channel(channel_id);
     return;
   }
   if (streams_.size() >= limits_.max_concurrent_streams) {
@@ -1040,6 +1044,17 @@ void ByteStreamService::finish_stream(ByteStreamHandle& stream, StreamState term
   stream.writes_.clear();
   if (terminal == StreamState::reset || terminal == StreamState::closed) {
     streams_.erase(stream.id_);
+    if (stream.gateway_) {
+      // A gateway connection rides a DEDICATED logical channel (one per
+      // connection, both sides); release it at terminal so sequential
+      // connections cannot exhaust the channel budget. Terminal frames
+      // were already handed to the scheduler by the callers; a reset
+      // still sitting in a full queue is backstopped by the peer's dial
+      // deadline and idle timeouts.
+      const auto channel = stream.channel_id_;
+      std::erase(owned_channels_, channel);
+      session_.close_business_channel(channel);
+    }
   }
 }
 

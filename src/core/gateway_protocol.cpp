@@ -402,6 +402,30 @@ std::string_view gateway_refusal_name(GatewayRefusal refusal) noexcept {
   return "unknown";
 }
 
+void record_gateway_dial_sample(GatewayServiceStats& stats,
+                                std::uint32_t milliseconds) noexcept {
+  stats.dial_samples[stats.dial_samples_next] = milliseconds;
+  stats.dial_samples_next = (stats.dial_samples_next + 1U) % GatewayServiceStats::dial_sample_window;
+  if (stats.dial_samples_count < GatewayServiceStats::dial_sample_window) {
+    ++stats.dial_samples_count;
+  }
+}
+
+std::uint32_t gateway_dial_p95(const GatewayServiceStats& stats) noexcept {
+  if (stats.dial_samples_count == 0U) return 0U;
+  std::array<std::uint32_t, GatewayServiceStats::dial_sample_window> window{};
+  std::copy(stats.dial_samples.begin(),
+            stats.dial_samples.begin() +
+                static_cast<std::ptrdiff_t>(stats.dial_samples_count),
+            window.begin());
+  std::sort(window.begin(),
+            window.begin() + static_cast<std::ptrdiff_t>(stats.dial_samples_count));
+  const std::size_t index = stats.dial_samples_count >= 20U
+                                ? stats.dial_samples_count - stats.dial_samples_count / 20U
+                                : stats.dial_samples_count - 1U;
+  return window[index];
+}
+
 std::optional<GatewayIp> parse_gateway_ip(std::string_view literal) noexcept {
   if (literal.find(':') == std::string_view::npos) {
     auto octets = ipv4_octets(literal);
