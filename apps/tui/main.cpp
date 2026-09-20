@@ -360,7 +360,12 @@ heyaki::Result<std::string> read_secret(std::string_view prompt) {
   }
   termios hidden = original;
   hidden.c_lflag &= static_cast<tcflag_t>(~ECHO);
-  if (::tcsetattr(STDIN_FILENO, TCSAFLUSH, &hidden) != 0) {
+  // TCSANOW, never TCSAFLUSH: the harness drivers write the secret into
+  // the PTY as soon as the prompt fragment appears, and TCSAFLUSH discards
+  // that queued input — getline then blocks forever and the driver burns
+  // its whole window (CI transcript showed "bootstrap token:" followed by
+  // nothing until the driver gave up).
+  if (::tcsetattr(STDIN_FILENO, TCSANOW, &hidden) != 0) {
     std::cout << '\n';
     return heyaki::Result<std::string>::failure(
         heyaki::Error{heyaki::ErrorCode::configuration, "tui",
