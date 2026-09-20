@@ -51,6 +51,10 @@ struct SocksFrontendConfig {
 };
 
 struct SocksFrontendStats {
+  // False only when the stats snapshot could not reach the frontend strand
+  // within its bounded wait (wedged): every counter below is then zero and
+  // MUST NOT be read as "quiet".
+  bool responsive{true};
   std::uint64_t accepted{0};
   std::uint64_t handshakes_failed{0};
   std::uint64_t connects_succeeded{0};

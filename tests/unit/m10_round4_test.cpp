@@ -1393,8 +1393,23 @@ TEST_F(M10Round4SocksTest, SocksConnectEchoRoundTrip) {
   EXPECT_GE(stats.connections_active, 1U);
   EXPECT_EQ(stats.handshakes_failed, 0U);
 
-  client.close();
+  // Teardown order is stop() BEFORE client.close(): closing the client
+  // first makes the frontend strand's EOF branch call the BLOCKING public
+  // ByteStream::shutdown_write() (socks_frontend.cpp, pump_client_to_tunnel
+  // eof path) while the runtime's single asio worker serves both the
+  // frontend and node strands — the posted op can never run, the strand
+  // self-deadlocks for the facade's 5s future timeout, Node::shutdown's 2s
+  // stopped gate then times out and impl_.reset() destroys peer_attempts
+  // (freeing the PeerSession) before stream_services, whose ~ByteStreamService
+  // calls back into the freed session — the SEGFAULT seen in CI run
+  // 35503655450 (supply-chain). stop() first closes the connection server
+  // side (pending reads complete with operation_aborted, handlers early-out
+  // on connection->closed), so no blocking call is ever made from the
+  // strand. Product-side defects reported separately (socks EOF-branch
+  // blocking hop; Node::shutdown timeout teardown; ~Impl member order;
+  // stats() fabricating {} on strand timeout).
   frontend->stop();
+  client.close();
   ASSERT_TRUE(wait_until([&] { return !frontend->stats().listening; },
                          std::chrono::milliseconds{2000}))
       << "stop() never closed the listener";
@@ -1515,8 +1530,11 @@ TEST_F(M10Round4SocksTest, SocksDomainPassthroughResolvesOnServingSide) {
   EXPECT_EQ(echoed_text, payload);
   EXPECT_EQ(frontend->stats().connects_succeeded, 1U);
 
-  client.close();
+  // See SocksConnectEchoRoundTrip: stop() before client.close() keeps the
+  // EOF branch's blocking shutdown_write() off the single asio worker
+  // (CI supply-chain SEGFAULT family, run 35503655450).
   frontend->stop();
+  client.close();
   ASSERT_TRUE(wait_until([&] { return !frontend->stats().listening; },
                          std::chrono::milliseconds{2000}));
   EXPECT_TRUE(pair.first.value().shutdown().stopped);

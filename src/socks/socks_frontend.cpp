@@ -11,6 +11,7 @@
 #include <boost/asio/write.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <optional>
 #include <array>
 #include <functional>
@@ -56,7 +57,7 @@ struct ClientConnection final : std::enable_shared_from_this<ClientConnection> {
   boost::asio::ip::tcp::socket socket;
   SocksFrontendStats& stats;
   std::optional<ByteStream> stream;
-  bool closed{false};
+  std::atomic<bool> closed{false};
   std::vector<std::byte> request;
 };
 
@@ -407,16 +408,25 @@ void SocksFrontend::State::pump_client_to_tunnel(
     const std::shared_ptr<ClientConnection>& connection) {
   if (connection->closed) return;
   auto buffer = std::make_shared<std::vector<std::byte>>(socks_chunk_bytes);
+  auto* runtime_ptr = &runtime;
   connection->socket.async_read_some(
       boost::asio::buffer(buffer->data(), buffer->size()),
-      [weak = weak_from_this(), connection, buffer](
+      [weak = weak_from_this(), connection, buffer, runtime_ptr](
           boost::system::error_code error, std::size_t bytes) {
         auto self = weak.lock();
         if (!self || connection->closed) return;
         if (error == boost::asio::error::eof) {
-          // Client half-closed: propagate to the tunnel.
+          // Client half-closed: propagate to the tunnel. shutdown_write
+          // marshals to the node context and WAITS — on this single-worker
+          // io it would self-deadlock the strand (the node strand can never
+          // run), so hand it to the executor's general pool like open.
           if (connection->stream.has_value()) {
-            (void)connection->stream->shutdown_write();
+            auto stream = std::make_shared<ByteStream>(
+                std::move(*connection->stream));
+            connection->stream.reset();
+            (void)detail::RuntimeAccess::dispatch_general(
+                *runtime_ptr, "socks-tunnel-half-close",
+                [stream]() mutable { (void)stream->shutdown_write(); });
           }
           return;
         }
@@ -612,7 +622,12 @@ SocksFrontendStats SocksFrontend::stats() const {
     return {};
   }
   if (future.wait_for(std::chrono::seconds{1}) != std::future_status::ready) {
-    return {};
+    // The strand did not answer: return the empty snapshot with the
+    // responsiveness flag CLEAR so callers can tell "quiet" from "wedged"
+    // (a fabricated normal-looking snapshot hid exactly that before).
+    SocksFrontendStats unresponsive;
+    unresponsive.responsive = false;
+    return unresponsive;
   }
   return future.get();
 }

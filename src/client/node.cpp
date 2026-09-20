@@ -6249,7 +6249,6 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     std::vector<std::string> requested_scopes;
   };
   std::map<DeviceId, PendingPairing> pending_pairings;
-  std::map<DeviceEndpointKey, std::unique_ptr<ByteStreamService>> stream_services;
   std::function<void(const DeviceEndpointKey&, ByteStream)> stream_inbound_handler;
   // ---- M6 message & unary RPC ----
   std::shared_ptr<ServiceRegistry> service_registry{std::make_shared<ServiceRegistry>()};
@@ -6274,7 +6273,6 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   // ---- M10 gateway proxy ----
   // Serving-side tunnels per authorized peer; empty unless the node was
   // configured with gateway profiles (default off).
-  std::map<DeviceEndpointKey, std::shared_ptr<GatewayService>> gateway_services;
   // Bounded pairing audit history (M9-03); events carry the wire pairing
   // RequestId and GrantId as correlation ids, never the password.
   std::deque<PairingAuditEvent> pairing_audit_log;
@@ -6300,6 +6298,14 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   std::unique_ptr<LanCoordinatorRoute> lan_coordinator_route;
   std::unique_ptr<RelaySignalingRoute> relay_coordinator_route;
   std::map<RequestId, PeerAttempt> peer_attempts;
+
+  // Destroyed BEFORE peer_attempts (reverse declaration order): these
+  // services hold raw PeerSession references owned by the attempts, and
+  // ~ByteStreamService calls back into its session. When the strand
+  // teardown could not run (shutdown timed out), declaration order is the
+  // only thing standing between ~Impl and a use-after-free.
+  std::map<DeviceEndpointKey, std::unique_ptr<ByteStreamService>> stream_services;
+  std::map<DeviceEndpointKey, std::shared_ptr<GatewayService>> gateway_services;
   std::map<DeviceEndpointKey, RequestId> peer_attempt_by_endpoint;
   std::deque<NodePeerSessionSnapshot> finished_peer_sessions;
   std::map<DeviceEndpointKey, std::unique_ptr<SessionRestart>> session_restarts;
