@@ -370,7 +370,8 @@ TEST_F(M9NodeAuditRingTest, RecordsRevocationWithGrantId) {
       .file_receive_roots = {},
       .file_max_peer_receive_bytes = 0U,
       .shell_profiles = {},
-      .gateway_profiles = {}};
+      .gateway_profiles = {},
+                          .gateway_confirm_sink = {}};
   auto node = Node::create(std::move(node_config));
   ASSERT_TRUE(node) << node.error_if()->safe_detail();
 

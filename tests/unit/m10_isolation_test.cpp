@@ -711,8 +711,13 @@ int run_restart_isolation_child(const std::filesystem::path& root) {
                                }});
   if (!child_check(opened.has_value(), "open_gateway_stream")) return 2;
   ByteStream tunnel{std::move(*opened.value_if())};
+  // Budget note (compat-2004): the gateway dial + prelude handshake rides a
+  // full LAN session; on the slow 20.04 container the 5s budget timed out
+  // (CI run 35492361592, CHILD_FAIL "prelude promoted the tunnel"), so the
+  // tunnel-lifecycle waits below carry a 15s budget; the propagation-only
+  // checks keep 10s.
   if (!child_check(wait_for([&] { return tunnel.state() == ByteStreamState::open; },
-                            std::chrono::milliseconds{5000}),
+                            std::chrono::milliseconds{15000}),
                    "prelude promoted the tunnel")) {
     return 2;
   }
@@ -732,7 +737,7 @@ int run_restart_isolation_child(const std::filesystem::path& root) {
                          write_state->done.store(true);
                        });
     if (!child_check(wait_for([&] { return write_state->done.load(); },
-                              std::chrono::milliseconds{5000}),
+                              std::chrono::milliseconds{15000}),
                      "tunnel write")) {
       return 2;
     }
@@ -756,7 +761,7 @@ int run_restart_isolation_child(const std::filesystem::path& root) {
     if (!child_check(wait_for([&] {
           (void)io.poll();
           return read_state->done.load();
-        }, std::chrono::milliseconds{8000}), "tunnel echo read")) {
+        }, std::chrono::milliseconds{15000}), "tunnel echo read")) {
       return 2;
     }
     const std::string echoed{reinterpret_cast<const char*>(buffer->data()),
@@ -810,7 +815,7 @@ int run_restart_isolation_child(const std::filesystem::path& root) {
           post_read->done.store(true);
         });
     if (!child_check(wait_for([&] { return post_read->done.load(); },
-                              std::chrono::milliseconds{5000}) &&
+                              std::chrono::milliseconds{10000}) &&
                          post_read->error.has_value(),
                      "post-restart read completes with an error")) {
       return 2;
@@ -823,7 +828,7 @@ int run_restart_isolation_child(const std::filesystem::path& root) {
   if (!child_check(wait_for([&] {
         return second_node.value_if()->service_diagnostics().gateway
                    .tunnels_active == 0U;
-      }, std::chrono::milliseconds{5000}), "no tunnel stays active")) {
+      }, std::chrono::milliseconds{10000}), "no tunnel stays active")) {
     return 2;
   }
   for (const auto& record : second_node.value_if()->gateway_audit_records()) {
@@ -845,7 +850,7 @@ int run_restart_isolation_child(const std::filesystem::path& root) {
   }
   ByteStream successor{std::move(*reopened.value_if())};
   if (!child_check(wait_for([&] { return successor.state() == ByteStreamState::open; },
-                            std::chrono::milliseconds{5000}),
+                            std::chrono::milliseconds{15000}),
                    "fresh gateway tunnel reached open on epoch 2")) {
     return 2;
   }

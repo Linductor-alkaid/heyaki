@@ -1043,17 +1043,21 @@ void ByteStreamService::finish_stream(ByteStreamHandle& stream, StreamState term
   }
   stream.writes_.clear();
   if (terminal == StreamState::reset || terminal == StreamState::closed) {
+    // Capture the gateway release decision BEFORE the erase: callers hold
+    // only references into the map's shared_ptr, so erasing here can
+    // destroy the handle (ASan/TSan caught exactly that).
+    const bool release_gateway_channel = stream.gateway_;
+    const auto gateway_channel = stream.channel_id_;
     streams_.erase(stream.id_);
-    if (stream.gateway_) {
+    if (release_gateway_channel) {
       // A gateway connection rides a DEDICATED logical channel (one per
       // connection, both sides); release it at terminal so sequential
       // connections cannot exhaust the channel budget. Terminal frames
       // were already handed to the scheduler by the callers; a reset
       // still sitting in a full queue is backstopped by the peer's dial
       // deadline and idle timeouts.
-      const auto channel = stream.channel_id_;
-      std::erase(owned_channels_, channel);
-      session_.close_business_channel(channel);
+      std::erase(owned_channels_, gateway_channel);
+      session_.close_business_channel(gateway_channel);
     }
   }
 }

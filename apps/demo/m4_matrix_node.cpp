@@ -778,6 +778,13 @@ void run_gateway_socks(heyaki::Node& node, heyaki::Runtime& runtime,
     executor::comm::PhaseGate poll{"heyaki-m4-matrix-gateway-socks"};
     (void)poll.wait_for(1U, std::chrono::milliseconds{100});
   }
+  // Observability for the harness: the CI coturn job once saw the initiator
+  // die with neither this marker nor the summary, proving the stop latch
+  // never ran (default SIGTERM disposition) — the marker distinguishes
+  // "handler ran, shutting down" from an outside kill.
+  if (g_gateway_socks_stop != 0) {
+    std::cout << "MATRIX_PHASE gateway-socks-stop-signal\n";
+  }
   executor::comm::PhaseGate settle{"heyaki-m4-matrix-gateway-socks-stats"};
   (void)settle.wait_for(1U, std::chrono::milliseconds{50});
   const auto stats = (*frontend.value_if())->stats();

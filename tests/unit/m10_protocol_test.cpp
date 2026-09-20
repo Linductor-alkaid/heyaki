@@ -794,9 +794,12 @@ TEST(M10ByteStream, GatewayStreamEndToEndOnNegotiated13) {
   // for further payload).
   const auto prelude = encode_gateway_prelude(gateway_prelude_connected);
   bool prelude_written = false;
+  // const-ref parameter: GCC 13 -Wmaybe-uninitialized flags the by-value
+  // StreamIoResult copy through std::function (optional<Error> holds a
+  // std::string); the reference form is warning-clean and identical here.
   inbound[0].first->async_write(
       std::span<const std::byte>{prelude.data(), prelude.size()},
-      [&prelude_written](StreamIoResult result) {
+      [&prelude_written](const StreamIoResult& result) {
         if (!result.error.has_value()) prelude_written = true;
       });
   harness.pump_all();

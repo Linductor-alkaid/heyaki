@@ -886,7 +886,8 @@ class M10GatewayNodeTest : public ::testing::Test {
                       .file_receive_roots = {},
                       .file_max_peer_receive_bytes = 0U,
                       .shell_profiles = {},
-                      .gateway_profiles = std::move(gateway_profiles)};
+                      .gateway_profiles = std::move(gateway_profiles),
+                      .gateway_confirm_sink = {}};
     return Node::create(std::move(config));
   }
 

@@ -288,7 +288,8 @@ int main() {
 
   heyaki::Node node{std::move(*created.value_if())};
   const heyaki::DeviceEndpointKey peer{};   // an authorized serving peer
-  heyaki::GatewayConnect target{.host = "intranode.lan", .port = 443};
+  heyaki::GatewayConnect target{.host = "intranode.lan", .port = 443,
+                               .profile = ""};  // empty = serving default
 
   // Without an authorized session the open fails locally (peer required).
   auto opened = node.open_gateway_stream(peer, target);

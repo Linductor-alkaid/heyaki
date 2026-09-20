@@ -3,11 +3,18 @@ set -euo pipefail
 
 # Heyaki M10 Round 6 gateway matrix harness (requires root, coturn, curl, and
 # the built apps). One public segment (198.51.100.0/24) carries the relay, two
-# coturn instances, the gateway serving node (gwb) and the target namespace
-# (gwt); the gateway client (gwa) shares the same segment, but an iptables
-# FORWARD DROP blocks its direct traffic toward gwt, so the ONLY route from
-# gwa to the target is a tunnel through gwb's gateway proxy. The real
-# heyaki-m4-matrix-node participants then prove:
+# coturn instances, the gateway serving node (gwb) and the gateway client
+# (gwa). The target namespace (gwt) lives on a SECOND segment
+# (203.0.113.0/24, bridge hygw-br1) that only gwb is also attached to, and an
+# iptables FORWARD DROP blocks routed gwa->gwt traffic, so the ONLY route
+# from gwa to the target is a tunnel through gwb's gateway proxy. The split
+# is deliberate: gwa->gwt crosses the host's L3 forwarding path, where the
+# iptables FORWARD chain is guaranteed to apply. A same-bridge target would
+# be L2-switched past FORWARD (the filter only sees bridged frames when the
+# runner loads br_netfilter with bridge-nf-call-iptables=1, which the CI
+# runner did not — CI run 35492361592 saw the DROP rule bypassed and the
+# direct-path probe REACHABLE). The real heyaki-m4-matrix-node participants
+# then prove:
 #   cross_segment  A --gateway-echo gwt:echo-port through B's "lan" profile
 #                  (allowlist = gwt/32): 64-byte echo round trip ok=1 and
 #                  B-side heyaki_gateway_bytes_* > 0 (the serving side owns
@@ -29,7 +36,7 @@ set -euo pipefail
 #                  gateway open must be refused (ok=0) while the session
 #                  itself authenticates on the TURN data path.
 # The TURN server addresses (198.51.100.2/.3) deliberately stay OUTSIDE the
-# allowlist (198.51.100.20/32): the serving-side runtime does not yet compare
+# allowlist (the gwt /32 on the target segment): the serving-side runtime does not yet compare
 # the tunnel's own endpoint against the allowlist (review L1), so no scenario
 # may put a TURN/relay address into the allowed CIDRs.
 # Per-scenario verdicts print `GATEWAY_MATRIX <name> OK|FAIL|BOUNDARY ...`
@@ -101,16 +108,19 @@ echo_pid=""
 http_pid=""
 initiator_pid=""
 responder_pid=""
-br0="hygw-br"
+br0="hygw-br"              # public segment: relay, coturn, gwa, gwb
+br1="hygw-br1"             # target segment: gwt (+ gwb's serving leg)
 ns_a="hygw-a"        # gateway client (A / initiator)
 ns_b="hygw-b"        # gateway serving node (B / responder)
 ns_t="hygw-t"        # target namespace (echo + http servers)
-host_gw="198.51.100.1"     # bridge gateway; the relay listens here
+host_gw="198.51.100.1"     # public bridge gateway; the relay listens here
+target_gw="203.0.113.1"    # target bridge gateway (routing only; no services)
 turn_a_ip="198.51.100.2"   # coturn A advertised address (A's TURN)
 turn_b_ip="198.51.100.3"   # coturn B advertised address (B's TURN)
-client_b="198.51.100.9"    # gwb
+client_b="198.51.100.9"    # gwb (public leg)
+client_b_target="203.0.113.9"  # gwb serving leg on the target segment
 client_a="198.51.100.10"   # gwa
-client_t="198.51.100.20"   # gwt (target)
+client_t="203.0.113.20"    # gwt (target; second segment, reachable only via routing)
 relay_port=8443
 turn_port=3478
 turn_port_b=3480
@@ -153,6 +163,7 @@ cleanup() {
     ip netns delete "${namespace}" 2>/dev/null
   done
   ip link delete "${br0}" 2>/dev/null
+  ip link delete "${br1}" 2>/dev/null
   rm -rf "${work_dir}"
 }
 trap cleanup EXIT
@@ -178,30 +189,49 @@ ip addr add "${host_gw}/24" dev "${br0}"
 ip addr add "${turn_a_ip}/32" dev "${br0}"
 ip addr add "${turn_b_ip}/32" dev "${br0}"
 ip link set "${br0}" up
+# Target segment: separate bridge so gwa->gwt is ROUTED through the host
+# (iptables FORWARD always applies to routed traffic) instead of L2-switched
+# past it on a shared bridge.
+ip link add "${br1}" type bridge
+ip addr add "${target_gw}/24" dev "${br1}"
+ip link set "${br1}" up
 
 create_client() {
-  # namespace client_addr
-  local ns=$1 client_addr=$2
+  # namespace client_addr bridge gateway
+  local ns=$1 client_addr=$2 bridge=$3 gateway=$4
   ip netns add "${ns}"
   ip link add "v-${ns}" type veth peer name "p-${ns}"
-  ip link set "v-${ns}" master "${br0}"
+  ip link set "v-${ns}" master "${bridge}"
   ip link set "v-${ns}" up
   ip link set "p-${ns}" netns "${ns}"
   ip netns exec "${ns}" ip link set lo up
   ip netns exec "${ns}" sysctl -qw net.ipv6.conf.all.disable_ipv6=1 || true
   ip netns exec "${ns}" ip addr add "${client_addr}/24" dev "p-${ns}"
   ip netns exec "${ns}" ip link set "p-${ns}" up
-  ip netns exec "${ns}" ip route add default via "${host_gw}"
+  ip netns exec "${ns}" ip route add default via "${gateway}"
 }
-create_client "${ns_a}" "${client_a}"
-create_client "${ns_b}" "${client_b}"
-create_client "${ns_t}" "${client_t}"
+create_client "${ns_a}" "${client_a}" "${br0}" "${host_gw}"
+create_client "${ns_b}" "${client_b}" "${br0}" "${host_gw}"
+create_client "${ns_t}" "${client_t}" "${br1}" "${target_gw}"
+
+# gwb's serving leg on the target segment: on-link reach toward gwt without
+# any routing (the gateway dialer uses this leg; no default route, so the
+# public segment stays gwb's only path to the relay and TURN).
+ip link add "v-${ns_b}-t" type veth peer name "p-${ns_b}-t"
+ip link set "v-${ns_b}-t" master "${br1}"
+ip link set "v-${ns_b}-t" up
+ip link set "p-${ns_b}-t" netns "${ns_b}"
+ip netns exec "${ns_b}" ip addr add "${client_b_target}/24" dev "p-${ns_b}-t"
+ip netns exec "${ns_b}" ip link set "p-${ns_b}-t" up
 
 # GitHub runners carry Docker's FORWARD policy DROP; explicit ACCEPTs keep
-# the bridge routing alive. The A->target DROP is inserted AFTER the accepts
-# so it lands at position 1 and cannot be preempted: gwa must not reach gwt
-# except through gwb's gateway tunnel.
+# the bridge routing alive (the br1-br1 accept also covers hosts where
+# br_netfilter pulls bridged frames through FORWARD). The A->target DROP is
+# inserted AFTER the accepts so it lands at position 1 and cannot be
+# preempted: gwa's routed packets toward gwt must die here — gwa may reach
+# gwt only through gwb's gateway tunnel.
 insert_forward "-i ${br0} -o ${br0} -j ACCEPT"
+insert_forward "-i ${br1} -o ${br1} -j ACCEPT"
 iptables -C FORWARD -s "${client_a}" -d "${client_t}" -j DROP 2>/dev/null ||
   iptables -I FORWARD 1 -s "${client_a}" -d "${client_t}" -j DROP
 forward_rules+=("-s ${client_a} -d ${client_t} -j DROP")
@@ -289,7 +319,7 @@ wait_for() {
 wait_for "${ns_a}" "${host_gw}" "${relay_port}"
 wait_for "${ns_a}" "${turn_a_ip}" "${turn_port}"
 wait_for "${ns_b}" "${turn_b_ip}" "${turn_port_b}"
-log "TOPOLOGY_OK relay=${host_gw}:${relay_port} turnA=${turn_a_ip}:${turn_port} turnB=${turn_b_ip}:${turn_port_b} blocked=${client_a}->${client_t}"
+log "TOPOLOGY_OK relay=${host_gw}:${relay_port} turnA=${turn_a_ip}:${turn_port} turnB=${turn_b_ip}:${turn_port_b} public=${client_a},${client_b} target_seg=${client_t} gwb_leg=${client_b_target} blocked=${client_a}->${client_t}"
 
 # ---- helpers ------------------------------------------------------------
 run_in() {
@@ -397,6 +427,28 @@ gateway_bytes_from_tunnel() {
   sed -n 's/^heyaki_gateway_bytes_from_tunnel_total \([0-9][0-9]*\)$/\1/p' "$1" | tail -1
 }
 
+# TERM then bounded drain: give the node a grace window to run its shutdown
+# path (the socks initiator prints GATEWAY_SOCKS_SUMMARY on the way out). A
+# wedged teardown escalates to KILL after the grace so one hung process
+# cannot stall the whole job; the custom status 9 marks that escalation.
+term_and_reap() {
+  # pid grace_seconds
+  local pid=$1 grace=$2 status=0
+  kill -TERM "${pid}" 2>/dev/null || return 1
+  local tick
+  for tick in $(seq 1 "${grace}"); do
+    kill -0 "${pid}" 2>/dev/null || break
+    sleep 1
+  done
+  if kill -0 "${pid}" 2>/dev/null; then
+    kill -KILL "${pid}" 2>/dev/null || true
+    wait "${pid}" 2>/dev/null
+    return 9
+  fi
+  wait "${pid}" 2>/dev/null || status=$?
+  return "${status}"
+}
+
 start_echo_target() {
   cat > "${work_dir}/echo_server.py" <<'PY_EOF'
 import socket
@@ -432,22 +484,24 @@ PY_EOF
 assert_direct_blocked() {
   local probe
   probe=$(ip netns exec "${ns_a}" python3 -c '
-import socket
+import errno, socket, sys
+target = (sys.argv[1], int(sys.argv[2]))
 probe = socket.socket()
 probe.settimeout(3)
 try:
-    probe.connect(("198.51.100.20", 9007))
+    probe.connect(target)
     print("DIRECT_REACHABLE")
-except OSError:
-    print("DIRECT_BLOCKED")
+except OSError as error:
+    # Distinguish "filtered by the DROP rule" (timeout) from other errors.
+    print("DIRECT_BLOCKED errno=%d" % (error.errno or 0))
 finally:
     probe.close()
-') || probe="PROBE_ERROR"
-  if [[ "${probe}" == "DIRECT_BLOCKED" ]]; then
-    log "PROBE_OK gwa->gwt direct path blocked (tunnel is the unique route)"
+' "${client_t}" "${echo_port}") || probe="PROBE_ERROR"
+  if [[ "${probe}" == DIRECT_BLOCKED* ]]; then
+    log "PROBE_OK gwa->gwt direct path blocked (${probe}; tunnel is the unique route)"
     return 0
   fi
-  log "GATEWAY_MATRIX cross_segment FAIL direct-path probe: ${probe}"
+  log "GATEWAY_MATRIX cross_segment FAIL direct-path probe: ${probe} (target=${client_t}:${echo_port})"
   return 1
 }
 
@@ -527,34 +581,67 @@ for scenario in "${scenarios[@]}"; do
         fi
         sleep 0.2
       done
+      # One SOCKS probe with bounded retries. The FIRST CONNECT through a
+      # freshly authenticated session can race the serving side's gateway
+      # readiness and fail fast (CI run 35492361592: IP leg curl 000 while
+      # the very next domain-leg curl through the same tunnel answered 200),
+      # so a failed attempt sleeps and retries; the assertion itself stays
+      # strict — every leg must ultimately answer 200.
+      probe_socks_http() {
+        # url -> "code rc=<curl_exit> attempts=<n>"
+        local url=$1 code rc attempts=0
+        for attempt in 1 2 3; do
+          attempts=${attempt}
+          code=""
+          if ip netns exec "${ns_a}" curl -s --max-time 20 \
+              --socks5-hostname "127.0.0.1:${socks_port}" -o /dev/null \
+              -w '%{http_code}' "${url}" \
+              2>"${work_dir}/socks-curl-attempt${attempt}.stderr" \
+              >"${work_dir}/socks-curl-attempt${attempt}.code"; then
+            rc=0
+          else
+            rc=$?
+          fi
+          code=$(cat "${work_dir}/socks-curl-attempt${attempt}.code" 2>/dev/null || true)
+          [[ "${rc}" == "0" ]] && break
+          sleep 1
+        done
+        printf '%s rc=%d attempts=%d' "${code:-000}" "${rc:-1}" "${attempts}"
+      }
       verdict="FAIL"
       detail=""
       if [[ -z "${ready}" ]]; then
         detail="frontend never became ready"
       else
-        status_ip=$(ip netns exec "${ns_a}" curl -s --max-time 20 \
-          --socks5-hostname "127.0.0.1:${socks_port}" -o /dev/null \
-          -w '%{http_code}' "http://${client_t}:${http_port}/" || echo 000)
-        status_dns=$(ip netns exec "${ns_a}" curl -s --max-time 20 \
-          --socks5-hostname "127.0.0.1:${socks_port}" -o /dev/null \
-          -w '%{http_code}' "http://gwt.lan:${http_port}/" || echo 000)
+        ip_probe=$(probe_socks_http "http://${client_t}:${http_port}/")
+        status_ip=${ip_probe%% *}
+        dns_probe=$(probe_socks_http "http://gwt.lan:${http_port}/")
+        status_dns=${dns_probe%% *}
         if [[ "${status_ip}" == "200" && "${status_dns}" == "200" ]]; then
           verdict="OK"
         else
-          detail="http_status_ip=${status_ip:-none} http_status_dns=${status_dns:-none}"
+          detail="http_status_ip=${ip_probe} http_status_dns=${dns_probe}"
         fi
       fi
-      # SIGTERM the initiator: the frontend keep-alive loop must exit cleanly.
-      kill -TERM "${initiator_pid}" 2>/dev/null || true
+      # SIGTERM the initiator: the frontend keep-alive loop must exit cleanly
+      # and print GATEWAY_SOCKS_SUMMARY on the way out. status 9 = the
+      # teardown wedged and the reap escalated to KILL.
       initiator_status=0
-      wait "${initiator_pid}" || initiator_status=$?
-      kill -TERM "${responder_pid}" 2>/dev/null || true
-      wait "${responder_pid}" 2>/dev/null || true
+      term_and_reap "${initiator_pid}" 10 || initiator_status=$?
+      term_and_reap "${responder_pid}" 10 || true
       initiator_pid=""
       responder_pid=""
       summary=$(sed -n 's/^GATEWAY_SOCKS_SUMMARY //p' "${work_dir}/socks-a.out" | tail -1)
       connects=$(printf '%s\n' "${summary}" | tr ' ' '\n' |
         sed -n 's/^connects_succeeded=//p' | head -1)
+      if [[ -z "${summary}" ]]; then
+        # 0 with no summary = stdout lost before exit; 9 = teardown wedged,
+        # reaped with KILL; 143 = default-disposition TERM death (stop latch
+        # never ran); 137 = SIGKILL (OOM or outside killer). The tail shows
+        # whether the node reached the gateway-socks-stop-signal marker.
+        log "SOCKS_SUMMARY_MISSING initiator_exit=${initiator_status} last-initiator-output:"
+        tail -n 8 "${work_dir}/socks-a.out" 2>/dev/null || true
+      fi
       if [[ "${verdict}" == "OK" ]]; then
         if [[ -n "${connects}" && "${connects}" -ge 1 && "${initiator_status}" == "0" ]]; then
           log "GATEWAY_MATRIX socks_curl OK: ip_and_dns_200=1 connects_succeeded=${connects} clean_exit=${initiator_status}"
@@ -564,7 +651,11 @@ for scenario in "${scenarios[@]}"; do
           failures=$((failures + 1))
         fi
       else
-        log "GATEWAY_MATRIX socks_curl FAIL: ${detail:-unknown} connects_succeeded=${connects:-missing} summary=${summary:-missing}"
+        log "GATEWAY_MATRIX socks_curl FAIL: ${detail:-unknown} initiator_exit=${initiator_status} connects_succeeded=${connects:-missing} summary=${summary:-missing}"
+        for attempt_log in "${work_dir}"/socks-curl-attempt*.stderr; do
+          [[ -e "${attempt_log}" ]] || continue
+          log "SOCKS_CURL_STDERR ${attempt_log##*/}: $(tail -n 2 "${attempt_log}" | tr '\n' ' ')"
+        done
         dump_outputs socks
         failures=$((failures + 1))
       fi
