@@ -1492,11 +1492,21 @@ TEST_F(M10Round5NodeTest, AuditRecordAndDiagnosticsAfterEchoTunnel) {
   // expiry tick (~500ms), so wait for a snapshot that reflects the tunnel.
   {
     NodeServiceDiagnostics diagnostics;
+    // The reset is fire-and-forget through the facade and the counters
+    // republish on the ~500ms tick: under tsan the reset can still be in
+    // flight when the first satisfied predicate snapshot is taken, so the
+    // wait predicate itself must require the tunnel to have DRAINED (the
+    // audit record above already proves the teardown completed).
     ASSERT_TRUE(wait_until([&] {
       diagnostics = pair.second.value().service_diagnostics();
       return diagnostics.gateway_sessions == 1U &&
              diagnostics.gateway.dials_succeeded == 1U &&
-             diagnostics.gateway.dial_samples_count == 1U;
+             diagnostics.gateway.dial_samples_count == 1U &&
+             diagnostics.gateway.tunnels_active == 0U &&
+             diagnostics.gateway.profile_usage.size() == 1U &&
+             diagnostics.gateway.profile_usage[0].active_tunnels == 0U &&
+             diagnostics.gateway.profile_usage[0].bytes_from_tunnel == 9U &&
+             diagnostics.gateway.profile_usage[0].bytes_to_tunnel == 9U;
     }, std::chrono::milliseconds{6000}))
         << "the gateway service never appeared in the published diagnostics "
            "(sessions="
