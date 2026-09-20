@@ -542,7 +542,23 @@ int run_restart_isolation_child(const std::filesystem::path& root) {
         const auto local = probe.local_endpoint(ec);
         if (!ec && !local.address().is_loopback() &&
             !local.address().is_unspecified()) {
-          local_address = local.address().to_string();
+          const auto candidate = local.address();
+          // PROVE dialability with a real TCP round trip (some CI hosts
+          // drop hairpin dials to the egress address; skip there).
+          boost::asio::ip::tcp::acceptor verifier{io};
+          verifier.open(boost::asio::ip::tcp::v4(), ec);
+          if (!ec) verifier.bind(boost::asio::ip::tcp::endpoint{candidate, 0U}, ec);
+          if (!ec) verifier.listen(1, ec);
+          if (!ec) {
+            boost::asio::ip::tcp::socket client{io};
+            client.connect(verifier.local_endpoint(ec), ec);
+            boost::system::error_code close_ec;
+            client.close(close_ec);
+            verifier.close(close_ec);
+          }
+          if (!ec) {
+            local_address = candidate.to_string();
+          }
         }
       }
     }

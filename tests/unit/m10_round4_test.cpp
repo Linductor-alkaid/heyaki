@@ -232,6 +232,12 @@ ProtocolHello protocol_13_hello() {
 // ---- Local network detection / echo target ------------------------------------
 
 std::string detect_non_loopback_v4(boost::asio::io_context& io) {
+  // Candidate from the UDP egress probe, then PROVE dialability with a
+  // real TCP round trip: on some CI runners the egress interface address
+  // exists but hairpin TCP dials to it are dropped by the host fabric —
+  // the gateway echo tests then flap on dial timeouts. A candidate that
+  // cannot round-trip here means "environment unsuitable" (the callers
+  // skip), not a product failure.
   boost::system::error_code ec;
   boost::asio::ip::udp::socket probe{io};
   probe.open(boost::asio::ip::udp::v4(), ec);
@@ -246,7 +252,21 @@ std::string detect_non_loopback_v4(boost::asio::io_context& io) {
   if (ec || local.address().is_loopback() || local.address().is_unspecified()) {
     return {};
   }
-  return local.address().to_string();
+  const auto candidate = local.address();
+  boost::asio::ip::tcp::acceptor verifier{io};
+  verifier.open(boost::asio::ip::tcp::v4(), ec);
+  if (ec) return {};
+  verifier.bind(boost::asio::ip::tcp::endpoint{candidate, 0U}, ec);
+  if (ec) return {};
+  verifier.listen(1, ec);
+  if (ec) return {};
+  boost::asio::ip::tcp::socket client{io};
+  client.connect(verifier.local_endpoint(ec), ec);
+  if (ec) return {};
+  boost::system::error_code close_ec;
+  client.close(close_ec);
+  verifier.close(close_ec);
+  return candidate.to_string();
 }
 
 class EchoTarget : public std::enable_shared_from_this<EchoTarget> {
