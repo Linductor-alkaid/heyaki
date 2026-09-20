@@ -1494,7 +1494,10 @@ TEST_F(M10NodeGatewayApiTest, EndToEndEchoThroughPublicApi) {
   };
   // M10-08: the stream opens as `opening` and promotes only when the
   // serving side's 2-byte prelude lands after the real dial completes.
-  EXPECT_EQ(stream.state(), ByteStreamState::opening);
+  // Loopback-fast paths can land the prelude before this line: `open`
+  // already means connected; only a reset would be wrong here.
+  EXPECT_TRUE(stream.state() == ByteStreamState::opening ||
+              stream.state() == ByteStreamState::open);
   {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{12};
     executor::comm::PhaseGate poll{"m10-gateway-service-connect-poll"};
@@ -1525,6 +1528,7 @@ TEST_F(M10NodeGatewayApiTest, EndToEndEchoThroughPublicApi) {
   auto buffer = std::make_shared<std::array<std::byte, 64U>>();
   stream.async_read_some(std::span<std::byte>{buffer->data(), buffer->size()},
                          [read_state, buffer](ByteStreamIoResult result) {
+                           (void)buffer;  // lifetime anchor
                            if (result.error.has_value()) read_state->error = result.error;
                            read_state->bytes.store(result.bytes);
                            read_state->done.store(true);
@@ -1548,6 +1552,7 @@ TEST_F(M10NodeGatewayApiTest, EndToEndEchoThroughPublicApi) {
   auto eof_buffer = std::make_shared<std::array<std::byte, 16U>>();
   stream.async_read_some(std::span<std::byte>{eof_buffer->data(), eof_buffer->size()},
                          [eof_state, eof_buffer](ByteStreamIoResult result) {
+                           (void)eof_buffer;  // lifetime anchor
                            if (result.error.has_value()) eof_state->error = result.error;
                            eof_state->bytes.store(result.bytes);
                            eof_state->done.store(true);

@@ -1420,6 +1420,7 @@ TEST_F(M10Round5NodeTest, AuditRecordAndDiagnosticsAfterEchoTunnel) {
   auto buffer = std::make_shared<std::array<std::byte, 64U>>();
   stream.async_read_some(std::span<std::byte>{buffer->data(), buffer->size()},
                          [read_state, buffer](ByteStreamIoResult result) {
+                           (void)buffer;  // lifetime anchor
                            if (result.error.has_value()) read_state->error = result.error;
                            read_state->bytes.store(result.bytes);
                            read_state->done.store(true);

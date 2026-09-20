@@ -192,6 +192,6 @@ D7 close_tunnel 悬垂引用、D8 shared_ptr 自捕获循环泄漏——主循�
 
 文档：api.md 增 Gateway 小节+可编译示例（gateway-open，docs 同步测试执行）、服务表 gateway 行、版本 1.3；configuration.md 增 GatewayProfileConfig 行与默认关闭说明。两文件遗漏的 `gateway_confirm_sink` 初始化（m4_topology/m4_shutdown，CI -Werror 失败根因）补齐。
 
-里程碑状态：M10-01..M10-12 全部完成；退出条件五项对账如上。遗留（评审记录）：L1 隧道端点运行时 deny（P2，部署侧 denied_cidrs 缓解）、L2 每 host 探测速率限制（P3，配额+观测兜底）、L3 first_use 跨重启持久化（P4）、per-profile 指标名 Prometheus 合法性（README 冻结决策，v1.x 收紧或映射）、runtime asio 空闲自旋（既有，独立跟踪）、`run_on_strandAndWait` 其余 `[&]` 调用点（既有，独立任务）。v1.1 Gateway beta 发布按发布 checklist 另行执行。
+里程碑状态：M10-01..M10-12 全部完成；退出条件五项对账如上。遗留（评审记录）：**L0 Windows 网关启用**（三个 m10 运行时套件在 Windows CI fail-fast 0xc0000409，CI 注册层已按平台排除——Linux/macOS 全跑；网关运行路径的 Windows 适配为 v1.x 跟进），L1 隧道端点运行时 deny（P2，部署侧 denied_cidrs 缓解）、L2 每 host 探测速率限制（P3，配额+观测兜底）、L3 first_use 跨重启持久化（P4）、per-profile 指标名 Prometheus 合法性（README 冻结决策，v1.x 收紧或映射）、runtime asio 空闲自旋（既有，独立跟踪）、`run_on_strandAndWait` 其余 `[&]` 调用点（既有，独立任务）。v1.1 Gateway beta 发布按发布 checklist 另行执行。
 
 遗留观察（非 M10 引入，记录备查）：runtime asio worker 空闲时 epoll 自旋（~50k/s）持续占核；`run_on_strandAndWait` 其余既有调用点仍为 `[&]` 捕获（>5s strand 延迟下理论悬垂，与 M10 无关，建议独立任务收敛）。

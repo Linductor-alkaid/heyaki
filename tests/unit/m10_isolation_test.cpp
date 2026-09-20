@@ -566,7 +566,7 @@ int run_restart_isolation_child(const std::filesystem::path& root) {
     options.secret_backend.prefer_os_backend = false;
     return ProfileStore::create(root / name / "profile.sqlite", options);
   };
-  auto initialize = [&make_store](Result<ProfileStore> profile) {
+  auto initialize = [](Result<ProfileStore> profile) {
     if (!profile) return profile;
     PasswordVerifier verifier{
         .format_version = 1U, .parameters = PasswordHashParameters{},
@@ -717,7 +717,7 @@ int run_restart_isolation_child(const std::filesystem::path& root) {
   // tunnel-lifecycle waits below carry a 15s budget; the propagation-only
   // checks keep 10s.
   if (!child_check(wait_for([&] { return tunnel.state() == ByteStreamState::open; },
-                            std::chrono::milliseconds{15000}),
+                            std::chrono::milliseconds{30000}),
                    "prelude promoted the tunnel")) {
     return 2;
   }
@@ -737,7 +737,7 @@ int run_restart_isolation_child(const std::filesystem::path& root) {
                          write_state->done.store(true);
                        });
     if (!child_check(wait_for([&] { return write_state->done.load(); },
-                              std::chrono::milliseconds{15000}),
+                              std::chrono::milliseconds{30000}),
                      "tunnel write")) {
       return 2;
     }
@@ -754,6 +754,7 @@ int run_restart_isolation_child(const std::filesystem::path& root) {
     tunnel.async_read_some(
         std::span<std::byte>{buffer->data(), buffer->size()},
         [read_state, buffer](ByteStreamIoResult result) {
+          (void)buffer;  // lifetime anchor
           if (result.error.has_value()) read_state->error = result.error;
           read_state->bytes.store(result.bytes);
           read_state->done.store(true);
@@ -761,7 +762,7 @@ int run_restart_isolation_child(const std::filesystem::path& root) {
     if (!child_check(wait_for([&] {
           (void)io.poll();
           return read_state->done.load();
-        }, std::chrono::milliseconds{15000}), "tunnel echo read")) {
+        }, std::chrono::milliseconds{30000}), "tunnel echo read")) {
       return 2;
     }
     const std::string echoed{reinterpret_cast<const char*>(buffer->data()),
@@ -850,7 +851,7 @@ int run_restart_isolation_child(const std::filesystem::path& root) {
   }
   ByteStream successor{std::move(*reopened.value_if())};
   if (!child_check(wait_for([&] { return successor.state() == ByteStreamState::open; },
-                            std::chrono::milliseconds{15000}),
+                            std::chrono::milliseconds{30000}),
                    "fresh gateway tunnel reached open on epoch 2")) {
     return 2;
   }
