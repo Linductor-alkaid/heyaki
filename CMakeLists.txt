@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 
 project(
   heyaki
-  VERSION 1.0.1
+  VERSION 1.1.0
   DESCRIPTION "Device-to-device communication infrastructure"
   LANGUAGES C CXX)
 

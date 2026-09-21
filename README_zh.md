@@ -140,7 +140,9 @@ CGNAT、UDP 全封 → TURN/TCP）在 CI 中以真实 coturn 实例验证；完�
 全部文档索引于 [docs/README.md](docs/README.md)——架构、冻结的 wire
 协议、部署与运维 runbook、配置参考、API 参考、故障排查、兼容性策略与
 [v1 发布清单](docs/operations/release-checklist-v1.md)。工程交付记录
-（里程碑 M0–M9）见 [docs/todolists/](docs/todolists/)。
+（里程碑 M0–M10）见 [docs/todolists/](docs/todolists/)。下游项目用 AI
+agent 基于 SDK 开发时，可直接挂载打包好的
+[heyaki-integration skill](docs/skill/heyaki-integration/SKILL.md)。
 
 ## 项目状态
 
@@ -150,6 +152,12 @@ CGNAT、UDP 全封 → TURN/TCP）在 CI 中以真实 coturn 实例验证；完�
 基准、参数冻结、兼容性、模糊测试、供应链、安全回归、打包、发布工程）。
 发布制品由 [scripts/package_release.sh](scripts/package_release.sh) 构建
 并验证，按[签名规程](docs/operations/release-signing.md)签名。
+
+**v1.1.0** —— 新增受限 L4 Gateway 代理（M10，wire 协议 1.3）：持有
+`gateway.use` 的已授权会话可经服务端 `gateway.provide:<profile>` profile
+（CIDR/端口允许列表、配额、fail-closed 人工确认）隧道访问 TCP 目标，
+附带 SOCKS5 CONNECT 前端、审计与指标；同时新增面向下游 AI agent 的
+[heyaki-integration skill](docs/skill/heyaki-integration/SKILL.md)。
 
 ## 许可证
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Heyaki Integration"
+  short_description: "Integrate Heyaki P2P device communication into a C++20 application."
+  default_prompt: "Use $heyaki-integration to add peer discovery, authenticated sessions, pairing, messaging, RPC, events, file transfer, shell, or gateway tunneling to this application."

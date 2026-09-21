@@ -149,8 +149,10 @@ Everything is indexed in [docs/README.md](docs/README.md) — architecture,
 frozen wire protocol, deployment & operations runbook, configuration
 reference, API reference, troubleshooting, compatibility policy, and the
 [v1 release checklist](docs/operations/release-checklist-v1.md). The
-engineering delivery record (milestones M0–M9) lives in
-[docs/todolists/](docs/todolists/).
+engineering delivery record (milestones M0–M10) lives in
+[docs/todolists/](docs/todolists/). Projects developing against the SDK
+with an AI agent can point it at the packaged
+[heyaki-integration skill](docs/skill/heyaki-integration/SKILL.md).
 
 ## Project status
 
@@ -162,6 +164,13 @@ compatibility, fuzzing, supply chain, security regression, packaging, release
 engineering). Release artifacts are built and verified by
 [scripts/package_release.sh](scripts/package_release.sh) and signed per the
 [signing procedure](docs/operations/release-signing.md).
+
+**v1.1.0** — adds the restricted L4 gateway proxy (M10, wire protocol 1.3):
+authorized sessions with `gateway.use` tunnel TCP through a serving
+device's `gateway.provide:<profile>` profiles (CIDR/port allowlists,
+quotas, fail-closed confirmation), with a SOCKS5 CONNECT frontend, audit,
+and metrics — plus the downstream AI-agent
+[heyaki-integration skill](docs/skill/heyaki-integration/SKILL.md).
 
 ## License
 

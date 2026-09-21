@@ -6,6 +6,11 @@ libraries, public headers, and ready-made CMake packages. A companion
 walk-through of the API itself is [api.md](api.md); this page is about
 getting it to link and run on both platforms.
 
+If an AI agent is doing the integration, point it at the packaged agent
+skill — [skill/heyaki-integration/SKILL.md](skill/heyaki-integration/SKILL.md)
+routes feature requests to the right capability card with the matching
+pitfalls.
+
 ## What is in the SDK
 
 | Path | Content |

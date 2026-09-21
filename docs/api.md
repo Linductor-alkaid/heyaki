@@ -331,7 +331,7 @@ serving side resolves them.
 `Node::metrics()` returns the aggregated `NodeMetrics` (node/pairing/
 connectivity/transport/channels/services + embedded executor runtime
 snapshot); `format_node_metrics_prometheus()` renders the Prometheus text
-(~200 families). The TUI `metrics` command prints exactly this. The relay
+(300+ families). The TUI `metrics` command prints exactly this. The relay
 counterpart is `format_relay_metrics_prometheus` on the relay snapshot; the
 family catalog and alert mappings live in
 [deploy/observability/README.md](../deploy/observability/README.md).
@@ -343,8 +343,13 @@ settings) selects the relay: URL, optional leaf pin (full SHA-256 of the
 leaf certificate), tenant, CA file, and the timing/backoff/queue knobs.
 Enrollment (bootstrap token → device identity registered) happens once per
 generation through the enrollment client; afterwards login is automatic.
-TURN REST credentials are derived per session from the negotiated relay
-capabilities — applications never handle TURN secrets.
+TURN/STUN servers are configured by the application on the node's path
+policy (`NodeIceServer`: kind, hostname, port, username, credential); relay
+login does not carry TURN credentials in v1. When the operator runs coturn
+with `use-auth-secret`, the application derives the short-lived REST
+credential itself — `apps/demo/m4_matrix_node.cpp` is the worked example
+(username `expiry:tenant:deviceId`, HMAC-SHA1 password from the shared
+secret).
 
 ## Protocol compatibility
 

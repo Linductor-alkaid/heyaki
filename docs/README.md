@@ -12,6 +12,7 @@ delivery record.
 | Production deployment: relay host, coturn, observability, fleet | [deployment.md](deployment.md) |
 | Client library API reference | [api.md](api.md) |
 | Consuming the SDK on Linux and Windows | [client-library.md](client-library.md) |
+| Agent integration skill (AI-assisted downstream development) | [skill/heyaki-integration/SKILL.md](skill/heyaki-integration/SKILL.md) |
 | Troubleshooting by symptom (devices, relay, TUI) | [troubleshooting.md](troubleshooting.md) |
 | Upgrade, backup, rollback, per-alert triage, soak/bench procedures | [operations/runbook.md](operations/runbook.md) |
 | Frozen defaults and hard upper bounds for every tunable | [operations/parameter-freeze.md](operations/parameter-freeze.md) |
@@ -42,3 +43,9 @@ Code and config samples in the user-facing docs are not prose-only:
 
 When editing samples, keep them inside those fenced tags so the sync tests
 keep covering them.
+
+The agent skill cards under
+[skill/heyaki-integration/](skill/heyaki-integration/) deliberately use
+plain illustrative `cpp` fences: their fragments are not extracted or
+compiled. Sync-tested samples live only in the six documents scanned by
+`heyaki_m9_docs_examples`; the skill cards link to them as the authority.
