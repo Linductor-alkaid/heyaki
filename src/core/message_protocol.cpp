@@ -263,6 +263,11 @@ Result<MessageAckBody> parse_message_ack(std::span<const std::byte> payload) {
   if (!have_id) {
     return Result<MessageAckBody>::failure(envelope_error("message_id_field_missing"));
   }
+  if (ack.message_id.is_zero()) {
+    // Same domain rule as encode_message_ack: the zero id is not a valid
+    // message identity, so a body carrying it must not parse.
+    return Result<MessageAckBody>::failure(envelope_error("message_id_missing"));
+  }
   return Result<MessageAckBody>::success(ack);
 }
 

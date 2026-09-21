@@ -257,6 +257,21 @@ Result<PairingResultBody> parse_pairing_result(std::span<const std::byte> payloa
     return Result<PairingResultBody>::failure(pairing_error(ErrorCode::protocol,
                                                              "field_missing"));
   }
+  // Domain rules mirror encode_pairing_result so an accepted body can always
+  // re-encode: the zero id and the unspecified status are not valid outcomes,
+  // and an ok result must carry its trust grant.
+  if (request_id->is_zero()) {
+    return Result<PairingResultBody>::failure(
+        pairing_error(ErrorCode::protocol, "request_id_zero"));
+  }
+  if (*status == StableStatus::unspecified) {
+    return Result<PairingResultBody>::failure(
+        pairing_error(ErrorCode::protocol, "status_unspecified"));
+  }
+  if (!grant.has_value() && *status == StableStatus::ok) {
+    return Result<PairingResultBody>::failure(
+        pairing_error(ErrorCode::protocol, "ok_without_grant"));
+  }
   if (grant.has_value() && *status != StableStatus::ok) {
     return Result<PairingResultBody>::failure(
         pairing_error(ErrorCode::protocol, "grant_with_failure_status"));

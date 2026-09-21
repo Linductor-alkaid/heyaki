@@ -257,6 +257,11 @@ Result<RpcResponseBody> parse_rpc_response(std::span<const std::byte> payload,
   if (!have_id) {
     return Result<RpcResponseBody>::failure(rpc_error("request_id_field_missing"));
   }
+  if (response.request_id.is_zero()) {
+    // Same domain rule as encode_rpc_response: the zero id is not a valid
+    // request identity, so a body carrying it must not parse.
+    return Result<RpcResponseBody>::failure(rpc_error("request_id_missing"));
+  }
   if (response.status == StableStatus::unspecified) {
     return Result<RpcResponseBody>::failure(rpc_error("status_unspecified"));
   }
@@ -297,6 +302,11 @@ Result<RpcCancelBody> parse_rpc_cancel(std::span<const std::byte> payload) {
   }
   if (!have_id) {
     return Result<RpcCancelBody>::failure(rpc_error("request_id_field_missing"));
+  }
+  if (cancel.request_id.is_zero()) {
+    // Same domain rule as encode_rpc_cancel: the zero id is not a valid
+    // request identity, so a body carrying it must not parse.
+    return Result<RpcCancelBody>::failure(rpc_error("request_id_missing"));
   }
   return Result<RpcCancelBody>::success(cancel);
 }

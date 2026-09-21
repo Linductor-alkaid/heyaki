@@ -362,6 +362,11 @@ Result<FileAcceptBody> parse_file_accept(std::span<const std::byte> payload) {
   if (!have_id) {
     return Result<FileAcceptBody>::failure(file_error("accept_field_missing"));
   }
+  if (accept.transfer_id.is_zero()) {
+    // Same domain rule as encode_file_accept: the zero id is not a valid
+    // transfer identity, so a body carrying it must not parse.
+    return Result<FileAcceptBody>::failure(file_error("transfer_id_missing"));
+  }
   return Result<FileAcceptBody>::success(std::move(accept));
 }
 
@@ -478,6 +483,11 @@ Result<FileCompleteBody> parse_file_complete(std::span<const std::byte> payload)
   }
   if (!have_id || !have_status) {
     return Result<FileCompleteBody>::failure(file_error("complete_field_missing"));
+  }
+  if (complete.transfer_id.is_zero()) {
+    // Same domain rule as encode_file_complete: the zero id is not a valid
+    // transfer identity, so a body carrying it must not parse.
+    return Result<FileCompleteBody>::failure(file_error("transfer_id_missing"));
   }
   if (complete.status == StableStatus::unspecified ||
       (!complete.safe_detail.empty() && !is_safe_detail_token(complete.safe_detail))) {
