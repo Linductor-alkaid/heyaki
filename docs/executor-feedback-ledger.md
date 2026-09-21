@@ -17,6 +17,29 @@
 
 ---
 
+## 上游收敛状态（2026-09-21 pin 升级）
+
+executor 上游 master 前进至 `74a9419`（v0.5.0 发布 + 7 个后续修复，PR #189–#195），
+heyaki pin 于 2026-09-21 从 `e2dc8ca` 升级。该范围公共头（`include/`）零改动，
+facade 与 `executor::comm` 对 heyaki 完全兼容，仍为纯重编译升级：
+
+- **#187 残余窗口收口（lockfree 批量预留误取消）**：`util/lockfree_queue.hpp`
+  消费者侧取消预算改按认领批量规模缩放（`reservation_wait_yields_ ×
+  min(claimed, 1024)`）并加 `BatchWriting` 逃逸。ThreadPool 的 worker 队列
+  （`lockfree_worker_queue.hpp`）经由该内部头，heyaki 全部任务负载落在其上，
+  健康批量生产者不再可能被停滞启发式误杀。
+- **`~TaskMonitor` 析构加锁**（析构移入 .cpp，先取 `mutex_` 再析构成员）：与最后
+  一个持锁读者建立 happens-before，消除 shutdown/析构路径的 TSAN 报告与潜在 UAF；
+  heyaki M9 指标/SLO dashboard 的监控读数路径受益。
+- **与 heyaki 无关**：v0.5.0 发版事务（版本 0.4.0→0.5.0、tag 触发打包/发布流水线、
+  Windows/DEB 打包修复、网站/文档同步）与测试自身修复（hotpath benchmark 采样
+  数据竞争、首提交唤醒窗口、测试同步域、CI 序列化）。
+- **验证**：本地 debug 76/76 绿、asan 74/74 绿且 ASan/LSan 零命中（各 10 项网络
+  harness/扫描测试按环境跳过）；executor 0.5.0 经 `executorConfigVersion.cmake`
+  与目标文件时间戳双重确认被吸收。
+- **门控不变**：T2（asio strand/外部 context adapter、与 IO 对象同 strand 的
+  timer）本批未交付，P1-1/P1-2 相关条目维持原判。
+
 ## 上游收敛状态（2026-09-09 pin 升级）
 
 executor 上游 master 前进至 `e2dc8ca`（PR #180–#184），heyaki pin 于 2026-09-09
@@ -267,3 +290,8 @@ heyaki pin 于 2026-08-29 从 `077d854` 升至 `4e8e8eb`，PR #176/#177）：
   无 API 变化（facade/comm 头零改动），heyaki 无代码改动；动机是 P1 线程池热路径
   （heyaki 全负载所在）与 P-006 监控读数修复。本地 debug/release 各 55/55 绿
   （3 项网络矩阵测试按环境跳过）。
+- 2026-09-21：pin 升至 `74a9419`（v0.5.0 + 后续 lockfree 批量预留误取消收口与
+  `~TaskMonitor` 析构加锁）。公共头零改动，heyaki 无代码改动；动机是 ThreadPool
+  worker 队列所在 lockfree 路径的误取消窗口收口与 shutdown 路径 UAF 窗口消除。
+  本地 debug 76/76、asan 74/74 全绿（各 10 项网络 harness/扫描测试按环境跳过），
+  ASan/LSan 零命中。
