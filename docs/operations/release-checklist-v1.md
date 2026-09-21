@@ -106,6 +106,28 @@ zero GLIBCXX references via static libstdc++/libgcc; OpenSSL 3 bundled;
 consumer-verified from the extracted archive). Both manifests signed with
 the v1 key; digests recorded on the release page.
 
+**v1.1.0 stamp (2026-09-22, M10 Gateway beta + agent skill)**: release
+commit `445c90e`, green CI run
+[35643991754](https://github.com/Linductor-alkaid/heyaki/actions/runs/35643991754)
+(12/12 jobs; first socks_curl run with a true `clean_exit=0` after the
+process-group signaling fix in the matrix harness), tag `v1.1.0`,
+[GitHub release](https://github.com/Linductor-alkaid/heyaki/releases/tag/v1.1.0)
+with Ed25519-signed artifacts (signing key id `fa4d676f792b5e82`, same key
+train). The Linux SDK attached by the `release-sdk` workflow (run
+35648484941) on the 20.04 baseline; `MANIFEST-sdk.txt` signed with the v1
+key. Local gates: `scripts/package_release.sh` full pass from the release
+tree with `HEYAKI_BUILD_COMMIT` stamped to `445c90e` (inventory
+assertions, 12-file symbol split, stripped-binary smoke, tarball extract
+smoke, manifest-driven uninstall simulation), manifest verify/check
+round-trips for both bundles.
+
+```text
+827e38f76ebbbdb952272cd4711e438f226de506bd307c1a9a9bbd74822da055  heyaki-1.1.0-linux-x86_64.tar.gz
+fe1364786de90ccfb1b7d69ce625eb09e3833531f0661debbddbd6117a6708e8  heyaki-1.1.0-linux-x86_64-dbg.tar.gz
+b1d69d310d5299ad5e2cf186daac5dfb9f7a964d78914fba66d0d3b056bf0ba3  heyaki-1.1.0-linux-x86_64-sdk.tar.gz
+d1befe4443fa1a7d56b64ba68e8db8a917741db25da622b05b57412ea062be94  heyaki-1.1.0-windows-x64-sdk.zip
+```
+
 ## Known limitations (v1)
 
 Behavior accepted with rationale at release; each has a follow-up owner
