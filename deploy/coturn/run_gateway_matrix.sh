@@ -78,7 +78,7 @@ done
 ((${#scenarios[@]} == 0)) &&
   scenarios=(cross_segment forced_turn socks_curl path_policy)
 
-for command_name in ip iptables openssl python3; do
+for command_name in ip iptables openssl python3 setsid; do
   command -v "${command_name}" >/dev/null 2>&1 || skip "${command_name} is unavailable"
 done
 # socks_curl needs curl inside the client namespace (same host filesystem).
@@ -135,16 +135,27 @@ forward_rules=()
 
 cleanup() {
   set +e
-  [[ -n "${initiator_pid}" ]] && kill -TERM "${initiator_pid}" 2>/dev/null
-  [[ -n "${responder_pid}" ]] && kill -TERM "${responder_pid}" 2>/dev/null
+  # run_in_bg participants are session leaders: signal their whole group so
+  # TERM reaches the matrix node (a bare pid kill would only hit a wrapper
+  # and orphan the node inside the namespace). Directly launched helpers
+  # (echo/http/relay/turn) are not group leaders; the group form fails and
+  # the fallback covers them.
+  for pid_var in initiator_pid responder_pid; do
+    [[ -n "${!pid_var}" ]] &&
+      { kill -TERM -- "-${!pid_var}" 2>/dev/null ||
+        kill -TERM "${!pid_var}" 2>/dev/null; }
+  done
   [[ -n "${echo_pid}" ]] && kill -TERM "${echo_pid}" 2>/dev/null
   [[ -n "${http_pid}" ]] && kill -TERM "${http_pid}" 2>/dev/null
   [[ -n "${relay_pid}" ]] && kill -TERM "${relay_pid}" 2>/dev/null
   [[ -n "${turn_pid}" ]] && kill -TERM "${turn_pid}" 2>/dev/null
   [[ -n "${turn_pid_b}" ]] && kill -TERM "${turn_pid_b}" 2>/dev/null
   sleep 0.3
-  [[ -n "${initiator_pid}" ]] && kill -KILL "${initiator_pid}" 2>/dev/null
-  [[ -n "${responder_pid}" ]] && kill -KILL "${responder_pid}" 2>/dev/null
+  for pid_var in initiator_pid responder_pid; do
+    [[ -n "${!pid_var}" ]] &&
+      { kill -KILL -- "-${!pid_var}" 2>/dev/null ||
+        kill -KILL "${!pid_var}" 2>/dev/null; }
+  done
   [[ -n "${echo_pid}" ]] && kill -KILL "${echo_pid}" 2>/dev/null
   [[ -n "${http_pid}" ]] && kill -KILL "${http_pid}" 2>/dev/null
   [[ -n "${relay_pid}" ]] && kill -KILL "${relay_pid}" 2>/dev/null
@@ -334,13 +345,13 @@ socks_curl_attempt() {
   wait_for "${ns_b}" "${client_t}" "${http_port}"
   prepare_participants "${tag}"
   sleep 4
-  run_in "${ns_b}" "${work_dir}/${tag}-b.out" \
+  run_in_bg "${ns_b}" "${work_dir}/${tag}-b.out" \
     run "${work_dir}/${tag}-b.sqlite" matrix.second \
     "wss://${host_gw}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" 75000 \
     --role responder --gateway-serve "${serve_cidr}" \
     --authenticate-budget-ms 25000 &
   responder_pid=$!
-  run_in "${ns_a}" "${work_dir}/${tag}-a.out" \
+  run_in_bg "${ns_a}" "${work_dir}/${tag}-a.out" \
     run "${work_dir}/${tag}-a.sqlite" matrix.first \
     "wss://${host_gw}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" 70000 \
     --role initiator --gateway-socks "${socks_port}" \
@@ -488,6 +499,23 @@ run_in() {
     "${matrix_bin}" "$@" >"${out}" 2>&1
 }
 
+# Background participant launch. MUST be invoked with `&` (never in the
+# foreground — the exec replaces the subshell). For a backgrounded FUNCTION
+# invocation (`run_in ... &`), bash forks a subshell that runs the function
+# and waits: $! is that subshell, not the node — a TERM to it died with
+# status 143 while orphaning the node, which kept its SIGTERM latch
+# untriggered and its port bound (CI run 35635328918: both socks_curl
+# attempts ended 143 with no stop marker or summary; the retry then failed
+# to rebind :1080). Here the subshell exec's into setsid — a non-leader
+# subshell becomes the session leader without forking — so $! is the node
+# chain itself and term_and_reap can signal its process group.
+run_in_bg() {
+  # namespace output_file command...
+  local ns=$1 out=$2; shift 2
+  exec setsid ip netns exec "${ns}" env SSL_CERT_FILE="${work_dir}/ca.pem" \
+    "${matrix_bin}" "$@" >"${out}" 2>&1
+}
+
 prepare_participants() {
   local tag=$1
   run_in "${ns_a}" "${work_dir}/${tag}-prepare-a.out" \
@@ -547,7 +575,7 @@ run_echo_pair() {
   fi
   prepare_participants "${tag}"
   sleep 4
-  run_in "${ns_b}" "${work_dir}/${tag}-b.out" \
+  run_in_bg "${ns_b}" "${work_dir}/${tag}-b.out" \
     run "${work_dir}/${tag}-b.sqlite" matrix.second \
     "wss://${host_gw}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" "${budget}" \
     --role responder --gateway-serve "${serve_cidr}" --gateway-metrics \
@@ -555,7 +583,7 @@ run_echo_pair() {
     ${resp_turn_args[@]+"${resp_turn_args[@]}"} \
     ${responder_extra[@]+"${responder_extra[@]}"} &
   responder_pid=$!
-  run_in "${ns_a}" "${work_dir}/${tag}-a.out" \
+  run_in_bg "${ns_a}" "${work_dir}/${tag}-a.out" \
     run "${work_dir}/${tag}-a.sqlite" matrix.first \
     "wss://${host_gw}:${relay_port}" "${work_dir}/ca.pem" "${tenant}" "${budget}" \
     --role initiator --gateway-echo "${client_t}:${echo_port}" --gateway-metrics \
@@ -591,15 +619,20 @@ gateway_bytes_from_tunnel() {
 # wedged teardown escalates to KILL after the grace so one hung process
 # cannot stall the whole job; the custom status 9 marks that escalation.
 term_and_reap() {
-  # pid grace_seconds
+  # pid(session leader from run_in_bg) grace_seconds. Signals the process
+  # GROUP so TERM reaches the matrix node itself; the single-pid fallback
+  # keeps directly launched helpers working.
   local pid=$1 grace=$2 status=0
-  kill -TERM "${pid}" 2>/dev/null || return 1
+  kill -TERM -- "-${pid}" 2>/dev/null ||
+    kill -TERM "${pid}" 2>/dev/null || return 1
   local tick
   for tick in $(seq 1 "${grace}"); do
+    kill -0 -- "-${pid}" 2>/dev/null || break
     kill -0 "${pid}" 2>/dev/null || break
     sleep 1
   done
   if kill -0 "${pid}" 2>/dev/null; then
+    kill -KILL -- "-${pid}" 2>/dev/null || true
     kill -KILL "${pid}" 2>/dev/null || true
     wait "${pid}" 2>/dev/null
     return 9
