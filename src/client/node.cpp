@@ -3045,6 +3045,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     const auto peer_key = iterator->second.snapshot.peer;
     const auto peer_device = peer_key.device_id;
     const auto peer_public_key = iterator->second.peer_public_key;
+    const auto config_approval_enabled = pairing_approval_enabled;
     auto session = PeerSession::create_verified(
         {.transport = iterator->second.transport,
          .binding = *binding.value_if(),
@@ -3104,6 +3105,19 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
          .pairing_deadline = pairing_deadline,
          .basic_communication = basic_communication,
          .basic_communication_scopes = basic_communication_scopes,
+         .pairing_approval_enabled = config_approval_enabled,
+         .pairing_approval_handler =
+             [weak, peer_key, peer_device, peer_public_key](
+                 const PairingApprovalRequestBody& request) -> Result<void> {
+               auto self = weak.lock();
+               if (!self || !self->pairing_service) {
+                 return Result<void>::failure(
+                     node_error(ErrorCode::configuration, "pairing_service_missing"));
+               }
+               return self->record_pending_pairing_approval(request, peer_key,
+                                                            peer_device,
+                                                            peer_public_key);
+             },
          // The successor session re-runs the same trust adjudication: a
          // grant revoked during the old session does not carry over.
          .wall_clock = unix_milliseconds_now,
@@ -3345,20 +3359,28 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   void notify_pairing_failure(const DeviceEndpointKey& peer,
                                const std::optional<Error>& error) {
     auto pending = pending_pairings.find(peer.device_id);
-    if (pending == pending_pairings.end()) return;
+    auto approval = pending_pairing_approvals.find(peer.device_id);
+    if (pending == pending_pairings.end() && approval == pending_pairing_approvals.end()) {
+      return;
+    }
     if (pairing_observer) {
       pairing_observer(peer, NodePairingOutcome::failure(error.value_or(
                                         node_error(ErrorCode::pairing_denied,
                                                    "pairing_denied"))));
     }
-    pending_pairings.erase(pending);
+    if (pending != pending_pairings.end()) {
+      pending_pairings.erase(pending);
+    }
+    if (approval != pending_pairing_approvals.end()) {
+      pending_pairing_approvals.erase(approval);
+    }
   }
 
   // ---- M5 pairing, trust, and stream API (strand context) ----
 
   Result<void> pair_peer_strand(DeviceEndpointKey peer, std::string_view password,
                                 std::vector<std::string> requested_scopes,
-                                const RequestId& request_id) {
+                                const RequestId& request_id, bool approval = false) {
     const auto index = peer_attempt_by_endpoint.find(peer);
     if (index == peer_attempt_by_endpoint.end()) {
       return Result<void>::failure(node_error(ErrorCode::peer_offline,
@@ -3378,8 +3400,11 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return Result<void>::failure(
           node_error(ErrorCode::pairing_required, "pairing_already_pending"));
     }
-    auto submitted = iterator->second.session->submit_pairing_request(
-        request_id, password, requested_scopes);
+    auto submitted =
+        approval ? iterator->second.session->submit_pairing_approval_request(
+                       request_id, std::move(requested_scopes))
+                 : iterator->second.session->submit_pairing_request(
+                       request_id, password, requested_scopes);
     if (!submitted) return submitted;
     pending_pairings.emplace(
         peer.device_id,
@@ -3430,6 +3455,170 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     if (session) {
       session->close(transport::CloseReason::local_shutdown);
     }
+  }
+
+  // Records one admitted approval request as pending for the app's
+  // approve/reject entry points. Bounded: one pending request per peer and
+  // a global cap; a full registry denies the request with a stable result.
+  Result<void> record_pending_pairing_approval(
+      const PairingApprovalRequestBody& request,
+      const DeviceEndpointKey& peer, const DeviceId& peer_device,
+      const IdentityPublicKey& peer_public_key) {
+    if (!pairing_approval_enabled || !pairing_request_observer) {
+      return Result<void>::failure(
+          node_error(ErrorCode::permission, "pairing_approval_disabled"));
+    }
+    if (pending_pairing_approvals.contains(peer_device)) {
+      return Result<void>::failure(
+          node_error(ErrorCode::resource_exhausted, "pairing_approval_conflict"));
+    }
+    if (pending_pairing_approvals.size() >= max_pending_pairing_approvals) {
+      return Result<void>::failure(
+          node_error(ErrorCode::resource_exhausted, "pairing_approval_full"));
+    }
+    auto& pending = pending_pairing_approvals[peer_device];
+    pending.peer = peer;
+    pending.request = request;
+    pending.peer_public_key = peer_public_key;
+    auto& timer = pending.deadline.emplace(strand);
+    timer.expires_after(pairing_deadline);
+    auto weak = weak_from_this();
+    const auto request_id = request.request_id;
+    timer.async_wait(boost::asio::bind_executor(
+        strand, [weak, peer_device, request_id](const boost::system::error_code& error) {
+          if (error) return;
+          if (auto self = weak.lock()) {
+            self->expire_pairing_approval(peer_device, request_id);
+          }
+        }));
+    pairing_request_observer(peer, request);
+    return Result<void>::success();
+  }
+
+  // Deadline expiry for one pending approval request: stable denial to the
+  // requester, one failure outcome to the pairing observer, pending cleared.
+  void expire_pairing_approval(const DeviceId& peer_device,
+                               const RequestId& request_id) {
+    auto pending = pending_pairing_approvals.find(peer_device);
+    if (pending == pending_pairing_approvals.end() ||
+        pending->second.request.request_id != request_id) {
+      return;
+    }
+    const auto peer = pending->second.peer;
+    std::shared_ptr<PeerSession> session;
+    const auto index = peer_attempt_by_endpoint.find(peer);
+    if (index != peer_attempt_by_endpoint.end()) {
+      const auto iterator = peer_attempts.find(index->second);
+      if (iterator != peer_attempts.end()) session = iterator->second.session;
+    }
+    pending_pairing_approvals.erase(pending);
+    if (session) {
+      PairingResultBody expired;
+      expired.request_id = request_id;
+      expired.status = StableStatus::deadline_exceeded;
+      (void)session->send_pairing_result(expired);
+    }
+    if (pairing_observer) {
+      pairing_observer(peer, NodePairingOutcome::failure(
+                                 node_error(ErrorCode::timeout,
+                                            "pairing_approval_deadline_exceeded")));
+    }
+  }
+
+  // Strand body of approve_pairing/reject_pairing: resolves one pending
+  // approval request exactly once - grant issuance plus result frame for
+  // approve, a stable denial plus audit record for reject.
+  Result<void> resolve_pairing_approval_strand(const DeviceEndpointKey& peer,
+                                               const RequestId& request_id,
+                                               std::vector<std::string> scopes,
+                                               bool approve) {
+    auto pending = pending_pairing_approvals.find(peer.device_id);
+    if (pending == pending_pairing_approvals.end() ||
+        pending->second.request.request_id != request_id) {
+      return Result<void>::failure(
+          node_error(ErrorCode::pairing_required, "pairing_approval_not_pending"));
+    }
+    std::shared_ptr<PeerSession> session;
+    const auto index = peer_attempt_by_endpoint.find(peer);
+    if (index != peer_attempt_by_endpoint.end()) {
+      const auto iterator = peer_attempts.find(index->second);
+      if (iterator != peer_attempts.end()) session = iterator->second.session;
+    }
+    if (!session) {
+      return Result<void>::failure(node_error(ErrorCode::peer_offline,
+                                              "peer_session_missing"));
+    }
+    auto request = pending->second.request;
+    const auto peer_public_key = pending->second.peer_public_key;
+    pending_pairing_approvals.erase(pending);
+    if (!approve) {
+      if (pairing_service) {
+        pairing_service->record_approval_rejected(peer.device_id, request_id);
+      }
+      PairingResultBody denied;
+      denied.request_id = request_id;
+      denied.status = StableStatus::permission_denied;
+      auto sent = session->send_pairing_result(denied);
+      if (pairing_observer) {
+        pairing_observer(peer, NodePairingOutcome::failure(
+                                   node_error(ErrorCode::pairing_denied,
+                                              "pairing_approval_rejected")));
+      }
+      return sent;
+    }
+    if (!pairing_service) {
+      return Result<void>::failure(
+          node_error(ErrorCode::configuration, "pairing_service_missing"));
+    }
+    // The approving app confirms the granted scopes; they can only narrow
+    // what the requester asked for (the requester's result sink enforces the
+    // subset rule on receipt). An empty intersection is a stable denial.
+    std::vector<std::string> confirmed;
+    for (const auto& scope : request.requested_scopes) {
+      if (std::find(scopes.begin(), scopes.end(), scope) != scopes.end()) {
+        confirmed.push_back(scope);
+      }
+    }
+    if (confirmed.empty()) {
+      PairingResultBody denied;
+      denied.request_id = request_id;
+      denied.status = StableStatus::permission_denied;
+      auto sent = session->send_pairing_result(denied);
+      if (pairing_observer) {
+        pairing_observer(peer, NodePairingOutcome::failure(
+                                   node_error(ErrorCode::pairing_denied,
+                                              "pairing_approval_scopes_empty")));
+      }
+      return sent;
+    }
+    request.requested_scopes = std::move(confirmed);
+    auto issued = pairing_service->approve(request, peer.device_id,
+                                           peer_public_key);
+    if (!issued) {
+      // Hard failure (profile/identity trouble): deny the requester and
+      // report the local failure; the pending entry stays resolved.
+      PairingResultBody denied;
+      denied.request_id = request_id;
+      denied.status = StableStatus::internal;
+      (void)session->send_pairing_result(denied);
+      if (pairing_observer) {
+        pairing_observer(peer, NodePairingOutcome::failure(*issued.error_if()));
+      }
+      return Result<void>::failure(*issued.error_if());
+    }
+    auto sent = session->send_pairing_result(*issued.value_if());
+    if (pairing_observer) {
+      if (issued.value_if()->status == StableStatus::ok &&
+          issued.value_if()->grant.has_value()) {
+        pairing_observer(peer, NodePairingOutcome::success(
+                                   issued.value_if()->grant->granted_scopes));
+      } else {
+        pairing_observer(peer, NodePairingOutcome::failure(
+                                   pairing_status_error(
+                                       issued.value_if()->status)));
+      }
+    }
+    return sent;
   }
 
   // Lazily creates (and attaches) the per-peer ByteStreamService; shared
@@ -5030,6 +5219,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     const auto peer = restart.peer;
     const auto peer_device = peer.device_id;
     const auto peer_public_key = restart.context.peer_public_key;
+    const auto config_approval_enabled = pairing_approval_enabled;
     auto session = PeerSession::create_verified(
         {.transport = restart.transport,
          .binding = binding,
@@ -5074,6 +5264,19 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
              },
          .basic_communication = basic_communication,
          .basic_communication_scopes = basic_communication_scopes,
+         .pairing_approval_enabled = config_approval_enabled,
+         .pairing_approval_handler =
+             [weak, peer, peer_device, peer_public_key](
+                 const PairingApprovalRequestBody& request) -> Result<void> {
+               auto self = weak.lock();
+               if (!self || !self->pairing_service) {
+                 return Result<void>::failure(
+                     node_error(ErrorCode::configuration, "pairing_service_missing"));
+               }
+               return self->record_pending_pairing_approval(request, peer,
+                                                            peer_device,
+                                                            peer_public_key);
+             },
          .wall_clock = unix_milliseconds_now,
          .initiator_owned_domains = {session::ChannelDomain::event,
                                         session::ChannelDomain::file,
@@ -6395,6 +6598,20 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     std::optional<boost::asio::steady_timer> deadline;
   };
   std::map<DeviceId, PendingPairing> pending_pairings;
+  // Receiver-side passwordless approval registry (pairing_approval_v1): one
+  // pending request per peer, bounded count, deadline-armed like the
+  // initiator side. Resolved only by approve_pairing/reject_pairing or the
+  // deadline.
+  struct PendingPairingApproval {
+    DeviceEndpointKey peer;
+    PairingApprovalRequestBody request;
+    IdentityPublicKey peer_public_key;
+    std::optional<boost::asio::steady_timer> deadline;
+  };
+  static constexpr std::size_t max_pending_pairing_approvals = 16U;
+  std::map<DeviceId, PendingPairingApproval> pending_pairing_approvals;
+  NodePairingRequestObserver pairing_request_observer;
+  bool pairing_approval_enabled{false};
   std::function<void(const DeviceEndpointKey&, ByteStream)> stream_inbound_handler;
   // ---- M6 message & unary RPC ----
   std::shared_ptr<ServiceRegistry> service_registry{std::make_shared<ServiceRegistry>()};
@@ -6659,6 +6876,7 @@ Result<Node> Node::create(NodeConfig config) {
     impl->event_service_config.max_subscriptions_per_peer =
         config.event_max_subscriptions_per_peer;
   }
+  impl->pairing_approval_enabled = config.pairing_approval_enabled;
   impl->basic_communication = config.basic_communication;
   if (config.basic_communication) {
     impl->basic_communication_scopes.push_back("message.send");
@@ -6876,8 +7094,10 @@ Result<void> Node::connect(DeviceEndpointKey peer) {
       Impl::ConnectCommand{peer, *route.value_if()});
 }
 
-Result<RequestId> Node::pair_peer(DeviceEndpointKey peer, std::string_view password,
-                                  std::vector<std::string> requested_scopes) {
+Result<RequestId> Node::submit_pairing_attempt(DeviceEndpointKey peer,
+                                               std::string_view password,
+                                               std::vector<std::string> requested_scopes,
+                                               bool approval) {
   if (!impl_) {
     return Result<RequestId>::failure(
         node_error(ErrorCode::cancelled, "node_not_running"));
@@ -6886,7 +7106,7 @@ Result<RequestId> Node::pair_peer(DeviceEndpointKey peer, std::string_view passw
     return Result<RequestId>::failure(
         node_error(ErrorCode::configuration, "pairing_peer_invalid"));
   }
-  if (password.empty()) {
+  if (!approval && password.empty()) {
     return Result<RequestId>::failure(
         node_error(ErrorCode::configuration, "pairing_password_empty"));
   }
@@ -6906,8 +7126,9 @@ Result<RequestId> Node::pair_peer(DeviceEndpointKey peer, std::string_view passw
   if (impl_->strand.running_in_this_thread()) {
     // Same reentrancy rule as the strand mutation helper: a post-and-wait
     // from inside the strand would deadlock, so admission runs inline.
-    auto submitted = impl_->pair_peer_strand(peer, password, *normalized.value_if(),
-                                             request_id);
+    auto submitted = impl_->pair_peer_strand(peer, password,
+                                             *normalized.value_if(), request_id,
+                                             approval);
     if (!submitted) {
       return Result<RequestId>::failure(*submitted.error_if());
     }
@@ -6925,11 +7146,11 @@ Result<RequestId> Node::pair_peer(DeviceEndpointKey peer, std::string_view passw
   try {
     boost::asio::post(impl_->strand,
                       [weak, peer, scopes, password_copy, request_id, admission,
-                       completion] {
+                       completion, approval] {
                       if (auto self = weak.lock()) {
                         auto submitted =
                             self->pair_peer_strand(peer, *password_copy, *scopes,
-                                                   request_id);
+                                                   request_id, approval);
                         if (submitted) {
                           *admission = Result<RequestId>::success(request_id);
                         } else {
@@ -6952,6 +7173,68 @@ Result<RequestId> Node::pair_peer(DeviceEndpointKey peer, std::string_view passw
   // timeout keeps the caller's pre-set failure outcome in place.
   (void)completed.wait_for(std::chrono::seconds{5});
   return *admission;
+}
+
+Result<RequestId> Node::pair_peer(DeviceEndpointKey peer, std::string_view password,
+                                  std::vector<std::string> requested_scopes) {
+  return submit_pairing_attempt(peer, password, std::move(requested_scopes), false);
+}
+
+Result<RequestId> Node::request_pairing_approval(
+    DeviceEndpointKey peer, std::vector<std::string> requested_scopes) {
+  return submit_pairing_attempt(peer, {}, std::move(requested_scopes), true);
+}
+
+void Node::set_pairing_request_observer(NodePairingRequestObserver observer) {
+  if (!impl_) return;
+  impl_->pairing_request_observer = std::move(observer);
+}
+
+// Bounded strand mutation shared by approve_pairing/reject_pairing: the
+// decision must serialize with the approval registry on the strand.
+Result<void> Node::resolve_pairing_approval(DeviceEndpointKey peer,
+                                            const RequestId& request_id,
+                                            std::vector<std::string> scopes,
+                                            bool approve) {
+  if (!impl_) {
+    return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  if (impl_->strand.running_in_this_thread()) {
+    return impl_->resolve_pairing_approval_strand(peer, request_id,
+                                                  std::move(scopes), approve);
+  }
+  auto weak = std::weak_ptr<Impl>{impl_};
+  auto outcome = std::make_shared<Result<void>>(
+      Result<void>::failure(node_error(ErrorCode::timeout, "pairing_resolution_timeout")));
+  auto completion = std::make_shared<std::promise<void>>();
+  auto completed = completion->get_future();
+  try {
+    boost::asio::post(impl_->strand, [weak, peer, request_id, outcome, completion,
+                                      scopes, approve]() mutable {
+      if (auto self = weak.lock()) {
+        *outcome = self->resolve_pairing_approval_strand(peer, request_id,
+                                                         std::move(scopes), approve);
+      } else {
+        *outcome = Result<void>::failure(
+            node_error(ErrorCode::cancelled, "node_not_running"));
+      }
+      completion->set_value();
+    });
+  } catch (...) {
+    return Result<void>::failure(
+        node_error(ErrorCode::internal, "pairing_schedule_failed"));
+  }
+  (void)completed.wait_for(std::chrono::seconds{5});
+  return *outcome;
+}
+
+Result<void> Node::approve_pairing(DeviceEndpointKey peer, const RequestId& request_id,
+                                   std::vector<std::string> scopes) {
+  return resolve_pairing_approval(peer, request_id, std::move(scopes), true);
+}
+
+Result<void> Node::reject_pairing(DeviceEndpointKey peer, const RequestId& request_id) {
+  return resolve_pairing_approval(peer, request_id, {}, false);
 }
 
 void Node::set_pairing_observer(NodePairingObserver observer) {

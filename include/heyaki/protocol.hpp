@@ -34,6 +34,9 @@ enum class Capability : std::uint64_t {
   lan_signaling_v1 = 1ULL << 11U,
   session_restart_v1 = 1ULL << 12U,
   gateway_v1 = 1ULL << 13U,
+  // Optional: the peer understands the passwordless pairing-approval
+  // request frame and answers with a pairing_result.
+  pairing_approval_v1 = 1ULL << 14U,
 };
 
 inline constexpr std::uint64_t protocol_1_0_capability_bits =
@@ -64,9 +67,16 @@ inline constexpr std::uint64_t protocol_1_2_capability_bits =
 // a 2-byte prelude (M10-01 change sheet). A peer below 1.3 never negotiates
 // the bit and must reject a gateway-carrying STREAM_OPEN with `protocol`
 // on that channel only.
+// Protocol 1.3 also carries the passwordless pairing-approval capability:
+// peers advertising 1.3 understand the approval request frame. Older peers
+// never advertise the bit (their build's known-bit set excludes it) and the
+// version mask strips it from every negotiation with them, so hello
+// compatibility is unchanged; the receiving side's
+// NodeConfig::pairing_approval_enabled still gates actual use.
 inline constexpr std::uint64_t protocol_1_3_capability_bits =
     protocol_1_2_capability_bits |
-    static_cast<std::uint64_t>(Capability::gateway_v1);
+    static_cast<std::uint64_t>(Capability::gateway_v1) |
+    static_cast<std::uint64_t>(Capability::pairing_approval_v1);
 inline constexpr std::uint64_t known_capability_bits = protocol_1_3_capability_bits;
 
 inline constexpr ProtocolVersion current_protocol_version{1U, 3U};

@@ -249,6 +249,83 @@ Result<PairingResultBody> PairingService::evaluate(
   return Result<PairingResultBody>::success(std::move(result));
 }
 
+Result<PairingResultBody> PairingService::approve(
+    const PairingApprovalRequestBody& request, const DeviceId& peer_device,
+    std::span<const std::byte> peer_public_key) {
+  if (config_.profile == nullptr) {
+    return Result<PairingResultBody>::failure(
+        pairing_service_error(ErrorCode::configuration, "profile_missing"));
+  }
+  const auto now_value = now();
+
+  PairingResultBody result;
+  result.request_id = request.request_id;
+  auto policy = config_.profile->pairing_policy();
+  if (!policy) {
+    return Result<PairingResultBody>::failure(*policy.error_if());
+  }
+  audit(PairingAuditKind::attempt, peer_device, "pairing_approval_attempt",
+        &request.request_id);
+
+  // M5-12: the granted set is the intersection of requested scopes and the
+  // current pairing policy; an empty intersection denies the request.
+  auto policy_scopes = normalize_trust_scopes(policy.value_if()->default_scopes);
+  if (!policy_scopes) {
+    return Result<PairingResultBody>::failure(*policy_scopes.error_if());
+  }
+  auto adjudication = adjudicate_trust_scopes(request.requested_scopes,
+                                              *policy_scopes.value_if(),
+                                              std::nullopt);
+  if (!adjudication.authorized) {
+    audit(PairingAuditKind::denied_policy, peer_device,
+          "approval_scope_intersection_empty", &request.request_id);
+    result.status = StableStatus::permission_denied;
+    return Result<PairingResultBody>::success(result);
+  }
+
+  // Same grant binding as the password path: identities, nonce, password
+  // generation, optional TTL - the nonce ties the grant to this approval.
+  SignedTrustGrant grant;
+  grant.grant_id = random_grant_id();
+  grant.issuer = config_.profile->device_id();
+  grant.subject = peer_device;
+  grant.granted_scopes = adjudication.allowed_scopes;
+  auto generation = config_.profile->password_generation();
+  if (!generation) {
+    return Result<PairingResultBody>::failure(*generation.error_if());
+  }
+  grant.password_generation = *generation.value_if();
+  grant.issued_unix_milliseconds = now_value;
+  if (config_.grant_ttl_milliseconds > 0U) {
+    grant.expires_unix_milliseconds = now_value + config_.grant_ttl_milliseconds;
+  }
+  grant.nonce = request.nonce;
+  auto signed_grant = sign_signed_trust_grant(grant, config_.identity);
+  if (!signed_grant) {
+    return Result<PairingResultBody>::failure(*signed_grant.error_if());
+  }
+  if (peer_public_key.size() > max_identity_public_key_bytes) {
+    return Result<PairingResultBody>::failure(
+        pairing_service_error(ErrorCode::protocol, "peer_public_key_invalid"));
+  }
+  auto persisted = config_.profile->put_trust_grant(
+      to_record(grant, TrustGrantDirection::issued));
+  if (!persisted) {
+    return Result<PairingResultBody>::failure(*persisted.error_if());
+  }
+  audit(PairingAuditKind::granted, peer_device, "approval_grant_issued",
+        &request.request_id, &grant.grant_id);
+  result.status = StableStatus::ok;
+  result.grant = std::move(grant);
+  return Result<PairingResultBody>::success(std::move(result));
+}
+
+void PairingService::record_approval_rejected(const DeviceId& peer_device,
+                                              const RequestId& request_id) {
+  audit(PairingAuditKind::denied_policy, peer_device, "approval_rejected",
+        &request_id);
+}
+
 Result<void> PairingService::accept_grant(
     const PairingResultBody& result, const RequestId& pending_request_id,
     const PairingNonce& pending_nonce, const DeviceId& issuer_device,

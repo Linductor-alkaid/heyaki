@@ -69,6 +69,137 @@ Result<std::vector<std::byte>> encode_pairing_request(const PairingRequestBody& 
   return Result<std::vector<std::byte>>::success(std::move(output));
 }
 
+Result<void> validate_pairing_approval_request(
+    const PairingApprovalRequestBody& request) {
+  if (request.request_id.is_zero()) {
+    return Result<void>::failure(pairing_error(ErrorCode::protocol, "request_id_zero"));
+  }
+  if (all_zero(request.nonce)) {
+    return Result<void>::failure(pairing_error(ErrorCode::protocol, "nonce_zero"));
+  }
+  if (request.requested_scopes.empty() ||
+      request.requested_scopes.size() > max_pairing_requested_scopes) {
+    return Result<void>::failure(
+        pairing_error(ErrorCode::protocol, "requested_scope_count_invalid"));
+  }
+  for (const auto& scope : request.requested_scopes) {
+    if (!is_valid_trust_scope(scope)) {
+      return Result<void>::failure(
+          pairing_error(ErrorCode::protocol, "requested_scope_syntax_invalid"));
+    }
+  }
+  return Result<void>::success();
+}
+
+Result<std::vector<std::byte>> encode_pairing_approval_request(
+    const PairingApprovalRequestBody& request) {
+  auto validated = validate_pairing_approval_request(request);
+  if (!validated) {
+    return Result<std::vector<std::byte>>::failure(*validated.error_if());
+  }
+  std::vector<std::byte> output;
+  proto_codec::append_bytes(output, 1U, request.request_id.bytes());
+  proto_codec::append_bytes(output, 2U,
+                            std::span<const std::byte>{request.nonce.data(),
+                                                       request.nonce.size()});
+  for (const auto& scope : request.requested_scopes) {
+    proto_codec::append_text(output, 4U, scope);
+  }
+  if (output.size() > pairing_payload_ceiling) {
+    return Result<std::vector<std::byte>>::failure(
+        pairing_error(ErrorCode::resource_exhausted, "object_too_large"));
+  }
+  return Result<std::vector<std::byte>>::success(std::move(output));
+}
+
+Result<PairingApprovalRequestBody> parse_pairing_approval_request(
+    std::span<const std::byte> payload) {
+  if (payload.size() > pairing_payload_ceiling) {
+    return Result<PairingApprovalRequestBody>::failure(
+        pairing_error(ErrorCode::resource_exhausted, "object_too_large"));
+  }
+  proto_codec::ProtoReader reader(payload);
+  std::optional<RequestId> request_id;
+  std::optional<PairingNonce> nonce;
+  std::optional<std::vector<std::string>> scopes;
+  while (!reader.done()) {
+    auto field = reader.next();
+    if (!field) {
+      return Result<PairingApprovalRequestBody>::failure(*field.error_if());
+    }
+    switch (field.value_if()->number) {
+      case 1U: {
+        if (field.value_if()->wire_type != 2U || request_id) {
+          return Result<PairingApprovalRequestBody>::failure(
+              pairing_error(ErrorCode::protocol, "request_id_field_conflict"));
+        }
+        RequestId::Storage value{};
+        auto copied = proto_codec::copy_exact(field.value_if()->bytes, value,
+                                              "request_id_field_invalid");
+        if (!copied) {
+          return Result<PairingApprovalRequestBody>::failure(*copied.error_if());
+        }
+        request_id = RequestId{value};
+        break;
+      }
+      case 2U: {
+        if (field.value_if()->wire_type != 2U || nonce) {
+          return Result<PairingApprovalRequestBody>::failure(
+              pairing_error(ErrorCode::protocol, "nonce_field_conflict"));
+        }
+        PairingNonce value{};
+        auto copied =
+            proto_codec::copy_exact(field.value_if()->bytes, value, "nonce_field_invalid");
+        if (!copied) {
+          return Result<PairingApprovalRequestBody>::failure(*copied.error_if());
+        }
+        nonce = value;
+        break;
+      }
+      case 3U: {
+        // The approval flavor never carries a password field: reject instead
+        // of silently interpreting a password request as an approval.
+        return Result<PairingApprovalRequestBody>::failure(
+            pairing_error(ErrorCode::protocol, "password_field_unexpected"));
+      }
+      case 4U: {
+        if (field.value_if()->wire_type != 2U) {
+          return Result<PairingApprovalRequestBody>::failure(
+              pairing_error(ErrorCode::protocol, "scope_field_invalid"));
+        }
+        const auto text = reader.text(*field.value_if());
+        if (!is_valid_trust_scope(text)) {
+          return Result<PairingApprovalRequestBody>::failure(
+              pairing_error(ErrorCode::protocol, "requested_scope_syntax_invalid"));
+        }
+        if (!scopes) scopes.emplace();
+        if (scopes->size() >= max_pairing_requested_scopes) {
+          return Result<PairingApprovalRequestBody>::failure(
+              pairing_error(ErrorCode::protocol, "requested_scope_count_invalid"));
+        }
+        scopes->emplace_back(text);
+        break;
+      }
+      default:
+        return Result<PairingApprovalRequestBody>::failure(
+            pairing_error(ErrorCode::protocol, "field_unknown"));
+    }
+  }
+  if (!request_id || !nonce || !scopes || scopes->empty()) {
+    return Result<PairingApprovalRequestBody>::failure(
+        pairing_error(ErrorCode::protocol, "field_missing"));
+  }
+  PairingApprovalRequestBody request;
+  request.request_id = *request_id;
+  request.nonce = *nonce;
+  request.requested_scopes = std::move(*scopes);
+  auto validated = validate_pairing_approval_request(request);
+  if (!validated) {
+    return Result<PairingApprovalRequestBody>::failure(*validated.error_if());
+  }
+  return Result<PairingApprovalRequestBody>::success(std::move(request));
+}
+
 Result<PairingRequestBody> parse_pairing_request(std::span<const std::byte> payload) {
   if (payload.size() > pairing_payload_ceiling) {
     return Result<PairingRequestBody>::failure(

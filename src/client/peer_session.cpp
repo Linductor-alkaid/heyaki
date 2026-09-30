@@ -238,6 +238,9 @@ Result<std::shared_ptr<PeerSession>> PeerSession::create_verified(
                  .basic_communication = config.basic_communication,
                  .basic_communication_scopes =
                      std::move(config.basic_communication_scopes),
+                 .pairing_approval_enabled = config.pairing_approval_enabled,
+                 .pairing_approval_handler =
+                     std::move(config.pairing_approval_handler),
                  .wall_clock = std::move(config.wall_clock),
                  .initiator_owned_domains = std::move(config.initiator_owned_domains)});
 }
@@ -662,6 +665,10 @@ void PeerSession::handle_control_frame(transport::TransportChannel& channel,
     handle_pairing_result(frame);
     return;
   }
+  if (type == FrameType::pairing_approval_request) {
+    handle_pairing_approval_request(frame);
+    return;
+  }
   if (type == FrameType::session_restart_offer ||
       type == FrameType::session_restart_answer ||
       type == FrameType::session_restart_candidate) {
@@ -997,6 +1004,145 @@ Result<void> PeerSession::submit_pairing_request(
   ++diagnostics_.pairing_requests_sent;
   notify();
   return Result<void>::success();
+}
+
+Result<void> PeerSession::submit_pairing_approval_request(
+    const RequestId& request_id, std::vector<std::string> requested_scopes) {
+  const auto self_guard = shared_from_this();
+  if (diagnostics_.state != PeerSessionState::pairing_restricted && !authenticated()) {
+    return Result<void>::failure(
+        session_error(ErrorCode::pairing_required, "session_not_pairing_restricted"));
+  }
+  if (pending_pairing_.has_value()) {
+    return Result<void>::failure(
+        session_error(ErrorCode::pairing_required, "pairing_request_in_flight"));
+  }
+  auto deadline = enforce_pairing_deadline();
+  if (!deadline) return deadline;
+  if (!diagnostics_.negotiated_capabilities.has(Capability::pairing_approval_v1)) {
+    return Result<void>::failure(
+        session_error(ErrorCode::pairing_denied, "approval_capability_absent"));
+  }
+  PairingApprovalRequestBody request;
+  request.request_id = request_id;
+  request.nonce = random_pairing_nonce();
+  request.requested_scopes = std::move(requested_scopes);
+  auto encoded = encode_pairing_approval_request(request);
+  if (!encoded) return Result<void>::failure(*encoded.error_if());
+  auto sent = enqueue_control_frame(
+      static_cast<std::uint8_t>(FrameType::pairing_approval_request), 0U,
+      std::move(*encoded.value_if()));
+  if (!sent) return sent;
+  pending_pairing_ = std::make_pair(request.request_id, request.nonce);
+  pending_pairing_scopes_ = request.requested_scopes;
+  ++diagnostics_.pairing_requests_sent;
+  notify();
+  return Result<void>::success();
+}
+
+Result<void> PeerSession::send_pairing_result(const PairingResultBody& result) {
+  const auto self_guard = shared_from_this();
+  if (diagnostics_.state != PeerSessionState::pairing_restricted && !authenticated()) {
+    return Result<void>::failure(
+        session_error(ErrorCode::pairing_required, "session_not_pairing_restricted"));
+  }
+  auto encoded = encode_pairing_result(result);
+  if (!encoded) return Result<void>::failure(*encoded.error_if());
+  auto sent = enqueue_control_frame(static_cast<std::uint8_t>(FrameType::pairing_result),
+                                    0U, std::move(*encoded.value_if()));
+  if (!sent) return sent;
+  ++diagnostics_.pairing_results_sent;
+  notify();
+  return Result<void>::success();
+}
+
+// Receiver side of the passwordless approval flow (pairing_approval_v1):
+// parse, admit, and hand the request to the Node's approval handler, which
+// records it as pending for the app's approve/reject entry points. The
+// response is a pairing_result frame sent later from those entry points (or
+// the pending deadline); the session never answers approval requests by
+// itself.
+void PeerSession::handle_pairing_approval_request(FrameView frame) {
+  if (!authenticated() && diagnostics_.state != PeerSessionState::pairing_restricted) {
+    fail(session_error(ErrorCode::authentication, "pairing_frame_before_hello"));
+    return;
+  }
+  const bool authorized_peer = authenticated();
+  ++diagnostics_.pairing_requests_received;
+  auto deny = [&](StableStatus status, const char* detail) {
+    PairingResultBody denied;
+    denied.status = status;
+    auto encoded = encode_pairing_result(denied);
+    if (encoded) {
+      auto sent = enqueue_control_frame(
+          static_cast<std::uint8_t>(FrameType::pairing_result), 0U,
+          std::move(*encoded.value_if()));
+      (void)sent;
+      if (authorized_peer) ++diagnostics_.pairing_results_sent;
+    }
+    if (authorized_peer) {
+      notify();
+      return;
+    }
+    fail(Error{ErrorCode::pairing_denied, "peer_session", detail});
+  };
+  if (authorized_peer && frame.payload.size() > config_.limits.max_pairing_payload_bytes) {
+    notify();
+    return;
+  }
+  auto parsed = parse_pairing_approval_request(frame.payload);
+  if (!parsed) {
+    if (authorized_peer) {
+      notify();
+      return;
+    }
+    fail(*parsed.error_if());
+    return;
+  }
+  const auto& request = *parsed.value_if();
+  if (!config_.pairing_approval_enabled || !config_.pairing_approval_handler) {
+    // Parsed: the denial carries the request id so the requester resolves
+    // its pending attempt with a stable terminal.
+    PairingResultBody disabled;
+    disabled.request_id = request.request_id;
+    disabled.status = StableStatus::permission_denied;
+    auto encoded = encode_pairing_result(disabled);
+    if (encoded) {
+      (void)enqueue_control_frame(static_cast<std::uint8_t>(FrameType::pairing_result),
+                                  0U, std::move(*encoded.value_if()));
+      if (authorized_peer) ++diagnostics_.pairing_results_sent;
+    }
+    if (authorized_peer) {
+      notify();
+      return;
+    }
+    fail(session_error(ErrorCode::pairing_denied, "pairing_approval_disabled"));
+    return;
+  }
+  auto deadline = enforce_pairing_deadline();
+  if (!deadline) {
+    PairingResultBody expired;
+    expired.request_id = request.request_id;
+    expired.status = StableStatus::deadline_exceeded;
+    auto encoded = encode_pairing_result(expired);
+    if (encoded) {
+      (void)enqueue_control_frame(static_cast<std::uint8_t>(FrameType::pairing_result),
+                                  0U, std::move(*encoded.value_if()));
+      if (authorized_peer) ++diagnostics_.pairing_results_sent;
+    }
+    if (authorized_peer) {
+      notify();
+      return;
+    }
+    fail(session_error(ErrorCode::pairing_denied, "pairing_deadline_exceeded"));
+    return;
+  }
+  auto handed_off = config_.pairing_approval_handler(request);
+  if (!handed_off) {
+    deny(StableStatus::resource_exhausted, "pairing_approval_not_admitted");
+    return;
+  }
+  notify();
 }
 
 Result<std::uint32_t> PeerSession::open_business_channel(

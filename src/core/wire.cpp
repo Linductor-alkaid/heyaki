@@ -85,7 +85,8 @@ bool requires_control_channel(std::uint8_t type) noexcept {
   return (type >= static_cast<std::uint8_t>(FrameType::session_hello) &&
           type <= static_cast<std::uint8_t>(FrameType::pong)) ||
          type == static_cast<std::uint8_t>(FrameType::pairing_request) ||
-         type == static_cast<std::uint8_t>(FrameType::pairing_result);
+         type == static_cast<std::uint8_t>(FrameType::pairing_result) ||
+         type == static_cast<std::uint8_t>(FrameType::pairing_approval_request);
 }
 
 bool requires_business_channel(std::uint8_t type) noexcept {
@@ -118,8 +119,9 @@ const char* payload_limit_error(std::uint8_t type, std::size_t payload_size,
       payload_size > limits.max_event_payload_bytes) {
     return "event_payload_limit";
   }
-  if (type >= static_cast<std::uint8_t>(FrameType::pairing_request) &&
-      type <= static_cast<std::uint8_t>(FrameType::pairing_result) &&
+  if (((type >= static_cast<std::uint8_t>(FrameType::pairing_request) &&
+        type <= static_cast<std::uint8_t>(FrameType::pairing_result)) ||
+       type == static_cast<std::uint8_t>(FrameType::pairing_approval_request)) &&
       payload_size > limits.max_pairing_payload_bytes) {
     return "pairing_payload_limit";
   }
@@ -169,6 +171,7 @@ bool is_known_frame_type(std::uint8_t type) noexcept {
     case FrameType::session_restart_candidate:
     case FrameType::pairing_request:
     case FrameType::pairing_result:
+    case FrameType::pairing_approval_request:
     case FrameType::message:
     case FrameType::message_ack:
     case FrameType::rpc_request:

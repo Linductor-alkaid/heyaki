@@ -368,6 +368,11 @@ struct NodeConfig {
   std::chrono::milliseconds pairing_backoff_max{0};
   // Optional grant TTL; 0 disables expiry.
   std::uint64_t pairing_grant_ttl_milliseconds{0U};
+  // Receiver-side passwordless approval policy (pairing_approval_v1):
+  // admitted approval requests surface through the pairing request observer
+  // and resolve through approve_pairing/reject_pairing. Default off:
+  // approval requests get a stable permission_denied result.
+  bool pairing_approval_enabled{false};
   // Opt-in basic communication on identity-verified, untrusted sessions:
   // text/image messages and file pushes into the configured receive roots
   // (`file_receive_roots`) work without a device TrustGrant or password
@@ -414,6 +419,13 @@ struct NodeConfig {
 using NodePairingOutcome = Result<std::vector<std::string>>;
 using NodePairingObserver =
     std::function<void(const DeviceEndpointKey& peer, const NodePairingOutcome& outcome)>;
+struct PairingApprovalRequestBody;
+// Receiver-side pending approval request (pairing_approval_v1): fired once
+// per admitted request while the app must decide. The request stays pending
+// until approve_pairing/reject_pairing resolves it or the deadline expires.
+using NodePairingRequestObserver = std::function<void(
+    const DeviceEndpointKey& peer, const PairingApprovalRequestBody& request)>;
+
 // Options for Node::open_byte_stream.
 struct NodeByteStreamOptions {
   std::uint64_t receive_window_bytes{256U * 1024U};
@@ -715,6 +727,38 @@ class Node {
                                             std::string_view password,
                                             std::vector<std::string> requested_scopes);
   void set_pairing_observer(NodePairingObserver observer);
+  // Passwordless pairing (pairing_approval_v1): submits one trust request on
+  // the peer's session; the remote app approves or rejects it explicitly.
+  // Admission mirrors pair_peer (synchronous, bounded); on admission the
+  // call returns the stable wire request id and the pairing observer reports
+  // exactly one terminal outcome for it.
+  [[nodiscard]] Result<RequestId> request_pairing_approval(
+      DeviceEndpointKey peer, std::vector<std::string> requested_scopes);
+  // Receiver side: resolves one pending approval request. approve issues a
+  // TrustGrant bound to the request nonce with the requested scopes
+  // intersected by the local pairing policy, sends the grant to the
+  // requester, and reports one success outcome through the pairing
+  // observer. reject sends a stable denial and reports one failure outcome.
+  // Unknown or already-resolved requests fail without side effects.
+  [[nodiscard]] Result<void> approve_pairing(DeviceEndpointKey peer,
+                                             const RequestId& request_id,
+                                             std::vector<std::string> scopes);
+  [[nodiscard]] Result<void> reject_pairing(DeviceEndpointKey peer,
+                                            const RequestId& request_id);
+  // Shared bounded-strand admission behind pair_peer/request_pairing_approval.
+  [[nodiscard]] Result<RequestId> submit_pairing_attempt(DeviceEndpointKey peer,
+                                                         std::string_view password,
+                                                         std::vector<std::string> requested_scopes,
+                                                         bool approval);
+  // Strand body behind approve_pairing/reject_pairing.
+  [[nodiscard]] Result<void> resolve_pairing_approval(DeviceEndpointKey peer,
+                                                      const RequestId& request_id,
+                                                      std::vector<std::string> scopes,
+                                                      bool approve);
+  // Receiver-side pending approval requests (pairing_approval_v1): fires
+  // once per admitted request while the app must decide. Requires
+  // NodeConfig::pairing_approval_enabled.
+  void set_pairing_request_observer(NodePairingRequestObserver observer);
   // Bounded pairing audit history with correlation ids (M9-03): every
   // evaluated pairing attempt and grant lifecycle event, carrying the wire
   // pairing RequestId and GrantId so app logs join initiator/target
