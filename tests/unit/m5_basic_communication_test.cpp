@@ -771,7 +771,13 @@ TEST_F(M5BasicCommunicationTest,
   PairOptions options;
   ShellProfileConfig shell_profile;
   shell_profile.name = "dbg";
+#ifdef _WIN32
+  // Windows shell-profile validation requires a drive-absolute executable;
+  // the profile is never launched here, only admitted.
+  shell_profile.argv = {"C:\\Windows\\System32\\cmd.exe"};
+#else
   shell_profile.argv = {"/bin/cat"};
+#endif
   shell_profile.working_directory = root_;
   shell_profile.max_concurrent_sessions = 1U;
   options.second_shell_profiles = {shell_profile};
