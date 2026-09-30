@@ -14,6 +14,17 @@ answered explicitly (repair, renewal, reverse grant); a denial there reports
 the stable failure outcome without closing the authorized session. The
 peer side verifies the password with Argon2id.
 
+## Basic communication without device trust
+
+`NodeConfig::basic_communication` (default off) lets identity-verified,
+untrusted sessions exchange messages and push files into the configured
+`file_receive_roots` without a TrustGrant or password pairing. It never
+covers shell/RPC/events/streams/gateway and never mints a grant; each end
+enforces its own policy, so a one-sided opt-in fails explicitly. The session
+snapshot separates `policy_scopes` (policy-derived) from `authorized_scopes`
+(grant-only, empty while untrusted); a successful pairing supersedes the
+policy for that session.
+
 ## TrustGrants and scopes
 
 Successful pairing stores a signed `TrustGrant` locally. Supporting APIs:

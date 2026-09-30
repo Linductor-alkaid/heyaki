@@ -100,6 +100,13 @@ struct PeerSessionConfig {
   session::ChannelBudgetConfig channel_budgets{};
   // Lifetime cap of a pairing-restricted session (M5-07).
   std::chrono::milliseconds pairing_deadline{60000};
+  // Opt-in basic communication for identity-verified, untrusted sessions:
+  // when enabled, the listed policy scopes (message.send,
+  // file.push:<root>) are in force without any TrustGrant. The scope list
+  // is the caller's own policy decision; the session never widens it.
+  // Default disabled with an empty list.
+  bool basic_communication{false};
+  std::vector<std::string> basic_communication_scopes{};
   std::function<std::uint64_t()> wall_clock{};
   // M6: business domains whose PHYSICAL transport channels are created only
   // by the session initiator; the responder adopts the peer's channel (via
@@ -127,6 +134,11 @@ struct VerifiedPeerSessionConfig {
   Limits limits{};
   session::ChannelBudgetConfig channel_budgets{};
   std::chrono::milliseconds pairing_deadline{60000};
+  // ---- M5 basic-communication extension, same meaning as in
+  // PeerSessionConfig: a verified session whose trust adjudication denies
+  // still lands in pairing_restricted, where the policy applies ----
+  bool basic_communication{false};
+  std::vector<std::string> basic_communication_scopes{};
   std::function<std::uint64_t()> wall_clock{};
   std::set<session::ChannelDomain> initiator_owned_domains{};
 };
@@ -151,6 +163,12 @@ struct PeerSessionDiagnostics {
   // grant) by request id instead of mistaking raw counters for success.
   RequestId pairing_result_request_id{};
   StableStatus pairing_result_status{StableStatus::unspecified};
+  // Opt-in basic communication is in force: this identity-verified,
+  // untrusted session may exercise `policy_scopes` (message.send,
+  // file.push:<root>) without any TrustGrant. `authorized_scopes` stays
+  // grant-only and empty while the session remains untrusted.
+  bool basic_communication{false};
+  std::vector<std::string> policy_scopes{};
   // Scopes in force for this session; empty while untrusted in legacy mode
   // means unrestricted (M4 semantics).
   std::vector<std::string> authorized_scopes;
@@ -190,6 +208,13 @@ class PeerSession final : public std::enable_shared_from_this<PeerSession> {
   [[nodiscard]] PeerSessionDiagnostics diagnostics() const noexcept;
   [[nodiscard]] bool authenticated() const noexcept;
   [[nodiscard]] bool pairing_restricted() const noexcept;
+  // Opt-in basic communication is in force on this untrusted session, and
+  // the domain is one the policy covers (message, file). Never true for
+  // authorized sessions - grants, not policy, drive those.
+  [[nodiscard]] bool basic_domain_allowed(session::ChannelDomain domain) const noexcept;
+  [[nodiscard]] bool basic_communication_active() const noexcept;
+  // True when the in-force basic communication policy covers the scope.
+  [[nodiscard]] bool policy_scope_covers(std::string_view scope) const noexcept;
   [[nodiscard]] const std::vector<std::string>& authorized_scopes() const noexcept;
 
   // ---- Pairing (initiator side, M5-09) ----
@@ -200,6 +225,7 @@ class PeerSession final : public std::enable_shared_from_this<PeerSession> {
   [[nodiscard]] Result<void> submit_pairing_request(
       const RequestId& request_id, std::string_view password_utf8,
       std::vector<std::string> requested_scopes);
+
 
   // ---- Business channels (M5-02/M5-06/M5-14) ----
   // Opens a logical business channel. Requires an authorized session and the

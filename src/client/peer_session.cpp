@@ -235,6 +235,9 @@ Result<std::shared_ptr<PeerSession>> PeerSession::create_verified(
                  .limits = config.limits,
                  .channel_budgets = config.channel_budgets,
                  .pairing_deadline = config.pairing_deadline,
+                 .basic_communication = config.basic_communication,
+                 .basic_communication_scopes =
+                     std::move(config.basic_communication_scopes),
                  .wall_clock = std::move(config.wall_clock),
                  .initiator_owned_domains = std::move(config.initiator_owned_domains)});
 }
@@ -463,6 +466,31 @@ bool PeerSession::pairing_restricted() const noexcept {
   return diagnostics_.state == PeerSessionState::pairing_restricted;
 }
 
+bool PeerSession::basic_communication_active() const noexcept {
+  return diagnostics_.basic_communication;
+}
+
+bool PeerSession::basic_domain_allowed(session::ChannelDomain domain) const noexcept {
+  if (!diagnostics_.basic_communication || authenticated()) {
+    // Grants, not policy, drive authorized sessions.
+    return false;
+  }
+  return domain == session::ChannelDomain::message ||
+         domain == session::ChannelDomain::file;
+}
+
+bool PeerSession::policy_scope_covers(std::string_view scope) const noexcept {
+  if (!diagnostics_.basic_communication) {
+    return false;
+  }
+  for (const auto& policy_scope : diagnostics_.policy_scopes) {
+    if (trust_scope_covers(policy_scope, scope)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 const std::vector<std::string>& PeerSession::authorized_scopes() const noexcept {
   return diagnostics_.authorized_scopes;
 }
@@ -492,6 +520,10 @@ void PeerSession::upgrade_to_authorized(std::vector<std::string> scopes,
                                         std::string_view reason) {
   diagnostics_.authorized_scopes = std::move(scopes);
   diagnostics_.pairing_restricted = false;
+  // A TrustGrant supersedes the opt-in basic communication policy: policy
+  // scopes never blend into the grant-derived set.
+  diagnostics_.basic_communication = false;
+  diagnostics_.policy_scopes.clear();
   restricted_since_.reset();
   auto recorded = record(ConnectionStage::authenticated, "peer_session", reason);
   if (!recorded) diagnostics_.last_error = *recorded.error_if();
@@ -592,14 +624,26 @@ void PeerSession::handle_control_frame(transport::TransportChannel& channel,
         if (trust.trusted) {
           upgrade_to_authorized(trust.scopes, "session_authorized");
         } else {
-          // RULE-03: an untrusted peer may only pair, within strict caps.
-          if (!diagnostics_.negotiated_capabilities.has(Capability::pairing)) {
+          // Opt-in basic communication (M5-15): the local policy may put
+          // message/file capabilities in force on this identity-verified,
+          // untrusted session without any TrustGrant. Pairing stays
+          // available on the same session whenever the capability was
+          // negotiated; basic only ever covers message and file.
+          const bool basic =
+              config_.basic_communication && !config_.basic_communication_scopes.empty() &&
+              diagnostics_.negotiated_capabilities.has(Capability::message);
+          if (!basic &&
+              !diagnostics_.negotiated_capabilities.has(Capability::pairing)) {
+            // RULE-03: an untrusted peer may only pair, within strict caps.
             fail(session_error(ErrorCode::pairing_denied, "pairing_capability_absent"));
             return;
           }
           diagnostics_.state = PeerSessionState::pairing_restricted;
           diagnostics_.pairing_restricted = true;
           diagnostics_.authorized_scopes.clear();
+          diagnostics_.basic_communication = basic;
+          diagnostics_.policy_scopes =
+              basic ? config_.basic_communication_scopes : std::vector<std::string>{};
           restricted_since_ = wall_clock_now();
           notify();
         }
@@ -959,12 +1003,15 @@ Result<std::uint32_t> PeerSession::open_business_channel(
     session::ChannelDomain domain, session::QueueFullPolicy policy,
     std::size_t queued_frame_capacity, std::size_t queued_byte_capacity,
     BusinessFrameHandler handler) {
-  // M5-14: business channels exist only after session authorization.
-  if (!authenticated()) {
+  // M5-14: business channels exist only after session authorization - or,
+  // opt-in, on an identity-verified untrusted session whose basic
+  // communication policy covers the domain (message, file only).
+  const bool basic_domain = basic_domain_allowed(domain);
+  if (!authenticated() && !basic_domain) {
     return Result<std::uint32_t>::failure(
         session_error(ErrorCode::pairing_required, "session_not_authorized"));
   }
-  if (diagnostics_.state == PeerSessionState::pairing_restricted) {
+  if (diagnostics_.state == PeerSessionState::pairing_restricted && !basic_domain) {
     return Result<std::uint32_t>::failure(
         session_error(ErrorCode::pairing_required, "session_not_authorized"));
   }
@@ -1014,7 +1061,10 @@ Result<std::uint32_t> PeerSession::adopt_business_channel(
     std::uint32_t channel_id, session::ChannelDomain domain,
     session::QueueFullPolicy policy, std::size_t queued_frame_capacity,
     std::size_t queued_byte_capacity, BusinessFrameHandler handler) {
-  if (!authenticated()) {
+  // Peer-initiated channel adoption follows the same rule as opening:
+  // authorization, or the opt-in basic communication policy for the
+  // message/file domains on an untrusted session.
+  if (!authenticated() && !basic_domain_allowed(domain)) {
     return Result<std::uint32_t>::failure(
         session_error(ErrorCode::pairing_required, "session_not_authorized"));
   }
@@ -1050,7 +1100,10 @@ Result<void> PeerSession::send_frame(std::uint32_t channel_id,
   // destructor.
   const auto self_guard = shared_from_this();
 
-  if (!authenticated()) {
+  const auto frame_domain =
+      session::frame_type_domain(frame.type);
+  if (!authenticated() && !(frame_domain.has_value() &&
+                            basic_domain_allowed(*frame_domain))) {
     return Result<void>::failure(
         session_error(ErrorCode::pairing_required, "session_not_authorized"));
   }
@@ -1161,7 +1214,9 @@ void PeerSession::ensure_physical_channel(session::ChannelDomain domain) {
 
 void PeerSession::handle_business_frame(transport::TransportChannel& channel,
                                         FrameView frame) {
-  if (!authenticated()) {
+  const auto frame_domain = session::frame_type_domain(frame.type);
+  if (!authenticated() && !(frame_domain.has_value() &&
+                            basic_domain_allowed(*frame_domain))) {
     note_business_violation(channel);
     return;
   }
