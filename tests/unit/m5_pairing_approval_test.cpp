@@ -595,12 +595,16 @@ TEST_F(M5PairingApprovalTest, DeadlineResolvesPendingApprovalExactlyOnce) {
     EXPECT_EQ(issued.value_if()->front().scopes,
               (std::vector<std::string>{"message.send"}));
   } else {
-    // The teardown race cleared B's pending entry first: stable no-op, no
-    // grant, no observer event.
+    // The teardown race cleared B's pending entry first: approve is a
+    // stable no-op. B still observed its own terminal exactly once - the
+    // disconnect/shutdown cleanup path reports one failure outcome through
+    // B's observer (issue #2: both sides get a terminal) - and no grant
+    // was issued.
     EXPECT_EQ(approve_expired.error_if()->code(), ErrorCode::pairing_required);
     EXPECT_EQ(approve_expired.error_if()->safe_detail(),
               "pairing_approval_not_pending");
-    EXPECT_EQ(approver_outcomes.size(), 0U);
+    ASSERT_EQ(approver_outcomes.size(), 1U);
+    EXPECT_FALSE(approver_outcomes.snapshot()[0].success);
     EXPECT_EQ(pair.second.value().trust_grants_for(pair.first_key)
                   .value_if()
                   ->size(),
