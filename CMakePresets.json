@@ -110,7 +110,7 @@
         "noTestsAction": "error"
       },
       "environment": {
-        "LSAN_OPTIONS": "suppressions=tests/sanitizer/lsan-usrsctp.supp"
+        "LSAN_OPTIONS": "suppressions=${sourceDir}/tests/sanitizer/lsan-usrsctp.supp"
       }
     },
     {
