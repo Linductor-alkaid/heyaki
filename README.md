@@ -178,3 +178,5 @@ Heyaki is released under the [MIT License](LICENSE). Third-party dependencies
 carry their own permissive licenses (MPL-2.0, ISC, BSL-1.0, MIT, …); every
 license text ships in the release tarball and the SPDX SBOM lists the full
 closure ([docs/supply-chain/dependency-policy.md](docs/supply-chain/dependency-policy.md)).
+
+<!-- coturn scheduling probe (revert pending) -->
