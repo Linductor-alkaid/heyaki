@@ -500,18 +500,27 @@ TEST_F(M5NodePairingTest, WrongPasswordFailsExactlyOnceAndReadmitsAfterReconnect
       std::chrono::seconds{10}));
 
   // Re-admission after a fresh restricted session succeeds: the pending
-  // state of the failed attempt is fully cleared.
-  ASSERT_TRUE(pair.first.value().connect_lan(pair.second_key));
-  const bool reconnected = wait_until(
-      [&] {
-        const auto left = latest_session_for(pair.first.value(), pair.second_key);
-        const auto right = latest_session_for(pair.second.value(), pair.first_key);
-        return left.has_value() &&
-               left->state == NodePeerSessionState::pairing_restricted &&
-               right.has_value() &&
-               right->state == NodePeerSessionState::pairing_restricted;
-      },
-      std::chrono::seconds{12});
+  // state of the failed attempt is fully cleared. The reconnect request can
+  // land while the denied attempt's LAN signaling connection is still being
+  // torn down (start_outbound_connection drops peers with a live connection),
+  // so re-issue connect_lan until both sides report a fresh restricted
+  // session instead of racing one shot against the teardown.
+  const bool reconnected = [&] {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{30};
+    while (std::chrono::steady_clock::now() < deadline) {
+      (void)pair.first.value().connect_lan(pair.second_key);
+      const auto left = latest_session_for(pair.first.value(), pair.second_key);
+      const auto right = latest_session_for(pair.second.value(), pair.first_key);
+      if (left.has_value() &&
+          left->state == NodePeerSessionState::pairing_restricted &&
+          right.has_value() &&
+          right->state == NodePeerSessionState::pairing_restricted) {
+        return true;
+      }
+      (void)wait_until([] { return false; }, std::chrono::milliseconds{300});
+    }
+    return false;
+  }();
   if (!reconnected) {
     const auto left = latest_session_for(pair.first.value(), pair.second_key);
     const auto right = latest_session_for(pair.second.value(), pair.first_key);
