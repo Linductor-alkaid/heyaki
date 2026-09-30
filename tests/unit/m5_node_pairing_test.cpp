@@ -878,8 +878,12 @@ TEST_F(M5NodePairingTest, TargetShutdownResolvesPendingAttemptExactlyOnce) {
   auto first_profile =
       initialized_profile("disconnect-initiator", std::nullopt, {});
   PasswordHashParameters heavy{};
-  heavy.operations = 4U;
-  heavy.memory_bytes = 256U * 1024U * 1024U;
+  // Heavy enough to keep the evaluate window open across the shutdown, but
+  // light enough that the target's shutdown drain can still finish behind
+  // the in-flight Argon2 on a loaded CI runner (a 256 MiB / 4-op verifier
+  // starved the drain past its bound there).
+  heavy.operations = 2U;
+  heavy.memory_bytes = 64U * 1024U * 1024U;
   auto second_profile = initialized_profile(
       "disconnect-target", kTargetPassword, {"message.send"}, heavy);
   ASSERT_TRUE(first_profile && second_profile);
