@@ -113,6 +113,35 @@ Error node_error(ErrorCode code, const char* detail,
   return {code, "node", detail, underlying};
 }
 
+// Inverse of the session's status_for_error mapping: turns a consumed
+// pairing result status into the pairing-observer failure error.
+Error pairing_status_error(StableStatus status) {
+  switch (status) {
+    case StableStatus::cancelled:
+      return node_error(ErrorCode::cancelled, "pairing_cancelled");
+    case StableStatus::deadline_exceeded:
+      return node_error(ErrorCode::timeout, "pairing_deadline_exceeded");
+    case StableStatus::resource_exhausted:
+      return node_error(ErrorCode::pairing_rate_limited, "pairing_rate_limited");
+    case StableStatus::unauthenticated:
+      return node_error(ErrorCode::authentication, "pairing_unauthenticated");
+    case StableStatus::permission_denied:
+      return node_error(ErrorCode::pairing_denied, "pairing_denied");
+    case StableStatus::ok:
+    case StableStatus::unspecified:
+    case StableStatus::not_found:
+    case StableStatus::already_exists:
+    case StableStatus::failed_precondition:
+    case StableStatus::unavailable:
+    case StableStatus::internal:
+    case StableStatus::unimplemented:
+    case StableStatus::protocol_error:
+    case StableStatus::outcome_unknown:
+      return node_error(ErrorCode::pairing_denied, "pairing_denied");
+  }
+  return node_error(ErrorCode::pairing_denied, "pairing_denied");
+}
+
 NodeConnectionStage public_connection_stage(ConnectionStage stage) noexcept {
   switch (stage) {
     case ConnectionStage::idle:
@@ -3140,12 +3169,22 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         const auto peer_device = iterator->second.snapshot.peer.device_id;
         auto pending = pending_pairings.find(peer_device);
         if (pending != pending_pairings.end() &&
-            diagnostics.pairing_results_received > 0U) {
-          // Password pairing completed end to end: report the effective
-          // scopes of the fresh grant.
+            diagnostics.pairing_result_request_id == pending->second.request_id) {
+          // The admitted request's result was consumed: resolve the attempt
+          // exactly once - on a freshly upgraded session (first pairing) or
+          // an already-authorized one (renewal / reverse grant) alike. A
+          // denial keeps the authorized session; only a fresh restricted
+          // pairing closes it inside the session.
           if (pairing_observer) {
-            pairing_observer(iterator->second.snapshot.peer,
-                             NodePairingOutcome::success(diagnostics.authorized_scopes));
+            if (diagnostics.pairing_result_status == StableStatus::ok) {
+              pairing_observer(iterator->second.snapshot.peer,
+                               NodePairingOutcome::success(diagnostics.authorized_scopes));
+            } else {
+              pairing_observer(iterator->second.snapshot.peer,
+                               NodePairingOutcome::failure(
+                                   pairing_status_error(
+                                       diagnostics.pairing_result_status)));
+            }
           }
           pending_pairings.erase(pending);
         }
@@ -3295,7 +3334,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return Result<void>::failure(node_error(ErrorCode::peer_offline,
                                               "peer_session_missing"));
     }
-    if (!iterator->second.session->pairing_restricted()) {
+    if (!iterator->second.session->pairing_restricted() &&
+        !iterator->second.session->authenticated()) {
       return Result<void>::failure(
           node_error(ErrorCode::pairing_required, "session_not_pairing_restricted"));
     }

@@ -691,20 +691,21 @@ void PeerSession::handle_control_frame(transport::TransportChannel& channel,
 
 void PeerSession::handle_pairing_request(FrameView frame) {
   // M5-07/M5-08: pairing frames only exist inside an identity-verified,
-  // fingerprint-bound session that is still untrusted.
+  // fingerprint-bound session. Since asymmetric trust is a supported state
+  // (HEY-20260930-002), an already-authorized session answers pairing
+  // requests too - silence would strand the requester.
   if (!authenticated() && diagnostics_.state != PeerSessionState::pairing_restricted) {
     fail(session_error(ErrorCode::authentication, "pairing_frame_before_hello"));
     return;
   }
-  if (authenticated()) {
-    // Already authorized peers have no business pairing; count and ignore.
-    ++diagnostics_.pairing_requests_received;
-    notify();
-    return;
-  }
+  const bool authorized_peer = authenticated();
   ++diagnostics_.pairing_requests_received;
-  auto deny_and_close = [this](RequestId request_id, StableStatus status,
-                               ErrorCode close_code, const char* close_detail) {
+  // A restricted session closes on terminal denials with a stable
+  // AUTH_DENIED code (M5-14). An authorized session stays up: it answers
+  // with the stable denial result only, so a bad attempt can never kill a
+  // healthy trust relationship.
+  auto deny = [&](RequestId request_id, StableStatus status, ErrorCode close_code,
+                  const char* close_detail) {
     PairingResultBody denied;
     denied.request_id = request_id;
     denied.status = status;
@@ -712,31 +713,46 @@ void PeerSession::handle_pairing_request(FrameView frame) {
     if (encoded) {
       (void)enqueue_control_frame(static_cast<std::uint8_t>(FrameType::pairing_result),
                                   0U, std::move(*encoded.value_if()));
+      if (authorized_peer) ++diagnostics_.pairing_results_sent;
+    }
+    if (authorized_peer) {
+      notify();
+      return;
     }
     fail(Error{close_code, "peer_session", close_detail});
   };
+  if (authorized_peer && frame.payload.size() > config_.limits.max_pairing_payload_bytes) {
+    // Malformed input on a healthy authorized session: counted and ignored,
+    // never a session failure.
+    notify();
+    return;
+  }
   if (frame.payload.size() > config_.limits.max_pairing_payload_bytes) {
     fail(session_error(ErrorCode::protocol, "pairing_payload_limit"));
     return;
   }
   auto parsed = parse_pairing_request(frame.payload);
   if (!parsed) {
+    if (authorized_peer) {
+      notify();
+      return;
+    }
     fail(*parsed.error_if());
     return;
   }
   const auto& request = *parsed.value_if();
   auto deadline = enforce_pairing_deadline();
   if (!deadline) {
-    deny_and_close(request.request_id, StableStatus::deadline_exceeded,
-                   ErrorCode::pairing_denied, "pairing_deadline_exceeded");
+    deny(request.request_id, StableStatus::deadline_exceeded,
+         ErrorCode::pairing_denied, "pairing_deadline_exceeded");
     return;
   }
   auto admission = pairing_admission_->admit_request(request);
   if (!admission) {
     // Attempts exhausted or a conflicting duplicate: stable rate-limited
-    // denial, then close (M5-14).
-    deny_and_close(request.request_id, StableStatus::resource_exhausted,
-                   admission.error_if()->code(), "pairing_rate_limited");
+    // denial (M5-14).
+    deny(request.request_id, StableStatus::resource_exhausted,
+         admission.error_if()->code(), "pairing_rate_limited");
     return;
   }
   if (admission.value_if()->action == PairingAdmissionAction::duplicate &&
@@ -751,12 +767,16 @@ void PeerSession::handle_pairing_request(FrameView frame) {
         static_cast<std::uint8_t>(FrameType::pairing_result), 0U,
         std::move(*encoded.value_if()));
     if (!sent) fail(*sent.error_if());
+    else if (authorized_peer) {
+      ++diagnostics_.pairing_results_sent;
+      notify();
+    }
     return;
   }
   if (!config_.pairing_evaluator) {
-    // Pairing disabled on this target: stable denial and close (M5-14).
-    deny_and_close(request.request_id, StableStatus::permission_denied,
-                   ErrorCode::pairing_denied, "pairing_disabled");
+    // Pairing disabled on this target: stable denial (M5-14).
+    deny(request.request_id, StableStatus::permission_denied,
+         ErrorCode::pairing_denied, "pairing_disabled");
     return;
   }
   auto evaluated = config_.pairing_evaluator(request);
@@ -788,10 +808,16 @@ void PeerSession::handle_pairing_request(FrameView frame) {
     return;
   }
   ++diagnostics_.pairing_results_sent;
-  if (result.status == StableStatus::ok && result.grant.has_value()) {
+  if (result.status == StableStatus::ok && result.grant.has_value() && !authorized_peer) {
     // Target side upgrade: the peer now holds a signed grant for the
-    // intersection scopes.
+    // intersection scopes. An already-authorized target keeps its session
+    // state - the fresh grant lives in the TrustStore and the requester
+    // upgrades its own session from the result.
     upgrade_to_authorized(result.grant->granted_scopes, "session_authorized");
+    return;
+  }
+  if (authorized_peer) {
+    notify();
     return;
   }
   // Terminal denial: wrong password, policy refusal, or rate limit close the
@@ -813,7 +839,7 @@ void PeerSession::handle_pairing_result(FrameView frame) {
     fail(session_error(ErrorCode::protocol, "pairing_result_unexpected"));
     return;
   }
-  if (diagnostics_.state != PeerSessionState::pairing_restricted) {
+  if (diagnostics_.state != PeerSessionState::pairing_restricted && !authenticated()) {
     fail(session_error(ErrorCode::protocol, "pairing_result_outside_restricted"));
     return;
   }
@@ -828,6 +854,11 @@ void PeerSession::handle_pairing_result(FrameView frame) {
     return;
   }
   ++diagnostics_.pairing_results_received;
+  // Publish the consumed binding so the Node can resolve an admitted
+  // pairing on an already-authorized session by request id (renewal and
+  // reverse grants never change the session state).
+  diagnostics_.pairing_result_request_id = result.request_id;
+  diagnostics_.pairing_result_status = result.status;
   if (result.status == StableStatus::ok && result.grant.has_value()) {
     if (!config_.pairing_result_sink) {
       fail(session_error(ErrorCode::configuration, "pairing_result_sink_missing"));
@@ -840,12 +871,24 @@ void PeerSession::handle_pairing_result(FrameView frame) {
       fail(*accepted.error_if());
       return;
     }
-    auto scopes = result.grant->granted_scopes;
     pending_pairing_.reset();
-    upgrade_to_authorized(std::move(scopes), "session_authorized");
+    if (!authenticated()) {
+      auto scopes = result.grant->granted_scopes;
+      upgrade_to_authorized(std::move(scopes), "session_authorized");
+      return;
+    }
+    // Renewal / reverse grant on an authorized session: the fresh grant is
+    // persisted by the sink; the session keeps its state and scopes.
+    notify();
     return;
   }
   pending_pairing_.reset();
+  if (authenticated()) {
+    // Denied renewal / reverse grant on an authorized session: report the
+    // stable denial and keep the healthy session up.
+    notify();
+    return;
+  }
   notify();
   // Stable AUTH_DENIED close for denied / rate-limited / expired attempts.
   fail(Error{ErrorCode::pairing_denied, "peer_session", "pairing_denied"});
@@ -881,7 +924,7 @@ Result<void> PeerSession::submit_pairing_request(
   // destructor.
   const auto self_guard = shared_from_this();
 
-  if (diagnostics_.state != PeerSessionState::pairing_restricted) {
+  if (diagnostics_.state != PeerSessionState::pairing_restricted && !authenticated()) {
     return Result<void>::failure(
         session_error(ErrorCode::pairing_required, "session_not_pairing_restricted"));
   }

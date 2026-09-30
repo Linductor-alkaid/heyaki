@@ -4,11 +4,14 @@
 
 `pair_peer(peer, password, requested_scopes)` returns `Result<RequestId>`.
 Admission is synchronous and bounded: strand-level rejections (missing
-session, session not pairing-restricted, pairing already pending) return a
-failure and produce no observer outcome. On admission the call returns the
-stable wire request id, and the one-time observer (`set_pairing_observer`)
-reports exactly one terminal outcome for it — success with the effective
-scopes, or failure (denial, deadline, disconnect, cancel, shutdown). The
+session, session neither pairing-restricted nor authorized, pairing already
+pending) return a failure and produce no observer outcome. On admission the
+call returns the stable wire request id, and the one-time observer
+(`set_pairing_observer`) reports exactly one terminal outcome for it —
+success with the effective scopes, or failure (denial, deadline, disconnect,
+cancel, shutdown). On an already-authorized session a pairing request is
+answered explicitly (repair, renewal, reverse grant); a denial there reports
+the stable failure outcome without closing the authorized session. The
 peer side verifies the password with Argon2id.
 
 ## TrustGrants and scopes

@@ -20,6 +20,7 @@
 
 #include <gtest/gtest.h>
 
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -72,6 +73,7 @@ struct RecordedPairingOutcome {
   DeviceEndpointKey peer;
   bool success{false};
   ErrorCode code{ErrorCode::internal};
+  std::string component;
   std::string detail;
   std::vector<std::string> scopes;
 };
@@ -88,6 +90,7 @@ class PairingObserverRecorder {
             recorded.scopes = *scopes;
           } else {
             recorded.code = outcome.error_if()->code();
+            recorded.component = std::string{outcome.error_if()->component()};
             recorded.detail = std::string{outcome.error_if()->safe_detail()};
           }
           const std::lock_guard<std::mutex> guard{mutex_};
@@ -198,10 +201,13 @@ class M5NodePairingTest : public ::testing::Test {
   // `password` arms the profile's pairing verifier; nullopt installs a dummy
   // verifier like every other Node-level suite (the profile never pairs
   // inbound then). `policy_scopes` becomes the pairing policy intersection
-  // set on the target side.
+  // set on the target side. `verifier_parameters` tunes the Argon2 cost (a
+  // heavy verifier makes the evaluate phase far slower than the local
+  // shutdown path, which the disconnect case relies on).
   Result<ProfileStore> initialized_profile(
       const std::string& name, std::optional<std::string_view> password,
-      const std::vector<std::string>& policy_scopes) {
+      const std::vector<std::string>& policy_scopes,
+      PasswordHashParameters verifier_parameters = {}) {
     ProfileOpenOptions options;
     options.secret_backend.prefer_os_backend = false;
     auto profile = ProfileStore::create(root_ / name / "profile.sqlite", options);
@@ -212,7 +218,7 @@ class M5NodePairingTest : public ::testing::Test {
                               .parameters = PasswordHashParameters{},
                               .encoded = "$argon2id$v=19$m=65536,t=2,p=1$test$test"};
     if (password.has_value()) {
-      auto created = create_password_verifier(*password, PasswordHashParameters{});
+      auto created = create_password_verifier(*password, verifier_parameters);
       if (!created) {
         return Result<ProfileStore>::failure(*created.error_if());
       }
@@ -441,12 +447,9 @@ TEST_F(M5NodePairingTest, AdmittedPairingHasExactlyOneSuccessOutcomeAndRejectsDu
   EXPECT_EQ(events[0].peer, pair.second_key);
   EXPECT_EQ(events[0].scopes, (std::vector<std::string>{"message.send", "stream.open"}));
 
-  // Pending cleared: re-admission now fails with session_not_pairing_restricted.
-  const auto after = pair.first.value().pair_peer(pair.second_key, kTargetPassword,
-                                                  {"message.send"});
-  ASSERT_FALSE(after);
-  EXPECT_EQ(after.error_if()->code(), ErrorCode::pairing_required);
-  EXPECT_EQ(after.error_if()->safe_detail(), "session_not_pairing_restricted");
+  // Pending cleared; the session is authorized, so a follow-up pair_peer is
+  // now a legal renewal admission (#3) covered by the dedicated suite - the
+  // first pairing's exactly-one success outcome is what this case asserts.
   EXPECT_EQ(recorder.size(), 1U);
 
   // Grant directions: the receiver issued, the initiator received, and the
@@ -558,15 +561,14 @@ TEST_F(M5NodePairingTest, WrongPasswordFailsExactlyOnceAndReadmitsAfterReconnect
   EXPECT_TRUE(pair.second.value().shutdown().stopped);
 }
 
-// Case 7: the armed deadline fires exactly once when the responder stays
-// silent. Silence is constructed deterministically: the target holds an
-// ISSUED grant for the initiator (its store only), so the target's session
-// authorizes at hello while the initiator's session stays restricted. The
-// target's pairing frame handler counts an authenticated peer's
-// pairing_request and never answers; the initiator's deadline then expires
-// the pending attempt, reports exactly one timeout outcome, clears the
-// pending entry, and closes the restricted session.
-TEST_F(M5NodePairingTest, PairingDeadlineExpiresSilentResponderExactlyOnce) {
+// Case 7 (issue #3): asymmetric trust is repairable end to end. The target
+// holds an ISSUED grant for the initiator (its store only), so the target's
+// session authorizes at hello while the initiator's session stays restricted.
+// Since #3 the authorized target answers the pairing request instead of
+// silently ignoring it: the correct password issues a fresh grant, the
+// initiator upgrades exactly once, and the observer reports exactly one
+// success outcome.
+TEST_F(M5NodePairingTest, AsymmetricTrustRepairPairsEndToEnd) {
   NodePairHandles pair;
   auto first_profile = initialized_profile("deadline-initiator", std::nullopt, {});
   auto second_profile = initialized_profile(
@@ -580,7 +582,7 @@ TEST_F(M5NodePairingTest, PairingDeadlineExpiresSilentResponderExactlyOnce) {
                                      {"message.send"}, 0xAU));
 
   auto first_node = Node::create(
-      node_config(*pair.first_store, std::chrono::milliseconds{300}));
+      node_config(*pair.first_store, std::chrono::milliseconds{0}));
   auto second_node =
       Node::create(node_config(*pair.second_store, std::chrono::milliseconds{0}));
   ASSERT_TRUE(first_node && second_node);
@@ -625,31 +627,430 @@ TEST_F(M5NodePairingTest, PairingDeadlineExpiresSilentResponderExactlyOnce) {
   EXPECT_FALSE(admitted.value_if()->is_zero());
   EXPECT_EQ(recorder.size(), 0U);
 
-  // The authenticated target never answers; the armed deadline fires.
+  // The authorized target answers the repair request with a fresh grant.
   ASSERT_TRUE(wait_until([&] { return recorder.size() >= 1U; },
                          std::chrono::seconds{10}));
   const auto events = recorder.snapshot();
   ASSERT_EQ(events.size(), 1U);
-  EXPECT_FALSE(events[0].success);
+  EXPECT_TRUE(events[0].success);
   EXPECT_EQ(events[0].peer, pair.second_key);
-  EXPECT_EQ(events[0].code, ErrorCode::timeout);
-  EXPECT_EQ(events[0].detail, "pairing_deadline_exceeded");
+  EXPECT_FALSE(events[0].scopes.empty());
 
-  // The restricted session is closed locally and no second outcome fires.
+  // The initiator's restricted session upgraded to authorized and no second
+  // outcome fires.
   ASSERT_TRUE(wait_until(
       [&] {
         const auto session = latest_session_for(pair.first.value(), pair.second_key);
-        return session.has_value() && session->state == NodePeerSessionState::closed;
+        return session.has_value() && session->state == NodePeerSessionState::authenticated;
       },
       std::chrono::seconds{10}));
   (void)wait_until([] { return false; }, std::chrono::milliseconds{500});
   EXPECT_EQ(recorder.size(), 1U);
 
-  // Pending cleared: the dead attempt cannot be re-admitted.
-  const auto again = pair.first.value().pair_peer(pair.second_key, kTargetPassword,
+  // Trust repaired in the missing direction: the target now also holds the
+  // fresh ISSUED grant alongside the seeded one, and the initiator stores
+  // the received copy.
+  const auto issued = pair.second.value().trust_grants_for(pair.first_key);
+  ASSERT_TRUE(issued);
+  EXPECT_GE(issued.value_if()->size(), 1U);
+  EXPECT_EQ(issued.value_if()->back().direction, TrustGrantDirection::issued);
+  const auto received = pair.first.value().trust_grants_for(pair.second_key);
+  ASSERT_TRUE(received);
+  EXPECT_GE(received.value_if()->size(), 1U);
+  EXPECT_EQ(received.value_if()->back().direction, TrustGrantDirection::received);
+
+  EXPECT_TRUE(pair.first.value().shutdown().stopped);
+  EXPECT_TRUE(pair.second.value().shutdown().stopped);
+}
+
+// Issue #3, renewal: on an already-authorized session a fresh pair_peer is
+// legal admission. It returns a new request id, reports exactly one ADDITIONAL
+// success terminal outcome, keeps the session authenticated, and stores a
+// fresh grant on both ends: PairingService::evaluate draws a random GrantId
+// per issuance and put_trust_grant upserts by grant_id, so every successful
+// pairing/renewal APPENDS one record per store. The renewal's observer
+// outcome still reports the session's effective scopes - on an authorized
+// session the fresh grant lives in the TrustStore while the session keeps
+// its state and scopes (#3: no re-upgrade).
+TEST_F(M5NodePairingTest, RenewalOnAuthorizedSessionAdmitsWithFreshGrantAndOutcome) {
+  NodePairHandles pair;
+  ASSERT_TRUE(establish_restricted_pair(pair));
+  PairingObserverRecorder recorder;
+  recorder.attach(pair.first.value());
+
+  // First pairing: narrow scope.
+  const auto first = pair.first.value().pair_peer(pair.second_key, kTargetPassword,
                                                   {"message.send"});
-  ASSERT_FALSE(again);
-  EXPECT_NE(again.error_if()->safe_detail(), std::string_view{"pairing_already_pending"});
+  ASSERT_TRUE(first) << first.error_if()->safe_detail();
+  ASSERT_TRUE(wait_until([&] { return recorder.size() >= 1U; },
+                         std::chrono::seconds{15}));
+  auto events = recorder.snapshot();
+  ASSERT_EQ(events.size(), 1U);
+  EXPECT_TRUE(events[0].success);
+  EXPECT_EQ(events[0].scopes, (std::vector<std::string>{"message.send"}));
+  ASSERT_TRUE(wait_until(
+      [&] {
+        const auto session = latest_session_for(pair.first.value(), pair.second_key);
+        return session.has_value() && session->state == NodePeerSessionState::authenticated;
+      },
+      std::chrono::seconds{10}));
+  auto issued = pair.second.value().trust_grants_for(pair.first_key);
+  ASSERT_TRUE(issued);
+  ASSERT_EQ(issued.value_if()->size(), 1U);
+  auto received = pair.first.value().trust_grants_for(pair.second_key);
+  ASSERT_TRUE(received);
+  ASSERT_EQ(received.value_if()->size(), 1U);
+
+  // Renewal: same password, wider requested scopes. Legal admission on the
+  // authorized session with a fresh request id.
+  const auto renewal = pair.first.value().pair_peer(
+      pair.second_key, kTargetPassword, {"message.send", "stream.open"});
+  ASSERT_TRUE(renewal) << renewal.error_if()->safe_detail();
+  const auto renewal_id = *renewal.value_if();
+  EXPECT_FALSE(renewal_id.is_zero());
+  EXPECT_NE(renewal_id, *first.value_if());
+  EXPECT_EQ(recorder.size(), 1U);
+
+  // Exactly one additional success terminal outcome.
+  ASSERT_TRUE(wait_until([&] { return recorder.size() >= 2U; },
+                         std::chrono::seconds{15}));
+  events = recorder.snapshot();
+  ASSERT_EQ(events.size(), 2U);
+  EXPECT_TRUE(events[1].success);
+  EXPECT_EQ(events[1].peer, pair.second_key);
+  // The session kept its state, so the outcome carries the in-force session
+  // scopes; the wider fresh grant lives in the TrustStore below.
+  EXPECT_EQ(events[1].scopes, (std::vector<std::string>{"message.send"}));
+
+  // Session stays authenticated on both ends; no third outcome fires.
+  (void)wait_until([] { return false; }, std::chrono::milliseconds{500});
+  EXPECT_EQ(recorder.size(), 2U);
+  const auto left = latest_session_for(pair.first.value(), pair.second_key);
+  ASSERT_TRUE(left.has_value());
+  EXPECT_EQ(left->state, NodePeerSessionState::authenticated);
+  const auto right = latest_session_for(pair.second.value(), pair.first_key);
+  ASSERT_TRUE(right.has_value());
+  EXPECT_EQ(right->state, NodePeerSessionState::authenticated);
+
+  // The re-issue appended one record per store: the issued side gained the
+  // wider grant, the received side mirrors it.
+  issued = pair.second.value().trust_grants_for(pair.first_key);
+  ASSERT_TRUE(issued);
+  ASSERT_EQ(issued.value_if()->size(), 2U);
+  const auto widened = std::find_if(
+      issued.value_if()->begin(), issued.value_if()->end(),
+      [](const TrustGrantRecord& record) {
+        return record.direction == TrustGrantDirection::issued &&
+               record.scopes == std::vector<std::string>{"message.send", "stream.open"};
+      });
+  ASSERT_NE(widened, issued.value_if()->end())
+      << "renewal grant with widened scopes not found in the issued store";
+  received = pair.first.value().trust_grants_for(pair.second_key);
+  ASSERT_TRUE(received);
+  ASSERT_EQ(received.value_if()->size(), 2U);
+  const auto received_widened = std::find_if(
+      received.value_if()->begin(), received.value_if()->end(),
+      [](const TrustGrantRecord& record) {
+        return record.direction == TrustGrantDirection::received &&
+               record.scopes == std::vector<std::string>{"message.send", "stream.open"};
+      });
+  ASSERT_NE(received_widened, received.value_if()->end())
+      << "renewal grant with widened scopes not found in the received store";
+
+  EXPECT_TRUE(pair.first.value().shutdown().stopped);
+  EXPECT_TRUE(pair.second.value().shutdown().stopped);
+}
+
+// Issue #3: an asymmetric repair attempt with a WRONG password reports
+// exactly one failure terminal outcome on the initiator, and the authorized
+// target answers with the stable denial result WITHOUT closing its healthy
+// session (the old deny_and_close would have killed the trust relationship)
+// and without storing any new grant.
+TEST_F(M5NodePairingTest, AsymmetricWrongPasswordKeepsAuthorizedTargetAlive) {
+  NodePairHandles pair;
+  auto first_profile = initialized_profile("repair-initiator", std::nullopt, {});
+  auto second_profile = initialized_profile(
+      "repair-target", kTargetPassword, {"message.send", "stream.open"});
+  ASSERT_TRUE(first_profile && second_profile);
+  pair.first_store.emplace(std::move(*first_profile.value_if()));
+  pair.second_store.emplace(std::move(*second_profile.value_if()));
+  ASSERT_TRUE(seed_issued_grant_only(*pair.second_store,
+                                     pair.first_store->device_id(),
+                                     {"message.send"}, 0xBU));
+
+  auto first_node =
+      Node::create(node_config(*pair.first_store, std::chrono::milliseconds{0}));
+  auto second_node =
+      Node::create(node_config(*pair.second_store, std::chrono::milliseconds{0}));
+  ASSERT_TRUE(first_node && second_node);
+  pair.first.emplace(std::move(*first_node.value_if()));
+  pair.second.emplace(std::move(*second_node.value_if()));
+  if (lan_interfaces_unavailable(pair.first.value(), pair.second.value())) {
+    (void)pair.first.value().shutdown();
+    (void)pair.second.value().shutdown();
+    if (environment_requires_lan_interfaces()) {
+      FAIL() << "Required LAN interface is unavailable";
+    }
+    GTEST_SKIP() << "No multicast-capable non-loopback interface";
+  }
+  pair.first_key = DeviceEndpointKey{pair.first.value().snapshot().device_id,
+                                     pair.first.value().snapshot().endpoint_id};
+  pair.second_key = DeviceEndpointKey{pair.second.value().snapshot().device_id,
+                                      pair.second.value().snapshot().endpoint_id};
+  ASSERT_TRUE(wait_until(
+      [&] {
+        return discovered(pair.first.value(), pair.second_key) &&
+               discovered(pair.second.value(), pair.first_key);
+      },
+      std::chrono::milliseconds{8000}));
+  ASSERT_TRUE(pair.first.value().connect_lan(pair.second_key));
+  ASSERT_TRUE(wait_until(
+      [&] {
+        const auto left = latest_session_for(pair.first.value(), pair.second_key);
+        const auto right = latest_session_for(pair.second.value(), pair.first_key);
+        return left.has_value() &&
+               left->state == NodePeerSessionState::pairing_restricted &&
+               right.has_value() &&
+               right->state == NodePeerSessionState::authenticated;
+      },
+      std::chrono::seconds{12}));
+
+  PairingObserverRecorder recorder;
+  recorder.attach(pair.first.value());
+  const auto admitted = pair.first.value().pair_peer(
+      pair.second_key, "wrong-password", {"message.send"});
+  ASSERT_TRUE(admitted) << admitted.error_if()->safe_detail();
+  EXPECT_FALSE(admitted.value_if()->is_zero());
+
+  // Exactly one failure terminal outcome on the initiator.
+  ASSERT_TRUE(wait_until([&] { return recorder.size() >= 1U; },
+                         std::chrono::seconds{15}));
+  const auto events = recorder.snapshot();
+  ASSERT_EQ(events.size(), 1U);
+  EXPECT_FALSE(events[0].success);
+  EXPECT_EQ(events[0].peer, pair.second_key);
+  EXPECT_EQ(events[0].code, ErrorCode::pairing_denied);
+
+  // The target answered the denial; the denial response itself must not
+  // close the authorized session. The initiator's failing RESTRICTED session
+  // tears its own transport down (M5-14), and that ICE teardown cascades to
+  // the target's session within milliseconds on loopback - that is transport
+  // bookkeeping, not the denial closing the session. So the deterministic
+  // property is: whenever the target's session ends, its recorded error is
+  // never the pairing denial; while it lives it stays authorized.
+  const auto target_session =
+      latest_session_for(pair.second.value(), pair.first_key);
+  ASSERT_TRUE(target_session.has_value());
+  if (target_session->state == NodePeerSessionState::authenticated) {
+    EXPECT_EQ(target_session->error, std::nullopt);
+  } else {
+    ASSERT_EQ(target_session->state, NodePeerSessionState::closed);
+    // fail_peer_attempt always records a root-cause error on the closed
+    // snapshot; the denial path must not be it.
+    ASSERT_TRUE(target_session->error.has_value());
+    EXPECT_NE(target_session->error->code(), ErrorCode::pairing_denied);
+    EXPECT_NE(target_session->error->safe_detail(), std::string_view{"pairing_denied"});
+  }
+
+  // No new grant: the target's store still holds only the seeded record.
+  const auto issued = pair.second.value().trust_grants_for(pair.first_key);
+  ASSERT_TRUE(issued);
+  ASSERT_EQ(issued.value_if()->size(), 1U);
+  EXPECT_EQ(issued.value_if()->front().direction, TrustGrantDirection::issued);
+  EXPECT_EQ(issued.value_if()->front().scopes,
+            (std::vector<std::string>{"message.send"}));
+
+  EXPECT_TRUE(pair.first.value().shutdown().stopped);
+  EXPECT_TRUE(pair.second.value().shutdown().stopped);
+}
+
+// Issue #3 disconnect terminal: an admitted attempt whose peer dies resolves
+// EXACTLY ONCE with a consistent outcome. Construction: the attempt is
+// admitted, then the target node shuts down while the attempt is pending.
+// The resolution races the target's shutdown drain (its in-flight evaluate
+// may finish and flush the buffered result before the sockets close), so the
+// branch is a property: failure = the disconnect path (non-denial
+// transport-class error, session closed, attempt retired), success = the
+// flushed result path (session upgraded). Both branches clear the pending
+// state and report exactly one terminal outcome.
+TEST_F(M5NodePairingTest, TargetShutdownResolvesPendingAttemptExactlyOnce) {
+  NodePairHandles pair;
+  auto first_profile =
+      initialized_profile("disconnect-initiator", std::nullopt, {});
+  PasswordHashParameters heavy{};
+  // Heavy enough to keep the evaluate window open across the shutdown, but
+  // light enough that the target's shutdown drain can still finish behind
+  // the in-flight Argon2 on a loaded CI runner (a 256 MiB / 4-op verifier
+  // starved the drain past its bound there).
+  heavy.operations = 2U;
+  heavy.memory_bytes = 64U * 1024U * 1024U;
+  auto second_profile = initialized_profile(
+      "disconnect-target", kTargetPassword, {"message.send"}, heavy);
+  ASSERT_TRUE(first_profile && second_profile);
+  pair.first_store.emplace(std::move(*first_profile.value_if()));
+  pair.second_store.emplace(std::move(*second_profile.value_if()));
+
+  auto first_node =
+      Node::create(node_config(*pair.first_store, std::chrono::milliseconds{0}));
+  auto second_node =
+      Node::create(node_config(*pair.second_store, std::chrono::milliseconds{0}));
+  ASSERT_TRUE(first_node && second_node);
+  pair.first.emplace(std::move(*first_node.value_if()));
+  pair.second.emplace(std::move(*second_node.value_if()));
+  if (lan_interfaces_unavailable(pair.first.value(), pair.second.value())) {
+    (void)pair.first.value().shutdown();
+    (void)pair.second.value().shutdown();
+    if (environment_requires_lan_interfaces()) {
+      FAIL() << "Required LAN interface is unavailable";
+    }
+    GTEST_SKIP() << "No multicast-capable non-loopback interface";
+  }
+  pair.first_key = DeviceEndpointKey{pair.first.value().snapshot().device_id,
+                                     pair.first.value().snapshot().endpoint_id};
+  pair.second_key = DeviceEndpointKey{pair.second.value().snapshot().device_id,
+                                      pair.second.value().snapshot().endpoint_id};
+  ASSERT_TRUE(wait_until(
+      [&] {
+        return discovered(pair.first.value(), pair.second_key) &&
+               discovered(pair.second.value(), pair.first_key);
+      },
+      std::chrono::milliseconds{8000}));
+  ASSERT_TRUE(pair.first.value().connect_lan(pair.second_key));
+  ASSERT_TRUE(wait_until(
+      [&] {
+        const auto left = latest_session_for(pair.first.value(), pair.second_key);
+        const auto right = latest_session_for(pair.second.value(), pair.first_key);
+        return left.has_value() &&
+               left->state == NodePeerSessionState::pairing_restricted &&
+               right.has_value() &&
+               right->state == NodePeerSessionState::pairing_restricted;
+      },
+      std::chrono::seconds{12}));
+
+  PairingObserverRecorder recorder;
+  recorder.attach(pair.first.value());
+
+  // Admit, then kill the target while the attempt is pending and the target
+  // is grinding through its 256 MiB Argon2 evaluation.
+  const auto admitted = pair.first.value().pair_peer(
+      pair.second_key, kTargetPassword, {"message.send"});
+  ASSERT_TRUE(admitted) << admitted.error_if()->safe_detail();
+  EXPECT_FALSE(admitted.value_if()->is_zero());
+  EXPECT_EQ(recorder.size(), 0U);
+  EXPECT_TRUE(pair.second.value().shutdown().stopped);
+
+  // Exactly one terminal outcome.
+  ASSERT_TRUE(wait_until([&] { return recorder.size() >= 1U; },
+                         std::chrono::seconds{25}));
+  const auto events = recorder.snapshot();
+  ASSERT_EQ(events.size(), 1U);
+  EXPECT_EQ(events[0].peer, pair.second_key);
+
+  if (events[0].success) {
+    // The flushed result beat the shutdown: the grant was accepted and the
+    // restricted session upgraded (it may immediately afterwards die from
+    // the same transport teardown - the OUTCOME is the contract here, and
+    // the persisted grant is its durable evidence).
+    bool received_persisted = false;
+    if (wait_until(
+            [&] {
+              const auto grants =
+                  pair.first.value().trust_grants_for(pair.second_key);
+              return grants &&
+                     std::any_of(grants.value_if()->begin(),
+                                 grants.value_if()->end(),
+                                 [](const TrustGrantRecord& record) {
+                                   return record.direction ==
+                                          TrustGrantDirection::received;
+                                 });
+            },
+            std::chrono::seconds{5})) {
+      received_persisted = true;
+    }
+    EXPECT_TRUE(received_persisted);
+  } else {
+    // Disconnect terminal: a transport-class failure, never a denial.
+    EXPECT_NE(events[0].code, ErrorCode::pairing_denied);
+    EXPECT_NE(events[0].code, ErrorCode::pairing_required);
+    EXPECT_NE(events[0].code, ErrorCode::configuration);
+    ASSERT_TRUE(wait_until(
+        [&] {
+          const auto session =
+              latest_session_for(pair.first.value(), pair.second_key);
+          return session.has_value() && session->state == NodePeerSessionState::closed;
+        },
+        std::chrono::seconds{10}));
+    // Pending cleared: the dead attempt is retired, not still pending.
+    const auto again = pair.first.value().pair_peer(
+        pair.second_key, kTargetPassword, {"message.send"});
+    ASSERT_FALSE(again);
+    EXPECT_NE(again.error_if()->safe_detail(),
+              std::string_view{"pairing_already_pending"});
+  }
+
+  // Exactly once: no duplicate terminal outcome from the losing side.
+  (void)wait_until([] { return false; }, std::chrono::milliseconds{500});
+  EXPECT_EQ(recorder.size(), 1U);
+
+  EXPECT_TRUE(pair.first.value().shutdown().stopped);
+}
+
+// Deadline trigger path (issue #1 case 7, post-#3): with a live responder a
+// deterministic silence is no longer constructible at the Node level, so the
+// deadline is exercised as a property test: an extreme 30ms window races the
+// target's Argon2 evaluation, and whichever wins, the attempt resolves
+// EXACTLY ONCE with a consistent outcome (timeout with the restricted
+// session closed and the attempt retired, or success with the session
+// upgraded), the pending state clears, and no duplicate event fires.
+TEST_F(M5NodePairingTest, PairingDeadlineResolvesExactlyOnceAgainstLiveResponder) {
+  NodePairHandles pair;
+  ASSERT_TRUE(establish_restricted_pair(pair,
+                                        std::chrono::milliseconds{30}));
+  PairingObserverRecorder recorder;
+  recorder.attach(pair.first.value());
+
+  const auto admitted = pair.first.value().pair_peer(
+      pair.second_key, kTargetPassword, {"message.send"});
+  ASSERT_TRUE(admitted) << admitted.error_if()->safe_detail();
+  EXPECT_FALSE(admitted.value_if()->is_zero());
+  EXPECT_EQ(recorder.size(), 0U);
+
+  ASSERT_TRUE(wait_until([&] { return recorder.size() >= 1U; },
+                         std::chrono::seconds{15}));
+  const auto events = recorder.snapshot();
+  ASSERT_EQ(events.size(), 1U);
+
+  if (events[0].success) {
+    // The response beat the timer: the restricted session upgraded.
+    ASSERT_TRUE(wait_until(
+        [&] {
+          const auto session =
+              latest_session_for(pair.first.value(), pair.second_key);
+          return session.has_value() &&
+                 session->state == NodePeerSessionState::authenticated;
+        },
+        std::chrono::seconds{10}));
+  } else {
+    // The timer beat the response: stable timeout, restricted session closed.
+    EXPECT_EQ(events[0].code, ErrorCode::timeout);
+    EXPECT_EQ(events[0].detail, "pairing_deadline_exceeded");
+    ASSERT_TRUE(wait_until(
+        [&] {
+          const auto session =
+              latest_session_for(pair.first.value(), pair.second_key);
+          return session.has_value() && session->state == NodePeerSessionState::closed;
+        },
+        std::chrono::seconds{10}));
+    // Pending cleared: the dead attempt is retired, not still pending.
+    const auto again = pair.first.value().pair_peer(
+        pair.second_key, kTargetPassword, {"message.send"});
+    ASSERT_FALSE(again);
+    EXPECT_NE(again.error_if()->safe_detail(),
+              std::string_view{"pairing_already_pending"});
+  }
+
+  // Exactly once: no duplicate terminal outcome from the losing side.
+  (void)wait_until([] { return false; }, std::chrono::milliseconds{500});
   EXPECT_EQ(recorder.size(), 1U);
 
   EXPECT_TRUE(pair.first.value().shutdown().stopped);

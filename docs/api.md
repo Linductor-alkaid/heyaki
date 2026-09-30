@@ -196,8 +196,9 @@ after pairing they authenticate straight into `Authorized`.
 
 `pair_peer(peer, password, requested_scopes)` returns `Result<RequestId>`:
 admission is synchronous and bounded, so configuration errors and
-strand-admission rejections (missing session, session not pairing-restricted,
-pairing already pending) come back as failures with **no** observer outcome —
+strand-admission rejections (missing session, session neither
+pairing-restricted nor authorized, pairing already pending) come back as
+failures with **no** observer outcome —
 the operation was never admitted. On admission the call returns the stable
 wire request id, and exactly one terminal outcome for it surfaces through the
 one-time observer (`set_pairing_observer`) or the session snapshot: success
@@ -205,7 +206,10 @@ with the effective scopes, or failure (denial, deadline — `NodeConfig::
 pairing_deadline`, disconnect, cancel, shutdown). A duplicate request fails
 with `pairing_already_pending` and never disturbs the in-flight attempt; late
 or retransmitted results never resurrect a terminal state or create a second
-grant. Grants are signed TrustGrants stored locally, and the **effective
+grant. On an already-authorized session a pairing request is a legal repair,
+renewal, or reverse grant and always receives an explicit answer; a denial
+there reports the stable failure outcome without closing the authorized
+session. Grants are signed TrustGrants stored locally, and the **effective
 scope is the intersection** of requested and the target's policy — never
 more. Supporting APIs: `trust_grants_for`, `revoke_trust_grant`,
 `rotate_authorization_password[_and_revoke]`, and the bounded
