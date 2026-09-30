@@ -32,6 +32,7 @@
 #include <boost/asio/post.hpp>
 #include <boost/asio/read.hpp>
 #include <boost/asio/ssl.hpp>
+#include <boost/asio/bind_executor.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/asio/write.hpp>
@@ -922,7 +923,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
        boost::asio::any_io_executor executor, std::set<DeviceId> trusted_devices,
        LanSignalingValidator signaling_validator,
        LanSignalingHandler signaling_handler,
-       std::optional<RelayNodeConfig> relay_override)
+       std::optional<RelayNodeConfig> relay_override,
+       std::chrono::milliseconds pairing_deadline)
       : profile(profile), owned_runtime(std::move(owned_runtime)),
         runtime(this->owned_runtime ? &*this->owned_runtime : borrowed_runtime),
         application_id(std::move(application_id)), lan(std::move(lan)),
@@ -945,6 +947,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         stopped("heyaki-node-stopped"), trusted_devices(std::move(trusted_devices)),
         signaling_validator(std::move(signaling_validator)),
         signaling_handler(std::move(signaling_handler)),
+        pairing_deadline(pairing_deadline),
         relay_override(std::move(relay_override)) {}
 
   static LanBootNonce make_boot_nonce() {
@@ -3069,7 +3072,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
              },
          .limits = Limits{},
          .channel_budgets = session::ChannelBudgetConfig{},
-         .pairing_deadline = std::chrono::milliseconds{60000},
+         .pairing_deadline = pairing_deadline,
          // The successor session re-runs the same trust adjudication: a
          // grant revoked during the old session does not carry over.
          .wall_clock = unix_milliseconds_now,
@@ -3280,7 +3283,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   // ---- M5 pairing, trust, and stream API (strand context) ----
 
   Result<void> pair_peer_strand(DeviceEndpointKey peer, std::string_view password,
-                                std::vector<std::string> requested_scopes) {
+                                std::vector<std::string> requested_scopes,
+                                const RequestId& request_id) {
     const auto index = peer_attempt_by_endpoint.find(peer);
     if (index == peer_attempt_by_endpoint.end()) {
       return Result<void>::failure(node_error(ErrorCode::peer_offline,
@@ -3299,13 +3303,58 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return Result<void>::failure(
           node_error(ErrorCode::pairing_required, "pairing_already_pending"));
     }
-    auto submitted =
-        iterator->second.session->submit_pairing_request(password, requested_scopes);
+    auto submitted = iterator->second.session->submit_pairing_request(
+        request_id, password, requested_scopes);
     if (!submitted) return submitted;
-    pending_pairings.emplace(peer.device_id,
-                             PendingPairing{peer, std::move(requested_scopes)});
+    pending_pairings.emplace(
+        peer.device_id,
+        PendingPairing{peer, request_id, std::move(requested_scopes), std::nullopt});
+    arm_pairing_deadline(peer.device_id);
     publish_peer_sessions();
     return Result<void>::success();
+  }
+
+  // Arms the bounded window for one admitted pairing attempt. Firing while
+  // the same request is still pending reports exactly one timeout terminal
+  // state and fails the restricted session; completion, failure, teardown,
+  // or a replacement request erase the entry first, and the aborted wait is
+  // a no-op.
+  void arm_pairing_deadline(const DeviceId& device) {
+    auto pending = pending_pairings.find(device);
+    if (pending == pending_pairings.end()) return;
+    auto& timer = pending->second.deadline.emplace(strand);
+    timer.expires_after(pairing_deadline);
+    auto weak = weak_from_this();
+    const auto request_id = pending->second.request_id;
+    timer.async_wait(boost::asio::bind_executor(
+        strand, [weak, device, request_id](const boost::system::error_code& error) {
+          if (error) return;
+          if (auto self = weak.lock()) {
+            self->expire_pairing(device, request_id);
+          }
+        }));
+  }
+
+  void expire_pairing(const DeviceId& device, const RequestId& request_id) {
+    auto pending = pending_pairings.find(device);
+    if (pending == pending_pairings.end() || pending->second.request_id != request_id) {
+      return;
+    }
+    const auto peer = pending->second.peer;
+    std::shared_ptr<PeerSession> session;
+    const auto index = peer_attempt_by_endpoint.find(peer);
+    if (index != peer_attempt_by_endpoint.end()) {
+      const auto iterator = peer_attempts.find(index->second);
+      if (iterator != peer_attempts.end()) session = iterator->second.session;
+    }
+    notify_pairing_failure(peer, std::optional<Error>{
+                                     node_error(ErrorCode::timeout,
+                                                "pairing_deadline_exceeded")});
+    // The pending entry (and its timer) is gone; fail the restricted session
+    // so the dead attempt cannot be re-submitted against a stale transport.
+    if (session) {
+      session->close(transport::CloseReason::local_shutdown);
+    }
   }
 
   // Lazily creates (and attaches) the per-peer ByteStreamService; shared
@@ -6246,7 +6295,11 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   NodePairingObserver pairing_observer;
   struct PendingPairing {
     DeviceEndpointKey peer;
+    RequestId request_id;
     std::vector<std::string> requested_scopes;
+    // Armed on admission; firing reports exactly one timeout terminal state
+    // while the request is still pending and fails the restricted session.
+    std::optional<boost::asio::steady_timer> deadline;
   };
   std::map<DeviceId, PendingPairing> pending_pairings;
   std::function<void(const DeviceEndpointKey&, ByteStream)> stream_inbound_handler;
@@ -6315,6 +6368,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   std::uint64_t restarts_failed{0U};
   std::uint64_t restarts_suppressed{0U};
   std::size_t peak_restarts{0U};
+  // Bounded window for one admitted pairing attempt (NodeConfig default 60s).
+  // Declared beside relay_override to match the constructor init order.
+  std::chrono::milliseconds pairing_deadline;
   std::optional<RelayNodeConfig> relay_override;
   std::map<std::uint64_t, std::shared_ptr<TlsConnection>> connections;
   std::map<DeviceEndpointKey, std::uint64_t> active_connections;
@@ -6466,7 +6522,10 @@ Result<Node> Node::create(NodeConfig config) {
       std::move(*lan.value_if()), std::move(*identity.value_if()), *endpoint.value_if(),
       std::move(*directory.value_if()), std::move(*executor.value_if()),
       std::move(trusted_set), std::move(config.signaling_validator),
-      std::move(config.signaling_handler), std::move(config.relay_override));
+      std::move(config.signaling_handler), std::move(config.relay_override),
+      config.pairing_deadline > std::chrono::milliseconds::zero()
+          ? config.pairing_deadline
+          : std::chrono::milliseconds{60000});
   impl->path_policy = std::move(*path_policy.value_if());
   {
     // Every member is listed: the pinned release build treats a shorter
@@ -6713,44 +6772,82 @@ Result<void> Node::connect(DeviceEndpointKey peer) {
       Impl::ConnectCommand{peer, *route.value_if()});
 }
 
-Result<void> Node::pair_peer(DeviceEndpointKey peer, std::string_view password,
-                              std::vector<std::string> requested_scopes) {
+Result<RequestId> Node::pair_peer(DeviceEndpointKey peer, std::string_view password,
+                                  std::vector<std::string> requested_scopes) {
   if (!impl_) {
-    return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
+    return Result<RequestId>::failure(
+        node_error(ErrorCode::cancelled, "node_not_running"));
   }
   if (peer.device_id.is_zero() || peer.endpoint_id.is_zero()) {
-    return Result<void>::failure(
+    return Result<RequestId>::failure(
         node_error(ErrorCode::configuration, "pairing_peer_invalid"));
   }
   if (password.empty()) {
-    return Result<void>::failure(
+    return Result<RequestId>::failure(
         node_error(ErrorCode::configuration, "pairing_password_empty"));
   }
   auto normalized = normalize_trust_scopes(std::move(requested_scopes));
   if (!normalized) {
-    return Result<void>::failure(*normalized.error_if());
+    return Result<RequestId>::failure(*normalized.error_if());
   }
   if (normalized.value_if()->empty()) {
-    return Result<void>::failure(
+    return Result<RequestId>::failure(
         node_error(ErrorCode::configuration, "pairing_scopes_empty"));
+  }
+  // Admission is a bounded strand mutation: the caller learns the strand's
+  // accept/reject decision (or the wire request id on admission) instead of
+  // mistaking a successful dispatch for protocol acceptance. A dispatch that
+  // never runs inside the bound keeps the pre-set timeout failure.
+  const auto request_id = Impl::random_request_id();
+  if (impl_->strand.running_in_this_thread()) {
+    // Same reentrancy rule as the strand mutation helper: a post-and-wait
+    // from inside the strand would deadlock, so admission runs inline.
+    auto submitted = impl_->pair_peer_strand(peer, password, *normalized.value_if(),
+                                             request_id);
+    if (!submitted) {
+      return Result<RequestId>::failure(*submitted.error_if());
+    }
+    return Result<RequestId>::success(request_id);
   }
   auto weak = std::weak_ptr<Impl>{impl_};
   auto scopes = std::make_shared<std::vector<std::string>>(
       std::move(*normalized.value_if()));
   auto password_copy = std::make_shared<std::string>(password);
+  auto admission = std::make_shared<Result<RequestId>>(
+      Result<RequestId>::failure(
+          node_error(ErrorCode::timeout, "pairing_admission_timeout")));
+  auto completion = std::make_shared<std::promise<void>>();
+  auto completed = completion->get_future();
   try {
-    boost::asio::post(impl_->strand, [weak, peer, scopes, password_copy] {
-      if (auto self = weak.lock()) {
-        (void)self->pair_peer_strand(peer, *password_copy, *scopes);
-        // The password copy lives only for this dispatch and is zeroized by
-        // destruction; it is never logged or persisted.
-      }
-    });
+    boost::asio::post(impl_->strand,
+                      [weak, peer, scopes, password_copy, request_id, admission,
+                       completion] {
+                      if (auto self = weak.lock()) {
+                        auto submitted =
+                            self->pair_peer_strand(peer, *password_copy, *scopes,
+                                                   request_id);
+                        if (submitted) {
+                          *admission = Result<RequestId>::success(request_id);
+                        } else {
+                          *admission =
+                              Result<RequestId>::failure(*submitted.error_if());
+                        }
+                      } else {
+                        *admission = Result<RequestId>::failure(
+                            node_error(ErrorCode::cancelled, "node_not_running"));
+                      }
+                      completion->set_value();
+                      // The password copy lives only for this dispatch and is
+                      // zeroized by destruction; it is never logged or persisted.
+                      });
   } catch (...) {
-    return Result<void>::failure(
+    return Result<RequestId>::failure(
         node_error(ErrorCode::internal, "pairing_schedule_failed"));
   }
-  return Result<void>::success();
+  // Same bounded post-and-wait contract as the strand mutation helper: a
+  // timeout keeps the caller's pre-set failure outcome in place.
+  (void)completed.wait_for(std::chrono::seconds{5});
+  return *admission;
 }
 
 void Node::set_pairing_observer(NodePairingObserver observer) {

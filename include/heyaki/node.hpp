@@ -362,6 +362,11 @@ struct NodeConfig {
   std::chrono::milliseconds pairing_backoff_max{0};
   // Optional grant TTL; 0 disables expiry.
   std::uint64_t pairing_grant_ttl_milliseconds{0U};
+  // Bounded window for one admitted pairing attempt: the initiator fails
+  // the attempt when no terminal outcome arrived inside the window, and the
+  // receiver rejects requests evaluated after it. Zero keeps the protocol
+  // default of 60 s.
+  std::chrono::milliseconds pairing_deadline{0};
   // ---- M7 remote events & file transfer ----
   // Per-remote-subscriber staging (items) and per-peer subscription cap for
   // the event service; zero keeps service defaults.
@@ -683,10 +688,20 @@ class Node {
 
   // ---- M5 pairing, trust, and streams ----
   // Submits one password pairing attempt on the peer's pairing-restricted
-  // session. The one-time observer (or session snapshot) reports the terminal
-  // outcome; the password is never stored or logged.
-  [[nodiscard]] Result<void> pair_peer(DeviceEndpointKey peer, std::string_view password,
-                                       std::vector<std::string> requested_scopes);
+  // session. Admission is synchronous and bounded: configuration errors,
+  // dispatch failure, and strand-admission rejections (missing session,
+  // session not pairing-restricted, pairing already pending) return a
+  // failure and produce no pairing-observer outcome - the operation was
+  // never admitted. On admission the call returns the stable wire request
+  // id, and the pairing observer reports exactly one terminal outcome for
+  // it: success with the effective scopes, or failure (denial, deadline,
+  // disconnect, cancel, shutdown). A duplicate request fails with
+  // pairing_already_pending and never disturbs the in-flight attempt; late
+  // or retransmitted results never resurrect a terminal state or create a
+  // second grant. The password is never stored or logged.
+  [[nodiscard]] Result<RequestId> pair_peer(DeviceEndpointKey peer,
+                                            std::string_view password,
+                                            std::vector<std::string> requested_scopes);
   void set_pairing_observer(NodePairingObserver observer);
   // Bounded pairing audit history with correlation ids (M9-03): every
   // evaluated pairing attempt and grant lifecycle event, carrying the wire

@@ -194,12 +194,20 @@ after pairing they authenticate straight into `Authorized`.
 
 ## Pairing and trust
 
-`pair_peer(peer, password, requested_scopes)` submits one attempt against the
-peer's pairing-restricted session. Outcomes surface through a one-time
-observer (`set_pairing_observer`) or the session snapshot; grants are signed
-TrustGrants stored locally, and the **effective scope is the intersection**
-of requested and the target's policy — never more. Supporting APIs:
-`trust_grants_for`, `revoke_trust_grant`,
+`pair_peer(peer, password, requested_scopes)` returns `Result<RequestId>`:
+admission is synchronous and bounded, so configuration errors and
+strand-admission rejections (missing session, session not pairing-restricted,
+pairing already pending) come back as failures with **no** observer outcome —
+the operation was never admitted. On admission the call returns the stable
+wire request id, and exactly one terminal outcome for it surfaces through the
+one-time observer (`set_pairing_observer`) or the session snapshot: success
+with the effective scopes, or failure (denial, deadline — `NodeConfig::
+pairing_deadline`, disconnect, cancel, shutdown). A duplicate request fails
+with `pairing_already_pending` and never disturbs the in-flight attempt; late
+or retransmitted results never resurrect a terminal state or create a second
+grant. Grants are signed TrustGrants stored locally, and the **effective
+scope is the intersection** of requested and the target's policy — never
+more. Supporting APIs: `trust_grants_for`, `revoke_trust_grant`,
 `rotate_authorization_password[_and_revoke]`, and the bounded
 `pairing_audit_records()` ring (correlation ids, never the password).
 

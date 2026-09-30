@@ -189,9 +189,12 @@ class PeerSession final : public std::enable_shared_from_this<PeerSession> {
 
   // ---- Pairing (initiator side, M5-09) ----
   // Submits password, requested scopes, and a one-time nonce on the
-  // authenticated end-to-end control channel of a pairing-restricted session.
+  // authenticated end-to-end control channel of a pairing-restricted
+  // session. The caller owns the stable wire request id so admission and
+  // terminal outcomes stay correlatable end to end.
   [[nodiscard]] Result<void> submit_pairing_request(
-      std::string_view password_utf8, std::vector<std::string> requested_scopes);
+      const RequestId& request_id, std::string_view password_utf8,
+      std::vector<std::string> requested_scopes);
 
   // ---- Business channels (M5-02/M5-06/M5-14) ----
   // Opens a logical business channel. Requires an authorized session and the

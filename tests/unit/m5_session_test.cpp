@@ -49,6 +49,13 @@ ProtocolHello pairing_protocol() {
           .required = {static_cast<std::uint64_t>(Capability::session)}};
 }
 
+// Caller-owned stable wire request id for submit_pairing_request; non-zero
+// and deterministic per seed so tests can correlate admission, wire frames,
+// and result frames.
+RequestId deterministic_request_id(std::uint8_t seed) {
+  return RequestId{filled<RequestId::Storage>(seed)};
+}
+
 // Both sides of one loopback session with full M5 wiring. The RIGHT side is
 // the pairing target (verifier + policy); the LEFT side is the initiator.
 struct M5SessionPair {
@@ -65,6 +72,11 @@ struct M5SessionPair {
   bool grant_received = false;
   std::optional<SignedTrustGrant> received_grant;
   std::vector<std::pair<RequestId, PairingNonce>> initiator_pending;
+  // Pairing observability for the request-id and idempotency contracts: the
+  // request ids the target-side evaluator saw on the wire, and how many
+  // times the initiator's result sink accepted a grant.
+  std::vector<RequestId> evaluator_request_ids;
+  std::size_t grant_sink_calls = 0;
   std::shared_ptr<PeerSession> left;
   std::shared_ptr<PeerSession> right;
   std::uint64_t stream_clock = kNow;
@@ -147,11 +159,12 @@ struct M5SessionPair {
            (void)now;
            return Result<SessionAuthorization>::success(authorization);
          },
-         .pairing_result_sink =
+             .pairing_result_sink =
              [this](const PairingResultBody& result, const RequestId& pending_id,
                     const PairingNonce& pending_nonce,
                     const std::vector<std::string>& requested_scopes) {
                (void)pending_id;  // nonce is the binding checked below
+               ++grant_sink_calls;
                if (!result.grant.has_value()) {
                  return Result<void>::failure(
                      Error{ErrorCode::authentication, "m5_test", "result_without_grant"});
@@ -210,6 +223,7 @@ struct M5SessionPair {
          },
          .pairing_evaluator =
              [this](const PairingRequestBody& request) {
+               evaluator_request_ids.push_back(request.request_id);
                // Target-side evaluation (M5-09): constant-time verifier check,
                // policy scope intersection, grant issuance bound to the
                // pairing nonce.
@@ -293,7 +307,8 @@ TEST(M5PeerSession, PasswordPairingIssuesGrantAndUpgradesBothSides) {
   ASSERT_TRUE(harness.left->pairing_restricted());
 
   const auto submitted = harness.left->submit_pairing_request(
-      "target-password", {"message.send", "stream.open", "shell.open:x"});
+      deterministic_request_id(0xA1U), "target-password",
+      {"message.send", "stream.open", "shell.open:x"});
   ASSERT_TRUE(submitted);
   harness.pump_all();
 
@@ -323,8 +338,8 @@ TEST(M5PeerSession, WrongPasswordClosesRestrictedSessionWithStableDenial) {
   ASSERT_TRUE(harness.right->start());
   harness.pump_all();
 
-  const auto submitted =
-      harness.left->submit_pairing_request("wrong-password", {"message.send"});
+  const auto submitted = harness.left->submit_pairing_request(
+      deterministic_request_id(0xA2U), "wrong-password", {"message.send"});
   ASSERT_TRUE(submitted);
   harness.pump_all();
 
@@ -367,7 +382,7 @@ TEST(M5PeerSession, PairingDeadlineClosesExpiredRestrictedSession) {
   harness.target_wall_clock += 61'000U;
   harness.initiator_wall_clock += 61'000U;
   const auto submitted = harness.left->submit_pairing_request(
-      "target-password", {"message.send"});
+      deterministic_request_id(0xA3U), "target-password", {"message.send"});
   // The initiator's own deadline check fires before any bytes hit the wire.
   ASSERT_FALSE(submitted);
   EXPECT_EQ(submitted.error_if()->safe_detail(), "pairing_deadline_exceeded");
@@ -413,6 +428,150 @@ void pair_loopback_control_send(M5SessionPair& harness, const Frame& frame) {
       });
   harness.pair.left().pump();
   harness.pair.right().pump();
+}
+
+// Same injection path directed at the INITIATOR (left) session: the frame
+// enters the left inbound queue before the helper pumps, so tests can order
+// adversarial frames ahead of legitimate traffic.
+void pair_loopback_control_send_to_initiator(M5SessionPair& harness,
+                                             const Frame& frame) {
+  auto encoded = encode_frame(frame);
+  ASSERT_TRUE(encoded);
+  transport::ChannelOptions options;
+  harness.pair.right().async_open_channel(
+      transport::ChannelKind::control, options,
+      [&](Result<transport::TransportChannel*> channel) {
+        ASSERT_TRUE(channel);
+        (void)(*channel.value_if())->send(*encoded.value_if());
+      });
+  harness.pair.right().pump();
+  harness.pair.left().pump();
+}
+
+Frame pairing_result_frame(const PairingResultBody& body, std::uint8_t seed) {
+  auto encoded = encode_pairing_result(body);
+  EXPECT_TRUE(encoded);
+  Frame frame;
+  frame.type = static_cast<std::uint8_t>(FrameType::pairing_result);
+  frame.channel_id = 0U;
+  frame.message_id = filled<MessageId>(seed);
+  if (encoded) {
+    frame.payload = std::move(*encoded.value_if());
+  }
+  return frame;
+}
+
+// Issue #1 contract, wire level: the caller-owned request id submitted
+// through submit_pairing_request is the id the target sees in the
+// pairing_request frame, and the result frame echoing that same id is the
+// one accepted for the upgrade.
+TEST(M5PeerSession, CallerRequestIdFlowsThroughWireAndResultEcho) {
+  M5SessionPair harness;
+  ASSERT_TRUE(harness.left->start());
+  ASSERT_TRUE(harness.right->start());
+  harness.pump_all();
+  ASSERT_TRUE(harness.left->pairing_restricted());
+
+  const auto request_id = deterministic_request_id(0xB1U);
+  const auto submitted = harness.left->submit_pairing_request(
+      request_id, "target-password", {"message.send"});
+  ASSERT_TRUE(submitted);
+  EXPECT_EQ(harness.left->diagnostics().pairing_requests_sent, 1U);
+  harness.pump_all();
+
+  // The target-side evaluator saw exactly the caller's id on the wire.
+  ASSERT_EQ(harness.evaluator_request_ids.size(), 1U);
+  EXPECT_EQ(harness.evaluator_request_ids[0], request_id);
+  // The result frame echoed the same id and was accepted for the upgrade
+  // (a mismatched id fails the protocol - covered by the mismatch test).
+  EXPECT_TRUE(harness.left->authenticated());
+  EXPECT_TRUE(harness.right->authenticated());
+  EXPECT_EQ(harness.left->diagnostics().pairing_results_received, 1U);
+}
+
+// Original semantics kept: while the initiator is restricted with a pending
+// request, a result frame carrying a DIFFERENT request id is a protocol
+// violation that fails the session.
+TEST(M5PeerSession, MismatchedResultIdFailsProtocolWhileRestrictedAndPending) {
+  M5SessionPair harness;
+  ASSERT_TRUE(harness.left->start());
+  ASSERT_TRUE(harness.right->start());
+  harness.pump_all();
+  ASSERT_TRUE(harness.left->pairing_restricted());
+
+  const auto submitted = harness.left->submit_pairing_request(
+      deterministic_request_id(0xB2U), "target-password", {"message.send"});
+  ASSERT_TRUE(submitted);
+
+  // Inject a result for a different request id BEFORE the legitimate result
+  // is pumped: the injected frame enters the initiator's inbound queue first.
+  PairingResultBody bogus;
+  bogus.request_id = deterministic_request_id(0xB3U);
+  bogus.status = StableStatus::permission_denied;
+  pair_loopback_control_send_to_initiator(
+      harness, pairing_result_frame(bogus, 0x4U));
+
+  const auto state = harness.left->diagnostics();
+  EXPECT_EQ(state.state, PeerSessionState::closed);
+  ASSERT_TRUE(state.last_error.has_value());
+  EXPECT_EQ(state.last_error->code(), ErrorCode::protocol);
+  EXPECT_EQ(state.last_error->safe_detail(), "pairing_result_request_mismatch");
+  EXPECT_FALSE(harness.grant_received);
+}
+
+// Issue #1 contract: after the pairing completed, a late or retransmitted
+// result frame (same id or arbitrary id) is counted and ignored - it never
+// resurrects a terminal state, never re-runs the grant sink, and never
+// fails the healthy session. The same holds on the target side.
+TEST(M5PeerSession, LateResultAfterAuthorizationIsCountedAndIgnored) {
+  M5SessionPair harness;
+  ASSERT_TRUE(harness.left->start());
+  ASSERT_TRUE(harness.right->start());
+  harness.pump_all();
+  ASSERT_TRUE(harness.left->pairing_restricted());
+
+  const auto request_id = deterministic_request_id(0xC1U);
+  const auto submitted = harness.left->submit_pairing_request(
+      request_id, "target-password", {"message.send", "stream.open"});
+  ASSERT_TRUE(submitted);
+  harness.pump_all();
+  ASSERT_TRUE(harness.left->authenticated());
+  ASSERT_TRUE(harness.right->authenticated());
+  ASSERT_EQ(harness.grant_sink_calls, 1U);
+  ASSERT_EQ(harness.left->diagnostics().pairing_results_received, 1U);
+  ASSERT_EQ(harness.right->diagnostics().pairing_results_received, 0U);
+  const auto authorized_scopes = harness.left->authorized_scopes();
+
+  // Retransmission of the consumed result on the initiator: identical id,
+  // identical grant body.
+  PairingResultBody retransmitted;
+  retransmitted.request_id = request_id;
+  retransmitted.status = StableStatus::ok;
+  retransmitted.grant = harness.received_grant;
+  pair_loopback_control_send_to_initiator(
+      harness, pairing_result_frame(retransmitted, 0x5U));
+
+  const auto left_state = harness.left->diagnostics();
+  EXPECT_EQ(left_state.state, PeerSessionState::authenticated);
+  EXPECT_EQ(left_state.pairing_results_received, 2U);
+  EXPECT_EQ(harness.grant_sink_calls, 1U);
+  EXPECT_EQ(harness.left->authorized_scopes(), authorized_scopes);
+  EXPECT_EQ(harness.left->authorized_scopes(),
+            (std::vector<std::string>{"message.send", "stream.open"}));
+
+  // A stray result on the TARGET side (never had a pending request, now
+  // trust-authorized) is also counted and ignored.
+  PairingResultBody stray;
+  stray.request_id = deterministic_request_id(0xC9U);
+  stray.status = StableStatus::permission_denied;
+  pair_loopback_control_send(harness, pairing_result_frame(stray, 0x6U));
+
+  const auto right_state = harness.right->diagnostics();
+  EXPECT_EQ(right_state.state, PeerSessionState::authenticated);
+  EXPECT_EQ(right_state.pairing_results_received, 1U);
+  EXPECT_EQ(harness.grant_sink_calls, 1U);
+  EXPECT_TRUE(harness.left->authenticated());
+  EXPECT_TRUE(harness.right->authenticated());
 }
 
 TEST(M5ByteStream, StreamsCarryBytesWindowsAndHalfClose) {
