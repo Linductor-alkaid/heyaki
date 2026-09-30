@@ -32,7 +32,6 @@
 namespace heyaki {
 namespace {
 
-constexpr std::uint64_t kNow = 1'700'000'000'000U;
 constexpr const char* kApplicationId = "com.example.m5-pairing-approval";
 constexpr std::string_view kTargetPassword = "target-password";
 
