@@ -7187,7 +7187,16 @@ Result<RequestId> Node::request_pairing_approval(
 
 void Node::set_pairing_request_observer(NodePairingRequestObserver observer) {
   if (!impl_) return;
-  impl_->pairing_request_observer = std::move(observer);
+  // The observer is read and invoked on the node strand: approval requests
+  // arrive through the transport drain that peer_dispatcher posts onto the
+  // strand (record_pending_pairing_approval). Assigning the std::function
+  // directly from the caller thread publishes its target and captures with
+  // no happens-before edge into the strand once sessions are live, so the
+  // swap is itself a bounded strand mutation.
+  impl_->run_on_strandAndWait(
+      [observer = std::move(observer)](Impl& impl) mutable {
+        impl.pairing_request_observer = std::move(observer);
+      });
 }
 
 // Bounded strand mutation shared by approve_pairing/reject_pairing: the
@@ -7239,7 +7248,13 @@ Result<void> Node::reject_pairing(DeviceEndpointKey peer, const RequestId& reque
 
 void Node::set_pairing_observer(NodePairingObserver observer) {
   if (!impl_) return;
-  impl_->pairing_observer = std::move(observer);
+  // Same strand contract as set_pairing_request_observer: pairing outcomes
+  // are delivered from strand context (pending-attempt deadlines, approval
+  // expiry/resolution), so arming the observer must be a strand mutation.
+  impl_->run_on_strandAndWait(
+      [observer = std::move(observer)](Impl& impl) mutable {
+        impl.pairing_observer = std::move(observer);
+      });
 }
 
 Result<std::vector<TrustGrantRecord>> Node::trust_grants_for(
