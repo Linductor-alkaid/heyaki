@@ -4,3 +4,5 @@
 !dependencies.lock
 !licenses.lock
 !transitive-dependencies.lock
+!patches
+!patches/**
