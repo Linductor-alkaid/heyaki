@@ -1,0 +1,39 @@
+diff --git a/include/rtc/utils.hpp b/include/rtc/utils.hpp
+index be27733..2361fce 100644
+--- a/include/rtc/utils.hpp
++++ b/include/rtc/utils.hpp
+@@ -109,6 +109,34 @@ public:
+ 	    : synchronized_callback<Args...>(std::forward<CArgs>(cargs)...) {}
+ 	~synchronized_stored_callback() {}
+ 
++	// The implicitly generated copy/move assignments copy `stored` outside the
++	// base mutex and race with set()/call() from other threads (e.g. a local
++	// resetCallbacks() concurrent with an internal close-triggered reset).
++	// Declaring them here also keeps hiding the base operator= overloads, so
++	// `= nullptr` keeps selecting the derived assignment, now lock-held.
++	// `set()` must stay unqualified: the virtual dispatch into the stored
++	// override is what replays a stored event into the incoming callback.
++	synchronized_stored_callback(const synchronized_stored_callback &other) { *this = other; }
++	synchronized_stored_callback(synchronized_stored_callback &&other) { *this = std::move(other); }
++
++	synchronized_stored_callback &operator=(const synchronized_stored_callback &other) {
++		if (this == &other)
++			return *this;
++		std::scoped_lock lock(this->mutex, other.mutex);
++		set(other.callback);
++		stored = other.stored;
++		return *this;
++	}
++
++	synchronized_stored_callback &operator=(synchronized_stored_callback &&other) {
++		if (this == &other)
++			return *this;
++		std::scoped_lock lock(this->mutex, other.mutex);
++		set(std::move(other.callback));
++		stored = std::move(other.stored);
++		return *this;
++	}
++
+ private:
+ 	void set(std::function<void(Args...)> func) {
+ 		synchronized_callback<Args...>::set(func);

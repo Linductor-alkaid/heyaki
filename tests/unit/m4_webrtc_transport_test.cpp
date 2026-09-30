@@ -305,6 +305,218 @@ TEST(M4WebRtcTransport, HostCandidateDataChannelUsesExecutorDispatcher) {
   EXPECT_EQ(shutdown.final_phase, heyaki::RuntimePhase::stopped);
 }
 
+// Regression guard for the TSAN data race on libdatachannel's
+// synchronized_stored_callback (Aki CI run 36671067469). The adapter teardown
+// path (WebRtcTransportSession::close -> Channel::close ->
+// rtc::DataChannel::resetCallbacks on a runtime dispatcher task) and the
+// internal close that the PEER's teardown triggers (PeerConnection::close /
+// remoteClose -> closeDataChannels -> DataChannel::close ->
+// Channel::resetCallbacks on libdatachannel's own processor thread) reset the
+// same rtc::DataChannel's callbacks with no happens-before edge between the
+// two threads. The unfixed synchronized_stored_callback copied `stored`
+// outside the base mutex in its implicit copy assignment, so two `= nullptr`
+// resets raced on those bytes; TSAN's vector clocks report such a race even
+// when the two accesses do not overlap in wall-clock time, because nothing
+// orders the dispatcher task against the libdatachannel processor thread.
+// Both ends are therefore closed concurrently from two dispatcher tasks that
+// one PhaseGate releases together, and neither close is ordered before the
+// other. Rounds re-connect fresh pairs to widen the scheduling window. The
+// gates are test-scoped and advance one phase per round: handlers installed
+// on the sessions keep firing from in-flight dispatcher drains even after
+// close(), so everything they capture must outlive every round.
+TEST(M4WebRtcTransport, ConcurrentTeardownDoesNotRaceStoredCallbacks) {
+  auto runtime = heyaki::Runtime::create_owned();
+  ASSERT_TRUE(runtime) << runtime.error_if()->safe_detail();
+  // Context topology: a context dispatches through a strand. Both sessions
+  // share ONE signaling context so their callback drains and the signaling
+  // forwarding stay serialized per pair (the contract the production node
+  // gives the adapter); the two closes are dispatched on two further
+  // contexts so neither close is ordered before the other and both can run
+  // concurrently against the libdatachannel teardown threads.
+  auto signal_context = runtime.value_if()->create_context(
+      heyaki::RuntimeContextKind::peer_session, "m4-webrtc-teardown-signal");
+  ASSERT_TRUE(signal_context) << signal_context.error_if()->safe_detail();
+  auto left_teardown_context = runtime.value_if()->create_context(
+      heyaki::RuntimeContextKind::peer_session, "m4-webrtc-teardown-left");
+  ASSERT_TRUE(left_teardown_context) << left_teardown_context.error_if()->safe_detail();
+  auto right_teardown_context = runtime.value_if()->create_context(
+      heyaki::RuntimeContextKind::peer_session, "m4-webrtc-teardown-right");
+  ASSERT_TRUE(right_teardown_context) << right_teardown_context.error_if()->safe_detail();
+  const auto dispatcher_signal = runtime_dispatcher(*signal_context.value_if());
+  const auto dispatcher_left = runtime_dispatcher(*left_teardown_context.value_if());
+  const auto dispatcher_right = runtime_dispatcher(*right_teardown_context.value_if());
+
+  constexpr int kTeardownRounds = 6;
+  // One gate per wait condition, one phase per round: round N waits for and
+  // advances phase N, so the gates never need to be recreated (and handlers
+  // captured by the sessions can never dangle).
+  executor::comm::PhaseGate left_connected("m4-teardown-left-connected");
+  executor::comm::PhaseGate right_connected("m4-teardown-right-connected");
+  executor::comm::PhaseGate right_channel_up("m4-teardown-right-channel-up");
+  executor::comm::PhaseGate data_flowing("m4-teardown-data-flowing");
+  executor::comm::PhaseGate teardown_go("m4-teardown-go");
+  executor::comm::PhaseGate left_closed("m4-teardown-left-closed");
+  executor::comm::PhaseGate right_closed("m4-teardown-right-closed");
+
+  for (int round = 1; round <= kTeardownRounds; ++round) {
+    const auto phase = static_cast<std::uint64_t>(round);
+    const std::string label = "m4-teardown-r" + std::to_string(round);
+
+    std::shared_ptr<WebRtcTransportSession> left;
+    std::shared_ptr<WebRtcTransportSession> right;
+    WebRtcTransportConfig left_config;
+    left_config.offerer = true;
+    left_config.signaling_path = heyaki::transport::SignalingPathKind::lan;
+    left_config.ice_servers.clear();
+    left_config.candidates.allow_server_reflexive = false;
+    left_config.candidates.allow_turn_udp = false;
+    WebRtcTransportConfig right_config = left_config;
+    right_config.offerer = false;
+
+    heyaki::transport::webrtc::WebRtcSignalingHandler left_signaling;
+    left_signaling.on_local_description =
+        [&](std::vector<std::byte> sdp, std::string type,
+            heyaki::DtlsFingerprint) {
+          ASSERT_TRUE(right);
+          EXPECT_TRUE(right->set_remote_description(sdp, type).has_value());
+        };
+    left_signaling.on_local_candidate = [&](std::vector<std::byte> candidate) {
+      ASSERT_TRUE(right);
+      EXPECT_TRUE(right->add_remote_candidate(candidate).has_value());
+    };
+    heyaki::transport::webrtc::WebRtcSignalingHandler right_signaling;
+    right_signaling.on_local_description =
+        [&](std::vector<std::byte> sdp, std::string type,
+            heyaki::DtlsFingerprint) {
+          ASSERT_TRUE(left);
+          EXPECT_TRUE(left->set_remote_description(sdp, type).has_value());
+        };
+    right_signaling.on_local_candidate = [&](std::vector<std::byte> candidate) {
+      ASSERT_TRUE(left);
+      EXPECT_TRUE(left->add_remote_candidate(candidate).has_value());
+    };
+
+    auto created_left = WebRtcTransportSession::create(left_config, dispatcher_signal,
+                                                       std::move(left_signaling));
+    ASSERT_TRUE(created_left) << created_left.error_if()->safe_detail();
+    left = *created_left.value_if();
+    auto created_right = WebRtcTransportSession::create(right_config, dispatcher_signal,
+                                                        std::move(right_signaling));
+    ASSERT_TRUE(created_right) << created_right.error_if()->safe_detail();
+    right = *created_right.value_if();
+
+    left->set_state_handler([&, phase](const heyaki::transport::TransportSessionSnapshot& snapshot) {
+      if (snapshot.state == TransportState::connected) (void)left_connected.advance_to(phase);
+    });
+    right->set_state_handler([&, phase](const heyaki::transport::TransportSessionSnapshot& snapshot) {
+      if (snapshot.state == TransportState::connected) (void)right_connected.advance_to(phase);
+    });
+    right->set_channel_handler([&, phase](ChannelKind, TransportChannel&) {
+      (void)right_channel_up.advance_to(phase);
+    });
+    right->set_message_handler([&, phase](TransportChannel&, std::vector<std::byte>) {
+      (void)data_flowing.advance_to(phase);
+    });
+
+    // The offered data channel gives both ends live synchronized_stored_callback
+    // members (open/closed/available callbacks) for the teardown to race on.
+    ChannelOptions options;
+    options.send_queue_bytes = 64U * 1024U;
+    options.max_message_bytes = 64U * 1024U;
+    ASSERT_TRUE(left->prepare_channel(ChannelKind::file, options));
+    // Owned by shared_ptr: the open completion can still fire while a later
+    // round is running (drains hold the session alive), so it must not
+    // capture round-stack storage.
+    auto left_channel =
+        std::make_shared<std::atomic<TransportChannel*>>(nullptr);
+    const auto started = left->start();
+    ASSERT_TRUE(started) << started.error_if()->safe_detail();
+    ASSERT_TRUE(left_connected.wait_for(phase, 10s));
+    ASSERT_TRUE(right_connected.wait_for(phase, 10s));
+
+    auto open_dispatched = dispatcher_signal(label + ".open-left", [&] {
+      left->async_open_channel(
+          ChannelKind::file, options,
+          [&left_channel, dispatcher_signal, label](
+              heyaki::Result<TransportChannel*> opened) {
+            // The answerer's stream can open (and the teardown can then fail
+            // this pending completion with transport_closed) before the
+            // offerer's own OpenEvent resolves — the same bounded
+            // interleaving the duplicate-kind test documents. Liveness is
+            // asserted through the answerer's channel handler gate below.
+            if (!opened) return;
+            left_channel->store(*opened.value_if(), std::memory_order_release);
+            // Keep messages in flight across the teardown: SCTP data still
+            // arriving while the closes run makes rtc threads invoke the
+            // stored callbacks concurrently with the reset paths — exactly
+            // the interleaving the unfixed synchronized_stored_callback
+            // loses on. Sending stops on the first failure (would_block or
+            // closed), leaving the queue drained by the rtc threads while
+            // the concurrent teardown proceeds.
+            auto burst_dispatched = dispatcher_signal(
+                label + ".burst", [left_channel] {
+                  const std::vector<std::byte> payload(64U * 1024U,
+                                                       std::byte{0x5bU});
+                  auto* channel = left_channel->load(std::memory_order_acquire);
+                  for (unsigned attempt = 0U;
+                       attempt < 64U && channel != nullptr; ++attempt) {
+                    if (!channel->send(payload)) break;
+                  }
+                  return heyaki::Result<void>::success();
+                });
+            EXPECT_TRUE(burst_dispatched)
+                << burst_dispatched.error_if()->safe_detail();
+          });
+      return heyaki::Result<void>::success();
+    });
+    ASSERT_TRUE(open_dispatched) << open_dispatched.error_if()->safe_detail();
+    // The offerer's completion plus the answerer's channel handler prove the
+    // data path is live on both ends before the concurrent teardown starts.
+    ASSERT_TRUE(right_channel_up.wait_for(phase, 10s))
+        << label << " left(opened=" << left->diagnostics().channels_opened
+        << ", dispatched=" << left->diagnostics().callbacks_dispatched
+        << ", rejected=" << left->diagnostics().callbacks_rejected
+        << ") right(opened=" << right->diagnostics().channels_opened
+        << ", dispatched=" << right->diagnostics().callbacks_dispatched
+        << ", rejected=" << right->diagnostics().channels_rejected << ")";
+    // Best effort: an unlucky open-completion interleaving may leave no
+    // channel to burst on; the channel-open gates above are the liveness
+    // contract, the burst only widens the race window.
+    EXPECT_TRUE(data_flowing.wait_for(phase, 10s))
+        << label << " left(opened=" << left->diagnostics().channels_opened
+        << ", dispatched=" << left->diagnostics().callbacks_dispatched
+        << ", rejected=" << left->diagnostics().callbacks_rejected
+        << ") right(opened=" << right->diagnostics().channels_opened
+        << ", dispatched=" << right->diagnostics().callbacks_dispatched
+        << ", rejected=" << right->diagnostics().callbacks_rejected << ")";
+
+    auto close_left = dispatcher_left(label + ".close-left", [&, phase] {
+      (void)teardown_go.wait_for(phase, 10s);
+      left->close(heyaki::transport::CloseReason::local_shutdown);
+      (void)left_closed.advance_to(phase);
+      return heyaki::Result<void>::success();
+    });
+    auto close_right = dispatcher_right(label + ".close-right", [&, phase] {
+      (void)teardown_go.wait_for(phase, 10s);
+      right->close(heyaki::transport::CloseReason::local_shutdown);
+      (void)right_closed.advance_to(phase);
+      return heyaki::Result<void>::success();
+    });
+    ASSERT_TRUE(close_left) << close_left.error_if()->safe_detail();
+    ASSERT_TRUE(close_right) << close_right.error_if()->safe_detail();
+    (void)teardown_go.advance_to(phase);
+    ASSERT_TRUE(left_closed.wait_for(phase, 10s));
+    ASSERT_TRUE(right_closed.wait_for(phase, 10s));
+    EXPECT_EQ(left->snapshot().state, TransportState::closed);
+    EXPECT_EQ(right->snapshot().state, TransportState::closed);
+  }
+
+  // The last round's sessions are released with the runtime teardown; every
+  // gate and handler capture outlives them.
+  const auto shutdown = runtime.value_if()->shutdown();
+  EXPECT_EQ(shutdown.final_phase, heyaki::RuntimePhase::stopped);
+}
+
 TEST(M4WebRtcTransport, PropagatesHighAndLowWaterBackpressure) {
   auto runtime = heyaki::Runtime::create_owned();
   ASSERT_TRUE(runtime) << runtime.error_if()->safe_detail();

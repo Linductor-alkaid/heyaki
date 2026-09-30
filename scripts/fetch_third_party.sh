@@ -30,6 +30,9 @@ Options:
   --list             Print the lock file entries and exit.
   -h, --help         Show this help.
 
+Vendored patches under third_party/patches/<name>/ are applied on top of the
+pinned commit after fetching and are required by --check.
+
 Environment:
   HEYAKI_DEPENDENCIES_LOCK  Override the dependency lock file.
   HEYAKI_THIRD_PARTY_DIR    Override the destination directory.
@@ -207,6 +210,88 @@ verify_submodules() {
   done < <(git -C "${heyaki_destination}" submodule status --recursive)
 }
 
+# Vendored patches live in third_party/patches/<name>/*.patch and are applied
+# on top of the pinned commit after every fetch. The tree of a dependency with
+# recorded patches is only valid in the fully patched state: every script run
+# restores that state, and verification fails when patches are missing or
+# partially applied.
+dependency_patch_files() {
+  local heyaki_name=$1
+  local heyaki_patch_dir="${heyaki_repo_root}/third_party/patches/${heyaki_name}"
+  local -a heyaki_patches=()
+  local heyaki_entry
+
+  [[ -d "${heyaki_patch_dir}" ]] || return 0
+  for heyaki_entry in "${heyaki_patch_dir}"/*.patch; do
+    [[ -f "${heyaki_entry}" ]] || continue
+    heyaki_patches+=("${heyaki_entry}")
+  done
+  ((${#heyaki_patches[@]} == 0)) && return 0
+  printf '%s\n' "${heyaki_patches[@]}" | LC_ALL=C sort
+}
+
+patches_applied_dependency() {
+  local heyaki_name=$1
+  local heyaki_destination=$2
+  local heyaki_patch
+  local heyaki_any=false
+
+  while IFS= read -r heyaki_patch; do
+    [[ -z "${heyaki_patch}" ]] && continue
+    heyaki_any=true
+    git -C "${heyaki_destination}" apply --reverse --check --ignore-whitespace \
+      --whitespace=nowarn "${heyaki_patch}" 2>/dev/null || return 1
+  done < <(dependency_patch_files "${heyaki_name}")
+  [[ "${heyaki_any}" == "true" ]]
+}
+
+# Reverses applied patches and rejects any dirt the recorded patches do not
+# explain, leaving the tree exactly at the pinned commit.
+restore_pristine_dependency() {
+  local heyaki_name=$1
+  local heyaki_destination=$2
+  local heyaki_patch
+  local heyaki_status
+
+  while IFS= read -r heyaki_patch; do
+    [[ -z "${heyaki_patch}" ]] && continue
+    if git -C "${heyaki_destination}" apply --reverse --check --ignore-whitespace \
+      --whitespace=nowarn "${heyaki_patch}" 2>/dev/null; then
+      git -C "${heyaki_destination}" apply --reverse --ignore-whitespace \
+        --whitespace=nowarn "${heyaki_patch}"
+    elif ! git -C "${heyaki_destination}" apply --check --ignore-whitespace \
+      --whitespace=nowarn "${heyaki_patch}" 2>/dev/null; then
+      fail "${heyaki_name} matches neither the pinned commit nor the recorded patch: ${heyaki_patch}"
+    fi
+  done < <(dependency_patch_files "${heyaki_name}")
+
+  heyaki_status=$(git -C "${heyaki_destination}" status --porcelain --untracked-files=all)
+  if [[ -n "${heyaki_status}" ]]; then
+    fail "${heyaki_name} has local changes beyond recorded patches; preserve or remove them before syncing"
+  fi
+}
+
+apply_dependency_patches() {
+  local heyaki_name=$1
+  local heyaki_destination=$2
+  local heyaki_patch
+
+  while IFS= read -r heyaki_patch; do
+    [[ -z "${heyaki_patch}" ]] && continue
+    if git -C "${heyaki_destination}" apply --reverse --check --ignore-whitespace \
+      --whitespace=nowarn "${heyaki_patch}" 2>/dev/null; then
+      log "${heyaki_name} patch already applied: $(basename -- "${heyaki_patch}")"
+    elif git -C "${heyaki_destination}" apply --check --ignore-whitespace \
+      --whitespace=nowarn "${heyaki_patch}" 2>/dev/null; then
+      git -C "${heyaki_destination}" apply --ignore-whitespace \
+        --whitespace=nowarn "${heyaki_patch}"
+      log "${heyaki_name} applied patch: $(basename -- "${heyaki_patch}")"
+    else
+      fail "${heyaki_name} patch does not apply: ${heyaki_patch}"
+    fi
+  done < <(dependency_patch_files "${heyaki_name}")
+}
+
 verify_dependency() {
   local heyaki_name=$1
   local heyaki_url=$2
@@ -215,12 +300,24 @@ verify_dependency() {
   local heyaki_destination="${heyaki_third_party_dir}/${heyaki_name}"
   local heyaki_actual_url
   local heyaki_actual_commit
+  local heyaki_status
 
   [[ -d "${heyaki_destination}/.git" ]] || fail "${heyaki_name} is not fetched: ${heyaki_destination}"
   heyaki_actual_url=$(git -C "${heyaki_destination}" remote get-url origin)
   [[ "${heyaki_actual_url}" == "${heyaki_url}" ]] || \
     fail "${heyaki_name} origin mismatch: expected ${heyaki_url}, got ${heyaki_actual_url}"
-  ensure_clean_repository "${heyaki_name}" "${heyaki_destination}"
+  if dependency_patch_files "${heyaki_name}" | grep -q .; then
+    if ! patches_applied_dependency "${heyaki_name}" "${heyaki_destination}"; then
+      fail "${heyaki_name} recorded patches are not applied; run: scripts/fetch_third_party.sh ${heyaki_name}"
+    fi
+    # Only the tracked-file modifications of the applied patches are allowed.
+    heyaki_status=$(git -C "${heyaki_destination}" status --porcelain --untracked-files=all)
+    if [[ -n "$(printf '%s\n' "${heyaki_status}" | grep -v '^ M ')" ]]; then
+      fail "${heyaki_name} has local changes beyond recorded patches"
+    fi
+  else
+    ensure_clean_repository "${heyaki_name}" "${heyaki_destination}"
+  fi
   heyaki_actual_commit=$(git -C "${heyaki_destination}" rev-parse HEAD)
   [[ "${heyaki_actual_commit}" == "${heyaki_commit}" ]] || \
     fail "${heyaki_name} commit mismatch: expected ${heyaki_commit}, got ${heyaki_actual_commit}"
@@ -279,7 +376,7 @@ sync_existing_repository() {
   heyaki_actual_url=$(git -C "${heyaki_destination}" remote get-url origin)
   [[ "${heyaki_actual_url}" == "${heyaki_url}" ]] || \
     fail "${heyaki_name} origin mismatch: expected ${heyaki_url}, got ${heyaki_actual_url}"
-  ensure_clean_repository "${heyaki_name}" "${heyaki_destination}"
+  restore_pristine_dependency "${heyaki_name}" "${heyaki_destination}"
 
   heyaki_actual_commit=$(git -C "${heyaki_destination}" rev-parse HEAD)
   if [[ "${heyaki_actual_commit}" != "${heyaki_commit}" ]]; then
@@ -319,6 +416,7 @@ for heyaki_record in "${heyaki_dependency_records[@]}"; do
     initialize_repository "${heyaki_name}" "${heyaki_url}" "${heyaki_ref}" "${heyaki_commit}" "${heyaki_recursive}"
   fi
 
+  apply_dependency_patches "${heyaki_name}" "${heyaki_destination}"
   verify_dependency "${heyaki_name}" "${heyaki_url}" "${heyaki_commit}" "${heyaki_recursive}"
 done
 
