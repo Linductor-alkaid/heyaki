@@ -146,6 +146,11 @@ struct PeerSessionDiagnostics {
   std::uint64_t pairing_requests_received{};
   std::uint64_t pairing_results_sent{};
   std::uint64_t pairing_results_received{};
+  // Last consumed initiator-side pairing result: lets the Node resolve an
+  // admitted pairing on an already-authorized session (renewal, reverse
+  // grant) by request id instead of mistaking raw counters for success.
+  RequestId pairing_result_request_id{};
+  StableStatus pairing_result_status{StableStatus::unspecified};
   // Scopes in force for this session; empty while untrusted in legacy mode
   // means unrestricted (M4 semantics).
   std::vector<std::string> authorized_scopes;

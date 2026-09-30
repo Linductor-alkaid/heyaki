@@ -574,6 +574,137 @@ TEST(M5PeerSession, LateResultAfterAuthorizationIsCountedAndIgnored) {
   EXPECT_TRUE(harness.right->authenticated());
 }
 
+// Issue #3: an already-authorized target answers a legal pairing request
+// (repair / renewal) with a stable result and WITHOUT closing or re-upgrading
+// its session: the fresh grant lives in the TrustStore, the session keeps its
+// state and scopes. The initiator-side result is consumed as a late frame on
+// the authorized requester (counted, ignored).
+TEST(M5PeerSession, AuthorizedTargetAnswersPairingRequestWithoutClosing) {
+  M5SessionPair harness;
+  // Mutual pre-trust: both sides authorize at hello; the session under test
+  // (right, the pairing target) is authorized while a pairing request lands.
+  harness.left_trust[harness.right_identity.value_if()->device_id()] = {"message.send"};
+  harness.right_trust[harness.left_identity.value_if()->device_id()] = {"message.send"};
+  ASSERT_TRUE(harness.left->start());
+  ASSERT_TRUE(harness.right->start());
+  harness.pump_all();
+  ASSERT_TRUE(harness.left->authenticated());
+  ASSERT_TRUE(harness.right->authenticated());
+
+  PairingRequestBody renewal;
+  renewal.request_id = deterministic_request_id(0xD1U);
+  renewal.nonce = filled<PairingNonce>(0x3U);
+  renewal.nonce[0] = std::byte{0x5U};
+  renewal.password_utf8 = "target-password";
+  renewal.requested_scopes = {"stream.open"};
+  auto encoded = encode_pairing_request(renewal);
+  ASSERT_TRUE(encoded);
+  Frame frame;
+  frame.type = static_cast<std::uint8_t>(FrameType::pairing_request);
+  frame.channel_id = 0U;
+  frame.message_id = filled<MessageId>(0x7U);
+  frame.payload = std::move(*encoded.value_if());
+  pair_loopback_control_send(harness, frame);
+  // The helper pumps left before right answers; drain the answer into the
+  // authorized requester.
+  harness.pump_all();
+
+  // The authorized target evaluated and answered; the session survived with
+  // its original scopes (no re-upgrade to the renewal's grant scopes).
+  const auto right_state = harness.right->diagnostics();
+  EXPECT_EQ(right_state.state, PeerSessionState::authenticated);
+  EXPECT_EQ(right_state.pairing_requests_received, 1U);
+  EXPECT_EQ(right_state.pairing_results_sent, 1U);
+  EXPECT_EQ(harness.right->authorized_scopes(),
+            (std::vector<std::string>{"message.send"}));
+  ASSERT_EQ(harness.evaluator_request_ids.size(), 1U);
+  EXPECT_EQ(harness.evaluator_request_ids[0], renewal.request_id);
+
+  // The authorized requester consumed the result as a late frame: counted,
+  // ignored, no grant sink re-run, session alive.
+  const auto left_state = harness.left->diagnostics();
+  EXPECT_EQ(left_state.state, PeerSessionState::authenticated);
+  EXPECT_EQ(left_state.pairing_results_received, 1U);
+  EXPECT_EQ(harness.grant_sink_calls, 0U);
+  EXPECT_TRUE(harness.left->authenticated());
+  EXPECT_TRUE(harness.right->authenticated());
+}
+
+// Issue #3: a malformed pairing request on an authorized session is counted
+// and ignored - no result frame, no session failure.
+TEST(M5PeerSession, MalformedPairingRequestOnAuthorizedTargetIsIgnored) {
+  M5SessionPair harness;
+  harness.left_trust[harness.right_identity.value_if()->device_id()] = {"message.send"};
+  harness.right_trust[harness.left_identity.value_if()->device_id()] = {"message.send"};
+  ASSERT_TRUE(harness.left->start());
+  ASSERT_TRUE(harness.right->start());
+  harness.pump_all();
+  ASSERT_TRUE(harness.left->authenticated());
+  ASSERT_TRUE(harness.right->authenticated());
+
+  Frame garbage;
+  garbage.type = static_cast<std::uint8_t>(FrameType::pairing_request);
+  garbage.channel_id = 0U;
+  garbage.message_id = filled<MessageId>(0x8U);
+  garbage.payload.assign(16U, std::byte{0});
+  pair_loopback_control_send(harness, garbage);
+
+  const auto right_state = harness.right->diagnostics();
+  EXPECT_EQ(right_state.state, PeerSessionState::authenticated);
+  EXPECT_EQ(right_state.pairing_requests_received, 1U);
+  // No answer for malformed input, and the evaluator never ran.
+  EXPECT_EQ(right_state.pairing_results_sent, 0U);
+  EXPECT_TRUE(harness.evaluator_request_ids.empty());
+  // Nothing crossed back to the requester either.
+  EXPECT_EQ(harness.left->diagnostics().pairing_results_received, 0U);
+  EXPECT_TRUE(harness.left->authenticated());
+  EXPECT_TRUE(harness.right->authenticated());
+}
+
+// Issue #3: an authorized initiator with a pending request consumes a denial
+// result and STAYS authorized - the diagnostics record the consumed result
+// binding (request id + status) instead of the session dying.
+TEST(M5PeerSession, AuthorizedInitiatorConsumesDenialResultAndStaysAuthorized) {
+  M5SessionPair harness;
+  harness.left_trust[harness.right_identity.value_if()->device_id()] = {"message.send"};
+  harness.right_trust[harness.left_identity.value_if()->device_id()] = {"message.send"};
+  ASSERT_TRUE(harness.left->start());
+  ASSERT_TRUE(harness.right->start());
+  harness.pump_all();
+  ASSERT_TRUE(harness.left->authenticated());
+  ASSERT_TRUE(harness.right->authenticated());
+
+  const auto request_id = deterministic_request_id(0xE1U);
+  const auto submitted = harness.left->submit_pairing_request(
+      request_id, "target-password", {"stream.open"});
+  ASSERT_TRUE(submitted) << submitted.error_if()->safe_detail();
+
+  // Inject a denial for the pending id toward the authorized initiator. The
+  // helper pumps the target first (its own ok answer for the submitted
+  // request queues behind the injected denial), then the initiator drains
+  // the denial and the late ok - both consumed without a failure.
+  PairingResultBody denial;
+  denial.request_id = request_id;
+  denial.status = StableStatus::permission_denied;
+  pair_loopback_control_send_to_initiator(
+      harness, pairing_result_frame(denial, 0x9U));
+
+  const auto left_state = harness.left->diagnostics();
+  EXPECT_EQ(left_state.state, PeerSessionState::authenticated);
+  EXPECT_TRUE(harness.left->authenticated());
+  EXPECT_FALSE(harness.left->pairing_restricted());
+  EXPECT_EQ(harness.left->authorized_scopes(),
+            (std::vector<std::string>{"message.send"}));
+  // The consumed result binding is published for the Node's active-session
+  // pairing resolution.
+  EXPECT_EQ(left_state.pairing_result_request_id, request_id);
+  EXPECT_EQ(left_state.pairing_result_status, StableStatus::permission_denied);
+  // Denial consumed + the target's ok answer for the same request ignored.
+  EXPECT_EQ(left_state.pairing_results_received, 2U);
+  EXPECT_FALSE(left_state.last_error.has_value());
+  EXPECT_TRUE(harness.right->authenticated());
+}
+
 TEST(M5ByteStream, StreamsCarryBytesWindowsAndHalfClose) {
   M5SessionPair harness;
   harness.left_trust[harness.right_identity.value_if()->device_id()] = {"stream.open"};
