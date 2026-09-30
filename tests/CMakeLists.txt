@@ -910,6 +910,28 @@ heyaki_add_runtime_test(
   heyaki_m5_pairing heyaki_m5_pairing_service_tests
   "unit;security;profile;session")
 
+# Issue #1 pairing admission outcome: the Node-level pair_peer admission
+# contract (bounded synchronous admission, stable wire request id, exactly
+# one pairing-observer terminal outcome per admitted request, duplicate
+# rejection, deadline expiration) over a real two-node LAN pair.
+add_executable(heyaki_m5_node_pairing_tests unit/m5_node_pairing_test.cpp)
+heyaki_enable_executor_exception_adapter_source(unit/m5_node_pairing_test.cpp)
+target_link_libraries(heyaki_m5_node_pairing_tests PRIVATE
+  heyaki::client
+  executor::executor
+  GTest::gtest_main
+  OpenSSL::SSL)
+heyaki_target_use_pinned_boost_asio(heyaki_m5_node_pairing_tests)
+heyaki_configure_target(heyaki_m5_node_pairing_tests)
+target_compile_definitions(heyaki_m5_node_pairing_tests PRIVATE
+  "HEYAKI_M5_NODE_PAIRING_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}/m5-node-pairing\"")
+heyaki_add_runtime_test(
+  heyaki_m5_node_pairing heyaki_m5_node_pairing_tests
+  "unit;session;security;protocol;concurrency")
+set_tests_properties(heyaki_m5_node_pairing PROPERTIES
+  RESOURCE_LOCK heyaki_m3a_profile_state
+  TIMEOUT 180)
+
 add_executable(heyaki_m4_peer_session_tests unit/m4_peer_session_test.cpp)
 target_link_libraries(heyaki_m4_peer_session_tests PRIVATE
   heyaki::client

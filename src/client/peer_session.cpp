@@ -27,14 +27,6 @@ MessageId random_message_id() {
   return MessageId{bytes};
 }
 
-RequestId random_request_id() {
-  RequestId::Storage bytes{};
-  do {
-    randombytes_buf(bytes.data(), bytes.size());
-  } while (RequestId{bytes}.is_zero());
-  return RequestId{bytes};
-}
-
 PairingNonce random_pairing_nonce() {
   PairingNonce nonce{};
   do {
@@ -810,6 +802,14 @@ void PeerSession::handle_pairing_request(FrameView frame) {
 
 void PeerSession::handle_pairing_result(FrameView frame) {
   if (!pending_pairing_.has_value()) {
+    if (authenticated()) {
+      // Trust-authorized session: a late or retransmitted result for an
+      // already-consumed request is counted and ignored - it must never
+      // resurrect a terminal state or fail a healthy session.
+      ++diagnostics_.pairing_results_received;
+      notify();
+      return;
+    }
     fail(session_error(ErrorCode::protocol, "pairing_result_unexpected"));
     return;
   }
@@ -872,7 +872,8 @@ StableStatus PeerSession::status_for_error(const Error& error) const noexcept {
 }
 
 Result<void> PeerSession::submit_pairing_request(
-    std::string_view password_utf8, std::vector<std::string> requested_scopes) {  // Observer reentrancy guard: a send can fail the session synchronously,
+    const RequestId& request_id, std::string_view password_utf8,
+    std::vector<std::string> requested_scopes) {  // Observer reentrancy guard: a send can fail the session synchronously,
   // and the Node observer may drop the last external reference (retiring the
   // attempt) while this call is still on the stack. Holding a strong
   // reference for the duration of every public entry point keeps the object
@@ -895,7 +896,7 @@ Result<void> PeerSession::submit_pairing_request(
         session_error(ErrorCode::pairing_denied, "pairing_capability_absent"));
   }
   PairingRequestBody request;
-  request.request_id = random_request_id();
+  request.request_id = request_id;
   request.nonce = random_pairing_nonce();
   request.password_utf8 = std::string{password_utf8};
   request.requested_scopes = std::move(requested_scopes);
