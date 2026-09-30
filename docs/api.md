@@ -192,6 +192,19 @@ persistence) and reports whether the node stopped within budget
 Unknown peers always land in `PairingRestricted` first (default-deny, M5);
 after pairing they authenticate straight into `Authorized`.
 
+## Basic communication without device trust
+
+`NodeConfig::basic_communication` (default off) opts an app into basic
+communication on identity-verified, untrusted sessions: text/image messages
+and file pushes into the configured `file_receive_roots` work without a
+device TrustGrant or password pairing, in both directions (each end enforces
+its own policy on its own side, so a one-sided opt-in fails explicitly on
+the refusing end). The capability never covers shell, RPC, remote events,
+byte streams, or the gateway, and never creates or updates a TrustGrant. The
+session snapshot reports the policy-derived capabilities in `policy_scopes`
+while `authorized_scopes` stays grant-only and empty; a later successful
+pairing supersedes the policy for that session.
+
 ## Pairing and trust
 
 `pair_peer(peer, password, requested_scopes)` returns `Result<RequestId>`:

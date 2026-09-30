@@ -186,6 +186,12 @@ struct NodePeerSessionSnapshot {
   // authorized sessions carry the effective grant scopes.
   bool pairing_restricted{false};
   std::vector<std::string> authorized_scopes;
+  // Opt-in basic communication is in force on this identity-verified,
+  // untrusted session: `policy_scopes` lists the policy-derived capabilities
+  // (message.send, file.push:<root>) in force WITHOUT any TrustGrant. Always
+  // disjoint from `authorized_scopes`, which stays grant-only.
+  bool basic_communication{false};
+  std::vector<std::string> policy_scopes;
   std::optional<Error> error;
 };
 
@@ -362,6 +368,13 @@ struct NodeConfig {
   std::chrono::milliseconds pairing_backoff_max{0};
   // Optional grant TTL; 0 disables expiry.
   std::uint64_t pairing_grant_ttl_milliseconds{0U};
+  // Opt-in basic communication on identity-verified, untrusted sessions:
+  // text/image messages and file pushes into the configured receive roots
+  // (`file_receive_roots`) work without a device TrustGrant or password
+  // pairing. Never grants shell, RPC, remote events, byte streams, or
+  // gateway access, and never creates or updates a TrustGrant; each end
+  // enforces its own policy on its own side. Default off.
+  bool basic_communication{false};
   // Bounded window for one admitted pairing attempt: the initiator fails
   // the attempt when no terminal outcome arrived inside the window, and the
   // receiver rejects requests evaluated after it. Zero keeps the protocol
@@ -401,7 +414,6 @@ struct NodeConfig {
 using NodePairingOutcome = Result<std::vector<std::string>>;
 using NodePairingObserver =
     std::function<void(const DeviceEndpointKey& peer, const NodePairingOutcome& outcome)>;
-
 // Options for Node::open_byte_stream.
 struct NodeByteStreamOptions {
   std::uint64_t receive_window_bytes{256U * 1024U};

@@ -932,6 +932,38 @@ set_tests_properties(heyaki_m5_node_pairing PROPERTIES
   RESOURCE_LOCK heyaki_m3a_profile_state
   TIMEOUT 180)
 
+# HEY-20260930-003 (issue #4): opt-in basic communication on
+# identity-verified, device-untrusted sessions. Node-level dual-instance
+# scenarios over a real LAN pair (policy carries message/file only, default
+# denial on a disabled end, grant-only isolation for every other capability,
+# pairing supersession, receive-root whitelist) plus session-level wire
+# tests through PeerSession::create (the basic config fields are in force
+# only on that construction path).
+add_executable(heyaki_m5_basic_communication_tests
+  unit/m5_basic_communication_test.cpp)
+heyaki_enable_executor_exception_adapter_source(
+  unit/m5_basic_communication_test.cpp)
+target_link_libraries(heyaki_m5_basic_communication_tests PRIVATE
+  heyaki::client
+  heyaki::core
+  executor::executor
+  GTest::gtest_main
+  OpenSSL::SSL)
+heyaki_target_use_pinned_boost_asio(heyaki_m5_basic_communication_tests)
+heyaki_configure_target(heyaki_m5_basic_communication_tests)
+target_include_directories(heyaki_m5_basic_communication_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/client"
+  "${CMAKE_CURRENT_SOURCE_DIR}/unit")
+target_compile_definitions(heyaki_m5_basic_communication_tests PRIVATE
+  "HEYAKI_M5_BASIC_COMM_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}/m5-basic-comm\"")
+heyaki_add_runtime_test(
+  heyaki_m5_basic_communication heyaki_m5_basic_communication_tests
+  "unit;session;security;protocol;concurrency")
+set_tests_properties(heyaki_m5_basic_communication PROPERTIES
+  RESOURCE_LOCK heyaki_m3a_profile_state
+  TIMEOUT 240)
+
 add_executable(heyaki_m4_peer_session_tests unit/m4_peer_session_test.cpp)
 target_link_libraries(heyaki_m4_peer_session_tests PRIVATE
   heyaki::client

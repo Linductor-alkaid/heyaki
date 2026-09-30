@@ -3102,6 +3102,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
          .limits = Limits{},
          .channel_budgets = session::ChannelBudgetConfig{},
          .pairing_deadline = pairing_deadline,
+         .basic_communication = basic_communication,
+         .basic_communication_scopes = basic_communication_scopes,
          // The successor session re-runs the same trust adjudication: a
          // grant revoked during the old session does not carry over.
          .wall_clock = unix_milliseconds_now,
@@ -3141,6 +3143,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
             diagnostics.negotiated_capabilities;
         iterator->second.snapshot.pairing_restricted = false;
         iterator->second.snapshot.authorized_scopes = diagnostics.authorized_scopes;
+        iterator->second.snapshot.basic_communication = false;
+        iterator->second.snapshot.policy_scopes.clear();
         connectivity_metrics.record_authenticated(
             peer_session_snapshot(iterator->second), iterator->second.begun_at,
             std::chrono::steady_clock::now());
@@ -3191,12 +3195,28 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         break;
       }
       case PeerSessionState::pairing_restricted:
-        // Identity verified, trust absent: the session stays restricted and
-        // only pairing frames flow (RULE-03).
+        // Identity verified, trust absent: the session stays restricted.
+        // Pairing frames always flow (RULE-03); with the opt-in basic
+        // communication policy in force, message/file also flow under the
+        // policy scopes, which stay distinct from the (empty) grant set.
         iterator->second.snapshot.state = NodePeerSessionState::pairing_restricted;
         iterator->second.snapshot.pairing_restricted = true;
         iterator->second.snapshot.authorized_scopes.clear();
+        iterator->second.snapshot.basic_communication = diagnostics.basic_communication;
+        iterator->second.snapshot.policy_scopes = diagnostics.policy_scopes;
         ++connectivity_metrics.sessions_pairing_restricted;
+        if (diagnostics.basic_communication) {
+          // Attach the message/file services eagerly: a peer-initiated
+          // message or push must find its domain handler on the first
+          // inbound frame, without this side having initiated anything.
+          auto weak = weak_from_this();
+          const auto service_peer = iterator->second.snapshot.peer;
+          boost::asio::post(strand, [weak, service_peer] {
+            if (auto self = weak.lock()) {
+              self->ensure_peer_services(service_peer);
+            }
+          });
+        }
         if (coordinator) {
           (void)coordinator->cancel_attempt(request_id,
                                             std::chrono::steady_clock::now());
@@ -3302,6 +3322,21 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     const auto iterator = peer_attempts.find(index->second);
     if (iterator == peer_attempts.end()) return nullptr;
     if (!iterator->second.session || !iterator->second.session->authenticated()) {
+      return nullptr;
+    }
+    return &iterator->second;
+  }
+
+  // Message/file exchange on an identity-verified, untrusted session: only
+  // when the NodeConfig opted into basic communication and the session has
+  // the policy in force. Never carries shell/RPC/event/stream/gateway.
+  PeerAttempt* basic_communication_attempt(const DeviceEndpointKey& peer) {
+    const auto index = peer_attempt_by_endpoint.find(peer);
+    if (index == peer_attempt_by_endpoint.end()) return nullptr;
+    const auto iterator = peer_attempts.find(index->second);
+    if (iterator == peer_attempts.end()) return nullptr;
+    if (!iterator->second.session ||
+        !iterator->second.session->basic_communication_active()) {
       return nullptr;
     }
     return &iterator->second;
@@ -3535,13 +3570,15 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
 
   static bool session_scope_covers(const PeerSession& session, std::string_view scope) {
     // Default deny (RULE-03/M5-12): the Node always runs real trust
-    // adjudication, so an empty effective scope set grants nothing.
+    // adjudication, so an empty effective scope set grants nothing. A grant
+    // scope always wins; the opt-in basic communication policy covers its
+    // own scope list only while the session is untrusted.
     for (const auto& granted : session.authorized_scopes()) {
       if (trust_scope_covers(granted, scope)) {
         return true;
       }
     }
-    return false;
+    return session.policy_scope_covers(scope);
   }
 
   // ---- M6 service sinks ----
@@ -3642,10 +3679,19 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return;
     }
     auto* attempt = authenticated_attempt(peer);
-    if (attempt == nullptr || attempt->session == nullptr) {
+    const bool authorized = attempt != nullptr && attempt->session != nullptr;
+    std::shared_ptr<PeerSession> session;
+    if (authorized) {
+      session = attempt->session;
+    } else if (auto* basic_attempt = basic_communication_attempt(peer);
+               basic_attempt != nullptr && basic_attempt->session != nullptr) {
+      // Opt-in basic communication (M5-15): identity verified, no
+      // TrustGrant. Only the message and file services below are installed;
+      // RPC, events, shell, streams, and the gateway stay grant-only.
+      session = basic_attempt->session;
+    } else {
       return;
     }
-    const auto session = attempt->session;
     if (!message_services.contains(peer)) {
       auto service = std::make_shared<MessageService>(
           *session, peer, message_service_config, service_dispatch(),
@@ -3664,7 +3710,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       service->set_ack_sink(&Node::Impl::message_ack_sink, this);
       message_services.emplace(peer, std::move(service));
     }
-    if (!rpc_services.contains(peer)) {
+    if (authorized && !rpc_services.contains(peer)) {
       auto service = std::make_shared<RpcService>(
           *session, peer, rpc_service_config, service_registry,
           cancellable_service_dispatch(),
@@ -3693,7 +3739,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         }
       }
     }
-    if (!event_services.contains(peer)) {
+    if (authorized && !event_services.contains(peer)) {
       auto service = std::make_shared<EventService>(
           *session, peer, identity.device_id(), event_service_config, service_dispatch(),
           [session](std::string_view scope) {
@@ -3732,7 +3778,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       service->set_event_sink(&Node::Impl::file_event_sink, this);
       file_services.emplace(peer, std::move(service));
     }
-    if (!shell_services.contains(peer)) {
+    if (authorized && !shell_services.contains(peer)) {
       auto service = std::make_shared<ShellService>(
           *session, peer, shell_service_config, shell_pty,
           [session](std::string_view scope) {
@@ -3750,7 +3796,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       service->set_audit_sink(&Node::Impl::shell_audit_sink, this);
       shell_services.emplace(peer, std::move(service));
     }
-    if (!gateway_services.contains(peer)) {
+    if (authorized && !gateway_services.contains(peer)) {
       // Serving side (M10-07): only with an explicitly configured profile
       // set — the default stays off and inbound gateway opens reset with
       // `unimplemented` from the ByteStream path.
@@ -3886,6 +3932,11 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
 
   Result<MessageId> send_message_strand(DeviceEndpointKey peer, MessageEnvelope envelope) {
     auto* attempt = authenticated_attempt(peer);
+    if (attempt == nullptr) {
+      // Opt-in basic communication: an identity-verified untrusted session
+      // with the policy in force may exchange messages without a grant.
+      attempt = basic_communication_attempt(peer);
+    }
     if (attempt == nullptr || attempt->session == nullptr) {
       // No authorized session: immediate peer_offline, never an offline
       // queue (M6-06).
@@ -5021,6 +5072,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
                    result, pending_request_id, pending_nonce, peer_device,
                    peer_public_key, requested_scopes);
              },
+         .basic_communication = basic_communication,
+         .basic_communication_scopes = basic_communication_scopes,
          .wall_clock = unix_milliseconds_now,
          .initiator_owned_domains = {session::ChannelDomain::event,
                                         session::ChannelDomain::file,
@@ -6375,6 +6428,10 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   NodeMessageInboundHandler message_inbound_handler;
   NodeMessageAckObserver message_ack_observer;
   MessageServiceConfig message_service_config{};
+  // Opt-in basic communication (M5-15): the flag plus the derived policy
+  // scope list (message.send + file.push per configured receive root).
+  bool basic_communication{false};
+  std::vector<std::string> basic_communication_scopes;
   RpcServiceConfig rpc_service_config{};
   EventServiceConfig event_service_config{};
   FileServiceConfig file_service_config{};
@@ -6601,6 +6658,13 @@ Result<Node> Node::create(NodeConfig config) {
   if (config.event_max_subscriptions_per_peer > 0U) {
     impl->event_service_config.max_subscriptions_per_peer =
         config.event_max_subscriptions_per_peer;
+  }
+  impl->basic_communication = config.basic_communication;
+  if (config.basic_communication) {
+    impl->basic_communication_scopes.push_back("message.send");
+    for (const auto& root : config.file_receive_roots) {
+      impl->basic_communication_scopes.push_back("file.push:" + root.name);
+    }
   }
   impl->file_service_config.receive_roots = std::move(config.file_receive_roots);
   impl->file_service_config.max_peer_receive_bytes = config.file_max_peer_receive_bytes;
@@ -7074,12 +7138,16 @@ Result<MessageId> Node::send_message(const DeviceEndpointKey& peer,
   }
   const auto id = envelope.message_id;
   // M6-06: no authorized session means an immediate peer_offline — the
-  // library never queues messages for an offline peer.
+  // library never queues messages for an offline peer. Opt-in basic
+  // communication extends exchange to identity-verified untrusted sessions
+  // with the policy in force; the serving side enforces its own policy.
   const auto sessions = impl_->peer_session_snapshots.load().value;
   const auto authorized =
       std::any_of(sessions.begin(), sessions.end(), [&](const auto& session) {
         return session.peer == peer &&
-               session.state == NodePeerSessionState::authenticated;
+               (session.state == NodePeerSessionState::authenticated ||
+                (session.state == NodePeerSessionState::pairing_restricted &&
+                 session.basic_communication));
       });
   if (!authorized) {
     return Result<MessageId>::failure(node_error(ErrorCode::peer_offline,
@@ -7361,12 +7429,17 @@ Result<TransferId> Node::push_file(const DeviceEndpointKey& peer, std::string ro
         node_error(ErrorCode::configuration, "file_name_invalid"));
   }
   const auto sessions = impl_->peer_session_snapshots.load().value;
-  const auto authorized =
+  const auto exchangeable =
       std::any_of(sessions.begin(), sessions.end(), [&](const auto& session) {
         return session.peer == peer &&
-               session.state == NodePeerSessionState::authenticated;
+               (session.state == NodePeerSessionState::authenticated ||
+                // Opt-in basic communication: file pushes into the
+                // configured receive roots work without a TrustGrant; the
+                // serving side still enforces its own policy scope check.
+                (session.state == NodePeerSessionState::pairing_restricted &&
+                 session.basic_communication));
       });
-  if (!authorized) {
+  if (!exchangeable) {
     return Result<TransferId>::failure(
         node_error(ErrorCode::peer_offline, "peer_session_missing"));
   }
