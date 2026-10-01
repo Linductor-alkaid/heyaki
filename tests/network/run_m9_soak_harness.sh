@@ -336,7 +336,10 @@ SSL_CERT_FILE="${work_dir}/ca.pem" "${matrix_bin}" run "${first_db}" matrix.firs
 initiator_pid=$!
 
 for cycle in $(seq 1 "${session_cycles}"); do
-  wait_log "${initiator_log}" "SOAK_CYCLE idx=${cycle} state=work-done" 120 ||
+  # The per-cycle ceiling must cover the responder kill/respawn (relay
+  # restart + re-login measured ~80 s on loaded runners) plus the re-dial
+  # and the m6/m7 work; 120 s left no headroom there.
+  wait_log "${initiator_log}" "SOAK_CYCLE idx=${cycle} state=work-done" 240 ||
     fail "session cycle ${cycle} never reached work-done"
   # Unclean peer death: the authenticated session must reach a terminal state
   # without any close handshake. The node waits internally for the backend's
