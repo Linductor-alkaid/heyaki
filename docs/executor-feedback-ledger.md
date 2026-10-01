@@ -17,6 +17,43 @@
 
 ---
 
+## 上游收敛状态（2026-10-02 pin 升级）
+
+executor 上游 master 前进至 `e236273`（v0.5.2 标签 + 20 个后续提交，PR #196–#207，
+git describe `v0.5.2-20`），heyaki pin 于 2026-10-02 从 `74a9419` 升级。公开头有实质
+改动（`executor.hpp`、`serial_execution_context.hpp`、`timer.hpp`、comm 组件头、
+`task_cancellation.hpp`），但既有公开签名兼容，唯一新增公开方法是诊断接口
+`closure_graveyard_size()`；heyaki 未使用 `submit_after`/`when_all`/executor 定时器
+API，为无代码改动升级：
+
+- **依赖驱动调度（v0.5.2 主线）**：`submit_after` 依赖等待改为调度侧 park——依赖
+  未就绪的 dependent 驻留任务图节点（生命周期 `DependencyBlocked`）、不占 worker，
+  依赖终态定向级联出队；`task_timeout_ms > 0` 时超时预算自提交时刻起算（parked
+  期间也触发）；shutdown 对永不就绪的 parked 任务以 `std::runtime_error` 兜底结算，
+  future 不再悬空。heyaki 零使用该 API 面，无行为影响；未来接入依赖图时直接获得
+  上述语义。
+- **retired 池 UAF 闭环**：`stop(false)` 交出的 detached 池由
+  `retired_pools_`/`retired_async_executors_` 保活，任何 `shutdown(true)`（含
+  `~Executor`）先 join 退休 worker 再放行析构。heyaki 全部 Executor 生命周期路径
+  的停机正确性受益。
+- **2026-09-30 代码评审缺陷收敛（v0.5.2 后 master）**：Phase 1/2 修复 9 项 P0/P1
+  与 24 项 P1 缺陷，Phase 3 修复 8 项构建/打包缺陷；queued 诊断先于入队记录。
+- **热路径与定时器性能（v0.5.2 后 master）**：Phase 4 降低 submit/notify/dispatch
+  开销（heyaki 全部任务负载受益）；定时器从 1kHz 轮询改事件驱动条件等待（heyaki
+  未用 executor 定时器，无直接影响）。
+- **门控不变**：T2（asio strand/外部 context adapter、与 IO 对象同 strand 的
+  timer）本批未交付，P1-1/P1-2 相关条目维持原判。
+- **验证**（Independent-Verification-Agent）：debug 78/79、asan 76/77、tsan 76/77，
+  三预设失败名单一致且仅 `heyaki_m3a_lan`——经 A/B 对照（仅回退 executor 重编译
+  重跑）证明新旧版本同样失败，根因是本机无线网卡持有多 IPv6 地址致 LAN 发现产生
+  2 个 endpoint、与测试硬编码 `endpoints().size() == 1` 断言冲突，非升级回归；
+  ASan/LSan 零命中，TSAN 零报告（libglib/libgio 假阳性经抑制文件排除，堆栈无
+  executor 帧）。TSAN 运行需 `setarch -R`（本机内核 ASLR 与 libtsan 内存布局冲突，
+  环境问题）。
+- **流程教训**：pin 机制（`scripts/fetch_third_party.sh`）在 configure 时强制切回
+  lock 提交——更新 executor 检出必须与 `third_party/dependencies.lock` 同一变更落地，
+  否则构建系统会静默回滚源码并重编出旧版产物（本次验证中实际发生并被 A/B 实验暴露）。
+
 ## 上游收敛状态（2026-09-21 pin 升级）
 
 executor 上游 master 前进至 `74a9419`（v0.5.0 发布 + 7 个后续修复，PR #189–#195），
@@ -295,3 +332,9 @@ heyaki pin 于 2026-08-29 从 `077d854` 升至 `4e8e8eb`，PR #176/#177）：
   worker 队列所在 lockfree 路径的误取消窗口收口与 shutdown 路径 UAF 窗口消除。
   本地 debug 76/76、asan 74/74 全绿（各 10 项网络 harness/扫描测试按环境跳过），
   ASan/LSan 零命中。
+- 2026-10-02：pin 升至 `e236273`（v0.5.2 依赖驱动调度 + 2026-09-30 评审缺陷收敛、
+  Phase 4 热路径优化与定时器事件驱动唤醒）。公开签名兼容、heyaki 无代码改动；
+  动机是 retired 池 UAF 闭环、缺陷收敛与提交热路径收益。dependencies.lock 与检出
+  同步落地（pin 回滚教训见上节）。本地 debug 78/79、asan 76/77、tsan 76/77，唯一
+  失败 `heyaki_m3a_lan` 经 A/B 对照证明与本机多 IPv6 网卡环境相关、与升级无关；
+  ASan/LSan/TSAN 零命中（环境项处理见上节验证记录）。
