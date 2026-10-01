@@ -26,6 +26,10 @@ enum class FrameType : std::uint8_t {
   session_restart_candidate = 0x08,
   pairing_request = 0x10,
   pairing_result = 0x11,
+  // Optional capability pairing_approval_v1: a passwordless trust request
+  // the receiving side approves or rejects explicitly. The response reuses
+  // the pairing_result frame (request id, status, optional grant).
+  pairing_approval_request = 0x12,
   message = 0x20,
   message_ack = 0x21,
   rpc_request = 0x30,

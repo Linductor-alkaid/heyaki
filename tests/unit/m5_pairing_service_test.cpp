@@ -425,6 +425,165 @@ TEST_F(PairingServiceTest, PasswordLiteralNeverReachesAuditOrProfileBytes) {
   }
 }
 
+// ---- Passwordless approval (pairing_approval_v1, issue #2) ----------------
+
+namespace {
+
+PairingApprovalRequestBody approval_body(std::uint32_t sequence,
+                                         std::vector<std::string> scopes) {
+  PairingApprovalRequestBody body;
+  RequestId::Storage bytes{};
+  bytes[0] = static_cast<std::byte>(sequence & 0xFFU);
+  bytes[1] = std::byte{0x77U};
+  body.request_id = RequestId{bytes};
+  body.nonce = PairingNonce{};
+  body.nonce[0] = static_cast<std::byte>((sequence + 1U) & 0xFFU);
+  body.nonce[1] = std::byte{0x33U};
+  body.requested_scopes = std::move(scopes);
+  return body;
+}
+
+}  // namespace
+
+TEST_F(PairingServiceTest, ApproveGrantsPolicyIntersectionWithoutPassword) {
+  const auto peer = initiator_store->device_id();
+  const auto body = approval_body(1U, {"message.send", "shell.open:x"});
+  auto approved = service->approve(body, peer,
+                                   initiator_store->identity_public_key());
+  ASSERT_TRUE(approved);
+  const auto& result = *approved.value_if();
+  EXPECT_EQ(result.status, StableStatus::ok);
+  ASSERT_TRUE(result.grant.has_value());
+  // Same policy scope intersection as the password path (M5-12).
+  EXPECT_EQ(result.grant->granted_scopes, std::vector<std::string>{"message.send"});
+  EXPECT_EQ(result.grant->subject, peer);
+  EXPECT_EQ(result.grant->issuer, target_store->device_id());
+  // The grant is bound to the request nonce and the password generation.
+  EXPECT_EQ(result.grant->nonce, body.nonce);
+  EXPECT_EQ(result.grant->password_generation, 1U);
+  // No TTL configured: no expiry.
+  EXPECT_FALSE(result.grant->expires_unix_milliseconds.has_value());
+
+  // The issued grant verifies under the target identity and authorizes the
+  // session from the local TrustStore.
+  ASSERT_TRUE(verify_signed_trust_grant(
+      *result.grant,
+      std::span<const std::byte>{target_store->identity_public_key().data(),
+                                 target_store->identity_public_key().size()},
+      wall_clock));
+  auto authorization = service->authorize(peer, wall_clock);
+  ASSERT_TRUE(authorization);
+  EXPECT_TRUE(authorization.value_if()->trusted);
+  EXPECT_EQ(authorization.value_if()->scopes, std::vector<std::string>{"message.send"});
+
+  // Audit: attempt then granted, correlated by the wire request id.
+  ASSERT_GE(audit_events.size(), 2U);
+  EXPECT_EQ(audits[0], PairingAuditKind::attempt);
+  EXPECT_EQ(audits[1], PairingAuditKind::granted);
+  ASSERT_TRUE(audit_events[1].request_id.has_value());
+  EXPECT_EQ(audit_events[1].request_id->bytes(), body.request_id.bytes());
+  EXPECT_EQ(result.request_id, body.request_id);
+
+  // The approved peer never sees or supplies a password anywhere in the flow.
+  for (const auto& event : audit_events) {
+    EXPECT_EQ(std::string_view{event.detail}.find("password"), std::string_view::npos);
+  }
+}
+
+TEST_F(PairingServiceTest, ApprovePersistsIssuedGrantTheInitiatorAccepts) {
+  const auto peer = initiator_store->device_id();
+  const auto body = approval_body(2U, {"message.send", "stream.open"});
+  auto approved = service->approve(body, peer, initiator_store->identity_public_key());
+  ASSERT_TRUE(approved && approved.value_if()->grant.has_value());
+  const auto& result = *approved.value_if();
+
+  auto initiator_identity = initiator_store->load_identity();
+  ASSERT_TRUE(initiator_identity);
+  PairingServiceConfig config{
+      .profile = &*initiator_store,
+      .identity = std::move(*initiator_identity.value_if())};
+  config.wall_clock = [this] { return wall_clock; };
+  PairingService verifier{std::move(config)};
+
+  // Wrong pending nonce refused; the request nonce (echoed into the grant)
+  // accepted, persisted as a received grant.
+  PairingNonce wrong_nonce{};
+  wrong_nonce[4] = std::byte{8U};
+  ASSERT_FALSE(verifier.accept_grant(result, body.request_id, wrong_nonce,
+                                     target_store->device_id(),
+                                     target_store->identity_public_key(),
+                                     {"message.send", "stream.open"}));
+  auto accepted =
+      verifier.accept_grant(result, body.request_id, body.nonce,
+                            target_store->device_id(),
+                            target_store->identity_public_key(),
+                            {"message.send", "stream.open"});
+  ASSERT_TRUE(accepted);
+  auto grants = verifier.grants_for_peer(target_store->device_id(), wall_clock);
+  ASSERT_TRUE(grants);
+  ASSERT_EQ(grants.value_if()->size(), 1U);
+  EXPECT_EQ((*grants.value_if())[0].direction, TrustGrantDirection::received);
+}
+
+TEST_F(PairingServiceTest, ApproveDeniesWhenScopeIntersectionIsEmpty) {
+  const auto peer = initiator_store->device_id();
+  const auto body = approval_body(3U, {"shell.open:x"});
+  auto denied = service->approve(body, peer,
+                                 initiator_store->identity_public_key());
+  // A stable denial result, not a transport failure: the receiver answers the
+  // wire request with permission_denied and no grant.
+  ASSERT_TRUE(denied);
+  EXPECT_EQ(denied.value_if()->status, StableStatus::permission_denied);
+  EXPECT_FALSE(denied.value_if()->grant.has_value());
+  EXPECT_EQ(denied.value_if()->request_id, body.request_id);
+
+  auto authorization = service->authorize(peer, wall_clock);
+  ASSERT_TRUE(authorization);
+  EXPECT_FALSE(authorization.value_if()->trusted);
+
+  ASSERT_FALSE(audits.empty());
+  EXPECT_EQ(audits.back(), PairingAuditKind::denied_policy);
+  ASSERT_FALSE(audit_events.empty());
+  EXPECT_EQ(std::string_view{audit_events.back().detail},
+            "approval_scope_intersection_empty");
+}
+
+TEST_F(PairingServiceTest, ApproveBindsOptionalTtlToTheIssuedGrant) {
+  const auto peer = initiator_store->device_id();
+  auto target_identity = target_store->load_identity();
+  ASSERT_TRUE(target_identity);
+  PairingServiceConfig config{
+      .profile = &*target_store,
+      .identity = std::move(*target_identity.value_if())};
+  config.grant_ttl_milliseconds = 60'000U;
+  config.wall_clock = [this] { return wall_clock; };
+  PairingService ttl_service{std::move(config)};
+
+  auto approved =
+      ttl_service.approve(approval_body(4U, {"message.send"}), peer,
+                          initiator_store->identity_public_key());
+  ASSERT_TRUE(approved && approved.value_if()->grant.has_value());
+  ASSERT_TRUE(approved.value_if()->grant->expires_unix_milliseconds.has_value());
+  EXPECT_EQ(*approved.value_if()->grant->expires_unix_milliseconds,
+            wall_clock + 60'000U);
+}
+
+TEST_F(PairingServiceTest, RecordApprovalRejectedWritesCorrelatedAudit) {
+  const auto peer = initiator_store->device_id();
+  const auto body = approval_body(5U, {"message.send"});
+  service->record_approval_rejected(peer, body.request_id);
+  ASSERT_EQ(audit_events.size(), 1U);
+  EXPECT_EQ(audits[0], PairingAuditKind::denied_policy);
+  EXPECT_EQ(std::string_view{audit_events[0].detail}, "approval_rejected");
+  ASSERT_TRUE(audit_events[0].request_id.has_value());
+  EXPECT_EQ(audit_events[0].request_id->bytes(), body.request_id.bytes());
+  // Rejection is audit-only: no grant, no session trust.
+  auto authorization = service->authorize(peer, wall_clock);
+  ASSERT_TRUE(authorization);
+  EXPECT_FALSE(authorization.value_if()->trusted);
+  EXPECT_EQ(service->stats().denied_policy, 1U);
+}
+
 
 }  // namespace
 }  // namespace heyaki

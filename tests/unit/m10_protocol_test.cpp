@@ -349,6 +349,8 @@ TEST(M10GatewayMapping, ScopesAndFrozenLimits) {
 TEST(M10ProtocolVersion, CurrentVersionIs13AndBitsMapByMinor) {
   EXPECT_EQ(current_protocol_version, (ProtocolVersion{1U, 3U}));
   EXPECT_EQ(static_cast<std::uint64_t>(Capability::gateway_v1), 1ULL << 13U);
+  // Optional capability (issue #2, pairing_approval_v1) sits at bit 14.
+  EXPECT_EQ(static_cast<std::uint64_t>(Capability::pairing_approval_v1), 1ULL << 14U);
 
   EXPECT_EQ(capabilities_for_version(ProtocolVersion{1U, 0U}),
             protocol_1_0_capability_bits);
@@ -365,8 +367,17 @@ TEST(M10ProtocolVersion, CurrentVersionIs13AndBitsMapByMinor) {
 
   EXPECT_TRUE(CapabilitySet{protocol_1_3_capability_bits}.has(Capability::gateway_v1));
   EXPECT_FALSE(CapabilitySet{protocol_1_2_capability_bits}.has(Capability::gateway_v1));
+  // The approval capability rides the 1.3 baseline: every build that speaks
+  // 1.3 understands the approval frame, and legacy peers (whose known-bit
+  // set predates it) both ignore it in hello `supported` and strip it from
+  // negotiation via their own version mask.
   EXPECT_EQ(known_capability_bits, protocol_1_3_capability_bits);
   EXPECT_TRUE(CapabilitySet{known_capability_bits}.has(Capability::gateway_v1));
+  EXPECT_TRUE(CapabilitySet{known_capability_bits}.has(Capability::pairing_approval_v1));
+  EXPECT_TRUE(
+      CapabilitySet{protocol_1_3_capability_bits}.has(Capability::pairing_approval_v1));
+  EXPECT_FALSE(CapabilitySet{protocol_1_2_capability_bits}.has(
+      Capability::pairing_approval_v1));
 }
 
 ProtocolHello hello_13(std::uint64_t required) {
@@ -385,6 +396,53 @@ TEST(M10ProtocolNegotiation, BothSides13NegotiateGatewayBit) {
   EXPECT_EQ(negotiated.value_if()->version, (ProtocolVersion{1U, 3U}));
   EXPECT_EQ(negotiated.value_if()->capabilities.bits, protocol_1_3_capability_bits);
   EXPECT_TRUE(negotiated.value_if()->capabilities.has(Capability::gateway_v1));
+}
+
+TEST(M10ProtocolNegotiation, ApprovalBitNegotiatesBetweenCurrentPeers) {
+  // pairing_approval_v1 rides the 1.3 baseline: two current peers that
+  // advertise it negotiate it like any other capability bit.
+  const auto session_required = static_cast<std::uint64_t>(Capability::session);
+  const auto approval_bit =
+      static_cast<std::uint64_t>(Capability::pairing_approval_v1);
+  ProtocolHello advertising = hello_13(session_required);
+  advertising.supported.bits |= approval_bit;
+  const auto negotiated = negotiate_protocol(advertising, advertising);
+  ASSERT_TRUE(negotiated);
+  EXPECT_EQ(negotiated.value_if()->capabilities.bits,
+            protocol_1_3_capability_bits);
+  EXPECT_TRUE(
+      negotiated.value_if()->capabilities.has(Capability::pairing_approval_v1));
+
+  // A legacy 1.3 peer advertises exactly the pre-approval baseline (its
+  // build's bit-14 never existed), so the intersection drops the bit even
+  // though both versions clamp to 1.3: the negotiated set stays exactly the
+  // legacy baseline. Our `supported` bit is not known-checked, so hello
+  // compatibility is unchanged.
+  ProtocolHello legacy = hello_13(session_required);
+  legacy.supported.bits &= ~approval_bit;
+  const auto negotiated_with_legacy = negotiate_protocol(advertising, legacy);
+  ASSERT_TRUE(negotiated_with_legacy);
+  EXPECT_EQ(negotiated_with_legacy.value_if()->capabilities.bits,
+            protocol_1_3_capability_bits & ~approval_bit);
+  EXPECT_FALSE(negotiated_with_legacy.value_if()->capabilities.has(
+      Capability::pairing_approval_v1));
+
+  // The bit is `known`, so requiring it passes the unknown-required gate;
+  // a legacy peer that does not advertise it refuses it as unavailable.
+  ProtocolHello requiring = advertising;
+  requiring.required.bits |= approval_bit;
+  const auto refused = negotiate_protocol(requiring, legacy);
+  ASSERT_FALSE(refused);
+  ASSERT_NE(refused.error_if(), nullptr);
+  EXPECT_EQ(refused.error_if()->safe_detail(), "required_capability_unavailable");
+
+  const auto unknown_bit = 1ULL << 30U;
+  ProtocolHello unknown = hello_13(session_required | unknown_bit);
+  unknown.supported.bits |= unknown_bit;
+  const auto unrecognized = negotiate_protocol(unknown, unknown);
+  ASSERT_FALSE(unrecognized);
+  ASSERT_NE(unrecognized.error_if(), nullptr);
+  EXPECT_EQ(unrecognized.error_if()->safe_detail(), "unknown_required_capability");
 }
 
 TEST(M10ProtocolNegotiation, VersionClampStripsGatewayBitAgainst12Peer) {

@@ -63,6 +63,22 @@ struct PairingResultBody {
     const PairingRequestBody& request);
 [[nodiscard]] Result<PairingRequestBody> parse_pairing_request(
     std::span<const std::byte> payload);
+
+// Passwordless trust request (optional capability pairing_approval_v1): the
+// receiving side observes the pending request and answers through its
+// approve/reject entry points with a pairing_result frame. Same field
+// layout as PairingRequestBody minus the password.
+struct PairingApprovalRequestBody {
+  RequestId request_id;
+  PairingNonce nonce{};
+  std::vector<std::string> requested_scopes;
+};
+
+[[nodiscard]] Result<std::vector<std::byte>> encode_pairing_approval_request(
+    const PairingApprovalRequestBody& request);
+[[nodiscard]] Result<PairingApprovalRequestBody> parse_pairing_approval_request(
+    std::span<const std::byte> payload);
+
 [[nodiscard]] Result<std::vector<std::byte>> encode_pairing_result(
     const PairingResultBody& result);
 [[nodiscard]] Result<PairingResultBody> parse_pairing_result(

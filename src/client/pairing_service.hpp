@@ -79,6 +79,19 @@ class PairingService {
       const PairingRequestBody& request, const DeviceId& peer_device,
       std::span<const std::byte> peer_public_key);
 
+  // ---- Target side, passwordless approval (pairing_approval_v1) ----
+  // Issues the grant for one locally approved approval request: the same
+  // policy scope adjudication, grant binding (identities, nonce, password
+  // generation, TTL), persistence, and audit as evaluate - without any
+  // password verification step. The caller owns the approve/reject decision
+  // and the pending-request lifetime.
+  [[nodiscard]] Result<PairingResultBody> approve(
+      const PairingApprovalRequestBody& request, const DeviceId& peer_device,
+      std::span<const std::byte> peer_public_key);
+  // Audit-only record of a rejected approval request.
+  void record_approval_rejected(const DeviceId& peer_device,
+                                const RequestId& request_id);
+
   // ---- Initiator side (M5-09/M5-12) ----
   // Verifies a returned grant (signature under the peer's already-verified
   // session key, issuer identity, subject binding, nonce echo, scope subset)

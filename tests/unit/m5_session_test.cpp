@@ -49,6 +49,20 @@ ProtocolHello pairing_protocol() {
           .required = {static_cast<std::uint64_t>(Capability::session)}};
 }
 
+// Session hello pair for the passwordless approval flow: the negotiated set
+// carries pairing_approval_v1 (1.3 baseline) but, for the approval-only
+// variant, not the password pairing bit.
+ProtocolHello approval_protocol(bool with_pairing_bit) {
+  std::uint64_t supported = static_cast<std::uint64_t>(Capability::session);
+  if (with_pairing_bit) {
+    supported |= static_cast<std::uint64_t>(Capability::pairing);
+  }
+  supported |= static_cast<std::uint64_t>(Capability::pairing_approval_v1);
+  return {.version = current_protocol_version,
+          .supported = {supported},
+          .required = {static_cast<std::uint64_t>(Capability::session)}};
+}
+
 // Caller-owned stable wire request id for submit_pairing_request; non-zero
 // and deterministic per seed so tests can correlate admission, wire frames,
 // and result frames.
@@ -77,11 +91,23 @@ struct M5SessionPair {
   // times the initiator's result sink accepted a grant.
   std::vector<RequestId> evaluator_request_ids;
   std::size_t grant_sink_calls = 0;
+  // Per-side session hello (defaults keep the legacy 1.2-supported set, so
+  // the approval capability is NOT negotiated unless a test opts in).
+  ProtocolHello left_protocol = pairing_protocol();
+  ProtocolHello right_protocol = pairing_protocol();
+  // Receiver-side approval wiring for the right (target) session.
+  bool right_pairing_approval_enabled = false;
+  std::vector<PairingApprovalRequestBody> approval_requests_received;
   std::shared_ptr<PeerSession> left;
   std::shared_ptr<PeerSession> right;
   std::uint64_t stream_clock = kNow;
 
-  M5SessionPair() {
+  M5SessionPair(ProtocolHello left_hello = pairing_protocol(),
+                ProtocolHello right_hello = pairing_protocol(),
+                bool right_approval_enabled = false)
+      : left_protocol(std::move(left_hello)),
+        right_protocol(std::move(right_hello)),
+        right_pairing_approval_enabled(right_approval_enabled) {
     EXPECT_TRUE(left_identity && right_identity);
     auto created = create_password_verifier("target-password", PasswordHashParameters{});
     EXPECT_TRUE(created);
@@ -142,7 +168,7 @@ struct M5SessionPair {
          .binding = left_binding,
          .local_identity = &*left_identity.value_if(),
          .peer_public_key = right_identity.value_if()->public_key(),
-         .local_protocol = pairing_protocol(),
+         .local_protocol = left_protocol,
          .expires_unix_milliseconds = kNow + 60'000U,
          .now_unix_milliseconds = kNow,
          .observer = {},
@@ -204,7 +230,7 @@ struct M5SessionPair {
          .binding = right_binding,
          .local_identity = &*right_identity.value_if(),
          .peer_public_key = left_identity.value_if()->public_key(),
-         .local_protocol = pairing_protocol(),
+         .local_protocol = right_protocol,
          .expires_unix_milliseconds = kNow + 60'000U,
          .now_unix_milliseconds = kNow,
          .observer = {},
@@ -263,6 +289,12 @@ struct M5SessionPair {
                result.status = StableStatus::ok;
                result.grant = std::move(grant);
                return Result<PairingResultBody>::success(result);
+             },
+         .pairing_approval_enabled = right_pairing_approval_enabled,
+         .pairing_approval_handler =
+             [this](const PairingApprovalRequestBody& request) {
+               approval_requests_received.push_back(request);
+               return Result<void>::success();
              },
          .wall_clock = [this] { return target_wall_clock; }});
     ASSERT_TRUE(right_created);
@@ -1014,6 +1046,193 @@ TEST(M5ByteStream, RandomizedMisbehavingDataNeverCorruptsTheSession) {
     EXPECT_TRUE(harness.right->authenticated());
     EXPECT_LE(right_service.active_streams(), limits.max_concurrent_streams);
   }
+}
+
+// ---- Passwordless pairing approval (pairing_approval_v1, issue #2) --------
+// Session-level wire contracts over the loopback harness: capability gating,
+// disabled-receiver denials (restricted vs authorized), and the authorized
+// reverse-submission path.
+
+TEST(M5PeerSession, ApprovalSubmitFailsWithoutNegotiatedApprovalCapability) {
+  // The harness hellos advertise the 1.2 bit set: the negotiated session
+  // carries `pairing` but not `pairing_approval_v1`, so the passwordless
+  // submit must fail closed before any frame reaches the wire.
+  M5SessionPair harness;
+  ASSERT_TRUE(harness.left->start());
+  ASSERT_TRUE(harness.right->start());
+  harness.pump_all();
+  ASSERT_TRUE(harness.left->pairing_restricted());
+
+  const auto submitted = harness.left->submit_pairing_approval_request(
+      deterministic_request_id(0xB1U), {"message.send"});
+  ASSERT_FALSE(submitted);
+  ASSERT_NE(submitted.error_if(), nullptr);
+  EXPECT_EQ(submitted.error_if()->safe_detail(), "approval_capability_absent");
+  harness.pump_all();
+  // Nothing was sent and nothing pend: the session stays restricted.
+  EXPECT_EQ(harness.right->diagnostics().pairing_requests_received, 0U);
+  EXPECT_TRUE(harness.left->pairing_restricted());
+  // The password path on the very same session is unaffected.
+  const auto password_submitted = harness.left->submit_pairing_request(
+      deterministic_request_id(0xB2U), "target-password", {"message.send"});
+  ASSERT_TRUE(password_submitted);
+  harness.pump_all();
+  EXPECT_TRUE(harness.grant_received);
+}
+
+TEST(M5PeerSession, ApprovalSubmitNeedsOnlyTheApprovalCapability) {
+  // Negotiated set carries pairing_approval_v1 but not `pairing`: an
+  // untrusted session is refused outright at hello (RULE-03 keeps password
+  // pairing mandatory for restricted sessions), while a trust-authorized
+  // session admits the approval submit without any pairing capability.
+  M5SessionPair harness{approval_protocol(false), approval_protocol(false)};
+  harness.left_trust[harness.right_identity.value_if()->device_id()] = {
+      "message.send"};
+  harness.right_trust[harness.left_identity.value_if()->device_id()] = {
+      "message.send"};
+  ASSERT_TRUE(harness.left->start());
+  ASSERT_TRUE(harness.right->start());
+  harness.pump_all();
+  ASSERT_TRUE(harness.left->authenticated());
+  ASSERT_TRUE(harness.right->authenticated());
+
+  const auto password_submitted = harness.left->submit_pairing_request(
+      deterministic_request_id(0xC1U), "target-password", {"message.send"});
+  ASSERT_FALSE(password_submitted);
+  ASSERT_NE(password_submitted.error_if(), nullptr);
+  EXPECT_EQ(password_submitted.error_if()->safe_detail(),
+            "pairing_capability_absent");
+
+  const auto submitted = harness.left->submit_pairing_approval_request(
+      deterministic_request_id(0xC2U), {"message.send"});
+  ASSERT_TRUE(submitted);
+  EXPECT_EQ(harness.left->diagnostics().pairing_requests_sent, 1U);
+
+  // The default harness receiver has approval disabled: stable denial with
+  // the request id echoed; the authorized sessions both stay up.
+  harness.pump_all();
+  const auto left_state = harness.left->diagnostics();
+  const auto right_state = harness.right->diagnostics();
+  EXPECT_TRUE(harness.left->authenticated());
+  EXPECT_TRUE(harness.right->authenticated());
+  EXPECT_EQ(left_state.pairing_results_received, 1U);
+  EXPECT_EQ(left_state.pairing_result_request_id,
+            deterministic_request_id(0xC2U));
+  EXPECT_EQ(right_state.pairing_requests_received, 1U);
+  EXPECT_EQ(right_state.pairing_results_sent, 1U);
+  // The disabled receiver never hands the request to any handler.
+  EXPECT_TRUE(harness.approval_requests_received.empty());
+}
+
+TEST(M5PeerSession, DisabledReceiverDeniesApprovalOnRestrictedSession) {
+  // Dedicated restricted-receiver denial: same contract as above but with
+  // the full 1.3 hello set, isolating the disabled-receiver branch.
+  M5SessionPair harness{approval_protocol(true), approval_protocol(true)};
+  ASSERT_TRUE(harness.left->start());
+  ASSERT_TRUE(harness.right->start());
+  harness.pump_all();
+  ASSERT_TRUE(harness.left->pairing_restricted());
+
+  const auto submitted = harness.left->submit_pairing_approval_request(
+      deterministic_request_id(0xC3U), {"message.send", "shell.open:x"});
+  ASSERT_TRUE(submitted);
+  harness.pump_all();
+
+  const auto left_state = harness.left->diagnostics();
+  const auto right_state = harness.right->diagnostics();
+  EXPECT_EQ(left_state.state, PeerSessionState::closed);
+  EXPECT_EQ(right_state.state, PeerSessionState::closed);
+  ASSERT_TRUE(right_state.last_error.has_value());
+  EXPECT_EQ(right_state.last_error->code(), ErrorCode::pairing_denied);
+  ASSERT_TRUE(left_state.last_error.has_value());
+  EXPECT_EQ(left_state.last_error->code(), ErrorCode::pairing_denied);
+  EXPECT_FALSE(harness.grant_received);
+  EXPECT_TRUE(harness.approval_requests_received.empty());
+}
+
+TEST(M5PeerSession, DisabledReceiverKeepsAuthorizedSessionAlive) {
+  // Trust-authorized receiver: the stable denial resolves the requester's
+  // attempt but must never tear down the healthy authorized session (#3
+  // semantics), on either side.
+  M5SessionPair harness{approval_protocol(true), approval_protocol(true)};
+  harness.left_trust[harness.right_identity.value_if()->device_id()] = {
+      "message.send"};
+  harness.right_trust[harness.left_identity.value_if()->device_id()] = {
+      "message.send"};
+  ASSERT_TRUE(harness.left->start());
+  ASSERT_TRUE(harness.right->start());
+  harness.pump_all();
+  ASSERT_TRUE(harness.left->authenticated());
+  ASSERT_TRUE(harness.right->authenticated());
+
+  const auto submitted = harness.left->submit_pairing_approval_request(
+      deterministic_request_id(0xC4U), {"message.send"});
+  ASSERT_TRUE(submitted);
+  harness.pump_all();
+
+  const auto left_state = harness.left->diagnostics();
+  const auto right_state = harness.right->diagnostics();
+  // Both sessions stay up.
+  EXPECT_TRUE(harness.left->authenticated());
+  EXPECT_TRUE(harness.right->authenticated());
+  EXPECT_NE(left_state.state, PeerSessionState::closed);
+  EXPECT_NE(right_state.state, PeerSessionState::closed);
+  // The denial resolved the initiator's pending attempt with the echoed id.
+  EXPECT_EQ(left_state.pairing_results_received, 1U);
+  EXPECT_EQ(left_state.pairing_result_request_id,
+            deterministic_request_id(0xC4U));
+  EXPECT_EQ(right_state.pairing_requests_received, 1U);
+  EXPECT_EQ(right_state.pairing_results_sent, 1U);
+  EXPECT_TRUE(harness.approval_requests_received.empty());
+  EXPECT_FALSE(harness.grant_received);
+}
+
+TEST(M5PeerSession, AuthorizedReverseApprovalHandsOffToHandler) {
+  // Reverse direction on an authorized session: the state gate admits the
+  // approval submit, the enabled receiver hands the parsed request to its
+  // handler exactly once, and neither side answers on its own. The receiver
+  // flag must be set before construction: build_sessions() snapshots it
+  // into the session config.
+  M5SessionPair harness{approval_protocol(true), approval_protocol(true),
+                        /*right_approval_enabled=*/true};
+  harness.left_trust[harness.right_identity.value_if()->device_id()] = {
+      "message.send"};
+  harness.right_trust[harness.left_identity.value_if()->device_id()] = {
+      "message.send"};
+  ASSERT_TRUE(harness.left->start());
+  ASSERT_TRUE(harness.right->start());
+  harness.pump_all();
+  ASSERT_TRUE(harness.left->authenticated());
+  ASSERT_TRUE(harness.right->authenticated());
+
+  const auto submitted = harness.left->submit_pairing_approval_request(
+      deterministic_request_id(0xC5U), {"message.send", "stream.open"});
+  if (!submitted) {
+    ADD_FAILURE() << "submit failed: "
+                  << (submitted.error_if() ? submitted.error_if()->safe_detail()
+                                           : "<no error>");
+    return;
+  }
+  harness.pump_all();
+
+  // The receiver handed off the parsed request exactly once, intact.
+  ASSERT_EQ(harness.approval_requests_received.size(), 1U);
+  const auto& request = harness.approval_requests_received.front();
+  EXPECT_EQ(request.request_id, deterministic_request_id(0xC5U));
+  EXPECT_EQ(request.requested_scopes,
+            (std::vector<std::string>{"message.send", "stream.open"}));
+  bool nonce_zero = true;
+  for (const auto byte : request.nonce) {
+    nonce_zero = nonce_zero && byte == std::byte{0};
+  }
+  EXPECT_FALSE(nonce_zero);
+  // No session-side answer: the pending decision belongs to the app.
+  EXPECT_EQ(harness.right->diagnostics().pairing_results_sent, 0U);
+  EXPECT_EQ(harness.left->diagnostics().pairing_results_received, 0U);
+  // Both sessions stay healthy and authorized throughout.
+  EXPECT_TRUE(harness.left->authenticated());
+  EXPECT_TRUE(harness.right->authenticated());
+  EXPECT_FALSE(harness.grant_received);
 }
 
 }  // namespace

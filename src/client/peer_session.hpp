@@ -67,6 +67,13 @@ using PairingResultSink = std::function<Result<void>(
     const PairingResultBody&, const RequestId& pending_request_id,
     const PairingNonce& pending_nonce,
     const std::vector<std::string>& requested_scopes)>;
+// Receiver-side passwordless approval handoff (pairing_approval_v1): the
+// session parsed and admitted an approval request; the handler records it
+// as pending for the app's approve/reject entry points, which answer with
+// the pairing_result frame. A failure denies the request with a stable
+// result.
+using PairingApprovalHandler =
+    std::function<Result<void>(const PairingApprovalRequestBody&)>;
 // Inbound business-frame dispatcher per logical channel.
 using BusinessFrameHandler = std::function<void(const FrameView&)>;
 // Domain-level dispatcher: receives inbound business frames of one domain on
@@ -107,6 +114,12 @@ struct PeerSessionConfig {
   // Default disabled with an empty list.
   bool basic_communication{false};
   std::vector<std::string> basic_communication_scopes{};
+  // Passwordless approval policy (pairing_approval_v1): when enabled, the
+  // session hands admitted approval requests to the handler for the app's
+  // approve/reject entry points. Default off: approval requests get a
+  // stable permission_denied result.
+  bool pairing_approval_enabled{false};
+  PairingApprovalHandler pairing_approval_handler{};
   std::function<std::uint64_t()> wall_clock{};
   // M6: business domains whose PHYSICAL transport channels are created only
   // by the session initiator; the responder adopts the peer's channel (via
@@ -139,6 +152,12 @@ struct VerifiedPeerSessionConfig {
   // still lands in pairing_restricted, where the policy applies ----
   bool basic_communication{false};
   std::vector<std::string> basic_communication_scopes{};
+  // Passwordless approval policy (pairing_approval_v1): when enabled, the
+  // session hands admitted approval requests to the handler for the app's
+  // approve/reject entry points. Default off: approval requests get a
+  // stable permission_denied result.
+  bool pairing_approval_enabled{false};
+  PairingApprovalHandler pairing_approval_handler{};
   std::function<std::uint64_t()> wall_clock{};
   std::set<session::ChannelDomain> initiator_owned_domains{};
 };
@@ -225,7 +244,15 @@ class PeerSession final : public std::enable_shared_from_this<PeerSession> {
   [[nodiscard]] Result<void> submit_pairing_request(
       const RequestId& request_id, std::string_view password_utf8,
       std::vector<std::string> requested_scopes);
-
+  // Passwordless variant (pairing_approval_v1): submits scopes + nonce and
+  // waits for the receiving side's approve/reject pairing_result under the
+  // same pending-request and deadline discipline.
+  [[nodiscard]] Result<void> submit_pairing_approval_request(
+      const RequestId& request_id, std::vector<std::string> requested_scopes);
+  // Receiver side: emits the approve/reject/timeout pairing_result frame
+  // for a pending approval request.
+  [[nodiscard]] Result<void> send_pairing_result(const PairingResultBody& result);
+  void handle_pairing_approval_request(FrameView frame);
 
   // ---- Business channels (M5-02/M5-06/M5-14) ----
   // Opens a logical business channel. Requires an authorized session and the
