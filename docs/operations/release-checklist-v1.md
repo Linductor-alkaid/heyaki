@@ -211,3 +211,25 @@ note in the linked record:
 7. Post-release: watch the SLO dashboard for the first 24 h
    ([observability](../../deploy/observability/README.md)); any
    regression follows the runbook triage paths.
+
+**v1.1.1 stamp (2026-10-01, pairing closure + opt-in basic communication)**:
+release commit `1ceb42c`, green CI run
+[36831912768](https://github.com/Linductor-alkaid/heyaki/actions/runs/36831912768)
+(12/12 jobs), tag `v1.1.1`,
+[GitHub release](https://github.com/Linductor-alkaid/heyaki/releases/tag/v1.1.1)
+with Ed25519-signed artifacts (signing key id `fa4d676f792b5e82`, same v1
+key train; public key attached). Local gates: `scripts/package_release.sh`
+full pass from the release tree with `HEYAKI_BUILD_COMMIT=1ceb42c`
+(inventory assertions, 12-file symbol split, stripped-binary smoke,
+manifest-driven uninstall simulation), manifest verify/check round-trips.
+The SDK archives attached by the `release-sdk` workflow (run 36836491493;
+Linux on the 20.04 baseline); `MANIFEST-sdk.txt` (347 files) signed with
+the v1 key and verified against the extracted Linux SDK tree; the Windows
+SDK zip carries its recorded digest.
+
+```text
+efc1e17972ab68f569a327a6bd2dd46c8464d6fb711cc196eee0a1ba6bc2056d  heyaki-1.1.1-linux-x86_64.tar.gz
+1c464410773b0006b7b35671d3369a51d84e8939360ff826bc72ba6f6adefa34  heyaki-1.1.1-linux-x86_64-dbg.tar.gz
+32615ff9cbab82ba9382c059d5df66475b9e9c796aaf8f7f5a480443a8ce1036  heyaki-1.1.1-linux-x86_64-sdk.tar.gz
+15e97a65d5cb02da8efb800d03d411fa99d712fbf5e081a3113a88ee3284b8e9  heyaki-1.1.1-windows-x64-sdk.zip
+```
