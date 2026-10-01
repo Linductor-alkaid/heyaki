@@ -870,13 +870,30 @@ TEST_F(M5BasicCommunicationTest, OfferTimeoutFailsUnansweredPushOnce) {
             static_cast<std::int64_t>(StableStatus::deadline_exceeded));
 
   // Accepted gate on the initiator: manifest only, zero chunk/complete
-  // frames ever left the sender.
-  const auto first_file_stats = pair.first.value().service_diagnostics().file;
-  EXPECT_EQ(first_file_stats.manifests_sent, 1U);
-  EXPECT_EQ(first_file_stats.chunks_sent, 0U);
-  EXPECT_EQ(first_file_stats.completes_sent, 0U);
-  EXPECT_EQ(first_file_stats.sender_failed, 1U);
-  EXPECT_EQ(first_file_stats.sender_committed, 0U);
+  // frames ever left the sender. service_diagnostics() returns the snapshot
+  // published by the periodic maintenance tick (DoubleBuffer), which lags
+  // the live FileService by up to one 500 ms tick: the event observer above
+  // sees the terminal before the snapshot carries its counters, so poll
+  // until the snapshot settles instead of reading it once.
+  const bool first_stats_settled = wait_until(
+      [&] {
+        const auto stats = pair.first.value().service_diagnostics().file;
+        return stats.manifests_sent == 1U && stats.chunks_sent == 0U &&
+               stats.completes_sent == 0U && stats.sender_failed == 1U &&
+               stats.sender_committed == 0U;
+      },
+      std::chrono::seconds{2});
+  EXPECT_TRUE(first_stats_settled) << "initiator file stats never settled: "
+                                   << "manifests_sent="
+                                   << pair.first.value().service_diagnostics().file.manifests_sent
+                                   << " chunks_sent="
+                                   << pair.first.value().service_diagnostics().file.chunks_sent
+                                   << " completes_sent="
+                                   << pair.first.value().service_diagnostics().file.completes_sent
+                                   << " sender_failed="
+                                   << pair.first.value().service_diagnostics().file.sender_failed
+                                   << " sender_committed="
+                                   << pair.first.value().service_diagnostics().file.sender_committed;
 
   // The target saw no bytes and never committed; its session took exactly
   // one violation (the manifest) and survived it - no second violation ever
