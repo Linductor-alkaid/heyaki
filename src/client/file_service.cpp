@@ -346,6 +346,14 @@ Result<void> FileService::resume_transfer(const TransferId& id) {
   }
   sender->paused = false;
   ++stats_.sender_resumed;
+  if (!sender->accepted) {
+    // Still negotiating: the window restarts with the resume, so a pause
+    // longer than the offer timeout cannot expire an actively resumed
+    // transfer out from under the user (issue #13).
+    sender->offer_deadline_unix_ms = config_.offer_timeout_milliseconds != 0U
+                                         ? now() + config_.offer_timeout_milliseconds
+                                         : 0U;
+  }
   auto entry = book_->mutable_entries().find(id);
   if (entry != book_->mutable_entries().end()) {
     entry->second.phase = FileTransferPhase::transferring;
@@ -393,15 +401,47 @@ void FileService::set_event_sink(EventSink sink, void* context) {
 }
 
 void FileService::prune() {
-  for (auto& [id, sender] : senders_) {
-    if (!sender.terminal && !sender.paused) {
-      drain_window(sender);
-      start_next_read(sender);
-      if (sender.complete_deferred) {
-        // The verdict request lost its race with concurrent bulk traffic;
-        // with the window now drained there is queue room again.
-        sender.complete_deferred = !send_complete(id, StableStatus::ok, "");
-      }
+  // Erase-safe pass (issue #13): fail_transfer erases from senders_, so
+  // expiries are collected first and resolved after the scan; a read dispatch
+  // failure inside start_next_read can also erase mid-loop, hence the
+  // re-find before the deferred-complete retry.
+  std::vector<TransferId> expired;
+  std::vector<TransferId> ids;
+  ids.reserve(senders_.size());
+  for (const auto& [id, sender] : senders_) {
+    (void)sender;
+    ids.push_back(id);
+  }
+  for (const auto& id : ids) {
+    const auto found = senders_.find(id);
+    if (found == senders_.end()) {
+      continue;  // erased earlier in this pass
+    }
+    auto& sender = found->second;
+    if (sender.terminal || sender.paused) {
+      continue;
+    }
+    if (!sender.accepted && sender.offer_deadline_unix_ms != 0U &&
+        now() >= sender.offer_deadline_unix_ms) {
+      expired.push_back(id);
+      continue;
+    }
+    drain_window(sender);
+    start_next_read(sender);
+    const auto after = senders_.find(id);
+    if (after == senders_.end()) {
+      continue;
+    }
+    if (after->second.complete_deferred) {
+      // The verdict request lost its race with concurrent bulk traffic;
+      // with the window now drained there is queue room again.
+      after->second.complete_deferred = !send_complete(id, StableStatus::ok, "");
+    }
+  }
+  for (const auto& id : expired) {
+    if (auto* sender = sender_of(id)) {
+      fail_transfer(*sender, StableStatus::deadline_exceeded, "offer_expired",
+                    ErrorCode::timeout);
     }
   }
 }
@@ -579,11 +619,10 @@ void FileService::finish_probe(SenderState& sender) {
   send_manifest(sender);
 }
 
-void FileService::send_manifest(const SenderState& sender) {
+void FileService::send_manifest(SenderState& sender) {
   auto encoded = encode_file_manifest(sender.manifest, session_.channels().limits());
   if (!encoded) {
-    fail_transfer(const_cast<SenderState&>(sender), StableStatus::internal,
-                  "manifest_encode_failed");
+    fail_transfer(sender, StableStatus::internal, "manifest_encode_failed");
     return;
   }
   Frame frame;
@@ -591,11 +630,15 @@ void FileService::send_manifest(const SenderState& sender) {
   frame.channel_id = channel_id_;
   frame.payload = std::move(*encoded.value_if());
   if (!session_.send_frame(channel_id_, session::FrameClass::standard, std::move(frame))) {
-    fail_transfer(const_cast<SenderState&>(sender), StableStatus::unavailable,
-                  "manifest_send_failed");
+    fail_transfer(sender, StableStatus::unavailable, "manifest_send_failed");
     return;
   }
   ++stats_.manifests_sent;
+  // Arm the bounded negotiation window (issue #13): the offered phase now
+  // ends in one failed terminal even when the receiver never answers.
+  sender.offer_deadline_unix_ms = config_.offer_timeout_milliseconds != 0U
+                                      ? now() + config_.offer_timeout_milliseconds
+                                      : 0U;
   auto entry = book_->mutable_entries().find(sender.transfer_id);
   if (entry != book_->mutable_entries().end()) {
     entry->second.phase = FileTransferPhase::offered;
@@ -620,6 +663,9 @@ void FileService::handle_inbound_accept(const FrameView& frame) {
     return;
   }
   ++stats_.accepts_received;
+  // Chunks may flow from here; the offer deadline has served its purpose.
+  sender->accepted = true;
+  sender->offer_deadline_unix_ms = 0U;
   for (const auto index : body.present_chunk_indices) {
     if (index >= sender->chunk_count) {
       fail_transfer(*sender, StableStatus::protocol_error, "accept_index_invalid");
@@ -641,8 +687,12 @@ void FileService::handle_inbound_accept(const FrameView& frame) {
 }
 
 void FileService::start_next_read(SenderState& sender) {
-  if (sender.terminal || sender.paused || sender.read_in_flight ||
-      sender.probe_in_flight || sender.manifest.size == 0U) {
+  // The accepted gate (issue #13): before FILE_ACCEPT no byte is read or
+  // staged. An unaccepted sender therefore never pumps chunk or complete
+  // frames into a channel the receiver may have refused and closed, and no
+  // window bytes stay pinned by a refused push.
+  if (!sender.accepted || sender.terminal || sender.paused ||
+      sender.read_in_flight || sender.probe_in_flight || sender.manifest.size == 0U) {
     return;
   }
   const auto chunk_size = sender.manifest.chunk_size;
@@ -936,7 +986,7 @@ void FileService::complete_transfer(SenderState& sender, StableStatus status,
 }
 
 void FileService::fail_transfer(SenderState& sender, StableStatus status,
-                                std::string_view safe_detail) {
+                                std::string_view safe_detail, ErrorCode code) {
   if (sender.terminal) {
     return;
   }
@@ -946,7 +996,7 @@ void FileService::fail_transfer(SenderState& sender, StableStatus status,
   emit_event({sender.transfer_id, FileTransferDirection::push, FileTransferPhase::failed,
               sender.root, sender.logical_name, sender.bytes_admitted,
               sender.manifest.size,
-              Error{ErrorCode::internal, "file", std::string{safe_detail},
+              Error{code, "file", std::string{safe_detail},
                     static_cast<std::int64_t>(status)}});
   senders_.erase(sender.transfer_id);
 }

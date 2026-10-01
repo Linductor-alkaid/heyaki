@@ -98,6 +98,7 @@ M9-09 soak 会话 churn 下 pending/overflow 计数有界。
 | rpc.result_cache_entries / bytes | 64 / 256KiB | 65536 / 256MiB | **entries=0 = 禁用重放缓存（契约行为，允许）** |
 | rpc.max_pending_client_calls | 64 | 65536 | 与并发窗口 16 配比 |
 | file.max_concurrent_sends / send_window_bytes | 2 / 2MiB | 256 / 256MiB | 发送窗口是主要在途字节预算；M9-10 双并发文件实测 9MiB/s |
+| file.offer_timeout_milliseconds | 30s（`NodeConfig::file_offer_timeout`，0 = 默认） | —（协商窗口，非内存面） | 未被接受的 manifest 有界失败为一次 `deadline_exceeded` 终态（issue #13）；resume 重新计时，accept 即解除 |
 | shell.frame / byte / output_window / retained_terminal | 128 / 512KiB / 256KiB / 64 | 65536 / 64MiB / 64MiB / 4096 | M8 输出洪泛终止语义的上游水位 |
 
 ## 5. LAN（`LanConfiguration`）与安全面

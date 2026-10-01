@@ -395,6 +395,13 @@ struct NodeConfig {
   std::vector<FileRootConfig> file_receive_roots;
   // Per-peer cumulative received-byte quota; 0 disables the user quota.
   std::uint64_t file_max_peer_receive_bytes{0U};
+  // Bounded negotiation window for one locally admitted file push (issue
+  // #13): a manifest the receiving side never answers — receiver policy off,
+  // an old peer, lost frames — resolves as one `failed` terminal through the
+  // file event observer after the window instead of stalling unaccepted
+  // until the user cancels or the session closes. Zero keeps the service
+  // default of 30 s.
+  std::chrono::milliseconds file_offer_timeout{0};
   // ---- M8 Remote Shell ----
   // Serving-side shell profiles. EMPTY keeps Remote Shell off (M8-01); an
   // owned runtime starts the dedicated PTY worker only when a profile is

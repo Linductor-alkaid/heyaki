@@ -62,6 +62,14 @@ struct FileServiceConfig {
   std::uint64_t max_peer_receive_bytes{0U};
   // Max sender-role transfers in flight toward this peer.
   std::size_t max_concurrent_sends{2U};
+  // Bounded negotiation window for one locally admitted push (issue #13): a
+  // manifest the receiver never answers (policy off, old peer, lost frames)
+  // resolves as one failed terminal (`deadline_exceeded`, "offer_expired")
+  // after this many milliseconds instead of stalling unaccepted forever.
+  // Re-armed on every (re-)manifest and on resume; disarmed by FILE_ACCEPT.
+  // 0 disables the deadline (service-level escape hatch; the public
+  // NodeConfig knob never disables it).
+  std::uint64_t offer_timeout_milliseconds{30'000U};
   // Bounded sender staging window in bytes (M7-14): chunk frames wait here
   // when the file channel is full instead of blocking other services.
   std::size_t send_window_bytes{2U * 1024U * 1024U};
@@ -212,6 +220,11 @@ class FileService : public std::enable_shared_from_this<FileService> {
     std::uint64_t chunks_hashed{0U};
     bool paused{false};
     bool terminal{false};
+    // FILE_ACCEPT arrived: chunks may flow and the offer deadline is moot.
+    bool accepted{false};
+    // Bounded negotiation window (issue #13): armed when the manifest goes
+    // out, re-armed on resume, checked by prune(). 0 = no deadline.
+    std::uint64_t offer_deadline_unix_ms{0U};
     std::shared_ptr<ProbeRecord> probe;
     std::shared_ptr<ChunkReadRecord> read;
   };
@@ -282,11 +295,13 @@ class FileService : public std::enable_shared_from_this<FileService> {
   void finish_verify(const TransferId& id, bool ok, std::string_view detail);
   void complete_transfer(SenderState& sender, StableStatus status,
                          std::string_view safe_detail);
-  void fail_transfer(SenderState& sender, StableStatus status, std::string_view safe_detail);
+  void fail_transfer(SenderState& sender, StableStatus status,
+                     std::string_view safe_detail,
+                     ErrorCode code = ErrorCode::internal);
   void fail_receive(ReceiverState& receive, StableStatus status, std::string_view safe_detail);
   void cleanup_receive(ReceiverState& receive);
   void emit_event(FileTransferEvent event);
-  void send_manifest(const SenderState& sender);
+  void send_manifest(SenderState& sender);
   void send_abort(const TransferId& id, StableStatus status, std::string_view safe_detail);
   // Returns true when the frame was admitted; false means would_block and
   // the caller must defer (sender side retries via prune).

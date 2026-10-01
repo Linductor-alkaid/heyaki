@@ -294,6 +294,59 @@ class FileEventRecorder {
   std::vector<RecordedFileEvent> events_;
 };
 
+// Full-fidelity recorder for the issue #13 deadline contract: the error
+// code/detail/status of the failed terminal matter, not just the phase.
+class FullFileEventRecorder {
+ public:
+  void attach(Node& node) {
+    node.set_file_event_observer(
+        [this](const DeviceEndpointKey&, const FileTransferEvent& event) {
+          const std::lock_guard<std::mutex> guard{mutex_};
+          events_.push_back(event);
+        });
+  }
+
+  [[nodiscard]] std::vector<FileTransferEvent> for_transfer(
+      const TransferId& id) const {
+    const std::lock_guard<std::mutex> guard{mutex_};
+    auto matched = std::vector<FileTransferEvent>{};
+    for (const auto& event : events_) {
+      if (event.transfer_id == id) matched.push_back(event);
+    }
+    return matched;
+  }
+
+  [[nodiscard]] std::size_t terminal_count(const TransferId& id) const {
+    const std::lock_guard<std::mutex> guard{mutex_};
+    std::size_t terminals = 0U;
+    for (const auto& event : events_) {
+      if (event.transfer_id != id) continue;
+      if (event.phase == FileTransferPhase::committed ||
+          event.phase == FileTransferPhase::failed ||
+          event.phase == FileTransferPhase::cancelled) {
+        ++terminals;
+      }
+    }
+    return terminals;
+  }
+
+  [[nodiscard]] std::optional<FileTransferEvent> failed_for(
+      const TransferId& id) const {
+    const std::lock_guard<std::mutex> guard{mutex_};
+    std::optional<FileTransferEvent> found;
+    for (const auto& event : events_) {
+      if (event.transfer_id == id && event.phase == FileTransferPhase::failed) {
+        found = event;
+      }
+    }
+    return found;
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  std::vector<FileTransferEvent> events_;
+};
+
 // ---- node-level LAN harness (A) ----
 
 struct BasicNodePair {
@@ -366,11 +419,16 @@ class M5BasicCommunicationTest : public ::testing::Test {
     bool second_password{false};
     std::vector<std::string> second_policy{};
     std::vector<ShellProfileConfig> second_shell_profiles{};
+    // Issue #13 offer window on the INITIATOR; zero keeps the service
+    // default of 30 s.
+    std::chrono::milliseconds first_file_offer_timeout{std::chrono::milliseconds{0}};
   };
 
   static NodeConfig node_config(ProfileStore& store, bool basic,
                                 std::vector<FileRootConfig> roots,
-                                std::vector<ShellProfileConfig> shell_profiles) {
+                                std::vector<ShellProfileConfig> shell_profiles,
+                                std::chrono::milliseconds file_offer_timeout =
+                                    std::chrono::milliseconds{0}) {
     return NodeConfig{.profile = &store,
                       .runtime = nullptr,
                       .application_id = kApplicationId,
@@ -390,6 +448,7 @@ class M5BasicCommunicationTest : public ::testing::Test {
                       .event_max_subscriptions_per_peer = 0U,
                       .file_receive_roots = std::move(roots),
                       .file_max_peer_receive_bytes = 0U,
+                      .file_offer_timeout = file_offer_timeout,
                       .shell_profiles = std::move(shell_profiles),
                       .gateway_profiles = {},
                       .gateway_confirm_sink = {}};
@@ -415,7 +474,7 @@ class M5BasicCommunicationTest : public ::testing::Test {
     std::filesystem::create_directories(root_ / "second-inbox");
     auto first_node = Node::create(node_config(
         *pair.first_store, options.first_basic,
-        {inbox_root(root_ / "first-inbox")}, {}));
+        {inbox_root(root_ / "first-inbox")}, {}, options.first_file_offer_timeout));
     auto second_node = Node::create(node_config(
         *pair.second_store, options.second_basic,
         {inbox_root(root_ / "second-inbox")}, options.second_shell_profiles));
@@ -747,6 +806,88 @@ TEST_F(M5BasicCommunicationTest, TargetPolicyOffDropsFramesWithoutDelivery) {
   EXPECT_EQ(second_inbound.size(), 0U);
   EXPECT_FALSE(second_files.any_committed());
   EXPECT_TRUE(directory_empty(second_inbox_dir()));
+
+  // A one-sided policy never minted grants anywhere.
+  const auto first_grants = pair.first.value().trust_grants_for(pair.second_key);
+  ASSERT_TRUE(first_grants);
+  EXPECT_TRUE(first_grants.value_if()->empty());
+  const auto second_grants =
+      pair.second.value().trust_grants_for(pair.first_key);
+  ASSERT_TRUE(second_grants);
+  EXPECT_TRUE(second_grants.value_if()->empty());
+
+  EXPECT_TRUE(pair.first.value().shutdown().stopped);
+  EXPECT_TRUE(pair.second.value().shutdown().stopped);
+}
+
+// A2c (issue #13): the target's policy-off rejection used to leave a locally
+// admitted push stalled in the offered phase forever. With a short
+// NodeConfig::file_offer_timeout on the initiator, the unanswered push must
+// resolve with EXACTLY ONE failed terminal (timeout / "offer_expired" /
+// deadline_exceeded = 3). The accepted gate keeps every byte behind the
+// accept: the initiator never sends a chunk or a complete, the target's
+// session sees no second violation (it survives, still pairing_restricted),
+// and no byte lands anywhere on the target.
+TEST_F(M5BasicCommunicationTest, OfferTimeoutFailsUnansweredPushOnce) {
+  BasicNodePair pair;
+  PairOptions options;
+  options.first_basic = true;
+  options.second_basic = false;
+  options.first_file_offer_timeout = std::chrono::milliseconds{700};
+  if (!establish_pair(pair, options)) {
+    if (environment_requires_lan_interfaces()) {
+      FAIL() << "Required LAN interface is unavailable";
+    }
+    GTEST_SKIP() << "No multicast-capable non-loopback interface";
+  }
+  FullFileEventRecorder first_files;
+  first_files.attach(pair.first.value());
+  FileEventRecorder second_files;
+  second_files.attach(pair.second.value());
+
+  const auto source = write_source("blocked.bin", "no bytes");
+  const auto pushed = pair.first.value().push_file(
+      pair.second_key, std::string{kInboxRoot}, "blocked.bin", source);
+  // Locally admitted: this is exactly the issue #13 scenario (the refusing
+  // receiver cannot answer, so the local window must bound the offer).
+  ASSERT_TRUE(pushed) << pushed.error_if()->safe_detail();
+  const auto id = *pushed.value_if();
+
+  // One failed terminal inside the window plus one maintenance tick, well
+  // under the 3 s wait.
+  ASSERT_TRUE(wait_until(
+      [&] { return first_files.terminal_count(id) > 0U; },
+      std::chrono::seconds{3}));
+  EXPECT_EQ(first_files.terminal_count(id), 1U)
+      << "the offer deadline must fire exactly one terminal";
+  const auto failed = first_files.failed_for(id);
+  ASSERT_TRUE(failed.has_value());
+  ASSERT_TRUE(failed->error.has_value());
+  EXPECT_EQ(failed->error->code(), ErrorCode::timeout);
+  EXPECT_EQ(failed->error->safe_detail(), "offer_expired");
+  ASSERT_TRUE(failed->error->underlying_code().has_value());
+  EXPECT_EQ(*failed->error->underlying_code(),
+            static_cast<std::int64_t>(StableStatus::deadline_exceeded));
+
+  // Accepted gate on the initiator: manifest only, zero chunk/complete
+  // frames ever left the sender.
+  const auto first_file_stats = pair.first.value().service_diagnostics().file;
+  EXPECT_EQ(first_file_stats.manifests_sent, 1U);
+  EXPECT_EQ(first_file_stats.chunks_sent, 0U);
+  EXPECT_EQ(first_file_stats.completes_sent, 0U);
+  EXPECT_EQ(first_file_stats.sender_failed, 1U);
+  EXPECT_EQ(first_file_stats.sender_committed, 0U);
+
+  // The target saw no bytes and never committed; its session took exactly
+  // one violation (the manifest) and survived it - no second violation ever
+  // arrived to fail the session.
+  (void)wait_until([] { return false; }, std::chrono::milliseconds{300});
+  EXPECT_FALSE(second_files.any_committed());
+  EXPECT_TRUE(directory_empty(second_inbox_dir()));
+  const auto second_session =
+      latest_session_for(pair.second.value(), pair.first_key);
+  ASSERT_TRUE(second_session.has_value());
+  EXPECT_EQ(second_session->state, NodePeerSessionState::pairing_restricted);
 
   // A one-sided policy never minted grants anywhere.
   const auto first_grants = pair.first.value().trust_grants_for(pair.second_key);
