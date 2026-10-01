@@ -153,6 +153,14 @@ agent 基于 SDK 开发时，可直接挂载打包好的
 发布制品由 [scripts/package_release.sh](scripts/package_release.sh) 构建
 并验证，按[签名规程](docs/operations/release-signing.md)签名。
 
+**v1.1.1** —— 配对闭环 + 基础通信与设备信任解耦：`pair_peer` 准入返回
+wire request id 且每次尝试有界恰好一次终态（含发起方截止定时器）；已授权
+会话应答配对请求（修复/续期/反向授权，拒绝不再切断信任关系）；免密接收
+方批准（`pairing_approval_v1` 下的 `request_pairing_approval` +
+`approve_pairing`/`reject_pairing`）；opt-in 的 `basic_communication` 策略
+（身份已验证会话上免 TrustGrant 的消息与 inbox 文件推送）；vendored
+libdatachannel 补丁将回调重置收进基类互斥量（teardown TSAN 干净）。
+
 **v1.1.0** —— 新增受限 L4 Gateway 代理（M10，wire 协议 1.3）：持有
 `gateway.use` 的已授权会话可经服务端 `gateway.provide:<profile>` profile
 （CIDR/端口允许列表、配额、fail-closed 人工确认）隧道访问 TCP 目标，

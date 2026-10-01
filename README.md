@@ -165,6 +165,17 @@ engineering). Release artifacts are built and verified by
 [scripts/package_release.sh](scripts/package_release.sh) and signed per the
 [signing procedure](docs/operations/release-signing.md).
 
+**v1.1.1** — closes the pairing loop and decouples basic communication from
+device trust: `pair_peer` admission returns the wire request id with a
+bounded outcome per attempt (initiator deadline included), authorized
+sessions answer pairing requests (repair / renewal / reverse grants without
+killing the trust relationship), passwordless receiver approval
+(`request_pairing_approval` + `approve_pairing`/`reject_pairing` under
+`pairing_approval_v1`), an opt-in `basic_communication` policy (messages and
+inbox file pushes on identity-verified sessions without any TrustGrant),
+and a vendored libdatachannel patch keeping callback resets under the base
+mutex (TSAN-clean teardown).
+
 **v1.1.0** — adds the restricted L4 gateway proxy (M10, wire protocol 1.3):
 authorized sessions with `gateway.use` tunnel TCP through a serving
 device's `gateway.provide:<profile>` profiles (CIDR/port allowlists,
