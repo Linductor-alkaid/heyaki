@@ -199,8 +199,10 @@ communication on identity-verified, untrusted sessions: text/image messages
 and file pushes into the configured `file_receive_roots` work without a
 device TrustGrant or password pairing, in both directions (each end enforces
 its own policy on its own side, so a one-sided opt-in fails explicitly on
-the refusing end). The capability never covers shell, RPC, remote events,
-byte streams, or the gateway, and never creates or updates a TrustGrant. The
+the refusing end — messages through the ack-TTL terminal, files through the
+bounded `file_offer_timeout` offer window on the sending side). The
+capability never covers shell, RPC, remote events, byte streams, or the
+gateway, and never creates or updates a TrustGrant. The
 session snapshot reports the policy-derived capabilities in `policy_scopes`
 while `authorized_scopes` stays grant-only and empty; a later successful
 pairing supersedes the policy for that session.
@@ -258,7 +260,7 @@ serving side).
 | Message | `send_message`, inbound/ack handlers | `best_effort` or `peer_acked` delivery; `peer_offline` immediately when no authorized session (no offline queue in v1); bounded TTL dedup |
 | RPC | `register_rpc_method`, `call_rpc`, `cancel_rpc` | Unary; scope checked before the handler runs; exactly-once completion; **non-idempotent calls that lose their session return `outcome_unknown`**, at-most-once result caching keyed by RequestId |
 | Events | `subscribe_events` / `publish_event` (+ local topic bridge) | Publisher-direct fan-out; exact or segment-prefix patterns; per-subscriber QoS `keep_latest` or `reliable_live`; bounded staging with drop/lag counters |
-| Files | `push_file` / `pull_file`, pause/resume/cancel | Manifest → bitmap accept → bounded-window chunks → BLAKE3 verify → fsync → atomic rename; resumable by `TransferId`; receive roots are explicit allowlists with per-peer quotas |
+| Files | `push_file` / `pull_file`, pause/resume/cancel | Manifest → bitmap accept → bounded-window chunks → BLAKE3 verify → fsync → atomic rename; resumable by `TransferId`; receive roots are explicit allowlists with per-peer quotas; an unanswered manifest fails once with `deadline_exceeded` after `file_offer_timeout` (default 30 s) — a locally admitted push can never stall unaccepted forever |
 | Shell | `open_shell` / input / resize / signal / eof / `close_shell` | Default-off serving side (explicit `ShellProfileConfig` list); live `shell.open:<profile>` scope; content-free audit records; TERM→grace→kill escalation |
 | Gateway | `open_gateway_stream` (+ optional SOCKS5 frontend) | Protocol 1.3 (`gateway_v1`); default-off both sides; live `gateway.use` (initiator) / `gateway.provide:<profile>` (server); see the gateway subsection below |
 

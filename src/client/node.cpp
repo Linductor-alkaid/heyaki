@@ -6886,6 +6886,12 @@ Result<Node> Node::create(NodeConfig config) {
   }
   impl->file_service_config.receive_roots = std::move(config.file_receive_roots);
   impl->file_service_config.max_peer_receive_bytes = config.file_max_peer_receive_bytes;
+  // The public knob never disables the bound (issue #13): zero keeps the
+  // service default instead of passing the service-level "0 disables" through.
+  if (config.file_offer_timeout > std::chrono::milliseconds{0}) {
+    impl->file_service_config.offer_timeout_milliseconds =
+        static_cast<std::uint64_t>(config.file_offer_timeout.count());
+  }
   // M8 shell configuration: every profile validates before the node starts;
   // a borrowed runtime without the PTY worker keeps serving fail-closed.
   for (const auto& shell_profile : config.shell_profiles) {
