@@ -172,6 +172,11 @@ struct M6ServicePair {
     RpcServiceConfig right_rpc;
     bool attach_message{true};
     bool attach_rpc{true};
+    // Session observers (issue #16 regression): the Node installs one in
+    // production and tears peer services down synchronously from inside a
+    // failing send; tests replay that reentrancy through these.
+    std::function<void(const PeerSessionDiagnostics&)> left_observer;
+    std::function<void(const PeerSessionDiagnostics&)> right_observer;
   };
 
   LoopbackTransportPair pair;
@@ -193,6 +198,8 @@ struct M6ServicePair {
 
   std::shared_ptr<PeerSession> left;
   std::shared_ptr<PeerSession> right;
+  std::function<void(const PeerSessionDiagnostics&)> left_observer;
+  std::function<void(const PeerSessionDiagnostics&)> right_observer;
   std::shared_ptr<ServiceRegistry> left_registry = std::make_shared<ServiceRegistry>();
   std::shared_ptr<ServiceRegistry> right_registry = std::make_shared<ServiceRegistry>();
   std::shared_ptr<MessageService> left_messages;
@@ -204,6 +211,8 @@ struct M6ServicePair {
   explicit M6ServicePair(Options options) {
     if (!options.left_scopes.empty()) left_scopes = std::move(options.left_scopes);
     if (!options.right_scopes.empty()) right_scopes = std::move(options.right_scopes);
+    left_observer = std::move(options.left_observer);
+    right_observer = std::move(options.right_observer);
     EXPECT_TRUE(left_identity && right_identity);
     pair.connect();
     transport::ChannelOptions control_options;
@@ -255,7 +264,7 @@ struct M6ServicePair {
          .local_protocol = m6_protocol(),
          .expires_unix_milliseconds = m6_now + 60'000U,
          .now_unix_milliseconds = m6_now,
-         .observer = {},
+         .observer = left_observer,
          .timeline = {},
          .clock = {},
          .trust_authorizer = [this](std::uint64_t) {
@@ -277,7 +286,7 @@ struct M6ServicePair {
          .local_protocol = m6_protocol(),
          .expires_unix_milliseconds = m6_now + 60'000U,
          .now_unix_milliseconds = m6_now,
-         .observer = {},
+         .observer = right_observer,
          .timeline = {},
          .clock = {},
          .trust_authorizer = [this](std::uint64_t) {

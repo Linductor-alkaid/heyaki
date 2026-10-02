@@ -192,6 +192,19 @@ class LoopbackSession : public transport::TransportSession {
     }
   }
 
+  // Test-only failure injection (issue #16 regression): closes every channel
+  // of one kind WITHOUT touching the session state, so the PeerSession stays
+  // authenticated while its next physical send fails synchronously with
+  // "channel_closed" — the deterministic stand-in for a transport that dies
+  // mid-call in production.
+  void close_channels(transport::ChannelKind kind, transport::CloseReason reason) {
+    for (auto& channel : channels_) {
+      if (channel->kind() == kind) {
+        channel->close(reason);
+      }
+    }
+  }
+
   // Delivers every queued inbound message to the message handler in FIFO order.
   void pump() {
     while (!inbound_.empty() && message_handler_) {

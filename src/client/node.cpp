@@ -4245,8 +4245,12 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return Result<TransferId>::failure(
           node_error(ErrorCode::peer_offline, "peer_session_missing"));
     }
-    return service->second->push_file(std::move(root), std::move(logical_name),
-                                      std::move(source_path), transfer_id);
+    // Issue #16: hold a strong reference across the call — the service can
+    // tear its own peer session down reentrantly and be erased from this
+    // map while still on the stack.
+    auto file = service->second;
+    return file->push_file(std::move(root), std::move(logical_name),
+                           std::move(source_path), transfer_id);
   }
 
   Result<TransferId> pull_file_strand(DeviceEndpointKey peer, std::string root,
@@ -4263,7 +4267,10 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       randombytes_buf(bytes.data(), bytes.size());
     } while (TransferId{bytes}.is_zero());
     const TransferId transfer_id{bytes};
-    auto expected = file_service->second->expect_pull(transfer_id, root, logical_name);
+    // Issue #16: strong references across the calls (reentrant retirement).
+    auto file = file_service->second;
+    auto rpc = rpc_service->second;
+    auto expected = file->expect_pull(transfer_id, root, logical_name);
     if (!expected) {
       return Result<TransferId>::failure(*expected.error_if());
     }
@@ -4278,7 +4285,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return Result<TransferId>::failure(*encoded.error_if());
     }
     auto weak = weak_from_this();
-    auto called = rpc_service->second->call(
+    auto called = rpc->call(
         "heyaki.file", "pull", std::move(*encoded.value_if()),
         RpcCallOptions{.deadline_remaining_milliseconds = 15000U,
                        .idempotent = false,
@@ -4310,7 +4317,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     if (outcome && !outcome.value_if()->safe_detail.empty()) {
       detail = outcome.value_if()->safe_detail;
     }
-    service->second->fail_pending_pull(id, detail);
+    // Issue #16: strong reference across the call (reentrant retirement).
+    auto file = service->second;
+    file->fail_pending_pull(id, detail);
   }
 
   Result<void> pause_file_transfer_strand(const DeviceEndpointKey& peer,
@@ -4320,7 +4329,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return Result<void>::failure(node_error(ErrorCode::peer_offline,
                                               "peer_session_missing"));
     }
-    return service->second->pause_transfer(id);
+    auto file = service->second;
+    return file->pause_transfer(id);
   }
 
   Result<void> resume_file_transfer_strand(const DeviceEndpointKey& peer,
@@ -4330,7 +4340,12 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return Result<void>::failure(node_error(ErrorCode::peer_offline,
                                               "peer_session_missing"));
     }
-    return service->second->resume_transfer(id);
+    // Issue #16: the resume drains the send window, and a drained send can
+    // fail the session synchronously and erase this service from the map
+    // mid-call; the local strong reference keeps it alive until the call
+    // returns.
+    auto file = service->second;
+    return file->resume_transfer(id);
   }
 
   Result<void> cancel_file_transfer_strand(const DeviceEndpointKey& peer,
@@ -4340,7 +4355,14 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       return Result<void>::failure(node_error(ErrorCode::peer_offline,
                                               "peer_session_missing"));
     }
-    return service->second->cancel_transfer(id);
+    // Issue #16: the cancel sends a FileAbort whose pump can fail the
+    // transport synchronously; the observer then tears the peer services
+    // down (handle_session_closed) and erases this service from the map
+    // while the cancel is still on the stack. Without this local strong
+    // reference the erase is the service's last reference and the rest of
+    // the call runs on a freed object.
+    auto file = service->second;
+    return file->cancel_transfer(id);
   }
 
   std::vector<FileTransferSummary> file_transfers_strand(const DeviceEndpointKey& peer) {
@@ -4348,7 +4370,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     if (service == file_services.end()) {
       return {};
     }
-    return service->second->transfers();
+    auto file = service->second;
+    return file->transfers();
   }
 
   NodeServiceDiagnostics service_diagnostics_strand() {
@@ -4509,29 +4532,34 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     if (shell_pty) {
       shell_pty->drain();
     }
-    for (auto& [peer, service] : message_services) {
-      service->prune();
-    }
-    for (auto& [peer, service] : rpc_services) {
-      service->prune();
-    }
-    for (auto& [peer, service] : event_services) {
-      service->prune();
-    }
-    for (auto& [peer, service] : file_services) {
-      service->prune();
-    }
-    for (auto& [peer, service] : shell_services) {
-      service->prune();
-    }
-    // M10: gateway idle/duration sweeps and the A-side dial-deadline check
-    // ride the same tick (a silent peer sends no frames to trigger
-    // check_deadlines on its own).
-    for (auto& [peer, service] : gateway_services) {
-      service->prune();
-    }
-    for (auto& [peer, service] : stream_services) {
-      service->check_deadlines();
+    // Issue #16: a prune can send frames whose pump fails the session
+    // synchronously; the observer tears the peer services down and erases
+    // the very entry being visited. Pin each shared-owner service with a
+    // local strong reference for the call, and resume from
+    // upper_bound(peer) — the next entry whether or not the current one was
+    // erased reentrantly.
+    auto prune_shared = [](auto& services) {
+      for (auto it = services.begin(); it != services.end();) {
+        const auto peer = it->first;
+        auto service = it->second;
+        service->prune();
+        it = services.upper_bound(peer);
+      }
+    };
+    prune_shared(message_services);
+    prune_shared(rpc_services);
+    prune_shared(event_services);
+    prune_shared(file_services);
+    prune_shared(shell_services);
+    // M10: gateway idle/duration sweeps ride the same tick.
+    prune_shared(gateway_services);
+    // Byte streams are uniquely owned and die with their session (M5-18);
+    // their A-side dial-deadline check never fails the peer session, so an
+    // erase-safe pass without a pinning reference suffices.
+    for (auto it = stream_services.begin(); it != stream_services.end();) {
+      const auto peer = it->first;
+      it->second->check_deadlines();
+      it = stream_services.upper_bound(peer);
     }
     // Retries whose deadline passed while no session existed finalize now.
     for (auto queue_entry = rpc_retry_queue.begin();
@@ -6954,7 +6982,10 @@ Result<Node> Node::create(NodeConfig config) {
             if (service == self->file_services.end()) {
               return;
             }
-            (void)service->second->serve_pull(request);
+            // Issue #16: strong reference across the call (reentrant
+            // retirement through the probe/manifest path).
+            auto file = service->second;
+            (void)file->serve_pull(request);
           });
           return RpcHandlerResult{StableStatus::ok, {}, "pull_serving"};
         });

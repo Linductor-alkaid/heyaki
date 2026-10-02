@@ -362,32 +362,49 @@ Result<void> FileService::resume_transfer(const TransferId& id) {
               sender->root, sender->logical_name, sender->bytes_admitted,
               sender->manifest.size, std::nullopt});
   drain_window(*sender);
-  start_next_read(*sender);
+  // Issue #16: the drained sends can tear the session down reentrantly and
+  // clear senders_; only continue on a live entry.
+  auto* after_drain = sender_of(id);
+  if (after_drain != nullptr) {
+    start_next_read(*after_drain);
+  }
   return Result<void>::success();
 }
 
 Result<void> FileService::cancel_transfer(const TransferId& id) {
+  // Issue #16: send_abort rides session_.send_frame, whose pump can fail the
+  // transport synchronously and notify the Node observer, which tears the
+  // peer services down (handle_session_closed clears senders_/receivers_)
+  // while this call is still on the stack. Retire all state and capture the
+  // event payload BEFORE the send; nothing here may touch a map pointer or
+  // reference afterwards.
   if (auto* sender = sender_of(id)) {
     if (!sender->terminal) {
-      send_abort(id, StableStatus::cancelled, "local_cancel");
+      FileTransferEvent event{id, FileTransferDirection::push, FileTransferPhase::cancelled,
+                              sender->root, sender->logical_name, sender->bytes_admitted,
+                              sender->manifest.size, std::nullopt};
       sender->terminal = true;
       ++stats_.sender_cancelled;
       book_->mutable_entries().erase(id);
-      emit_event({id, FileTransferDirection::push, FileTransferPhase::cancelled, sender->root,
-                  sender->logical_name, sender->bytes_admitted, sender->manifest.size,
-                  std::nullopt});
+      senders_.erase(id);
+      send_abort(id, StableStatus::cancelled, "local_cancel");
+      emit_event(std::move(event));
+      return Result<void>::success();
     }
     senders_.erase(id);
     return Result<void>::success();
   }
   if (auto* receive = receiver_of(id)) {
     if (!receive->terminal) {
+      FileTransferEvent event{id, FileTransferDirection::pull, FileTransferPhase::cancelled,
+                              receive->root, receive->manifest.logical_name,
+                              receive->bytes_received, receive->manifest.size, std::nullopt};
       receive->terminal = true;
       ++stats_.receiver_cancelled;
       cleanup_receive(*receive);
-      emit_event({id, FileTransferDirection::pull, FileTransferPhase::cancelled,
-                  receive->root, receive->manifest.logical_name, receive->bytes_received,
-                  receive->manifest.size, std::nullopt});
+      receivers_.erase(id);
+      emit_event(std::move(event));
+      return Result<void>::success();
     }
     receivers_.erase(id);
     return Result<void>::success();
@@ -427,7 +444,13 @@ void FileService::prune() {
       continue;
     }
     drain_window(sender);
-    start_next_read(sender);
+    // Issue #16: the drained sends can tear the session down reentrantly;
+    // re-find before touching the record again.
+    const auto mid = senders_.find(id);
+    if (mid == senders_.end()) {
+      continue;
+    }
+    start_next_read(mid->second);
     const auto after = senders_.find(id);
     if (after == senders_.end()) {
       continue;
@@ -435,7 +458,14 @@ void FileService::prune() {
     if (after->second.complete_deferred) {
       // The verdict request lost its race with concurrent bulk traffic;
       // with the window now drained there is queue room again.
-      after->second.complete_deferred = !send_complete(id, StableStatus::ok, "");
+      const bool admitted = send_complete(id, StableStatus::ok, "");
+      // The retry send can also tear the session down reentrantly (issue
+      // #16): re-find before the deferred flag write.
+      const auto retry = senders_.find(id);
+      if (retry == senders_.end()) {
+        continue;
+      }
+      retry->second.complete_deferred = !admitted;
     }
   }
   for (const auto& id : expired) {
@@ -629,23 +659,40 @@ void FileService::send_manifest(SenderState& sender) {
   frame.type = static_cast<std::uint8_t>(FrameType::file_manifest);
   frame.channel_id = channel_id_;
   frame.payload = std::move(*encoded.value_if());
+  // Capture the post-send bookkeeping inputs up front (issue #16): a
+  // successful send still pumps, and the pump can fail the transport
+  // synchronously, retiring this transfer via the observer teardown before
+  // send_frame returns.
+  const auto id = sender.transfer_id;
+  const auto manifest_size = sender.manifest.size;
+  const auto root = sender.root;
+  const auto logical_name = sender.logical_name;
+  const auto deadline = config_.offer_timeout_milliseconds != 0U
+                            ? now() + config_.offer_timeout_milliseconds
+                            : 0U;
   if (!session_.send_frame(channel_id_, session::FrameClass::standard, std::move(frame))) {
+    // Enqueue failed before any pump ran; `sender` is still valid here.
     fail_transfer(sender, StableStatus::unavailable, "manifest_send_failed");
     return;
   }
   ++stats_.manifests_sent;
+  // Revalidate by the stable transfer id: reentrant teardown cleared
+  // senders_ and parked the entry in the book as paused; a second (offered)
+  // event or deadline re-arm must not resurrect it.
+  auto* live = sender_of(id);
+  if (live == nullptr) {
+    return;
+  }
   // Arm the bounded negotiation window (issue #13): the offered phase now
   // ends in one failed terminal even when the receiver never answers.
-  sender.offer_deadline_unix_ms = config_.offer_timeout_milliseconds != 0U
-                                      ? now() + config_.offer_timeout_milliseconds
-                                      : 0U;
-  auto entry = book_->mutable_entries().find(sender.transfer_id);
+  live->offer_deadline_unix_ms = deadline;
+  auto entry = book_->mutable_entries().find(id);
   if (entry != book_->mutable_entries().end()) {
     entry->second.phase = FileTransferPhase::offered;
-    entry->second.bytes_total = sender.manifest.size;
+    entry->second.bytes_total = manifest_size;
   }
-  emit_event({sender.transfer_id, FileTransferDirection::push, FileTransferPhase::offered,
-              sender.root, sender.logical_name, 0U, sender.manifest.size, std::nullopt});
+  emit_event({id, FileTransferDirection::push, FileTransferPhase::offered, root,
+              logical_name, 0U, manifest_size, std::nullopt});
 }
 
 void FileService::handle_inbound_accept(const FrameView& frame) {
@@ -828,36 +875,54 @@ void FileService::finish_send_hash(const TransferId& id, std::uint64_t offset,
   sender->window.emplace_back(offset, std::move(payload));
   sender->window_bytes += data_bytes + file_chunk_header_bytes;
   drain_window(*sender);
-  start_next_read(*sender);
+  // Issue #16: the drained sends can tear the session down reentrantly and
+  // clear senders_; only continue on a live entry.
+  auto* after_drain = sender_of(id);
+  if (after_drain != nullptr) {
+    start_next_read(*after_drain);
+  }
 }
 
 void FileService::drain_window(SenderState& sender) {
+  // Issue #16: every send here can synchronously fail the session (pump ->
+  // fail -> observer teardown -> senders_.clear()); revalidate by the stable
+  // transfer id after each admitted frame and never touch a stale reference.
+  const auto id = sender.transfer_id;
   while (!sender.window.empty()) {
-    auto& entry = sender.window.front();
+    const auto& staged = sender.window.front().second;
+    const auto data_bytes = staged.size() > file_chunk_header_bytes
+                                ? staged.size() - file_chunk_header_bytes
+                                : 0U;
     Frame frame;
     frame.type = static_cast<std::uint8_t>(FrameType::file_chunk);
     frame.channel_id = channel_id_;
-    frame.payload = entry.second;  // copied until admission
-    const auto data_bytes = entry.second.size() > file_chunk_header_bytes
-                                ? entry.second.size() - file_chunk_header_bytes
-                                : 0U;
+    frame.payload = staged;  // copied until admission
     const auto sent = session_.send_frame(channel_id_, session::FrameClass::bulk,
                                           std::move(frame));
     if (!sent) {
       // Channel queue full (would_block): the chunk stays staged in the
       // bounded window; prune() retries. Control/RPC frames keep their own
       // classes and budgets, so file backpressure never blocks them
-      // (M7-14).
+      // (M7-14). Enqueue failures never pump, so `sender` is still valid.
       ++stats_.chunk_send_deferred;
       return;
     }
-    sender.window.pop_front();
-    sender.window_bytes -= data_bytes + file_chunk_header_bytes;
-    sender.bytes_admitted += data_bytes;
+    auto* live = sender_of(id);
+    if (live == nullptr) {
+      // Reentrant teardown parked or retired the transfer mid-drain.
+      return;
+    }
+    live->window.pop_front();
+    live->window_bytes -= data_bytes + file_chunk_header_bytes;
+    live->bytes_admitted += data_bytes;
     ++stats_.chunks_sent;
   }
-  if (sender.manifest.size != 0U && sender.chunks_hashed >= sender.chunk_count &&
-      !sender.complete_sent && !sender.terminal) {
+  auto* live = sender_of(id);
+  if (live == nullptr) {
+    return;
+  }
+  if (live->manifest.size != 0U && live->chunks_hashed >= live->chunk_count &&
+      !live->complete_sent && !live->terminal) {
     // Every chunk is admitted into the transport queue: the receiver's
     // FILE_COMPLETE verdict is the terminal commit answer. The manifest
     // guard is load-bearing: prune() drains senders that are still probing
@@ -865,16 +930,24 @@ void FileService::drain_window(SenderState& sender) {
     // a zero-byte complete within the first tick — the receiver ignores it
     // as an unknown transfer, complete_sent latches, and the real verdict
     // request is never sent (found by the M9-10 bench under probe latency).
-    sender.complete_sent = true;
-    sender.complete_deferred = !send_complete(sender.transfer_id, StableStatus::ok, "");
+    live->complete_sent = true;
+    const auto bytes_admitted = live->bytes_admitted;
+    const auto root = live->root;
+    const auto logical_name = live->logical_name;
+    const auto size = live->manifest.size;
+    live->complete_deferred = !send_complete(id, StableStatus::ok, "");
     ++stats_.completes_sent;
-    auto entry = book_->mutable_entries().find(sender.transfer_id);
-    if (entry != book_->mutable_entries().end()) {
-      entry->second.bytes_done = sender.bytes_admitted;
+    // The verdict request itself can fail the session reentrantly; the
+    // parked book entry already carries the bytes (handle_session_closed).
+    if (sender_of(id) == nullptr) {
+      return;
     }
-    emit_event({sender.transfer_id, FileTransferDirection::push,
-                FileTransferPhase::verifying, sender.root, sender.logical_name,
-                sender.bytes_admitted, sender.manifest.size, std::nullopt});
+    auto entry = book_->mutable_entries().find(id);
+    if (entry != book_->mutable_entries().end()) {
+      entry->second.bytes_done = bytes_admitted;
+    }
+    emit_event({id, FileTransferDirection::push, FileTransferPhase::verifying, root,
+                logical_name, bytes_admitted, size, std::nullopt});
   }
 }
 
@@ -1157,8 +1230,9 @@ void FileService::handle_inbound_manifest(const FrameView& frame) {
 }
 
 void FileService::accept_transfer(ReceiverState& receive) {
+  const auto id = receive.transfer_id;
   FileAcceptBody accept;
-  accept.transfer_id = receive.transfer_id;
+  accept.transfer_id = id;
   for (std::uint64_t index = 0U; index < receive.chunk_count; ++index) {
     if (receive.chunk_bitmap[static_cast<std::size_t>(index)] != 0U) {
       accept.present_chunk_indices.push_back(index);
@@ -1174,28 +1248,38 @@ void FileService::accept_transfer(ReceiverState& receive) {
   frame.channel_id = channel_id_;
   frame.payload = std::move(*encoded.value_if());
   if (!session_.send_frame(channel_id_, session::FrameClass::standard, std::move(frame))) {
+    // Enqueue failed before any pump ran; `receive` is still valid here.
     fail_receive(receive, StableStatus::unavailable, "accept_send_failed");
     return;
   }
   ++stats_.accepts_sent;
+  // Issue #16: the send pumped, and the pump can fail the transport
+  // synchronously — the observer teardown clears receivers_ before
+  // send_frame returns. Skip the sidecar/event for a retired receive; the
+  // on-disk sidecar (already written before the accept) resumes or rebuilds
+  // with the next session either way.
+  auto* live = receiver_of(id);
+  if (live == nullptr) {
+    return;
+  }
   // Persist the sidecar so a crash mid-transfer resumes by transfer id.
   file_store::ResumeState state;
-  state.transfer_id = receive.transfer_id;
-  state.size = receive.manifest.size;
-  state.chunk_size = receive.manifest.chunk_size;
-  std::copy(receive.manifest.blake3.begin(), receive.manifest.blake3.end(),
+  state.transfer_id = id;
+  state.size = live->manifest.size;
+  state.chunk_size = live->manifest.chunk_size;
+  std::copy(live->manifest.blake3.begin(), live->manifest.blake3.end(),
             state.blake3.begin());
-  state.chunk_bitmap = receive.chunk_bitmap;
-  auto path = receive.state_path;
+  state.chunk_bitmap = live->chunk_bitmap;
+  auto path = live->state_path;
   (void)blocking_dispatch_(
       "heyaki-file-state", [path, state = std::move(state)](executor::StopToken) mutable {
         (void)file_store::write_resume_state(path, state);
       });
-  emit_event({receive.transfer_id,
-              receive.pull_initiated ? FileTransferDirection::pull
-                                     : FileTransferDirection::push,
-              FileTransferPhase::transferring, receive.root,
-              receive.manifest.logical_name, 0U, receive.manifest.size, std::nullopt});
+  emit_event({id,
+              live->pull_initiated ? FileTransferDirection::pull
+                                   : FileTransferDirection::push,
+              FileTransferPhase::transferring, live->root,
+              live->manifest.logical_name, 0U, live->manifest.size, std::nullopt});
 }
 
 void FileService::reject_transfer(const TransferId& id, StableStatus status,
@@ -1330,7 +1414,13 @@ void FileService::finish_chunk_hash(const TransferId& id, std::uint64_t offset,
   ready.data = std::move(data);
   receive->write_queue.push_back(std::move(ready));
   dispatch_chunk_write(*receive);
-  pump_validate(*receive);
+  // Issue #16: the rejected write dispatch fails the receive inside
+  // dispatch_chunk_write (freeing the map node); only continue on a live
+  // entry.
+  auto* after_write_dispatch = receiver_of(id);
+  if (after_write_dispatch != nullptr) {
+    pump_validate(*after_write_dispatch);
+  }
 }
 
 void FileService::dispatch_chunk_write(ReceiverState& receive) {
@@ -1419,7 +1509,13 @@ void FileService::finish_chunk_write(const TransferId& id, std::uint64_t offset,
               receive->manifest.logical_name, receive->bytes_received,
               receive->manifest.size, std::nullopt});
   maybe_start_verify(*receive);
-  dispatch_chunk_write(*receive);
+  // Issue #16: a rejected verify dispatch fails the receive inside
+  // maybe_start_verify (freeing the map node); only continue on a live
+  // entry.
+  auto* after_verify = receiver_of(id);
+  if (after_verify != nullptr) {
+    dispatch_chunk_write(*after_verify);
+  }
 }
 
 void FileService::maybe_start_verify(ReceiverState& receive) {
@@ -1493,9 +1589,11 @@ void FileService::finish_verify(const TransferId& id, bool ok, std::string_view 
                 FileTransferPhase::committed, receive->root,
                 receive->manifest.logical_name, receive->manifest.size,
                 receive->manifest.size, std::nullopt});
+    // Issue #16: retire the state before the verdict send — the send can
+    // synchronously fail the session and clear receivers_ reentrantly.
+    receivers_.erase(id);
     // The sender's terminal commit verdict (wire 6.3 verifying -> committed).
     send_complete(id, StableStatus::ok, "");
-    receivers_.erase(id);
     return;
   }
   ++stats_.commit_failures;
@@ -1505,9 +1603,9 @@ void FileService::finish_verify(const TransferId& id, bool ok, std::string_view 
               FileTransferPhase::failed, receive->root, receive->manifest.logical_name,
               receive->bytes_received, receive->manifest.size,
               Error{ErrorCode::internal, "file", std::string{detail}}});
-  send_complete(id, StableStatus::internal, std::string{detail}.substr(0, 31));
   cleanup_receive(*receive);
   receivers_.erase(id);
+  send_complete(id, StableStatus::internal, std::string{detail}.substr(0, 31));
 }
 
 void FileService::fail_receive(ReceiverState& receive, StableStatus status,
@@ -1522,9 +1620,16 @@ void FileService::fail_receive(ReceiverState& receive, StableStatus status,
               FileTransferPhase::failed, receive.root, receive.manifest.logical_name,
               receive.bytes_received, receive.manifest.size,
               Error{ErrorCode::internal, "file", std::string{safe_detail}}});
-  send_abort(receive.transfer_id, status, safe_detail);
+  // Issue #16: the abort send can synchronously fail the session and clear
+  // receivers_ reentrantly — retire the state (disk cleanup, map erase)
+  // before the send instead of touching `receive` afterwards. The transfer
+  // id is copied out first: erase frees the map node the `receive` fields
+  // live in, and send_abort must not read them through the dangling
+  // reference.
   cleanup_receive(receive);
-  receivers_.erase(receive.transfer_id);
+  const auto aborted_id = receive.transfer_id;
+  receivers_.erase(aborted_id);
+  send_abort(aborted_id, status, safe_detail);
 }
 
 void FileService::cleanup_receive(ReceiverState& receive) {

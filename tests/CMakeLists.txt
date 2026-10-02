@@ -879,6 +879,7 @@ heyaki_add_runtime_test(
 add_executable(heyaki_m7_service_tests
   unit/m7_codec_test.cpp
   unit/m7_event_test.cpp
+  unit/m7_file_cancel_reentry_test.cpp
   unit/m7_file_offer_test.cpp
   unit/m7_file_test.cpp)
 target_link_libraries(heyaki_m7_service_tests PRIVATE

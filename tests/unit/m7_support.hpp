@@ -126,6 +126,11 @@ struct M7ServicePair {
     EventServiceConfig right_event;
     FileServiceConfig left_file;
     FileServiceConfig right_file;
+    // Session observers, forwarded to the underlying M6 pair (issue #16
+    // regression: the test replays the Node's synchronous teardown observer
+    // against a failing send).
+    std::function<void(const PeerSessionDiagnostics&)> left_session_observer;
+    std::function<void(const PeerSessionDiagnostics&)> right_session_observer;
   };
 
   M7TempDir left_root_dir;
@@ -161,7 +166,7 @@ struct M7ServicePair {
 
   explicit M7ServicePair() : M7ServicePair(Options{}) {}
 
-  explicit M7ServicePair(Options options)
+         explicit M7ServicePair(Options options)
       : m6([&] {
            // Scopes freeze at session creation: hand them to the M6 pair's
            // constructor instead of mutating after the fact.
@@ -172,6 +177,8 @@ struct M7ServicePair {
            if (!options.right_scopes.empty()) {
              m6_options.right_scopes = options.right_scopes;
            }
+           m6_options.left_observer = std::move(options.left_session_observer);
+           m6_options.right_observer = std::move(options.right_session_observer);
            return M6ServicePair(std::move(m6_options));
          }()) {
     // Both sides share the default event/file config unless overridden; the
