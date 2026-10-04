@@ -138,6 +138,6 @@ jobs:
             -gpu swiftshader_indirect
             -no-snapshot
             -no-snapshot-save
-          script: |
-            scripts/run_android_smoke.sh \
-              --binary build-android/x86_64/install/bin/heyaki_android_smoke
+          # Single line: the action runs the script via `sh -c`, where a
+          # YAML-block line continuation would surface as a literal argument.
+          script: scripts/run_android_smoke.sh --binary build-android/x86_64/install/bin/heyaki_android_smoke
