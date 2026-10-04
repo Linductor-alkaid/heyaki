@@ -51,7 +51,9 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
 
       - name: Fetch pinned dependencies
-        run: scripts/fetch_third_party.sh
+        # --all: the install rules package every locked license text
+        # (including the test-group atoms), so all checkouts must exist.
+        run: scripts/fetch_third_party.sh --all
 
       - name: Cross-build the library set and the smoke
         run: |
