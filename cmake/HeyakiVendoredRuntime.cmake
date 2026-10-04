@@ -274,7 +274,12 @@ function(heyaki_add_vendored_blake3)
   target_include_directories(heyaki_blake3
     PUBLIC "$<BUILD_INTERFACE:${blake3_root}>")
   target_compile_definitions(heyaki_blake3 PRIVATE
-    BLAKE3_NO_SSE2 BLAKE3_NO_SSE41 BLAKE3_NO_AVX2 BLAKE3_NO_AVX512 BLAKE3_NO_NEON)
+    BLAKE3_NO_SSE2 BLAKE3_NO_SSE41 BLAKE3_NO_AVX2 BLAKE3_NO_AVX512 BLAKE3_NO_NEON
+    # The pinned header autodetects BLAKE3_USE_NEON=1 on AArch64 when it is
+    # undefined, making dispatch reference the NEON sources this vendored
+    # target deliberately does not compile; the mismatch only surfaces when a
+    # shared library links heyaki_blake3 (Android heyaki_jni). Pin it off.
+    BLAKE3_USE_NEON=0)
   set_target_properties(heyaki_blake3 PROPERTIES
     C_STANDARD 11
     C_STANDARD_REQUIRED ON

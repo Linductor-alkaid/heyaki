@@ -48,13 +48,15 @@
 - [x] `M11-02` vendored OpenSSL 3.x 交叉编译方案落地（A1）：更新
   `cmake/HeyakiVendoredRuntime.cmake`，Android 构建不再 `find_package(OpenSSL)`；
   记录与 libdatachannel TLS backend 的选择及理由到本文件与 supply-chain 文档。
-- [ ] `M11-03` 逐依赖交叉编译验证并记录版本/补丁：Boost.Asio/Beast、libsodium、
+- [x] `M11-03` 逐依赖交叉编译验证并记录版本/补丁：Boost.Asio/Beast、libsodium、
   protobuf、abseil、blake3、sqlite、zstd、libdatachannel（对齐
   `third_party/dependencies.lock` 版本，不借机升级）。
-- [ ] `M11-04` 平台层验证（A3）：`flock`、`getifaddrs`/`if_nametoindex`、文件锁 +
+- [x] `M11-04` 平台层验证（A3）：`flock`、`getifaddrs`/`if_nametoindex`、文件锁 +
   原子替换、XDG→Android 存储目录映射、`dlfcn` secret backend 的启用/禁用策略。
 - [ ] `M11-05` LAN 组播适配（A2）：JNI 集成层 MulticastLock 钩子；Android 无锁时
-  LAN discovery 显式降级并保持 relay 路径可用；补降级路径测试。
+  LAN discovery 显式降级并保持 relay 路径可用；补降级路径测试。（核心侧降级
+  路径与桌面测试已核实存在，见 §4 2026-10-04 第二批记录；MulticastLock 钩子
+  属应用/JNI 层，随 M11-06 落地后勾选。）
 - [ ] `M11-06` JNI 集成边界：以薄封装暴露 Node 会话生命周期/授权 API，Heyaki
   工作仍全部经 executor 提交，回调经既有 executor::comm 语义投递到宿主线程；
   不在 JNI 层建立第二并发系统。
@@ -135,3 +137,67 @@
 **待办（下一批）**：M11-03 逐依赖验证记录、M11-04 平台层验证（A3）、
 M11-05 组播降级（A2）、M11-06 JNI 边界、M11-07 冒烟示例、M11-08 CI、
 M11-09 文档收尾。
+
+### 2026-10-04 — 第二批：M11-03 依赖验证记录 + M11-04 平台层（A3）+ M11-05 核实
+
+**M11-03 逐依赖验证记录**
+
+- 新增 `docs/compatibility/android-ndk.md`：构建入口（NDK r26d、API 24、
+  双 ABI）、逐依赖交叉编译矩阵（12 个 lock atom 的 Android 状态与理由）、
+  平台层映射表、LAN 组播语义。结论：runtime 组全部原样交叉编译（无
+  Android 补丁，锁文件未升级）；protobuf/abseil（test-only 工具链）、
+  googletest、FTXUI（TUI）、zstd（optional 未启用）按范围排除并记录。
+- 证据：M11-01/M11-02 双 ABI 干净构建 + 架构抽查 + 独立验证报告。
+
+**M11-04 平台层验证（A3）**
+
+- `flock`/文件锁+原子替换：bionic 与 glibc 语义一致（kernel VFS），桌面套件
+  已覆盖行为，设备端执行随 M11-07/08。
+- `getifaddrs`/`if_nametoindex`：由 API 24 下限保证（build 脚本与 CMake 双重
+  检查）。
+- 存储目录映射：`ProfileStore::create/open` 显式路径即映射点（JNI 传应用
+  私有目录）；`default_profiles_root()` 等工厂在 Android 上显式返回
+  `configuration`/"home_directory_unavailable"（不发明 env 回退）。
+- `dlfcn` secret backend：`src/profile/secret_backend.cpp` 的 libsecret 探测在
+  Android 编译期跳过（`#if defined(__linux__) && !defined(__ANDROID__)`，
+  两处决策点），错误文本与降级语义不变，直接落加密文件后端策略；Keystore
+  等价映射留待 DEC-14 结论（M11-09）。桌面 Linux 行为零变化。
+
+**M11-05 核实（A2）**
+
+- 核心侧"无锁显式降级"已存在于 pinned 代码：`IP_ADD_MEMBERSHIP` 失败 →
+  记录 `multicast_join_failed` 并关闭该接口 socket；1.5s 就绪探测超时 →
+  `multicast_probe_timed_out` + `LanReadinessState::degraded`；relay 路径独立
+  可用；`NodeConfig.lan_override` 支持宿主主动禁用 LAN。桌面测试
+  （`tests/unit/m3a_lan_test.cpp`）已断言两条降级路径。
+- 剩余项：MulticastLock 生命周期钩子属应用/JNI 层，随 M11-06 落地；
+  设备端组播行为验证随 M11-07/08。
+
+### 2026-10-04 — 第三批：M11-06 JNI 边界第一增量（会话生命周期 + 授权）
+
+- 新增 `apps/jni/heyaki_jni.cpp` + CMake 目标 `heyaki_jni`（仅
+  `HEYAKI_ANDROID` 下构建的 SHARED 库，链接 `heyaki::services`，进入
+  Android 安装树）。Java 契约 `apps/jni/java/dev/heyaki/core/HeyakiNode.java`
+  （含 `HeyakiException`）：
+  - 生命周期：create（打开/新建并初始化 profile，Argon2id 校验器由初始密码
+    派生）、`snapshot()`（LAN/relay 状态摘要）、`deviceIdHex()`、`close()`
+    （返回 NodeShutdownReport 摘要）。
+  - 授权：`setPairingRequestListener`（无口令配对审批请求的接收端回调）、
+    `approvePairing`/`rejectPairing`、`rotateAuthorizationPassword`；以及
+    `connect`/`connectLan`/`closeLan`。M10 网关、RPC、shell、文件、事件面
+    留待后续增量。
+- executor 并发边界（EXEC 抽查项）：JNI 层零线程/零队列/零自建监控；所有
+  Heyaki 工作经 heyaki Runtime/Node 内 executor 提交；配对回调在 Heyaki
+  executor 上下文触发，经 Attach/DetachCurrentThread 临时挂接 JVM 投递一个
+  Java 回调（异常就地清除，不回灌 executor）；NativeNode 成员声明顺序固定
+  关闭顺序 node→profile→runtime；C++ 异常绝不穿越 JNI 函数边界（注册待抛
+  Java 异常 + 返回哨兵）。关闭顺序测试随 M11-07（JVM/qemu 冒烟）落地。
+- 修复 vendored blake3 在 AArch64 的潜伏缺陷：`blake3_impl.h` 在
+  `BLAKE3_USE_NEON` 未定义时按 AArch64 自动启用 NEON 调度，引用 vendored
+  目标刻意不编译的 NEON 源文件；静态库阶段不链接所以 M11-01 未暴露，直到
+  第一个共享库 heyaki_jni 链接才失败（`blake3_hash_many_neon` undefined）。
+  现显式钉 `BLAKE3_USE_NEON=0`（`cmake/HeyakiVendoredRuntime.cmake`）。
+- JNI create 的 profile secret 后端固定为加密文件（`prefer_os_backend=false`），
+  与 M11-04/A3 处置一致。
+- 范围决策：Android alpha 的 Node 为 LAN-only（不注入 relay_override）；relay
+  场景随 M11-07 冒烟接线。

@@ -521,6 +521,19 @@ if(HEYAKI_BUILD_APPS)
        heyaki-test-turn-server heyaki-m7-data-demo heyaki-release-sign)
 endif()
 
+# M11-06: thin JNI boundary over the Node session-lifecycle and authorization
+# API (Android only). The binding creates no threads, executors, or queues of
+# its own: Heyaki work stays on the executor-owned contexts, observer
+# callbacks transiently attach the calling executor thread to the JVM, and
+# teardown order is fixed (node → profile → runtime). The Java contract lives
+# in apps/jni/java/ and is consumed by the host application.
+if(HEYAKI_ANDROID)
+  add_library(heyaki_jni SHARED apps/jni/heyaki_jni.cpp)
+  target_link_libraries(heyaki_jni PRIVATE heyaki::services log)
+  heyaki_configure_target(heyaki_jni)
+  list(APPEND HEYAKI_INSTALL_TARGETS heyaki_jni)
+endif()
+
 heyaki_add_developer_targets()
 heyaki_generate_supply_chain_files(
   "${CMAKE_CURRENT_BINARY_DIR}/supply-chain"
