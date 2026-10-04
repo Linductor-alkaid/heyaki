@@ -1,6 +1,6 @@
 # M11 Android（NDK）库适配
 
-> - 状态：任务清单完成（2026-10-04；v1.2 alpha 退出条件剩余缺口见 §4 第四批末尾）
+> - 状态：任务清单完成，CI 首绿（2026-10-05；v1.2 alpha 退出条件剩余缺口见 §4）
 > - 前置：M9（v1.0 发布门禁完成后启动；可与 M10 并行）
 > - 建议发布点：v1.2 Android alpha
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md) §2.1 目标 8、
@@ -256,4 +256,17 @@ M11-09 文档收尾。
 - 退出条件 2 的 relay WSS 登录 + TURN 中继会话在模拟器/真机上的建立冒烟
   （需在设备侧接线 relay enrollment/TURN 场景）。
 - arm64 ABI 的执行 lane（当前为编译门禁）。
+
+### 2026-10-05 — CI 首绿（android workflow）
+
+- PR #18 的 `android` workflow 全绿（run 37218075875）：
+  `NDK cross-build (x86_64)=success`、`NDK cross-build (arm64-v8a)=success`、
+  `Emulator smoke (x86_64)=success`，冒烟在 CI 模拟器上输出
+  `HEYAKI_ANDROID_SMOKE_OK checks=16`（LAN readiness = ready）。
+  退出条件 1 与 4 的设备执行证据、退出条件 3 的文件锁/原子替换设备执行
+  均由该 lane 覆盖。
+- 调试中固化的两个 CI 事实：ubuntu-24.04 runner 不再预装 sdkmanager
+  （cmdline-tools 钉版自装）；裸 `adb wait-for-device` 在模拟器启动失败时
+  无界悬挂（已由 android-emulator-runner 的有界等待 + `timeout-minutes`
+  兜底）。
 - CI `android` workflow 首次绿（推送后由 workflow_dispatch 触发验证）。
