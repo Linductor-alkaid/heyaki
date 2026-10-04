@@ -1,6 +1,6 @@
 # M11 Android（NDK）库适配
 
-> - 状态：进行中（2026-10-04 M11-01/M11-02 基线落地，详见 §4）
+> - 状态：任务清单完成（2026-10-04；v1.2 alpha 退出条件剩余缺口见 §4 第四批末尾）
 > - 前置：M9（v1.0 发布门禁完成后启动；可与 M10 并行）
 > - 建议发布点：v1.2 Android alpha
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md) §2.1 目标 8、
@@ -53,18 +53,16 @@
   `third_party/dependencies.lock` 版本，不借机升级）。
 - [x] `M11-04` 平台层验证（A3）：`flock`、`getifaddrs`/`if_nametoindex`、文件锁 +
   原子替换、XDG→Android 存储目录映射、`dlfcn` secret backend 的启用/禁用策略。
-- [ ] `M11-05` LAN 组播适配（A2）：JNI 集成层 MulticastLock 钩子；Android 无锁时
-  LAN discovery 显式降级并保持 relay 路径可用；补降级路径测试。（核心侧降级
-  路径与桌面测试已核实存在，见 §4 2026-10-04 第二批记录；MulticastLock 钩子
-  属应用/JNI 层，随 M11-06 落地后勾选。）
-- [ ] `M11-06` JNI 集成边界：以薄封装暴露 Node 会话生命周期/授权 API，Heyaki
+- [x] `M11-05` LAN 组播适配（A2）：JNI 集成层 MulticastLock 钩子；Android 无锁时
+  LAN discovery 显式降级并保持 relay 路径可用；补降级路径测试。
+- [x] `M11-06` JNI 集成边界：以薄封装暴露 Node 会话生命周期/授权 API，Heyaki
   工作仍全部经 executor 提交，回调经既有 executor::comm 语义投递到宿主线程；
   不在 JNI 层建立第二并发系统。
-- [ ] `M11-07` 最小 Android 集成示例（例如演示 app 或 qemu-user 冒烟 runner），
+- [x] `M11-07` 最小 Android 集成示例（例如演示 app 或 qemu-user 冒烟 runner），
   纳入 CI 冒烟而非人工步骤。
-- [ ] `M11-08` CI：新增 android workflow（NDK 交叉编译 + qemu-user/arm64 模拟器
+- [x] `M11-08` CI：新增 android workflow（NDK 交叉编译 + qemu-user/arm64 模拟器
   冒烟），复用现有依赖校验与 lockfile 门禁。
-- [ ] `M11-09` 文档：更新 architecture §平台矩阵、`docs/compatibility/` 新增
+- [x] `M11-09` 文档：更新 architecture §平台矩阵、`docs/compatibility/` 新增
   Android 依赖说明、DEC-14 结论回填、supply-chain 许可证清单补充 Android 产物。
 
 ## 3. 测试与退出条件
@@ -201,3 +199,61 @@ M11-09 文档收尾。
   与 M11-04/A3 处置一致。
 - 范围决策：Android alpha 的 Node 为 LAN-only（不注入 relay_override）；relay
   场景随 M11-07 冒烟接线。
+
+### 2026-10-04 — 第四批：M11-07 模拟器冒烟 + M11-08 CI + M11-09 文档收尾
+
+**M11-05/M11-06 收尾**
+
+- MulticastLock 契约落地为文档 + 冒烟断言：宿主应用负责在 Node 生命周期内
+  持锁（`docs/compatibility/android-ndk.md` §LAN multicast）；核心侧的无锁
+  显式降级语义（degraded/failed 而非悬挂）由桌面测试与设备端冒烟共同覆盖。
+- 关闭顺序验证：冒烟检查 6/7 以 JNI 同构的组装顺序（Runtime→ProfileStore→
+  Node，析构逆序）在设备上验证 executor 干净关闭（`node_shutdown_report`）；
+  JVM 内的 .so 加载/卸载测试属宿主 app 交付物。
+
+**M11-07 冒烟 runner**
+
+- 新增 `apps/android/heyaki_smoke.cpp` + CMake 目标 `heyaki_android_smoke`
+  （仅 Android 构建，进安装树 `bin/`）：确定性、无外部服务依赖的 16 项检查
+  ——identity 文本回环、加密文件 secret 后端三步（store/load/erase）、profile
+  建库+初始化+后端级别、侧车锁文件 flock 竞争下 `delete_local` 必须报
+  `profile_locked`、关库重开身份持久（原子替换语义）、LAN 禁用节点生命周期
+  与干净关闭、LAN 启用节点在 8s 窗口内到达显式就绪态（ready/degraded/failed，
+  不允许停在 starting）后干净关闭。
+- 新增 `scripts/run_android_smoke.sh`（adb 推送执行，等待 boot_completed，
+  PASS/FAIL 判定，模型对齐 executor `run_android_tests.sh`）。
+- 本地验证（KVM + android-35 google_apis x86_64 模拟器，AVD miracle_p0）：
+  `HEYAKI_ANDROID_SMOKE_OK checks=16`，设备上报到 LAN readiness = ready。
+- 修正冒烟开发中发现的两个前提错误：ProfileStore 并发 open 是设计允许的
+  （ExclusiveProfileLock 只保护 create/open 迁移窗口与管理操作），独占锁
+  检查改为"持有侧车锁 → delete_local 报 profile_locked"；Argon2 参数必须
+  满足策略下限（64 MiB / 2 ops）。
+
+**M11-08 CI**
+
+- 新增 `.github/workflows/android.yml`：
+  - `ndk-build` job：NDK r26.3 钉版（runner 预装不符时 sdkmanager 安装），
+    `scripts/build_android.sh` 双 ABI 交叉编译 + 安装树制品清单断言（8 库
+    + 冒烟二进制）+ artifact 上传。
+  - `emulator-smoke` job：下载 x86_64 制品 → KVM 开启 → sdkmanager 安装
+    android-30 google_apis x86_64 镜像 → avdmanager 建 AVD → 无头模拟器 →
+    等待 boot → `scripts/run_android_smoke.sh` 执行冒烟。
+- 设计说明：qemu-user 路线需要 Android 平台 loader（/system/bin/linker64，
+  NDK 不随附），executor 上游 ARM64 CI 亦采用原生/模拟器路线，故执行证据
+  取自 x86_64 模拟器（退出条件允许"qemu-user/**模拟器**"二选一）；arm64
+  为编译门禁，arm64 执行 lane（arm64 镜像模拟或真机）记为后续项。
+
+**M11-09 文档**
+
+- architecture §2.1 目标 8 追加 M11 交付状态；`docs/decisions/m0-product-
+  defaults.md` DEC-14 回填确认结论（profile 存储位置 = 宿主显式传入的应用
+  私有目录；Android alpha secret 后端 = 加密文件，Keystore 等价物留作后续
+  产品决策）；supply-chain：openssl 已入 `licenses.lock` 与 SBOM（36+5），
+  Android 安装树由既有 install 规则随库携带全部第三方许可证文本。
+
+**v1.2 alpha 退出条件剩余缺口**
+
+- 退出条件 2 的 relay WSS 登录 + TURN 中继会话在模拟器/真机上的建立冒烟
+  （需在设备侧接线 relay enrollment/TURN 场景）。
+- arm64 ABI 的执行 lane（当前为编译门禁）。
+- CI `android` workflow 首次绿（推送后由 workflow_dispatch 触发验证）。

@@ -532,6 +532,15 @@ if(HEYAKI_ANDROID)
   target_link_libraries(heyaki_jni PRIVATE heyaki::services log)
   heyaki_configure_target(heyaki_jni)
   list(APPEND HEYAKI_INSTALL_TARGETS heyaki_jni)
+
+  # M11-07: deterministic on-device integration smoke (profile file lock and
+  # reopen durability, encrypted-file secret backend, node lifecycle and the
+  # explicit LAN readiness contract). Runs under adb on an emulator/device;
+  # no external servers. scripts/run_android_smoke.sh drives it in CI.
+  add_executable(heyaki_android_smoke apps/android/heyaki_smoke.cpp)
+  target_link_libraries(heyaki_android_smoke PRIVATE heyaki::services executor::executor)
+  heyaki_configure_target(heyaki_android_smoke)
+  list(APPEND HEYAKI_INSTALL_TARGETS heyaki_android_smoke)
 endif()
 
 heyaki_add_developer_targets()

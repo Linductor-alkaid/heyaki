@@ -1,0 +1,134 @@
+name: android
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Pinned NDK line (M11-01): matches the r26 series the baseline was
+  # verified against; runners that ship a different NDK install this pin.
+  ANDROID_NDK_VERSION: "26.3.11579264"
+  # Emulator lane (M11-07): the smoke binary targets API 24+ and runs on any
+  # newer image; 30 keeps the boot short.
+  ANDROID_EMULATOR_API: "30"
+
+jobs:
+  ndk-build:
+    name: NDK cross-build (${{ matrix.abi }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, x86_64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up the pinned NDK
+        run: |
+          if [ ! -d "$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION" ]; then
+            yes | sdkmanager --licenses > /dev/null
+            sdkmanager --install "ndk;$ANDROID_NDK_VERSION" > /dev/null
+          fi
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: Fetch pinned dependencies
+        run: scripts/fetch_third_party.sh
+
+      - name: Cross-build both library sets and the smoke
+        run: |
+          scripts/build_android.sh \
+            --ndk "$ANDROID_NDK_HOME" \
+            --abi ${{ matrix.abi }} \
+            --jobs 4
+
+      - name: Verify the installed artifact set
+        run: |
+          prefix="build-android/${{ matrix.abi }}/install"
+          for library in libheyaki_core.a libheyaki_profile.a libheyaki_client.a \
+                         libheyaki_services.a libheyaki_transport_webrtc.a \
+                         libssl.a libcrypto.a libheyaki_jni.so; do
+            test -f "$prefix/lib/$library" || { echo "missing $library"; exit 1; }
+          done
+          test -f "$prefix/bin/heyaki_android_smoke" || { echo "missing smoke"; exit 1; }
+          echo "artifact set OK for ${{ matrix.abi }}"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: heyaki-android-${{ matrix.abi }}
+          path: build-android/${{ matrix.abi }}/install
+          retention-days: 3
+
+  emulator-smoke:
+    name: Emulator smoke (x86_64)
+    runs-on: ubuntu-24.04
+    needs: ndk-build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the x86_64 build
+        uses: actions/download-artifact@v4
+        with:
+          name: heyaki-android-x86_64
+          path: build-android/x86_64/install
+
+      - name: Enable KVM
+        run: |
+          sudo -E apt-get -qq update > /dev/null
+          sudo -E apt-get -qq install -y qemu-kvm > /dev/null
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install the emulator system image
+        run: |
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager --install \
+            "platform-tools" \
+            "emulator" \
+            "system-images;android-$ANDROID_EMULATOR_API;google_apis;x86_64" > /dev/null
+
+      - name: Create the AVD
+        run: |
+          echo no | avdmanager create avd \
+            -n heyaki-smoke \
+            -k "system-images;android-$ANDROID_EMULATOR_API;google_apis;x86_64" \
+            -d pixel_5
+
+      - name: Start the headless emulator
+        run: |
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          nohup "$ANDROID_HOME/emulator/emulator" \
+            -avd heyaki-smoke \
+            -no-window -no-audio -no-boot-anim \
+            -gpu swiftshader_indirect \
+            -no-snapshot -no-snapshot-save \
+            > emulator.log 2>&1 &
+          echo "emulator pid $!"
+
+      - name: Wait for boot
+        run: |
+          adb wait-for-device
+          for _ in $(seq 1 90); do
+            boot="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
+            [ "$boot" = "1" ] && exit 0
+            sleep 2
+          done
+          echo "device did not finish booting"; tail -50 emulator.log; exit 1
+
+      - name: Run the integration smoke
+        run: |
+          scripts/run_android_smoke.sh \
+            --serial emulator-5554 \
+            --binary build-android/x86_64/install/bin/heyaki_android_smoke
+
+      - name: Dump emulator log on failure
+        if: failure()
+        run: tail -100 emulator.log
