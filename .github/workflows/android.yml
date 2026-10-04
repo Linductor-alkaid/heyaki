@@ -11,9 +11,10 @@ permissions:
   contents: read
 
 env:
-  # Pinned NDK line (M11-01): matches the r26 series the baseline was
-  # verified against; runners that ship a different NDK install this pin.
+  # Pinned toolchain line (M11-01): the NDK series the baseline was verified
+  # against, plus the pinned cmdline-tools release used to install it.
   ANDROID_NDK_VERSION: "26.3.11579264"
+  ANDROID_CMDLINE_TOOLS_VERSION: "11076708"
   # Emulator lane (M11-07): the smoke binary targets API 24+ and runs on any
   # newer image; 30 keeps the boot short.
   ANDROID_EMULATOR_API: "30"
@@ -29,18 +30,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up the pinned NDK
+      - name: Set up the Android SDK
         run: |
-          if [ ! -d "$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION" ]; then
-            yes | sdkmanager --licenses > /dev/null
-            sdkmanager --install "ndk;$ANDROID_NDK_VERSION" > /dev/null
-          fi
+          sdk_root="${RUNNER_TEMP}/android-sdk"
+          mkdir -p "$sdk_root/cmdline-tools"
+          curl -fsSL -o cmdline-tools.zip \
+            "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip"
+          unzip -q cmdline-tools.zip -d "$sdk_root/cmdline-tools"
+          mv "$sdk_root/cmdline-tools/cmdline-tools" "$sdk_root/cmdline-tools/latest"
+          echo "ANDROID_HOME=$sdk_root" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$sdk_root" >> "$GITHUB_ENV"
+          echo "$sdk_root/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$sdk_root/platform-tools" >> "$GITHUB_PATH"
+
+      - name: Install the pinned NDK
+        run: |
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager --install "ndk;$ANDROID_NDK_VERSION" > /dev/null
+          test -d "$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
 
       - name: Fetch pinned dependencies
         run: scripts/fetch_third_party.sh
 
-      - name: Cross-build both library sets and the smoke
+      - name: Cross-build the library set and the smoke
         run: |
           scripts/build_android.sh \
             --ndk "$ANDROID_NDK_HOME" \
@@ -78,14 +91,26 @@ jobs:
           name: heyaki-android-x86_64
           path: build-android/x86_64/install
 
+      - name: Set up the Android SDK
+        run: |
+          sdk_root="${RUNNER_TEMP}/android-sdk"
+          mkdir -p "$sdk_root/cmdline-tools"
+          curl -fsSL -o cmdline-tools.zip \
+            "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip"
+          unzip -q cmdline-tools.zip -d "$sdk_root/cmdline-tools"
+          mv "$sdk_root/cmdline-tools/cmdline-tools" "$sdk_root/cmdline-tools/latest"
+          echo "ANDROID_HOME=$sdk_root" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$sdk_root" >> "$GITHUB_ENV"
+          echo "$sdk_root/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$sdk_root/platform-tools" >> "$GITHUB_PATH"
+
       - name: Enable KVM
         run: |
-          sudo -E apt-get -qq update > /dev/null
-          sudo -E apt-get -qq install -y qemu-kvm > /dev/null
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+          ls -la /dev/kvm
 
       - name: Install the emulator system image
         run: |
@@ -104,7 +129,6 @@ jobs:
 
       - name: Start the headless emulator
         run: |
-          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
           nohup "$ANDROID_HOME/emulator/emulator" \
             -avd heyaki-smoke \
             -no-window -no-audio -no-boot-anim \
