@@ -83,6 +83,7 @@ jobs:
   emulator-smoke:
     name: Emulator smoke (x86_64)
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: ndk-build
     steps:
       - uses: actions/checkout@v4
@@ -114,7 +115,7 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           ls -la /dev/kvm
 
-      - name: Install the emulator system image
+      - name: Install the emulator packages
         run: |
           yes | sdkmanager --licenses > /dev/null
           sdkmanager --install \
@@ -122,39 +123,21 @@ jobs:
             "emulator" \
             "system-images;android-$ANDROID_EMULATOR_API;google_apis;x86_64" > /dev/null
 
-      - name: Create the AVD
-        run: |
-          echo no | avdmanager create avd \
-            -n heyaki-smoke \
-            -k "system-images;android-$ANDROID_EMULATOR_API;google_apis;x86_64" \
-            -d pixel_5
-
-      - name: Start the headless emulator
-        run: |
-          nohup "$ANDROID_HOME/emulator/emulator" \
-            -avd heyaki-smoke \
-            -no-window -no-audio -no-boot-anim \
-            -gpu swiftshader_indirect \
-            -no-snapshot -no-snapshot-save \
-            > emulator.log 2>&1 &
-          echo "emulator pid $!"
-
-      - name: Wait for boot
-        run: |
-          adb wait-for-device
-          for _ in $(seq 1 90); do
-            boot="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
-            [ "$boot" = "1" ] && exit 0
-            sleep 2
-          done
-          echo "device did not finish booting"; tail -50 emulator.log; exit 1
-
-      - name: Run the integration smoke
-        run: |
-          scripts/run_android_smoke.sh \
-            --serial emulator-5554 \
-            --binary build-android/x86_64/install/bin/heyaki_android_smoke
-
-      - name: Dump emulator log on failure
-        if: failure()
-        run: tail -100 emulator.log
+      # The maintained runner action owns AVD creation, the emulator launch,
+      # and a bounded boot wait (an unbounded `adb wait-for-device` hung an
+      # earlier revision of this job when the emulator failed to start).
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ env.ANDROID_EMULATOR_API }}
+          target: google_apis
+          arch: x86_64
+          emulator-options: >-
+            -no-window
+            -no-audio
+            -no-boot-anim
+            -gpu swiftshader_indirect
+            -no-snapshot
+            -no-snapshot-save
+          script: |
+            scripts/run_android_smoke.sh \
+              --binary build-android/x86_64/install/bin/heyaki_android_smoke
