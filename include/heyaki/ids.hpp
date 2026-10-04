@@ -44,7 +44,21 @@ class Identifier {
   }
 
   friend constexpr bool operator==(const Identifier&, const Identifier&) noexcept = default;
-  friend constexpr auto operator<=>(const Identifier&, const Identifier&) noexcept = default;
+  // A defaulted <=> compares bytes_ through std::array's own <=>, which
+  // libc++ in NDK r26 (LLVM 17) has not implemented; the defaulted comparison
+  // would be implicitly deleted there. Compare the bytes explicitly, keeping
+  // the same lexicographic strong ordering on every standard library.
+  friend constexpr std::strong_ordering operator<=>(const Identifier& lhs,
+                                                    const Identifier& rhs) noexcept {
+    for (std::size_t index = 0; index < Size; ++index) {
+      const auto lhs_byte = std::to_integer<unsigned char>(lhs.bytes_[index]);
+      const auto rhs_byte = std::to_integer<unsigned char>(rhs.bytes_[index]);
+      if (lhs_byte != rhs_byte) {
+        return lhs_byte < rhs_byte ? std::strong_ordering::less : std::strong_ordering::greater;
+      }
+    }
+    return std::strong_ordering::equal;
+  }
 
  private:
   Storage bytes_{};
@@ -69,7 +83,7 @@ struct DeviceEndpointKey {
   friend constexpr bool operator==(const DeviceEndpointKey&,
                                    const DeviceEndpointKey&) noexcept = default;
   friend constexpr auto operator<=>(const DeviceEndpointKey&,
-                                   const DeviceEndpointKey&) noexcept = default;
+                                    const DeviceEndpointKey&) noexcept = default;
 };
 
 enum class IdentifierDecodeError : std::uint8_t {

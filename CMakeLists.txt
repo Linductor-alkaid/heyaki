@@ -28,6 +28,22 @@ option(HEYAKI_ENABLE_IWYU "Run include-what-you-use while compiling Heyaki targe
 option(HEYAKI_REQUIRE_SANITIZER_RUNTIME
   "Fail instead of skipping when the host cannot run a selected sanitizer" OFF)
 option(HEYAKI_BUILD_FUZZERS "Build libFuzzer protocol targets (Clang only)" OFF)
+# M11-01: Android (NDK) cross-build mode. ANDROID is defined by the NDK
+# toolchain file during project(); HEYAKI_ANDROID exposes the resolved mode as
+# the Heyaki-level flag for scripts and guards. Build through the NDK
+# toolchain (scripts/build_android.sh); the flag itself follows the toolchain.
+set(HEYAKI_ANDROID ${ANDROID} CACHE BOOL
+  "Android (NDK) cross-build mode (resolved from the NDK toolchain file)" FORCE)
+if(HEYAKI_ANDROID)
+  # M11 scope boundary (m11-android-port.md): the TUI/relay apps, demos, and
+  # libFuzzer targets are desktop-only and never enter an Android build.
+  set(HEYAKI_BUILD_APPS OFF CACHE BOOL "" FORCE)
+  set(HEYAKI_BUILD_FUZZERS OFF CACHE BOOL "" FORCE)
+  # M11-01 baseline: on-device unit-test runs need a host protoc and a device
+  # harness; that wiring lands with the M11 CI/smoke tasks (M11-07/M11-08).
+  # Keep the Android configure to the library targets until then.
+  set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+endif()
 option(HEYAKI_HARDENING
   "Compile and link release artifacts with exploit mitigations (PIE, full RELRO, NX stack, stack protector, FORTIFY, CET/CF)"
   ON)
@@ -113,6 +129,13 @@ heyaki_add_pinned_boost_beast()
 heyaki_add_vendored_sodium()
 heyaki_add_vendored_blake3()
 heyaki_add_vendored_sqlite()
+# M11-02 (A1): Android ships no system OpenSSL, so the TLS backend is built
+# from the pinned vendored 3.x checkout into a stage tree that the standard
+# find_package below (and libdatachannel's own detection) consumes. Desktop
+# builds keep the system find_package path and its M3A provenance semantics.
+if(HEYAKI_ANDROID)
+  heyaki_add_vendored_openssl()
+endif()
 find_package(OpenSSL 3.0 REQUIRED COMPONENTS SSL Crypto)
 if(OPENSSL_VERSION VERSION_GREATER_EQUAL 4.0)
   message(FATAL_ERROR
@@ -513,6 +536,17 @@ install(TARGETS ${HEYAKI_INSTALL_TARGETS}
   ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
   LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
   RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+# M11-02: the vendored TLS backend is part of the Android artifact set.
+# heyaki_client and libdatachannel link it privately, but the final
+# application (JNI) link consumes the archives from the install tree.
+if(HEYAKI_ANDROID)
+  install(FILES
+    "${HEYAKI_VENDORED_OPENSSL_STAGE}/lib/libssl.a"
+    "${HEYAKI_VENDORED_OPENSSL_STAGE}/lib/libcrypto.a"
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+  install(DIRECTORY "${HEYAKI_VENDORED_OPENSSL_STAGE}/include/openssl"
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+endif()
 install(DIRECTORY include/ DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 install(DIRECTORY proto/ DESTINATION "${CMAKE_INSTALL_DATADIR}/heyaki/proto"
   FILES_MATCHING PATTERN "*.proto")

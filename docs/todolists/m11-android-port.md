@@ -1,6 +1,6 @@
 # M11 Android（NDK）库适配
 
-> - 状态：未开始（2026-08-29 依赖可移植性分析完成，计划立项）
+> - 状态：进行中（2026-10-04 M11-01/M11-02 基线落地，详见 §4）
 > - 前置：M9（v1.0 发布门禁完成后启动；可与 M10 并行）
 > - 建议发布点：v1.2 Android alpha
 > - 设计依据：[Heyaki 设备通信基础设施设计](../design/heyaki-architecture.md) §2.1 目标 8、
@@ -42,10 +42,10 @@
 
 ## 2. 任务清单
 
-- [ ] `M11-01` 建立 NDK 工具链交叉编译基线：`HEYAKI_ANDROID` CMake 选项 +
+- [x] `M11-01` 建立 NDK 工具链交叉编译基线：`HEYAKI_ANDROID` CMake 选项 +
   NDK toolchain file，`HEYAKI_BUILD_APPS=OFF`/fuzzer 关闭，验证核心库目标在
   NDK（r26c 或 r28b，与 executor CI 对齐）下为 arm64-v8a 与 x86_64 编译通过。
-- [ ] `M11-02` vendored OpenSSL 3.x 交叉编译方案落地（A1）：更新
+- [x] `M11-02` vendored OpenSSL 3.x 交叉编译方案落地（A1）：更新
   `cmake/HeyakiVendoredRuntime.cmake`，Android 构建不再 `find_package(OpenSSL)`；
   记录与 libdatachannel TLS backend 的选择及理由到本文件与 supply-chain 文档。
 - [ ] `M11-03` 逐依赖交叉编译验证并记录版本/补丁：Boost.Asio/Beast、libsodium、
@@ -79,4 +79,59 @@
 
 ## 4. 实施记录
 
-（随实施追加。）
+### 2026-10-04 — M11-01 NDK 交叉编译基线 + M11-02 vendored OpenSSL（A1）
+
+**M11-01 基线**
+
+- 新增 `scripts/build_android.sh`（对齐 executor `build_android.sh` 模式）：
+  NDK toolchain 文件驱动，默认 ABIs `arm64-v8a,x86_64`，API floor 固定
+  `android-24`（bionic `getifaddrs`/`if_nametoindex` 自 API 24 起可用，
+  LAN route 的 POSIX 枚举路径依赖它）；自动传 `HEYAKI_BUILD_APPS=OFF`、
+  `HEYAKI_AUTO_INSTALL=OFF`。
+- CMake 顶层：新增 `HEYAKI_ANDROID` 模式标志（由 NDK toolchain 定义的
+  `ANDROID` 解析而来，FORCE 保持一致）；Android 模式下强制
+  `HEYAKI_BUILD_APPS=OFF`、`HEYAKI_BUILD_FUZZERS=OFF`（A4：TUI/relay 应用、
+  demo、fuzzer 均为桌面专用）与 `BUILD_TESTING=OFF`（设备端单测需要 host
+  protoc 与测试 harness，随 M11-07/M11-08 落地）。
+- NDK 版本：本机 r26d（26.3.11579264，与计划的 r26c 同系列）。
+- arm64-v8a 与 x86_64 双 ABI 下核心库目标（`heyaki_core`、`heyaki_profile`、
+  `heyaki_client`、`heyaki_services`、`heyaki_transport_webrtc`，以及随库编译的
+  `heyaki_socks`、`heyaki_relay`）编译通过。安装树包含除 `heyaki_socks` 外的
+  全部核心库归档：`heyaki_socks` 的接口头位于源码树（`src/socks/`），M10 即
+  设计为构建树内链接的便利叶组件（M10-09），安装导出需要先做头文件重定位；
+  若 Android 宿主后续需要 SOCKS 前端，该决策随 M11-06 JNI 边界一并处理。
+- 移植中唯一的源码适配：`include/heyaki/ids.hpp` 的 `Identifier::operator<=>`
+  由 defaulted 改为显式字节序比较。根因：NDK r26 的 libc++（LLVM 17）尚未
+  实现 `std::array` 的 `operator<=>`，defaulted 比较被隐式删除，
+  `std::less<Identifier>` 随之不可用；显式版本保持完全相同的字典序
+  strong_ordering 语义，桌面工具链不受影响。`DeviceEndpointKey`、
+  `RelayEndpointKey`、`RelayLeaseKey`（defaulted over Identifier）随此修复。
+
+**M11-02 vendored OpenSSL 3.5.9（A1）**
+
+- `third_party/dependencies.lock` 新增 runtime 组 atom：openssl
+  `openssl-3.5.9` @ `45e844fa2a14`（3.5 LTS 最新补丁；Apache-2.0，无 copyleft，
+  通过 M9-14 许可证策略门禁）；`third_party/licenses.lock` 同步登记。
+  注：openssl tag 为 annotated tag，锁文件记录剥皮后的 commit。
+- `cmake/HeyakiVendoredRuntime.cmake` 新增 `heyaki_add_vendored_openssl()`：
+  仅 Android 模式调用；用 OpenSSL 自带 `Configure`（out-of-tree）按
+  `ANDROID_ABI` 映射到 `android-arm64/android-arm/android-x86_64/android-x86`
+  目标，`no-shared no-tests no-docs`，`-D__ANDROID_API__=<level>`；
+  Configure 要求 NDK clang 在 PATH 上（据此选择 API 专属 wrapper，如
+  `aarch64-linux-android24-clang`），函数负责把
+  `<NDK>/toolchains/llvm/prebuilt/*/bin` 前置到 PATH 并设置
+  `ANDROID_NDK_ROOT`；产物经 `install_sw` 装入
+  `<build>/vendored/openssl-stage`（include+lib 标准布局）。
+- 接入方式：stage 目录加入 `CMAKE_FIND_ROOT_PATH` 并设 `OPENSSL_ROOT_DIR`，
+  之后沿用**同一个** `find_package(OpenSSL 3.0 REQUIRED ...)`（含
+  "冻结 3.x、拒绝 4.x" 检查）与 libdatachannel 自身的 OpenSSL 探测——
+  桌面路径零改动，M3A 的 ABI 冻结语义在 Android 上保持有效。
+- 桌面构建不 fetch 不编译 vendored OpenSSL，TLS 后端仍为系统 OpenSSL 3.x
+  （`docs/supply-chain/dependency-policy.md` TLS backend 行已更新）。
+- 依赖计数同步：`cmake/GenerateSupplyChain.cmake` 直接 pin 计数 35→36；
+  policy 文档中 OSV 扫描与 inventory 描述同步（v1.0 release-checklist 与
+  m0/m9 audit 为时点记录，不改）。
+
+**待办（下一批）**：M11-03 逐依赖验证记录、M11-04 平台层验证（A3）、
+M11-05 组播降级（A2）、M11-06 JNI 边界、M11-07 冒烟示例、M11-08 CI、
+M11-09 文档收尾。

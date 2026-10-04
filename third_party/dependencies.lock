@@ -34,6 +34,7 @@ boost-type_index|https://github.com/boostorg/type_index.git|boost-1.88.0|3f72edd
 boost-type_traits|https://github.com/boostorg/type_traits.git|boost-1.88.0|cc6fc3daa8e20c4a70b563d67ceb4c34d8c1c4d7|false|runtime
 boost-utility|https://github.com/boostorg/utility.git|boost-1.88.0|31de9279d826c8a6ae6126c0c4a8a32ea9f0edff|false|runtime
 libdatachannel|https://github.com/paullouisageneau/libdatachannel.git|v0.23.2|9e6a13abbb6846c003d817d0387b6706466e2b03|true|runtime
+openssl|https://github.com/openssl/openssl.git|openssl-3.5.9|45e844fa2a14ec92d146bd8f5778ac130b6625fb|false|runtime
 libsodium|https://github.com/jedisct1/libsodium.git|1.0.20-RELEASE|9511c982fb1d046470a8b42aa36556cdb7da15de|false|runtime
 protobuf|https://github.com/protocolbuffers/protobuf.git|v31.1|74211c0dfc2777318ab53c2cd2c317a2ef9012de|true|runtime
 abseil-cpp|https://github.com/abseil/abseil-cpp.git|20250127.0|9ac7062b1860d895fb5a8cbf58c3e9ef8f674b5f|false|runtime
