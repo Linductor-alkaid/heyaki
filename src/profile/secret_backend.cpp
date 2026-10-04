@@ -908,7 +908,9 @@ Result<std::shared_ptr<SecretBackend>> open_default_secret_backend(
   }
 
   if (has_store_id) {
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)
+    // M11 (A3): Android ships no libsecret; the dlopen probe is skipped so the
+    // platform always takes the explicit unavailable path (same error text).
     auto backend = SecretServiceBackend::open(root, false);
     if (!backend && backend.error_if()->code() == ErrorCode::secret_backend_degraded) {
       return Result<std::shared_ptr<SecretBackend>>::failure(
@@ -944,7 +946,9 @@ Result<std::shared_ptr<SecretBackend>> open_default_secret_backend(
     }
     return Result<std::shared_ptr<SecretBackend>>::success(
         std::make_shared<DpapiSecretBackend>(root));
-#elif defined(__linux__)
+#elif defined(__linux__) && !defined(__ANDROID__)
+    // M11 (A3): no libsecret probe on Android — fall straight through to the
+    // encrypted-file backend policy below.
     auto backend = SecretServiceBackend::open(root, true);
     if (backend || backend.error_if()->code() != ErrorCode::secret_backend_degraded) {
       return backend;
