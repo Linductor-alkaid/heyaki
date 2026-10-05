@@ -165,6 +165,23 @@ engineering). Release artifacts are built and verified by
 [scripts/package_release.sh](scripts/package_release.sh) and signed per the
 [signing procedure](docs/operations/release-signing.md).
 
+**v1.2.0** — ports the core library to Android (M11, alpha) and upgrades the
+pinned concurrency dependency to kairo 0.6.0. The full heyaki stack
+(core, profile, client, services, transport) cross-builds with the NDK for
+`arm64-v8a` and `x86_64` with the complete third-party license set; a thin
+JNI boundary (`heyaki_jni`) exposes the Node session-lifecycle and
+authorization API without threads of its own (observer callbacks transiently
+attach the calling executor thread to the JVM, teardown order fixed); a
+deterministic on-device integration smoke (16 checks: profile file lock and
+reopen durability, encrypted-file secret backend, node lifecycle, explicit
+LAN readiness) runs in CI on the emulator lane (arm64 remains a compile
+gate; the on-device relay/TURN smoke is a known alpha gap). The kairo 0.6.0
+upgrade is breaking for SDK consumers: namespace `kairo::`, includes
+`<kairo/...>`, CMake target `kairo::kairo` with `KAIRO_*` options, and the
+compatibility layer is gone — `initialize` / `wait_for_completion` are the
+primary Result-returning names. Six known CI timing families were deflaked
+(progress budgets, a transient-state assertion, bounded matrix retries).
+
 **v1.1.1** — closes the pairing loop and decouples basic communication from
 device trust: `pair_peer` admission returns the wire request id with a
 bounded outcome per attempt (initiator deadline included), authorized

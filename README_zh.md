@@ -153,6 +153,19 @@ agent 基于 SDK 开发时，可直接挂载打包好的
 发布制品由 [scripts/package_release.sh](scripts/package_release.sh) 构建
 并验证，按[签名规程](docs/operations/release-signing.md)签名。
 
+**v1.2.0** —— 核心库移植到 Android（M11，alpha），并发依赖升级至 kairo
+0.6.0。完整 heyaki 栈（core/profile/client/services/transport）以 NDK 交叉
+构建 `arm64-v8a` 与 `x86_64`，随库携带全部第三方许可证文本；薄 JNI 边界
+（`heyaki_jni`）暴露 Node 会话生命周期与授权 API，自身不建线程（observer
+回调临时将调用方 executor 线程附着到 JVM，teardown 顺序固定）；确定性
+设备端集成冒烟（16 项检查：profile 文件锁与重开持久性、加密文件 secret
+后端、节点生命周期、显式 LAN ready 契约）在 CI 模拟器 lane 上执行
+（arm64 仍为编译门禁；设备端 relay/TURN 冒烟为已知的 alpha 缺口）。kairo
+0.6.0 升级对 SDK 消费方为破坏性变更：namespace `kairo::`、include
+`<kairo/...>`、CMake 目标 `kairo::kairo` 与 `KAIRO_*` 选项，兼容层全面
+移除——`initialize` / `wait_for_completion` 接管为主名（返回 Result）。
+六个已知 CI 时序抖动家族已治理（进度预算、瞬态断言、矩阵有界重试）。
+
 **v1.1.1** —— 配对闭环 + 基础通信与设备信任解耦：`pair_peer` 准入返回
 wire request id 且每次尝试有界恰好一次终态（含发起方截止定时器）；已授权
 会话应答配对请求（修复/续期/反向授权，拒绝不再切断信任关系）；免密接收
