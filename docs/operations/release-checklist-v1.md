@@ -233,3 +233,31 @@ efc1e17972ab68f569a327a6bd2dd46c8464d6fb711cc196eee0a1ba6bc2056d  heyaki-1.1.1-l
 32615ff9cbab82ba9382c059d5df66475b9e9c796aaf8f7f5a480443a8ce1036  heyaki-1.1.1-linux-x86_64-sdk.tar.gz
 15e97a65d5cb02da8efb800d03d411fa99d712fbf5e081a3113a88ee3284b8e9  heyaki-1.1.1-windows-x64-sdk.zip
 ```
+
+**v1.2.0 stamp (2026-10-06, Android core-library port + kairo 0.6.0)**: release
+commit `c64662b`, green CI run
+[37351306200](https://github.com/Linductor-alkaid/heyaki/actions/runs/37351306200)
+(12/12 jobs), tag `v1.2.0`,
+[GitHub release](https://github.com/Linductor-alkaid/heyaki/releases/tag/v1.2.0)
+with Ed25519-signed artifacts (signing key id `fa4d676f792b5e82`, same v1
+key train; public key attached). Local gates: `scripts/package_release.sh`
+full pass from the release tree with `HEYAKI_BUILD_COMMIT=c64662b`
+(inventory assertions, 12-file symbol split, stripped-binary smoke,
+manifest-driven uninstall simulation), manifest verify/check round-trips.
+The SDK archives attached by the `release-sdk` workflow (run 37357173495;
+Linux on the 20.04 baseline); `MANIFEST-sdk.txt` (355 files — grew from
+347 with the kairo 0.6.0 headers and package config) signed with the v1
+key and verified against the extracted Linux SDK tree; the Windows SDK
+zip carries its recorded digest. Release-window content: M11 Android
+(NDK) core-library port (alpha — x86_64 emulator lane executed, arm64
+compile gate, on-device relay/TURN smoke still open), the executor→kairo
+0.6.0 breaking dependency upgrade (namespace/include/CMake/package rename,
+compatibility layer removed; SDK consumers migrate in lockstep), and the
+seven-family CI deflake governance.
+
+```text
+69af77699d8aa008a3cd6ab478aa5c2cc284fe46ca2db57382d528f87ac26000  heyaki-1.2.0-linux-x86_64.tar.gz
+8cbbafb3381c625eea3617de57556e4312e5db8ae000831f556e46234f51341b  heyaki-1.2.0-linux-x86_64-dbg.tar.gz
+1fc38fb697f813cec8947198e5303f31f417a349ce21a0565bd18cf93e1e97e7  heyaki-1.2.0-linux-x86_64-sdk.tar.gz
+46daf4853d814f55b3405fcefc8335a0dff064bf088070ef13a61f6da4552c3e  heyaki-1.2.0-windows-x64-sdk.zip
+```
