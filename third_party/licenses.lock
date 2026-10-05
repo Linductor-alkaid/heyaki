@@ -27,6 +27,7 @@ boost-type_index|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
 boost-type_traits|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
 boost-utility|BSL-1.0|docs/supply-chain/boost-software-license-1.0.txt
 libdatachannel|MPL-2.0|third_party/libdatachannel/LICENSE
+openssl|Apache-2.0|third_party/openssl/LICENSE.txt
 libsodium|ISC AND BSD-2-Clause|docs/supply-chain/m1-libsodium-sha256-notices.md
 protobuf|BSD-3-Clause|third_party/protobuf/LICENSE
 abseil-cpp|Apache-2.0|third_party/abseil-cpp/LICENSE

@@ -274,7 +274,12 @@ function(heyaki_add_vendored_blake3)
   target_include_directories(heyaki_blake3
     PUBLIC "$<BUILD_INTERFACE:${blake3_root}>")
   target_compile_definitions(heyaki_blake3 PRIVATE
-    BLAKE3_NO_SSE2 BLAKE3_NO_SSE41 BLAKE3_NO_AVX2 BLAKE3_NO_AVX512 BLAKE3_NO_NEON)
+    BLAKE3_NO_SSE2 BLAKE3_NO_SSE41 BLAKE3_NO_AVX2 BLAKE3_NO_AVX512 BLAKE3_NO_NEON
+    # The pinned header autodetects BLAKE3_USE_NEON=1 on AArch64 when it is
+    # undefined, making dispatch reference the NEON sources this vendored
+    # target deliberately does not compile; the mismatch only surfaces when a
+    # shared library links heyaki_blake3 (Android heyaki_jni). Pin it off.
+    BLAKE3_USE_NEON=0)
   set_target_properties(heyaki_blake3 PROPERTIES
     C_STANDARD 11
     C_STANDARD_REQUIRED ON
@@ -427,4 +432,150 @@ function(heyaki_add_vendored_sqlite)
     target_link_options(heyaki_sqlite PUBLIC
       "${sqlite_sanitizer_flag}" -fno-omit-frame-pointer)
   endif()
+endfunction()
+
+# M11-02 (A1): vendored OpenSSL for Android. Android ships no system OpenSSL
+# and Heyaki freezes the OpenSSL 3.x ABI line (M3A), so the TLS backend is
+# built from the pinned third_party/openssl checkout with OpenSSL's own
+# Configure (out-of-tree, against the NDK toolchain) and installed into a
+# standard stage layout inside the build tree. The stage is exposed through
+# OPENSSL_ROOT_DIR plus CMAKE_FIND_ROOT_PATH so the regular find_package
+# (OpenSSL) flow — this project's, with its 3.x floor/4.x freeze gates, and
+# the pinned libdatachannel's — resolves the vendored artifacts unchanged.
+# Desktop builds keep the system OpenSSL path and never call this function.
+function(heyaki_add_vendored_openssl)
+  if(TARGET OpenSSL::SSL OR TARGET OpenSSL::Crypto)
+    return()
+  endif()
+
+  set(openssl_root "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openssl")
+  if(NOT EXISTS "${openssl_root}/Configure")
+    message(FATAL_ERROR
+      "Pinned OpenSSL checkout is missing. Run `scripts/fetch_third_party.sh openssl`.")
+  endif()
+
+  # OpenSSL's Configure carries first-class android targets; map the NDK ABI
+  # onto them instead of maintaining a custom toolchain.
+  if(ANDROID_ABI STREQUAL "arm64-v8a")
+    set(openssl_target android-arm64)
+  elseif(ANDROID_ABI STREQUAL "armeabi-v7a")
+    set(openssl_target android-arm)
+  elseif(ANDROID_ABI STREQUAL "x86_64")
+    set(openssl_target android-x86_64)
+  elseif(ANDROID_ABI STREQUAL "x86")
+    set(openssl_target android-x86)
+  else()
+    message(FATAL_ERROR
+      "No pinned OpenSSL android target for ANDROID_ABI='${ANDROID_ABI}'")
+  endif()
+
+  # Heyaki's POSIX interface enumeration uses getifaddrs/if_nametoindex,
+  # which bionic provides from API 24; the Android build floor is therefore
+  # android-24 (scripts/build_android.sh passes it explicitly).
+  string(REGEX MATCH "[0-9]+$" openssl_api_level "${ANDROID_PLATFORM}")
+  if(NOT openssl_api_level)
+    set(openssl_api_level 24)
+  endif()
+  if(openssl_api_level LESS 24)
+    message(FATAL_ERROR
+      "Heyaki Android requires ANDROID_PLATFORM >= android-24 (bionic "
+      "getifaddrs), got '${ANDROID_PLATFORM}'")
+  endif()
+  if(NOT ANDROID_NDK)
+    message(FATAL_ERROR
+      "ANDROID_NDK is not set; configure through the NDK toolchain file "
+      "(scripts/build_android.sh)")
+  endif()
+
+  set(openssl_build_dir "${CMAKE_BINARY_DIR}/vendored/openssl")
+  set(openssl_stage_dir "${CMAKE_BINARY_DIR}/vendored/openssl-stage")
+  set(openssl_stage_libs
+    "${openssl_stage_dir}/lib/libssl.a"
+    "${openssl_stage_dir}/lib/libcrypto.a")
+
+  if(NOT EXISTS "${openssl_stage_dir}/lib/libssl.a" OR
+     NOT EXISTS "${openssl_stage_dir}/lib/libcrypto.a")
+    find_program(HEYAKI_PERL_EXECUTABLE NAMES perl REQUIRED)
+    find_program(HEYAKI_VENDORED_MAKE_EXECUTABLE NAMES gmake make REQUIRED)
+    file(MAKE_DIRECTORY "${openssl_build_dir}")
+    cmake_host_system_information(RESULT openssl_jobs
+      QUERY NUMBER_OF_LOGICAL_CORES)
+
+    message(STATUS
+      "Configuring vendored OpenSSL for ${openssl_target} (API ${openssl_api_level})")
+    # OpenSSL's android targets pick their compiler by finding the NDK clang
+    # on PATH (which() must resolve inside the NDK prebuilt tree), then select
+    # the API-specific wrapper (e.g. aarch64-linux-android24-clang).
+    file(GLOB openssl_ndk_bin_dirs
+      "${ANDROID_NDK}/toolchains/llvm/prebuilt/*/bin")
+    if(NOT openssl_ndk_bin_dirs)
+      message(FATAL_ERROR
+        "No LLVM toolchain bin directory under "
+        "${ANDROID_NDK}/toolchains/llvm/prebuilt; NDK layout not recognized")
+    endif()
+    list(GET openssl_ndk_bin_dirs 0 openssl_ndk_bin_dir)
+    set(ENV{ANDROID_NDK_ROOT} "${ANDROID_NDK}")
+    set(ENV{PATH} "${openssl_ndk_bin_dir}:$ENV{PATH}")
+    execute_process(
+      COMMAND "${HEYAKI_PERL_EXECUTABLE}" "${openssl_root}/Configure"
+        "${openssl_target}"
+        "-D__ANDROID_API__=${openssl_api_level}"
+        "--prefix=${openssl_stage_dir}"
+        "--openssldir=${openssl_stage_dir}/ssl"
+        no-shared no-tests no-docs
+      WORKING_DIRECTORY "${openssl_build_dir}"
+      RESULT_VARIABLE openssl_configure_result
+      OUTPUT_VARIABLE openssl_configure_output
+      ERROR_VARIABLE openssl_configure_error)
+    if(NOT openssl_configure_result EQUAL 0)
+      message(FATAL_ERROR
+        "Pinned OpenSSL Configure failed: ${openssl_configure_result}\n"
+        "${openssl_configure_output}${openssl_configure_error}")
+    endif()
+
+    message(STATUS "Building vendored OpenSSL (${openssl_jobs} jobs)")
+    execute_process(
+      COMMAND "${HEYAKI_VENDORED_MAKE_EXECUTABLE}" "-j${openssl_jobs}" build_libs
+      WORKING_DIRECTORY "${openssl_build_dir}"
+      RESULT_VARIABLE openssl_build_result
+      OUTPUT_VARIABLE openssl_build_output
+      ERROR_VARIABLE openssl_build_error)
+    if(NOT openssl_build_result EQUAL 0)
+      message(FATAL_ERROR
+        "Pinned OpenSSL build failed: ${openssl_build_result}\n"
+        "${openssl_build_output}${openssl_build_error}")
+    endif()
+
+    execute_process(
+      COMMAND "${HEYAKI_VENDORED_MAKE_EXECUTABLE}" install_sw
+      WORKING_DIRECTORY "${openssl_build_dir}"
+      RESULT_VARIABLE openssl_install_result
+      OUTPUT_VARIABLE openssl_install_output
+      ERROR_VARIABLE openssl_install_error)
+    if(NOT openssl_install_result EQUAL 0)
+      message(FATAL_ERROR
+        "Pinned OpenSSL install_sw failed: ${openssl_install_result}\n"
+        "${openssl_install_output}${openssl_install_error}")
+    endif()
+  endif()
+
+  foreach(openssl_stage_lib IN LISTS openssl_stage_libs)
+    if(NOT EXISTS "${openssl_stage_lib}")
+      message(FATAL_ERROR
+        "Vendored OpenSSL stage is incomplete: missing ${openssl_stage_lib}")
+    endif()
+  endforeach()
+
+  # The NDK toolchain re-roots find_* searches (ONLY modes), so the stage
+  # must join CMAKE_FIND_ROOT_PATH for find_package(OpenSSL) to see it.
+  list(APPEND CMAKE_FIND_ROOT_PATH "${openssl_stage_dir}")
+  set(CMAKE_FIND_ROOT_PATH "${CMAKE_FIND_ROOT_PATH}" PARENT_SCOPE)
+  # Exposed to the top-level install rules: the vendored archives are part of
+  # the Android artifact set (heyaki_client/libdatachannel link them privately,
+  # and the final application link needs them in the install tree).
+  set(HEYAKI_VENDORED_OPENSSL_STAGE "${openssl_stage_dir}" PARENT_SCOPE)
+  set(OPENSSL_ROOT_DIR "${openssl_stage_dir}" CACHE PATH
+    "Vendored OpenSSL stage for Android builds (M11-02)" FORCE)
+  message(STATUS
+    "Heyaki vendored OpenSSL: pinned third_party/openssl staged at ${openssl_stage_dir}")
 endfunction()

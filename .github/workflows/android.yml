@@ -1,0 +1,143 @@
+name: android
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Pinned toolchain line (M11-01): the NDK series the baseline was verified
+  # against, plus the pinned cmdline-tools release used to install it.
+  ANDROID_NDK_VERSION: "26.3.11579264"
+  ANDROID_CMDLINE_TOOLS_VERSION: "11076708"
+  # Emulator lane (M11-07): the smoke binary targets API 24+ and runs on any
+  # newer image; 30 keeps the boot short.
+  ANDROID_EMULATOR_API: "30"
+
+jobs:
+  ndk-build:
+    name: NDK cross-build (${{ matrix.abi }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, x86_64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up the Android SDK
+        run: |
+          sdk_root="${RUNNER_TEMP}/android-sdk"
+          mkdir -p "$sdk_root/cmdline-tools"
+          curl -fsSL -o cmdline-tools.zip \
+            "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip"
+          unzip -q cmdline-tools.zip -d "$sdk_root/cmdline-tools"
+          mv "$sdk_root/cmdline-tools/cmdline-tools" "$sdk_root/cmdline-tools/latest"
+          echo "ANDROID_HOME=$sdk_root" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$sdk_root" >> "$GITHUB_ENV"
+          echo "$sdk_root/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$sdk_root/platform-tools" >> "$GITHUB_PATH"
+
+      - name: Install the pinned NDK
+        run: |
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager --install "ndk;$ANDROID_NDK_VERSION" > /dev/null
+          test -d "$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: Fetch pinned dependencies
+        # --all: the install rules package every locked license text
+        # (including the test-group atoms), so all checkouts must exist.
+        run: scripts/fetch_third_party.sh --all
+
+      - name: Cross-build the library set and the smoke
+        run: |
+          scripts/build_android.sh \
+            --ndk "$ANDROID_NDK_HOME" \
+            --abi ${{ matrix.abi }} \
+            --jobs 4
+
+      - name: Verify the installed artifact set
+        run: |
+          prefix="build-android/${{ matrix.abi }}/install"
+          for library in libheyaki_core.a libheyaki_profile.a libheyaki_client.a \
+                         libheyaki_services.a libheyaki_transport_webrtc.a \
+                         libssl.a libcrypto.a libheyaki_jni.so; do
+            test -f "$prefix/lib/$library" || { echo "missing $library"; exit 1; }
+          done
+          test -f "$prefix/bin/heyaki_android_smoke" || { echo "missing smoke"; exit 1; }
+          echo "artifact set OK for ${{ matrix.abi }}"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: heyaki-android-${{ matrix.abi }}
+          path: build-android/${{ matrix.abi }}/install
+          retention-days: 3
+
+  emulator-smoke:
+    name: Emulator smoke (x86_64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    needs: ndk-build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the x86_64 build
+        uses: actions/download-artifact@v4
+        with:
+          name: heyaki-android-x86_64
+          path: build-android/x86_64/install
+
+      - name: Set up the Android SDK
+        run: |
+          sdk_root="${RUNNER_TEMP}/android-sdk"
+          mkdir -p "$sdk_root/cmdline-tools"
+          curl -fsSL -o cmdline-tools.zip \
+            "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip"
+          unzip -q cmdline-tools.zip -d "$sdk_root/cmdline-tools"
+          mv "$sdk_root/cmdline-tools/cmdline-tools" "$sdk_root/cmdline-tools/latest"
+          echo "ANDROID_HOME=$sdk_root" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$sdk_root" >> "$GITHUB_ENV"
+          echo "$sdk_root/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$sdk_root/platform-tools" >> "$GITHUB_PATH"
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -la /dev/kvm
+
+      - name: Install the emulator packages
+        run: |
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager --install \
+            "platform-tools" \
+            "emulator" \
+            "system-images;android-$ANDROID_EMULATOR_API;google_apis;x86_64" > /dev/null
+
+      # The maintained runner action owns AVD creation, the emulator launch,
+      # and a bounded boot wait (an unbounded `adb wait-for-device` hung an
+      # earlier revision of this job when the emulator failed to start).
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ env.ANDROID_EMULATOR_API }}
+          target: google_apis
+          arch: x86_64
+          emulator-options: >-
+            -no-window
+            -no-audio
+            -no-boot-anim
+            -gpu swiftshader_indirect
+            -no-snapshot
+            -no-snapshot-save
+          # Single line: the action runs the script via `sh -c`, where a
+          # YAML-block line continuation would surface as a literal argument.
+          script: scripts/run_android_smoke.sh --binary build-android/x86_64/install/bin/heyaki_android_smoke

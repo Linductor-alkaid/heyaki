@@ -50,7 +50,9 @@ Heyaki 是面向设备间通信的 C++ 基础设施库，并提供名为 `heyaki
 7. 全链路具备有界队列、流控、超时、取消、错误分类和可观测性。
 8. 支持 Linux 和 Windows，保留 macOS 及受限嵌入式平台的扩展空间；Android（NDK，
    C++20 库 + JNI 集成层，不含 TUI/fuzzer/coturn 组件）作为 v1.x 后续目标
-   （计划 M11），v1.0 发布门禁不因 Android 未交付而阻塞。
+   （计划 M11），v1.0 发布门禁不因 Android 未交付而阻塞。2026-10-04 更新：
+   M11 核心库 NDK 基线已交付（arm64-v8a/x86_64 双 ABI、vendored OpenSSL、
+   JNI 边界第一增量、模拟器冒烟），见 `docs/compatibility/android-ndk.md`。
 9. 设备本地初始化时设置授权密码，未知设备验证该密码后获得目标设备授予的持久信任。
 10. 已登记设备后续启动时自动完成 relay 身份认证与重连，不再次要求用户输入注册凭据。
 11. 提供覆盖所有 Heyaki 能力的 `heyaki-tui`，并允许库应用复用其创建的设备档案。
