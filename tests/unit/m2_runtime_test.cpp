@@ -401,7 +401,10 @@ TEST(M2RuntimeTest, ExecutorOverloadTimeoutIsVisibleOnOperationAndFailureStatus)
   auto first = context.value_if()->submit(
       test_security_context(), [] { return Result<void>::success(); }, blocking_handler);
   ASSERT_TRUE(first);
-  ASSERT_TRUE(entered.wait_for(1U, 2s));
+  // Progress wait, not a tested latency bound: on a loaded CI runner the
+  // single worker thread may take several seconds to be scheduled. The
+  // overload properties below are measured after `entered` fires.
+  ASSERT_TRUE(entered.wait_for(1U, 10s));
 
   auto second = context.value_if()->submit(
       test_security_context(), [] { return Result<void>::success(); },

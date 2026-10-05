@@ -549,12 +549,13 @@ for scenario in "${scenarios[@]}"; do
       # M4-era runner family, and a non-terminal m6 RPC outcome rides the same
       # tail (admission racing a consent-loss session close). A single retry
       # was not enough on busy runners — 2026-08-31 saw back-to-back
-      # double-failures with distinct signatures — so run up to three fresh
-      # pairs and accept the first try that authenticates on a mediated path
-      # with a terminal m6 RPC outcome: a genuinely broken path fails every
-      # try with the same signature.
+      # double-failures with distinct signatures, and 2026-10-05 saw all
+      # three tries fail on one degraded runner attempt — so run up to four
+      # fresh pairs and accept the first try that authenticates on a mediated
+      # path with a terminal m6 RPC outcome: a genuinely broken path fails
+      # every try with the same signature.
       lossy_accepted=0
-      for lossy_try in 1 2 3; do
+      for lossy_try in 1 2 3 4; do
         run_pair "lossy-${lossy_try}" 90000 --stun ":${turn_port}" \
           --turn ":${turn_port}" --turn-secret "${secret}" --connect-retries 5 \
           --authenticate-budget-ms 75000 || true
@@ -563,7 +564,7 @@ for scenario in "${scenarios[@]}"; do
           lossy_accepted=1
           break
         fi
-        log "LOSSY_RETRY (try ${lossy_try} of 3): ${line:-no-result}"
+        log "LOSSY_RETRY (try ${lossy_try} of 4): ${line:-no-result}"
       done
       if [[ "${lossy_accepted}" == "1" ]]; then
         log "SCENARIO_OK lossy: ${line}"

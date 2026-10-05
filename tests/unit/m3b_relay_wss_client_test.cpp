@@ -309,7 +309,13 @@ TEST(M3BRelayWssClientTest, ConnectsWithTlsPinAndReceivesHealth) {
 
   auto connected = client.value_if()->connect(3s);
   ASSERT_TRUE(connected) << connected.error_if()->safe_detail();
-  EXPECT_EQ(client.value_if()->snapshot().state, RelayWssState::ready);
+  // The relay answers /health with one text frame and then closes the
+  // session (RelayServer session_send_health writes the frame and issues
+  // async_close). `ready` is therefore transient: by the time connect()
+  // resolves and this thread reads the snapshot, the server's close frame
+  // may already have moved the state back to disconnected (observed as a
+  // CI flake on fast runners). connect() success is the ready contract;
+  // the health frame asserted below proves the session end to end.
 
   auto message = client.value_if()->receive(3s);
   ASSERT_TRUE(message) << message.error_if()->safe_detail();

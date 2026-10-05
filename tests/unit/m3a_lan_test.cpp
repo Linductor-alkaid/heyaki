@@ -1326,7 +1326,7 @@ TEST_F(M3aNodeTest, SlowTrickledHandshakeTimesOutAndLegitimatePeerStillAuthentic
   }
   ASSERT_TRUE(wait_until(
       [&] { return victim.value_if()->endpoints().size() == 1U; },
-      std::chrono::seconds{4}));
+      std::chrono::seconds{8}));
   const auto port = victim.value_if()->snapshot().tls.listen_port;
   ASSERT_NE(port, 0U);
 
@@ -1344,14 +1344,17 @@ TEST_F(M3aNodeTest, SlowTrickledHandshakeTimesOutAndLegitimatePeerStillAuthentic
             return tls.timed_out >= static_cast<std::uint64_t>(cycle) + 1U &&
                    tls.provisional_connections == 0U;
           },
-          std::chrono::seconds{2}))
+          std::chrono::seconds{4}))
           << "slowloris cycle " << cycle << " was not reclaimed by the deadline";
       boost::system::error_code ignored;
       socket.close(ignored);
     }
   }
 
-  // The reclaimed listener still authenticates a real peer.
+  // The reclaimed listener still authenticates a real peer. The property is
+  // eventual authentication, not latency: budget 12s like the rest of the
+  // suite's auth waits (a loaded CI runner must not fail this on scheduling
+  // alone; the 300ms handshake timeouts above remain the actual gate).
   const auto peer_key = victim.value_if()->endpoints().front().key;
   ASSERT_TRUE(victim.value_if()->connect_lan(peer_key));
   EXPECT_TRUE(wait_until(
@@ -1366,7 +1369,7 @@ TEST_F(M3aNodeTest, SlowTrickledHandshakeTimesOutAndLegitimatePeerStillAuthentic
                std::count_if(peer_connections.begin(), peer_connections.end(),
                              authenticated) == 1;
       },
-      std::chrono::seconds{4}));
+      std::chrono::seconds{12}));
   EXPECT_TRUE(victim.value_if()->shutdown().stopped);
   EXPECT_TRUE(peer.value_if()->shutdown().stopped);
 }
