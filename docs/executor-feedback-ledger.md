@@ -52,7 +52,14 @@ Scheduling Runtime（可注入 `IScheduler` + deadline/QoS/affinity/resource 调
   bench、扫描器，SKIP_RETURN_CODE 77 既有设计）；升级直接相关的
   m2_runtime/m2_profile/m3b_relay/m5/m6/m7/m8 与 supply-chain lock 校验全绿；
   2026-10-02 条目的环境性失败 `heyaki_m3a_lan` 本次未复现；旧 API/namespace
-  残留符号 grep 零命中。
+  残留符号 grep 零命中。CI（ci + android workflow）最终全绿；期间 coturn-topology
+  job 出现两次失败（turntcp-1 m7 文件、lossy 信令 attempt_expired，第 3 次
+  通过）——经 resolve 专家机制审计（0.6.0 调度路径对 heyaki 负载语义等价：
+  deadline/GPU/affinity 闸门均被短路、TaskRouter 策略代码逐字相同、EDF 比较器
+  在无 deadline 时退化为旧实现）与失败签名比对（lossy 签名与
+  `deploy/coturn/run_network_matrix.sh` 注释记录的 M4 时代 runner flake 家族
+  逐字吻合，旧 pin 上 2026-08-31 即有双连败先例；turntcp-1 属旧 pin 上刚连修
+  两次的 M7 relayed-push 家族残留），判定为既有高压场景 flake，非升级回归。
 - **流程教训重申**：`scripts/fetch_third_party.sh` 在 configure 时强制切回 lock
   提交，executor 检出与 `third_party/dependencies.lock` 必须同一变更落地（2026-10-02
   条目教训继续有效）。
