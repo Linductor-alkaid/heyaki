@@ -625,7 +625,7 @@ unavailable, internal, unimplemented, protocol_error
 - topic 支持精确匹配和受控前缀匹配，不在 v1 引入任意正则；
 - 慢订阅者拥有独立有界队列，不能阻塞发布者或其他订阅者。
 
-仓库 `executor::comm::Topic<T>` 可用于单进程模块间 fan-out，并在设备边界处由 bridge 转为远程事件。两者必须保留不同名称或明确 adapter，因为本地 Topic 的生命周期和远程投递保证不同。
+仓库 `kairo::comm::Topic<T>` 可用于单进程模块间 fan-out，并在设备边界处由 bridge 转为远程事件。两者必须保留不同名称或明确 adapter，因为本地 Topic 的生命周期和远程投递保证不同。
 
 当一个发布者需要向大量设备广播时，点对点 fan-out 会线性消耗连接和上行带宽。这是“中继不做业务 Broker”的直接代价。v1 应给出连接数限制；大规模广播未来通过可选外部 Broker 或显式 gateway 服务解决，而不是悄悄扩展 relay 职责。
 
@@ -868,11 +868,11 @@ heyaki-tui
 - LAN multicast socket、TLS acceptor/client、lease 与 handshake timer 都运行在同一 executor 托管的 Asio runtime，不创建私有线程或 poll loop；
 - libdatachannel callback 只做校验和轻量 enqueue，不直接运行用户代码；
 - 用户 callback 派发到配置的 executor；
-- 文件读写、哈希、PTY wait 和其他阻塞操作使用 `executor::BlockingIoExecutor` 或专用 worker；
+- 文件读写、哈希、PTY wait 和其他阻塞操作使用 `kairo::BlockingIoExecutor` 或专用 worker；
 - 解析后传入其他线程的 buffer 使用明确所有权，不暴露悬空 `span`；
 - shutdown 顺序固定为停止接收新操作和发现生产者、关闭 LAN socket/listener/pending signaling、取消服务、关闭 peer、注销 relay、等待 worker、释放 I/O runtime。
 
-仓库已有 `executor::comm` 可连接网络线程与应用线程，例如用 `MpscChannel` 传递每条控制消息，用 `LatestMailbox` 表达 latest-only 遥测。其 drop/close 语义必须映射到 Heyaki 的可观测指标。
+仓库已有 `kairo::comm` 可连接网络线程与应用线程，例如用 `MpscChannel` 传递每条控制消息，用 `LatestMailbox` 表达 latest-only 遥测。其 drop/close 语义必须映射到 Heyaki 的可观测指标。
 
 ### 11.2 主要依赖建议
 

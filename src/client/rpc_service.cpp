@@ -492,7 +492,7 @@ void RpcService::start_server_call(const FrameView& frame, const RpcRequestBody&
   const auto dispatched = dispatch_(
       "heyaki-rpc-handler",
       [weak, call, task_handler = std::move(task_handler),
-       calling_peer](executor::StopToken token) mutable {
+       calling_peer](kairo::StopToken token) mutable {
         if (call->phase.load(std::memory_order_acquire) != 0U) {
           return;  // Session died before the task started.
         }
@@ -672,7 +672,7 @@ void RpcService::handle_cancel(const FrameView& frame) {
     return;  // Injected dispatch double without an executor handle.
   }
   const auto response = call.cancel_request();
-  if (response.result == executor::TaskCancellationResult::RequestedBeforeStart) {
+  if (response.result == kairo::TaskCancellationResult::RequestedBeforeStart) {
     // The executor terminated the still-queued task: it never runs, so this
     // side emits the terminal cancelled response itself (M6-10 exactly-once).
     finish_server_call(running->second,

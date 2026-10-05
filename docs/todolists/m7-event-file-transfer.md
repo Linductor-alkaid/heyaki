@@ -14,9 +14,9 @@
   （有界 FIFO staging，溢出仅终止该订阅（`subscriber_overflows`）；`handle_session_closed` 释放两端状态，重连不补历史。）
 - [x] `M7-04` 每个远程订阅者有独立有界队列和 scope；慢订阅者不阻塞发布者或其他订阅者。
   （`EventServiceConfig::subscriber_queue_items`；订阅准入检查 `event.subscribe:<root>`；publish 永不阻塞，滞留项在 `prune()` 重试。）
-- [x] `M7-05` 实现本地 `executor::comm::Topic<T>` 到远程事件的显式 bridge，类型和命名上区分本地 fan-out 与网络协议。
+- [x] `M7-05` 实现本地 `kairo::comm::Topic<T>` 到远程事件的显式 bridge，类型和命名上区分本地 fan-out 与网络协议。
   （`LocalEventMessage`（本地）vs `EventItemBody`（wire）；`EventService` 收到远程事件发布进 Node 持有的
-  `executor::comm::Topic`，`Node::publish_local_event`/`subscribe_local_events` 是对外的 bridge 半边。）
+  `kairo::comm::Topic`，`Node::publish_local_event`/`subscribe_local_events` 是对外的 bridge 半边。）
 - [x] `M7-06` 配置单设备远程订阅者/连接上限；超限明确拒绝，不把 relay 扩展为业务 Broker。
   （`max_subscriptions_per_peer`；超限以 EVENT_UNSUBSCRIBE 显式回应并计数 `subscription_limit_hits`。）
 - [x] `M7-07` TUI 事件视图支持 topic 浏览、订阅/取消、测试发布和 sequence/drop/lag 展示。
@@ -38,7 +38,7 @@
   （同目录 `.heyaki-<id>.part`/`.state`，0600；逐块 BLAKE3 校验 + 磁盘 sidecar bitmap；verify 任务整体 BLAKE3 +
   fsync + rename，sidecar 随 commit 删除。）
 - [x] `M7-12` 文件读写由 executor-managed Blocking I/O worker 管理，哈希等有限 CPU 工作通过普通 executor task；结果/failure 均有明确完成边界。
-  （Runtime 新增专用 FileIoWorker（executor `start_worker` + 有界 `executor::comm` 工作队列，MpscChannel）；
+  （Runtime 新增专用 FileIoWorker（executor `start_worker` + 有界 `kairo::comm` 工作队列，MpscChannel）；
   探测/读写/校验/清理走 `BlockingDispatch`；内存块哈希走 `ServiceDispatch`（普通任务）并经 StrandPoster 回收。）
 - [x] `M7-13` 实现暂停、取消、断线持久化和按 transfer ID 恢复；旧 session frame 不能污染恢复后的 transfer。
   （发送端记录在跨会话的 `FileTransferBook`，断线→paused，新会话 attach 以同一 transfer id 重新 manifest；
@@ -82,7 +82,7 @@
 - **Round 2（EventService）**：`src/client/event_service.{hpp,cpp}`——每订阅者 staging（keep-latest / 有界 FIFO）、
   段边界前缀匹配、sequence 重复/冲突规则（冲突关闭订阅、通道仅按 wire 6.2 处理）、订阅 scope
   `event.subscribe:<root>`、每对端订阅上限、断线终态；本地 fan-out 经 Node 持有的
-  `executor::comm::Topic<LocalEventMessage>`（bridge 类型与 wire 类型严格区分）。
+  `kairo::comm::Topic<LocalEventMessage>`（bridge 类型与 wire 类型严格区分）。
 - **Round 3（FileService 与阻塞 IO）**：`src/client/file_service.{hpp,cpp}`+`file_store.{hpp,cpp}`；
   Runtime 新增 FileIoWorker（executor-managed 阻塞 worker + 有界 MpscChannel 工作队列，协作取消），
   `service_dispatch.hpp` 增加 `BlockingDispatch`；`RpcCallContext` 增补可选 `peer()`（向后兼容默认参），

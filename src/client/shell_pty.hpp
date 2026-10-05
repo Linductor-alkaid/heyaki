@@ -7,7 +7,7 @@
 // (cooperative/TERM -> grace -> process-tree kill), reaping, and the
 // idle/absolute/output caps all run on that worker (M8-04). The strand side
 // never touches a process handle; it exchanges bounded commands and events
-// through executor::comm channels:
+// through kairo::comm channels:
 //
 //   strand (Node/ShellService) --ShellPtyCommandQueue--> PTY worker
 //   PTY worker --ShellPtyEventQueue--> strand (drained on the node tick)
@@ -25,9 +25,9 @@
 #include <heyaki/error.hpp>
 #include <heyaki/shell.hpp>
 
-#include <executor/comm/channel.hpp>
-#include <executor/comm/phase_gate.hpp>
-#include <executor/executor.hpp>
+#include <kairo/comm/channel.hpp>
+#include <kairo/comm/phase_gate.hpp>
+#include <kairo/executor.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -112,8 +112,8 @@ struct ShellPtyCommand {
   std::string reason;           // terminate: safe audit reason
 };
 
-using ShellPtyCommandQueue = executor::comm::MpscChannel<ShellPtyCommand>;
-using ShellPtyEventQueue = executor::comm::MpscChannel<ShellPtyEvent>;
+using ShellPtyCommandQueue = kairo::comm::MpscChannel<ShellPtyCommand>;
+using ShellPtyEventQueue = kairo::comm::MpscChannel<ShellPtyEvent>;
 
 // Thread-safe wake primitive owned by the runtime: the worker's poll wait
 // releases on signal() so freshly submitted commands and stop requests are
@@ -128,7 +128,7 @@ class ShellPtyWake {
 
 // The blocking worker loop. Platform process control (POSIX PTY/process
 // group, Windows ConPTY/job object) lives in the implementation.
-class ShellPtyWorker final : public executor::IBlockingIoWorker {
+class ShellPtyWorker final : public kairo::IBlockingIoWorker {
  public:
   static constexpr std::uint64_t exit_phase = 1U;
   // Cross-platform sanity cap on concurrently live shells per PTY worker.
@@ -136,11 +136,11 @@ class ShellPtyWorker final : public executor::IBlockingIoWorker {
   static constexpr std::size_t default_session_limit = 24U;
 
   ShellPtyWorker(ShellPtyCommandQueue& commands, ShellPtyEventQueue& events,
-                 ShellPtyWake& wake, executor::comm::PhaseGate& exit_gate,
+                 ShellPtyWake& wake, kairo::comm::PhaseGate& exit_gate,
                  std::size_t session_limit = default_session_limit);
   ~ShellPtyWorker() override;
 
-  void run(executor::StopToken stop_token) override;
+  void run(kairo::StopToken stop_token) override;
   // Wakes a blocked poll so fresh commands/deadlines are observed promptly.
   void wakeup() noexcept override;
 

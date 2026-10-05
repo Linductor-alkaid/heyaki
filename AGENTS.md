@@ -15,7 +15,7 @@ tools, examples, and tests.
   to `executor`.
 - Do not introduce `std::thread`, `std::jthread`, `std::async`, a custom thread
   pool, a detached worker, or another independently managed execution loop.
-- Use `executor::comm` components for communication across execution contexts.
+- Use `kairo::comm` components for communication across execution contexts.
   Select the component by its documented semantics, such as a bounded typed
   channel, `LatestMailbox`, `DoubleBuffer`, `RealtimeChannel`, `Topic`, or
   `PhaseGate`. Do not build an ad hoc queue or use shared mutable state plus
@@ -37,10 +37,10 @@ version used by Heyaki and take precedence over documentation for another
 executor release.
 
 - For application integration, use
-  `third_party/executor/docs/skill/executor-integration/SKILL.md`. Follow its
+  `third_party/executor/docs/skill/kairo-integration/SKILL.md`. Follow its
   routing instructions and load only the relevant router and capability card.
 - If explicit direction has been given to change executor itself, use
-  `third_party/executor/docs/skill/executor-maintainer/SKILL.md` before editing
+  `third_party/executor/docs/skill/kairo-maintainer/SKILL.md` before editing
   the dependency. Follow its source, invariant, test, and documentation checks.
   Do not use the maintainer skill as implicit permission to modify executor.
 - Use the current user-guide website sources under
@@ -60,7 +60,7 @@ including:
 
 1. the behavior that executor cannot currently provide;
 2. the executor API or semantic limitation that causes the gap;
-3. why existing executor lifecycle and `executor::comm` facilities are
+3. why existing executor lifecycle and `kairo::comm` facilities are
    insufficient;
 4. the smallest proposed executor capability or approved exception; and
 5. the impact of deferring the work.

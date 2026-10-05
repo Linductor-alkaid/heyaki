@@ -13,7 +13,7 @@
 #include <string_view>
 #include <vector>
 
-namespace executor {
+namespace kairo {
 class Executor;
 }
 
@@ -202,7 +202,7 @@ class Runtime {
   Runtime(const Runtime&) = delete;
   Runtime& operator=(const Runtime&) = delete;
 
-  [[nodiscard]] static Result<Runtime> create_borrowed(executor::Executor& executor,
+  [[nodiscard]] static Result<Runtime> create_borrowed(kairo::Executor& executor,
                                                        const RuntimeConfig& config = {});
   [[nodiscard]] static Result<Runtime> create_owned(const RuntimeConfig& config = {});
 

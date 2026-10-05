@@ -719,14 +719,14 @@ struct ShellPtyWorker::Impl {
   ShellPtyCommandQueue& commands;
   ShellPtyEventQueue& events;
   ShellPtyWake& wake;
-  executor::comm::PhaseGate& exit_gate;
+  kairo::comm::PhaseGate& exit_gate;
   std::size_t session_limit;
   std::map<ShellId, ShellPtySession> sessions;
 };
 
 ShellPtyWorker::ShellPtyWorker(ShellPtyCommandQueue& commands,
                                ShellPtyEventQueue& events, ShellPtyWake& wake,
-                               executor::comm::PhaseGate& exit_gate,
+                               kairo::comm::PhaseGate& exit_gate,
                                std::size_t session_limit)
     : impl_(std::make_unique<Impl>(commands, events, wake, exit_gate,
                                    session_limit > 0U
@@ -738,7 +738,7 @@ ShellPtyWorker::~ShellPtyWorker() = default;
 
 void ShellPtyWorker::wakeup() noexcept { impl_->wake.signal(); }
 
-void ShellPtyWorker::run(executor::StopToken stop_token) {
+void ShellPtyWorker::run(kairo::StopToken stop_token) {
   auto& impl = *impl_;
   std::vector<std::byte> read_scratch(kReadChunkBytes);
 

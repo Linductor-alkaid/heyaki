@@ -3,7 +3,7 @@
 include(CMakeFindDependencyMacro)
 
 find_dependency(Threads)
-find_dependency(executor CONFIG)
+find_dependency(kairo CONFIG)
 find_dependency(OpenSSL 3.0 COMPONENTS SSL Crypto)
 # M9-19: libnice builds install LibDataChannel with $<LINK_ONLY:LibNice::LibNice>
 # in its exported link interface, and the upstream LibDataChannel config does

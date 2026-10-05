@@ -73,7 +73,7 @@
   `connections_initiated`；`peer_session_changed` 在 authenticated（经
   `peer_session_snapshot` 取实时 data_path/rtt）、pairing_restricted、closed（失败/
   superseded 分流）转移点记账；prune tick 在 service diagnostics 之外同拍发布
-  `NodeMetrics`（`executor::comm::DoubleBuffer`，与既有模式一致）。
+  `NodeMetrics`（`kairo::comm::DoubleBuffer`，与既有模式一致）。
 - `tests/unit/m9_metrics_test.cpp`：格式良构性校验（每行可解析、HELP==TYPE、
   计数≥阈值）、配对块 golden 钉死、instance 转义、`record_authenticated` 单元、
   双节点 LAN 真会话端到端（idle 快照 → connect → authenticated 计数/时长/传输

@@ -16,7 +16,7 @@
 #include <heyaki/profile_store.hpp>
 #include <heyaki/trust_grant.hpp>
 
-#include <executor/comm.hpp>
+#include <kairo/comm.hpp>
 
 #include <gtest/gtest.h>
 
@@ -267,7 +267,7 @@ class M5NodePairingTest : public ::testing::Test {
   template <typename Predicate>
   bool wait_until(Predicate&& predicate, std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
-    executor::comm::PhaseGate poll{"m5-node-pairing-poll"};
+    kairo::comm::PhaseGate poll{"m5-node-pairing-poll"};
     while (std::chrono::steady_clock::now() < deadline) {
       if (predicate()) {
         return true;

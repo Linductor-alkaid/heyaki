@@ -29,7 +29,7 @@
 #include <heyaki/signaling_protocol.hpp>
 #include <heyaki/wire.hpp>
 
-#include <executor/comm.hpp>
+#include <kairo/comm.hpp>
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -1277,7 +1277,7 @@ class M10Round5NodeTest : public ::testing::Test {
   template <typename Predicate>
   bool wait_until(Predicate&& predicate, std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
-    executor::comm::PhaseGate poll{"m10-round5-poll"};
+    kairo::comm::PhaseGate poll{"m10-round5-poll"};
     while (std::chrono::steady_clock::now() < deadline) {
       if (predicate()) {
         return true;
@@ -1418,7 +1418,7 @@ TEST_F(M10Round5NodeTest, AuditRecordAndDiagnosticsAfterEchoTunnel) {
   {
     // Slow CI containers need more than the 3s this used to allow.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{15};
-    executor::comm::PhaseGate poll{"m10-round5-connect-poll"};
+    kairo::comm::PhaseGate poll{"m10-round5-connect-poll"};
     // Pre-tunnel outcomes race the whole result on CI runners (see the
     // gateway-service suite): a reset or a stall is the real-stack flake
     // family; post-tunnel assertions below stay hard failures.
@@ -1455,7 +1455,7 @@ TEST_F(M10Round5NodeTest, AuditRecordAndDiagnosticsAfterEchoTunnel) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{3};
     while (!read_state->done.load() && std::chrono::steady_clock::now() < deadline) {
       (void)pump_echo();
-      executor::comm::PhaseGate poll{"m10-round5-echo-poll"};
+      kairo::comm::PhaseGate poll{"m10-round5-echo-poll"};
       (void)poll.wait_for(1U, std::chrono::milliseconds{2});
     }
     ASSERT_TRUE(read_state->done.load()) << "echo never reached the public stream";

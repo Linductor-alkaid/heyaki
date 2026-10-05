@@ -30,6 +30,6 @@ because the capability cards are loaded on demand.
 `heyaki-integration` is for using the library in an application. Heyaki's
 own repository instructions (`AGENTS.md`) and `docs/todolists/` are for
 changing Heyaki itself — do not load them for integration work. Questions
-about the pinned `executor` concurrency layer (threads, channels,
-scheduling APIs) belong to executor's `executor-integration` skill
+about the pinned `kairo` concurrency layer (threads, channels,
+scheduling APIs) belong to kairo's `kairo-integration` skill
 (`third_party/executor/docs/skill/` when working inside this repository).

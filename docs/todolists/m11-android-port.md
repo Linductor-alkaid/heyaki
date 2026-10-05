@@ -15,7 +15,7 @@
 
 - **executor（pin 077d854）已完成 Android 一期适配**：`if(ANDROID)` CMake 分支、
   bionic 不链 `librt`、`stop_token` 的 `__ANDROID__` fallback
-  （`third_party/executor/include/executor/stop_token.hpp:10-17`）、
+  （`third_party/executor/include/kairo/stop_token.hpp:10-17`）、
   `sched_setaffinity` 适配（`third_party/executor/src/executor/util/thread_utils.cpp:199`），
   上游有 NDK r26c/r28b CI 与 qemu-user ARM64 验证（见 executor
   `docs/PACKAGE_ANDROID.md`）。M4 已为此升级 pin（m4 阶段文件记录）。
@@ -56,7 +56,7 @@
 - [x] `M11-05` LAN 组播适配（A2）：JNI 集成层 MulticastLock 钩子；Android 无锁时
   LAN discovery 显式降级并保持 relay 路径可用；补降级路径测试。
 - [x] `M11-06` JNI 集成边界：以薄封装暴露 Node 会话生命周期/授权 API，Heyaki
-  工作仍全部经 executor 提交，回调经既有 executor::comm 语义投递到宿主线程；
+  工作仍全部经 executor 提交，回调经既有 kairo::comm 语义投递到宿主线程；
   不在 JNI 层建立第二并发系统。
 - [x] `M11-07` 最小 Android 集成示例（例如演示 app 或 qemu-user 冒烟 runner），
   纳入 CI 冒烟而非人工步骤。

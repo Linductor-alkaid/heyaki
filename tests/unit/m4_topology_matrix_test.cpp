@@ -5,7 +5,7 @@
 #include <heyaki/password.hpp>
 #include <heyaki/profile_store.hpp>
 
-#include <executor/comm.hpp>
+#include <kairo/comm.hpp>
 
 #include <gtest/gtest.h>
 
@@ -127,7 +127,7 @@ class M4TopologyMatrixTest : public ::testing::Test {
   template <typename Predicate>
   bool wait_until(Predicate&& predicate, std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
-    executor::comm::PhaseGate poll{"m4-topology-poll"};
+    kairo::comm::PhaseGate poll{"m4-topology-poll"};
     while (std::chrono::steady_clock::now() < deadline) {
       if (predicate()) {
         return true;
@@ -144,7 +144,7 @@ class M4TopologyMatrixTest : public ::testing::Test {
         DeviceEndpointKey{first.snapshot().device_id, first.snapshot().endpoint_id};
     int stable_polls = 0;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
-    executor::comm::PhaseGate poll{"m4-topology-stable"};
+    kairo::comm::PhaseGate poll{"m4-topology-stable"};
     while (std::chrono::steady_clock::now() < deadline) {
       const bool mutual =
           discovered(first, second_key) && discovered(second, first_key);
@@ -288,7 +288,7 @@ TEST_F(M4TopologyMatrixTest, SimultaneousCrossConnectionsYieldSingleWinner) {
   ASSERT_TRUE(authenticated) << "cross connection never authenticated";
 
   // Wait a grace period for the losing duplicate connection to arbitrate.
-  executor::comm::PhaseGate grace{"m4-cross-grace"};
+  kairo::comm::PhaseGate grace{"m4-cross-grace"};
   (void)grace.wait_for(1U, std::chrono::milliseconds{5000});
   const auto left = (*first.value_if())->peer_sessions();
   std::size_t active = 0U;

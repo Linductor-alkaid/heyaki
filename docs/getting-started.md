@@ -16,7 +16,7 @@ a first device with the TUI. For configuration details see
 | Git | for the pinned dependency checkout |
 | Optional, Linux | `libnice >= 0.1.21` + `glib` + `pkg-config` when building with `HEYAKI_ICE_BACKEND=nice` (TURN/TCP client; see [cross-os-matrix.md](operations/cross-os-matrix.md)) |
 
-Pinned dependencies (executor, libdatachannel, boost, libsodium, blake3,
+Pinned dependencies (kairo, libdatachannel, boost, libsodium, blake3,
 sqlite, FTXUI, and test-only protobuf/abseil/googletest) are fetched from
 `third_party/*.lock` — no system packages needed for them.
 

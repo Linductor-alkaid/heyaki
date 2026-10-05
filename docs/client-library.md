@@ -15,9 +15,9 @@ pitfalls.
 
 | Path | Content |
 | --- | --- |
-| `lib/` | Static libraries: `heyaki_core`, `heyaki_profile`, `heyaki_client`, `heyaki_services`, `heyaki_transport_webrtc`, plus every pinned dependency statically linked in (`libdatachannel`, `libjuice`, `usrsctp`, `libexecutor`, libsodium, BLAKE3, SQLite amalgamation) |
-| `include/` | Public headers: `heyaki/`, `executor/`, `rtc/` |
-| `lib/cmake/` | CMake packages: `heyaki`, `executor`, `LibDataChannel` |
+| `lib/` | Static libraries: `heyaki_core`, `heyaki_profile`, `heyaki_client`, `heyaki_services`, `heyaki_transport_webrtc`, plus every pinned dependency statically linked in (`libdatachannel`, `libjuice`, `usrsctp`, `libkairo`, libsodium, BLAKE3, SQLite amalgamation) |
+| `include/` | Public headers: `heyaki/`, `kairo/`, `rtc/` |
+|  `lib/cmake/` | CMake packages: `heyaki`, `kairo`, `LibDataChannel` |
 | `bin/` | The applications (`heyaki-relay`, `heyaki-tui`, demos, helpers) — Windows SDKs also carry `datachannel.dll` and the OpenSSL runtime DLLs here |
 | `share/heyaki/` | Proto schemas, coturn example configuration, license texts, SPDX SBOM |
 
@@ -34,12 +34,12 @@ The archives are built by CI from the release tag (see
 | | Linux | Windows |
 | --- | --- | --- |
 | Distribution / baseline | Ubuntu 20.04 or newer — the SDK is built on the 20.04 baseline (glibc ≥ 2.31, libstdc++ ≥ 3.4.28), so it runs on 20.04 and every newer distribution | Windows 10/11, x64 |
-| Toolchain | GCC 11+ (C++20; the pinned `executor` dependency uses `std::atomic` wait/notify, which libstdc++ implements from 11.1 — Ubuntu 20.04: `g++-11` from the `ubuntu-toolchain-r/test` PPA, which also brings the matching runtime) — GCC 13 / Clang 17 recommended | Visual Studio 2022 (MSVC 19.38+), x64 |
+| Toolchain | GCC 11+ (C++20; the pinned `kairo` dependency uses `std::atomic` wait/notify, which libstdc++ implements from 11.1 — Ubuntu 20.04: `g++-11` from the `ubuntu-toolchain-r/test` PPA, which also brings the matching runtime) — GCC 13 / Clang 17 recommended | Visual Studio 2022 (MSVC 19.38+), x64 |
 | CMake | ≥ 3.25 | ≥ 3.25 |
 | OpenSSL | 3.x development package (`libssl-dev`; ≥ 3.0, < 4.0) — or use the copy bundled in the SDK (see [Ubuntu 20.04](#ubuntu-2004)) | OpenSSL 3.x — headers + import libraries for compiling (e.g. from [slproweb](https://slproweb.com/products/Win32OpenSSL.html) installed to the default location, or set `OPENSSL_ROOT_DIR`); the runtime DLLs ship inside the SDK `bin/` |
 | Runtime | `libssl.so.3` / `libcrypto.so.3` — system package, or the SDK's bundled copy | MSVC redistributable (matching VS 2022); `datachannel.dll` and OpenSSL DLLs are in the SDK `bin/` |
 
-Everything else — executor, libdatachannel, boost.Beast/Asio headers,
+Everything else — kairo, libdatachannel, boost.Beast/Asio headers,
 libsodium, BLAKE3, SQLite, usrsctp, libjuice — is statically inside the SDK
 and needs nothing on the consumer machine.
 
@@ -64,7 +64,7 @@ target_compile_features(my_device_app PRIVATE cxx_std_20)
 target_link_libraries(my_device_app PRIVATE heyaki::client heyaki::services)
 ```
 
-Configure with the SDK on the prefix path (the package pulls in `executor`,
+Configure with the SDK on the prefix path (the package pulls in `kairo`,
 `LibDataChannel`, `OpenSSL`, and `Threads` transitively):
 
 ```sh
@@ -81,7 +81,7 @@ cmake --build build --config Release
 
 If OpenSSL is in the default location on Windows, `OPENSSL_ROOT_DIR` can be
 omitted. Do not pass the SDK's `lib/` directory as `CMAKE_PREFIX_PATH` —
-point at the archive root, where `lib/cmake/` lives.
+point at the archive root, where  `lib/cmake/` lives.
 
 ## Ubuntu 20.04
 
@@ -93,7 +93,7 @@ archives run on 20.04 and newer. What that means for you on a 20.04 machine:
 
 - **Compiler**: install `g++-11` or newer —
   `sudo add-apt-repository ppa:ubuntu-toolchain-r/test && sudo apt install g++-11`.
-  GCC 10 is not enough (the pinned `executor` dependency uses
+  GCC 10 is not enough (the pinned `kairo` dependency uses
   `std::atomic` wait/notify, a libstdc++ 11 feature), and the PPA install
   also updates the system `libstdc++` runtime your compiled apps need.
 - **Ready-to-run binaries**: the executables inside the SDK (`bin/`) link
@@ -212,7 +212,7 @@ in `apps/demo/`.
 
 | Symptom | Cause and fix |
 | --- | --- |
-| `find_package(heyaki)` reports the package but configure fails on `executor` or `LibDataChannel` | `CMAKE_PREFIX_PATH` points inside `lib/` — point it at the SDK root (the packages live under `lib/cmake/` of that root) |
+| `find_package(heyaki)` reports the package but configure fails on `kairo` or `LibDataChannel` | `CMAKE_PREFIX_PATH` points inside `lib/` — point it at the SDK root (the packages live under  `lib/cmake/` of that root) |
 | Could not find OpenSSL / wrong version | Linux: install `libssl-dev` from the same 3.x line, or on Ubuntu 20.04 pass `-DOPENSSL_ROOT_DIR=<sdk>` to use the bundled copy. Windows: set `-DOPENSSL_ROOT_DIR` to your OpenSSL 3.x prefix; a 4.x install is rejected by the freeze |
 | Binary fails on an older distribution with `GLIBC_x.y` / `GLIBCXX_x.y` not found | The binary was not built from the SDK (whose baseline is glibc 2.31 / GLIBCXX 3.4.28) — link against the SDK libraries instead of a locally built copy, or rebuild on the target distribution |
 | App exits at startup with `profile_*` error | The state directory (or a parent) is group/other accessible — `chmod 700` it |

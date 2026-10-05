@@ -2,9 +2,9 @@
 #include <heyaki/password.hpp>
 #include <heyaki/profile_store.hpp>
 
-#include <executor/comm/channel.hpp>
-#include <executor/comm/phase_gate.hpp>
-#include <executor/executor.hpp>
+#include <kairo/comm/channel.hpp>
+#include <kairo/comm/phase_gate.hpp>
+#include <kairo/executor.hpp>
 
 #include <gtest/gtest.h>
 #include <sqlite3.h>
@@ -869,18 +869,18 @@ TEST_F(M2ProfileTest, ConcurrentProfileOpensPreserveOneIdentity) {
     expected_device_id = profile.value_if()->device_id();
   }
 
-  executor::Executor task_executor;
-  executor::ExecutorConfig executor_config;
+  kairo::Executor task_executor;
+  kairo::ExecutorConfig executor_config;
   executor_config.min_threads = 4U;
   executor_config.max_threads = 4U;
   executor_config.queue_capacity = 8U;
-  ASSERT_TRUE(task_executor.initialize_ex(executor_config));
+  ASSERT_TRUE(task_executor.initialize(executor_config));
 
-  executor::comm::ChannelOptions channel_options;
+  kairo::comm::ChannelOptions channel_options;
   channel_options.capacity = 4U;
   channel_options.name = "profile-open-started";
-  executor::comm::MpscChannel<std::size_t> started(channel_options);
-  executor::comm::PhaseGate release("profile-open-release");
+  kairo::comm::MpscChannel<std::size_t> started(channel_options);
+  kairo::comm::PhaseGate release("profile-open-release");
   std::vector<std::future<Result<ProfileStore>>> futures;
   futures.reserve(4U);
   for (std::size_t index = 0U; index < 4U; ++index) {

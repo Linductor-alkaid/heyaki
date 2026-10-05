@@ -27,7 +27,7 @@
 #include <heyaki/runtime.hpp>
 #include <heyaki/signaling_protocol.hpp>
 
-#include <executor/comm.hpp>
+#include <kairo/comm.hpp>
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -1181,7 +1181,7 @@ class M10Round4SocksTest : public ::testing::Test {
   template <typename Predicate>
   bool wait_until(Predicate&& predicate, std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
-    executor::comm::PhaseGate poll{"m10-round4-poll"};
+    kairo::comm::PhaseGate poll{"m10-round4-poll"};
     while (std::chrono::steady_clock::now() < deadline) {
       if (predicate()) {
         return true;
@@ -1386,7 +1386,7 @@ TEST_F(M10Round4SocksTest, SocksConnectEchoRoundTrip) {
                          std::chrono::milliseconds{2000}));
 
   const auto stats = [&] {
-    executor::comm::PhaseGate settle{"m10-round4-stats-settle"};
+    kairo::comm::PhaseGate settle{"m10-round4-stats-settle"};
     (void)settle.wait_for(1U, std::chrono::milliseconds{50});
     return frontend->stats();
   }();

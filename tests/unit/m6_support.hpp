@@ -68,7 +68,7 @@ struct ManualDispatch {
 // task that already began executing (the cooperative flag drives it).
 struct ManualCancellableDispatch {
   struct Entry {
-    std::function<void(executor::StopToken)> task;
+    std::function<void(kairo::StopToken)> task;
     bool done{false};
   };
   std::deque<std::shared_ptr<Entry>> tasks;
@@ -88,16 +88,16 @@ struct ManualCancellableDispatch {
       // ServerCallState, whose cancel_request holds this closure — a shared
       // capture would create a reference cycle (LeakSanitizer-visible).
       return Result<TaskCancelRequest>::success(
-          [this, entry = std::weak_ptr<Entry>{entry}]() -> executor::TaskCancellationResponse {
+          [this, entry = std::weak_ptr<Entry>{entry}]() -> kairo::TaskCancellationResponse {
             auto queued = entry.lock();
             if (!queued || queued->done) {
-              return {executor::TaskCancellationResult::AlreadyCompleted};
+              return {kairo::TaskCancellationResult::AlreadyCompleted};
             }
             if (emulate_running_cancel) {
-              return {executor::TaskCancellationResult::RequestedRunning};
+              return {kairo::TaskCancellationResult::RequestedRunning};
             }
             queued->done = true;  // Removed without running: queued cancellation.
-            return {executor::TaskCancellationResult::RequestedBeforeStart};
+            return {kairo::TaskCancellationResult::RequestedBeforeStart};
           });
     };
   }
@@ -111,7 +111,7 @@ struct ManualCancellableDispatch {
         continue;
       }
       entry->done = true;
-      executor::StopSource source;
+      kairo::StopSource source;
       entry->task(source.get_token());
     }
   }

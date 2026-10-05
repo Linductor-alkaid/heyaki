@@ -9,9 +9,9 @@
 // FIFO and terminates only its own subscription on overflow. A slow
 // subscriber never blocks the publisher or another subscriber (M7-04).
 //
-// The service is also the explicit bridge to local executor::comm fan-out
+// The service is also the explicit bridge to local kairo::comm fan-out
 // (M7-05): received remote items are re-published into a local
-// executor::comm::Topic<LocalEventMessage>, and publish() forwards locally
+// kairo::comm::Topic<LocalEventMessage>, and publish() forwards locally
 // authored messages to matching remote subscriptions. LocalEventMessage and
 // EventItemBody stay distinct types with distinct names so local Topic
 // lifecycle and remote delivery guarantees never blur.
@@ -24,7 +24,7 @@
 #include "peer_session.hpp"
 #include "service_dispatch.hpp"
 
-#include <executor/comm/topic.hpp>
+#include <kairo/comm/topic.hpp>
 
 #include <heyaki/event.hpp>
 
@@ -75,7 +75,7 @@ class EventService : public std::enable_shared_from_this<EventService> {
   using InboundSink = void (*)(void* context, const DeviceEndpointKey& peer,
                                std::string_view pattern, const EventItemBody& item);
   using ScopeCheck = std::function<bool(std::string_view scope)>;
-  using LocalTopic = executor::comm::Topic<LocalEventMessage>;
+  using LocalTopic = kairo::comm::Topic<LocalEventMessage>;
 
   // `local_topic` fans received remote events out to local consumers; it
   // outlives every service (owned by the Node).

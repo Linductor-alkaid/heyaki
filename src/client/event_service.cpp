@@ -462,7 +462,7 @@ void EventService::handle_inbound_item(const FrameView& frame) {
 void EventService::deliver_locally(const LocalSubscription& subscription,
                                    EventItemBody item) {
   // Inbound half of the M7-05 bridge: remote items become local
-  // executor::comm fan-out messages under the subscription's pattern.
+  // kairo::comm fan-out messages under the subscription's pattern.
   LocalEventMessage message;
   message.topic = subscription.pattern;
   message.schema_version = item.schema_version;

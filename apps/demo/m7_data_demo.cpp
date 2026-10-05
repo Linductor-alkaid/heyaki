@@ -14,7 +14,7 @@
 
 #include <heyaki/node.hpp>
 
-#include <executor/comm.hpp>
+#include <kairo/comm.hpp>
 
 #include <chrono>
 #include <cstdint>
@@ -258,17 +258,17 @@ int run_demo(const std::filesystem::path& database, std::string_view application
   }
   heyaki::Node node = std::move(*created.value_if());
 
-  executor::comm::ChannelOptions event_options;
+  kairo::comm::ChannelOptions event_options;
   event_options.capacity = 64U;
-  event_options.drop_policy = executor::comm::DropPolicy::DropOldest;
+  event_options.drop_policy = kairo::comm::DropPolicy::DropOldest;
   event_options.enable_stats = true;
-  executor::comm::MpscChannel<std::string> event_items{
+  kairo::comm::MpscChannel<std::string> event_items{
       [&event_options] {
         auto options = event_options;
         options.name = "heyaki-m7-demo-items";
         return options;
       }()};
-  executor::comm::MpscChannel<std::string> file_events{
+  kairo::comm::MpscChannel<std::string> file_events{
       [&event_options] {
         auto options = event_options;
         options.name = "heyaki-m7-demo-files";

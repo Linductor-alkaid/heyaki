@@ -13,7 +13,7 @@
 #include <heyaki/relay_wss_control.hpp>
 #include <heyaki/signaling_protocol.hpp>
 
-#include <executor/comm.hpp>
+#include <kairo/comm.hpp>
 
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/post.hpp>
@@ -220,7 +220,7 @@ struct RelayServer::Impl : std::enable_shared_from_this<RelayServer::Impl> {
   std::optional<RelayLeaseTable> lease_table;
   std::optional<RelayEndpointDirectory> endpoint_directory;
   RelayId relay_id{};
-  executor::comm::DoubleBuffer<RelayServerSnapshot> snapshots;
+  kairo::comm::DoubleBuffer<RelayServerSnapshot> snapshots;
   std::set<std::shared_ptr<RelaySession>> sessions;
   std::map<RelayLeaseKey, std::weak_ptr<RelaySession>> online_endpoints;
   std::promise<Result<void>> shutdown_promise;

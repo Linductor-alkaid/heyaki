@@ -1,7 +1,7 @@
 #include <heyaki/runtime.hpp>
 
-#include <executor/comm/phase_gate.hpp>
-#include <executor/executor.hpp>
+#include <kairo/comm/phase_gate.hpp>
+#include <kairo/executor.hpp>
 
 #include <gtest/gtest.h>
 
@@ -122,8 +122,8 @@ TEST(M2RuntimeTest, CallbackQueueRejectsNewestAndShutdownClosesAdmission) {
   auto context = runtime.value_if()->create_context(RuntimeContextKind::peer_session, "peer-one");
   ASSERT_TRUE(context);
 
-  executor::comm::PhaseGate entered("callback-entered");
-  executor::comm::PhaseGate release("callback-release");
+  kairo::comm::PhaseGate entered("callback-entered");
+  kairo::comm::PhaseGate release("callback-release");
   auto first = context.value_if()->submit(test_security_context(), [&] {
     (void)entered.advance_to(1U);
     const auto released = release.wait_for(1U, 2s);
@@ -165,11 +165,11 @@ TEST(M2RuntimeTest, CallbackQueueRejectsNewestAndShutdownClosesAdmission) {
 }
 
 TEST(M2RuntimeTest, BorrowedRuntimeLeavesCallerExecutorRunning) {
-  executor::Executor executor;
-  executor::ExecutorConfig executor_config;
+  kairo::Executor executor;
+  kairo::ExecutorConfig executor_config;
   executor_config.min_threads = 1U;
   executor_config.max_threads = 2U;
-  ASSERT_TRUE(executor.initialize_ex(executor_config));
+  ASSERT_TRUE(executor.initialize(executor_config));
 
   RuntimeConfig config;
   config.worker_name = "heyaki-borrowed-test";
@@ -186,7 +186,7 @@ TEST(M2RuntimeTest, BorrowedRuntimeLeavesCallerExecutorRunning) {
   const auto shutdown = runtime.value_if()->shutdown();
   EXPECT_FALSE(shutdown.executor_shutdown_performed);
   const auto executor_snapshot = executor.get_snapshot();
-  EXPECT_EQ(executor_snapshot.lifecycle, executor::ExecutorLifecycleState::Running);
+  EXPECT_EQ(executor_snapshot.lifecycle, kairo::ExecutorLifecycleState::Running);
   EXPECT_TRUE(executor_snapshot.async.is_running);
   (void)executor.shutdown(true);
 }
@@ -329,11 +329,11 @@ TEST(M2RuntimeTest, CallbackAndHandlerExceptionsRemainObservable) {
 #endif
 
 TEST(M2RuntimeTest, BorrowedRuntimeReportsOwnDrainTimeoutWithoutStoppingExecutor) {
-  executor::Executor executor;
-  executor::ExecutorConfig executor_config;
+  kairo::Executor executor;
+  kairo::ExecutorConfig executor_config;
   executor_config.min_threads = 1U;
   executor_config.max_threads = 1U;
-  ASSERT_TRUE(executor.initialize_ex(executor_config));
+  ASSERT_TRUE(executor.initialize(executor_config));
 
   RuntimeConfig config;
   config.worker_name = "heyaki-drain-timeout";
@@ -343,8 +343,8 @@ TEST(M2RuntimeTest, BorrowedRuntimeReportsOwnDrainTimeoutWithoutStoppingExecutor
   auto context = runtime.value_if()->create_context(RuntimeContextKind::node, "slow-node");
   ASSERT_TRUE(context);
 
-  executor::comm::PhaseGate entered("handler-entered");
-  executor::comm::PhaseGate release("handler-release");
+  kairo::comm::PhaseGate entered("handler-entered");
+  kairo::comm::PhaseGate release("handler-release");
   auto operation = context.value_if()->submit(
       test_security_context(), [] { return Result<void>::success(); },
       [&](const RuntimeSecurityContext&) {
@@ -368,19 +368,19 @@ TEST(M2RuntimeTest, BorrowedRuntimeReportsOwnDrainTimeoutWithoutStoppingExecutor
   EXPECT_EQ(status.value_if()->error->code(), ErrorCode::timeout);
 
   ASSERT_TRUE(release.advance_to(1U));
-  EXPECT_TRUE(executor.wait_for_completion_ex(2s).completed);
+  EXPECT_TRUE(executor.wait_for_completion(2s).completed);
   EXPECT_TRUE(executor.get_snapshot().async.is_running);
   (void)executor.shutdown(true);
 }
 
 TEST(M2RuntimeTest, ExecutorOverloadTimeoutIsVisibleOnOperationAndFailureStatus) {
-  executor::Executor executor;
-  executor::ExecutorConfig executor_config;
+  kairo::Executor executor;
+  kairo::ExecutorConfig executor_config;
   executor_config.min_threads = 1U;
   executor_config.max_threads = 1U;
   executor_config.queue_capacity = 1U;
   executor_config.task_timeout_ms = 20;
-  ASSERT_TRUE(executor.initialize_ex(executor_config));
+  ASSERT_TRUE(executor.initialize(executor_config));
 
   RuntimeConfig config;
   config.worker_name = "heyaki-executor-pressure";
@@ -389,8 +389,8 @@ TEST(M2RuntimeTest, ExecutorOverloadTimeoutIsVisibleOnOperationAndFailureStatus)
   auto context = runtime.value_if()->create_context(RuntimeContextKind::node, "busy-node");
   ASSERT_TRUE(context);
 
-  executor::comm::PhaseGate entered("executor-entered");
-  executor::comm::PhaseGate release("executor-release");
+  kairo::comm::PhaseGate entered("executor-entered");
+  kairo::comm::PhaseGate release("executor-release");
   auto blocking_handler = [&](const RuntimeSecurityContext&) {
     (void)entered.advance_to(1U);
     const auto released = release.wait_for(1U, 10s);

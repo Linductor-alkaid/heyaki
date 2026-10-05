@@ -241,7 +241,7 @@ add_executable(heyaki_m2_profile_tests
 target_link_libraries(heyaki_m2_profile_tests PRIVATE
   heyaki::profile
   heyaki::sqlite
-  executor::executor
+  kairo::kairo
   GTest::gtest_main)
 target_compile_definitions(heyaki_m2_profile_tests PRIVATE
   "HEYAKI_M2_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}\""
@@ -306,7 +306,7 @@ target_link_libraries(heyaki_m9_file_crash_probe PRIVATE
   heyaki::client
   heyaki::core
   heyaki::blake3
-  executor::executor
+  kairo::kairo
   GTest::gtest)
 target_include_directories(heyaki_m9_file_crash_probe PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../src"
@@ -331,7 +331,7 @@ endif()
 add_executable(heyaki_m2_runtime_tests unit/m2_runtime_test.cpp)
 target_link_libraries(heyaki_m2_runtime_tests PRIVATE
   heyaki::client
-  executor::executor
+  kairo::kairo
   GTest::gtest_main)
 heyaki_configure_target(heyaki_m2_runtime_tests)
 heyaki_enable_executor_exception_adapter_source(unit/m2_runtime_test.cpp)
@@ -342,7 +342,7 @@ add_executable(heyaki_m3a_lan_tests unit/m3a_lan_test.cpp)
 heyaki_enable_executor_exception_adapter_source(unit/m3a_lan_test.cpp)
 target_link_libraries(heyaki_m3a_lan_tests PRIVATE
   heyaki::client
-  executor::executor
+  kairo::kairo
   GTest::gtest_main
   OpenSSL::SSL)
 heyaki_target_use_pinned_boost_asio(heyaki_m3a_lan_tests)
@@ -389,7 +389,7 @@ add_executable(heyaki_m4_relay_cycle_repro unit/m4_relay_cycle_repro_test.cpp)
 heyaki_enable_executor_exception_adapter_source(unit/m4_relay_cycle_repro_test.cpp)
 target_link_libraries(heyaki_m4_relay_cycle_repro PRIVATE
   heyaki::relay
-  executor::executor
+  kairo::kairo
   GTest::gtest_main
   OpenSSL::SSL OpenSSL::Crypto)
 heyaki_target_use_pinned_boost_beast(heyaki_m4_relay_cycle_repro)
@@ -404,7 +404,7 @@ add_executable(heyaki_m4_topology_matrix_tests unit/m4_topology_matrix_test.cpp)
 heyaki_enable_executor_exception_adapter_source(unit/m4_topology_matrix_test.cpp)
 target_link_libraries(heyaki_m4_topology_matrix_tests PRIVATE
   heyaki::client
-  executor::executor
+  kairo::kairo
   GTest::gtest_main
   OpenSSL::SSL)
 heyaki_target_use_pinned_boost_asio(heyaki_m4_topology_matrix_tests)
@@ -422,7 +422,7 @@ add_executable(heyaki_m4_shutdown_matrix_tests unit/m4_shutdown_matrix_test.cpp)
 heyaki_enable_executor_exception_adapter_source(unit/m4_shutdown_matrix_test.cpp)
 target_link_libraries(heyaki_m4_shutdown_matrix_tests PRIVATE
   heyaki::client
-  executor::executor
+  kairo::kairo
   GTest::gtest_main
   OpenSSL::SSL)
 heyaki_target_use_pinned_boost_asio(heyaki_m4_shutdown_matrix_tests)
@@ -440,7 +440,7 @@ add_executable(heyaki_m4_session_restart_e2e_tests unit/m4_session_restart_e2e_t
 heyaki_enable_executor_exception_adapter_source(unit/m4_session_restart_e2e_test.cpp)
 target_link_libraries(heyaki_m4_session_restart_e2e_tests PRIVATE
   heyaki::client
-  executor::executor
+  kairo::kairo
   GTest::gtest_main
   OpenSSL::SSL)
 heyaki_target_use_pinned_boost_asio(heyaki_m4_session_restart_e2e_tests)
@@ -477,7 +477,7 @@ add_executable(heyaki_m6_service_tests
 target_link_libraries(heyaki_m6_service_tests PRIVATE
   heyaki::client
   heyaki::core
-  executor::executor
+  kairo::kairo
   GTest::gtest_main)
 target_include_directories(heyaki_m6_service_tests PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../src"
@@ -492,7 +492,7 @@ add_executable(heyaki_m9_metrics_tests unit/m9_metrics_test.cpp)
 heyaki_enable_executor_exception_adapter_source(unit/m9_metrics_test.cpp)
 target_link_libraries(heyaki_m9_metrics_tests PRIVATE
   heyaki::client
-  executor::executor
+  kairo::kairo
   GTest::gtest_main
   OpenSSL::SSL)
 heyaki_target_use_pinned_boost_asio(heyaki_m9_metrics_tests)
@@ -510,7 +510,7 @@ add_executable(heyaki_m9_relay_observability_tests
 heyaki_enable_executor_exception_adapter_source(unit/m9_relay_observability_test.cpp)
 target_link_libraries(heyaki_m9_relay_observability_tests PRIVATE
   heyaki::relay
-  executor::executor
+  kairo::kairo
   heyaki::sqlite
   GTest::gtest_main
   OpenSSL::SSL
@@ -532,7 +532,7 @@ add_executable(heyaki_m9_correlation_tests unit/m9_correlation_test.cpp)
 heyaki_enable_executor_exception_adapter_source(unit/m9_correlation_test.cpp)
 target_link_libraries(heyaki_m9_correlation_tests PRIVATE
   heyaki::client
-  executor::executor
+  kairo::kairo
   GTest::gtest_main
   OpenSSL::SSL)
 heyaki_target_use_pinned_boost_asio(heyaki_m9_correlation_tests)
@@ -553,7 +553,7 @@ heyaki_enable_executor_exception_adapter_source(unit/m9_slo_rules_test.cpp)
 target_link_libraries(heyaki_m9_slo_rules_tests PRIVATE
   heyaki::client
   heyaki::relay
-  executor::executor
+  kairo::kairo
   GTest::gtest_main)
 target_compile_definitions(heyaki_m9_slo_rules_tests PRIVATE
   "HEYAKI_M9_OBSERVABILITY_DIR=\"${PROJECT_SOURCE_DIR}/deploy/observability\""
@@ -571,7 +571,7 @@ target_link_libraries(heyaki_m9_parameter_freeze_tests PRIVATE
   heyaki::relay
   heyaki::core
   heyaki::blake3
-  executor::executor
+  kairo::kairo
   GTest::gtest_main)
 target_include_directories(heyaki_m9_parameter_freeze_tests PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../src"
@@ -615,7 +615,7 @@ foreach(heyaki_doc_slug IN LISTS HEYAKI_DOC_CPP_EXAMPLES)
     "${HEYAKI_DOCS_EXAMPLE_DIR}/${heyaki_doc_slug}.cpp")
   target_link_libraries(heyaki-doc-example-${heyaki_doc_slug} PRIVATE
     heyaki::client
-    executor::executor)
+    kairo::kairo)
   heyaki_configure_target(heyaki-doc-example-${heyaki_doc_slug})
   list(APPEND HEYAKI_DOC_CPP_BINARIES
     "$<TARGET_FILE:heyaki-doc-example-${heyaki_doc_slug}>")
@@ -630,7 +630,7 @@ endforeach()
 add_executable(heyaki-doc-relay-config-check docs/relay_config_doc_check.cpp)
 target_link_libraries(heyaki-doc-relay-config-check PRIVATE
   heyaki::relay
-  executor::executor)
+  kairo::kairo)
 heyaki_configure_target(heyaki-doc-relay-config-check)
 
 set(HEYAKI_DOC_RELAY_CONFIG_FILES "")
@@ -657,7 +657,7 @@ target_link_libraries(heyaki_m9_compat_tests PRIVATE
   heyaki::relay
   heyaki::core
   heyaki::sqlite
-  executor::executor
+  kairo::kairo
   GTest::gtest_main)
 target_include_directories(heyaki_m9_compat_tests PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../src"
@@ -711,7 +711,7 @@ add_executable(heyaki_m10_gateway_policy_tests unit/m10_gateway_policy_test.cpp)
 heyaki_enable_executor_exception_adapter_source(unit/m10_gateway_policy_test.cpp)
 target_link_libraries(heyaki_m10_gateway_policy_tests PRIVATE
   heyaki::client
-  executor::executor
+  kairo::kairo
   GTest::gtest_main
   OpenSSL::SSL)
 heyaki_target_use_pinned_boost_asio(heyaki_m10_gateway_policy_tests)
@@ -736,7 +736,7 @@ add_executable(heyaki_m10_gateway_service_tests unit/m10_gateway_service_test.cp
 heyaki_enable_executor_exception_adapter_source(unit/m10_gateway_service_test.cpp)
 target_link_libraries(heyaki_m10_gateway_service_tests PRIVATE
   heyaki::client
-  executor::executor
+  kairo::kairo
   GTest::gtest_main
   OpenSSL::SSL)
 heyaki_target_use_pinned_boost_asio(heyaki_m10_gateway_service_tests)
@@ -771,7 +771,7 @@ heyaki_enable_executor_exception_adapter_source(unit/m10_round4_test.cpp)
 target_link_libraries(heyaki_m10_round4_tests PRIVATE
   heyaki::client
   heyaki::socks
-  executor::executor
+  kairo::kairo
   GTest::gtest_main
   OpenSSL::SSL)
 heyaki_target_use_pinned_boost_asio(heyaki_m10_round4_tests)
@@ -806,7 +806,7 @@ add_executable(heyaki_m10_metrics_audit_tests unit/m10_metrics_audit_test.cpp)
 heyaki_enable_executor_exception_adapter_source(unit/m10_metrics_audit_test.cpp)
 target_link_libraries(heyaki_m10_metrics_audit_tests PRIVATE
   heyaki::client
-  executor::executor
+  kairo::kairo
   GTest::gtest_main
   OpenSSL::SSL)
 heyaki_target_use_pinned_boost_asio(heyaki_m10_metrics_audit_tests)
@@ -837,7 +837,7 @@ add_executable(heyaki_m10_isolation_tests unit/m10_isolation_test.cpp)
 heyaki_enable_executor_exception_adapter_source(unit/m10_isolation_test.cpp)
 target_link_libraries(heyaki_m10_isolation_tests PRIVATE
   heyaki::client
-  executor::executor
+  kairo::kairo
   GTest::gtest_main
   OpenSSL::SSL)
 heyaki_target_use_pinned_boost_asio(heyaki_m10_isolation_tests)
@@ -864,7 +864,7 @@ target_link_libraries(heyaki_m8_service_tests PRIVATE
   heyaki::client
   heyaki::core
   heyaki::blake3
-  executor::executor
+  kairo::kairo
   GTest::gtest_main)
 target_include_directories(heyaki_m8_service_tests PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../src"
@@ -886,7 +886,7 @@ target_link_libraries(heyaki_m7_service_tests PRIVATE
   heyaki::client
   heyaki::core
   heyaki::blake3
-  executor::executor
+  kairo::kairo
   GTest::gtest_main)
 target_include_directories(heyaki_m7_service_tests PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../src"
@@ -921,7 +921,7 @@ add_executable(heyaki_m5_pairing_approval_tests unit/m5_pairing_approval_test.cp
 heyaki_enable_executor_exception_adapter_source(unit/m5_pairing_approval_test.cpp)
 target_link_libraries(heyaki_m5_pairing_approval_tests PRIVATE
   heyaki::client
-  executor::executor
+  kairo::kairo
   GTest::gtest_main
   OpenSSL::SSL)
 heyaki_target_use_pinned_boost_asio(heyaki_m5_pairing_approval_tests)
@@ -943,7 +943,7 @@ add_executable(heyaki_m5_node_pairing_tests unit/m5_node_pairing_test.cpp)
 heyaki_enable_executor_exception_adapter_source(unit/m5_node_pairing_test.cpp)
 target_link_libraries(heyaki_m5_node_pairing_tests PRIVATE
   heyaki::client
-  executor::executor
+  kairo::kairo
   GTest::gtest_main
   OpenSSL::SSL)
 heyaki_target_use_pinned_boost_asio(heyaki_m5_node_pairing_tests)
@@ -971,7 +971,7 @@ heyaki_enable_executor_exception_adapter_source(
 target_link_libraries(heyaki_m5_basic_communication_tests PRIVATE
   heyaki::client
   heyaki::core
-  executor::executor
+  kairo::kairo
   GTest::gtest_main
   OpenSSL::SSL)
 heyaki_target_use_pinned_boost_asio(heyaki_m5_basic_communication_tests)
@@ -1006,7 +1006,7 @@ add_executable(heyaki_m4_webrtc_transport_tests unit/m4_webrtc_transport_test.cp
 target_link_libraries(heyaki_m4_webrtc_transport_tests PRIVATE
   heyaki::client
   heyaki::transport_webrtc
-  executor::executor
+  kairo::kairo
   GTest::gtest_main)
 target_include_directories(heyaki_m4_webrtc_transport_tests PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../src"
@@ -1027,7 +1027,7 @@ add_executable(heyaki_m4_relay_route_tests unit/m4_relay_signaling_test.cpp)
 target_link_libraries(heyaki_m4_relay_route_tests PRIVATE
   heyaki::relay
   heyaki_protocol_lite
-  executor::executor
+  kairo::kairo
   heyaki::sqlite
   GTest::gtest_main
   OpenSSL::SSL
@@ -1046,7 +1046,7 @@ add_executable(heyaki_m4_path_policy_tests unit/m4_path_policy_test.cpp)
 heyaki_enable_executor_exception_adapter_source(unit/m4_path_policy_test.cpp)
 target_link_libraries(heyaki_m4_path_policy_tests PRIVATE
   heyaki::client
-  executor::executor
+  kairo::kairo
   GTest::gtest_main
   OpenSSL::SSL)
 heyaki_target_use_pinned_boost_asio(heyaki_m4_path_policy_tests)
@@ -1062,7 +1062,7 @@ add_executable(heyaki_m4_session_latency_tests unit/m4_session_latency_test.cpp)
 heyaki_enable_executor_exception_adapter_source(unit/m4_session_latency_test.cpp)
 target_link_libraries(heyaki_m4_session_latency_tests PRIVATE
   heyaki::client
-  executor::executor
+  kairo::kairo
   GTest::gtest_main
   OpenSSL::SSL)
 heyaki_target_use_pinned_boost_asio(heyaki_m4_session_latency_tests)
@@ -1093,7 +1093,7 @@ add_executable(heyaki_m3b_relay_tests
 target_link_libraries(heyaki_m3b_relay_tests PRIVATE
   heyaki::relay
   heyaki_protocol_lite
-  executor::executor
+  kairo::kairo
   heyaki::sqlite
   GTest::gtest_main
   OpenSSL::SSL

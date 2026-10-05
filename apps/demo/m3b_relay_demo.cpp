@@ -3,7 +3,7 @@
 #include <heyaki/password.hpp>
 #include <heyaki/profile_store.hpp>
 
-#include <executor/comm.hpp>
+#include <kairo/comm.hpp>
 
 #include "relay_database.hpp"
 
@@ -93,7 +93,7 @@ heyaki::Result<void> seed_token(const std::filesystem::path& database,
 bool wait_until(const std::function<bool()>& predicate,
                 std::chrono::milliseconds timeout) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
-  executor::comm::PhaseGate poll{"heyaki-m3b-relay-demo-poll"};
+  kairo::comm::PhaseGate poll{"heyaki-m3b-relay-demo-poll"};
   while (std::chrono::steady_clock::now() < deadline) {
     if (predicate()) {
       return true;
@@ -135,7 +135,7 @@ heyaki::Result<void> run_node(const std::filesystem::path& database,
   if (ready) {
     const auto deadline = std::chrono::steady_clock::now() + hold_for;
     while (std::chrono::steady_clock::now() < deadline) {
-      executor::comm::PhaseGate poll{"heyaki-m3b-relay-demo-hold"};
+      kairo::comm::PhaseGate poll{"heyaki-m3b-relay-demo-hold"};
       (void)poll.wait_for(1U, std::chrono::milliseconds{1});
     }
   }

@@ -17,6 +17,48 @@
 
 ---
 
+## 上游收敛状态（2026-10-05 pin 升级：kairo 0.6.0 破坏性变更窗口）
+
+executor 上游发布 `v0.6.0`（提交 `d9602ea`，PR #208–#209），heyaki pin 于 2026-10-05
+从 `e236273`（v0.5.2-20）升级。0.6.0 是上游声明破坏性变更窗口，含三部分：项目更名
+**Executor → kairo**（namespace `kairo::`、include `<kairo/...>`、CMake
+`kairo::kairo`/`KAIRO_*`、产物 `libkairo`；`Executor` 等领域类名不变，仓库与
+`third_party/executor` 检出路径不变）、历史兼容层全面移除、以及核心主题
+Scheduling Runtime（可注入 `IScheduler` + deadline/QoS/affinity/resource 调度模型）。
+
+- **heyaki 侧代码迁移面**（依上游 docs/MIGRATION.md 0.6.0 节逐项核对）：
+  include 路径与 `kairo::` 限定名全量替换（34 个文件 44 处 include、47 个文件
+  `executor::` 限定名）；被移除 API 中 heyaki 仅使用了 `initialize_ex`（7 处）与
+  `wait_for_completion_ex`（2 处），均按迁移指南改回主名 `initialize` /
+  `wait_for_completion`（返回类型不变，Result 用法本就兼容）；定时器字符串 ID 体系、
+  `push_task` override、4 参 `submit_auto`、`is_lock_free()` 别名、
+  `memory_locked` 字段 heyaki 零使用。
+- **公共 API 连带变更**：`include/heyaki/runtime.hpp` 前向声明改为
+  `kairo::Executor`，`Runtime::create_borrowed` 签名随之变化——heyaki SDK 消费方
+  需同步本次升级（文档见 docs/client-library.md）。
+- **CMake/打包**：子项目选项 `EXECUTOR_BUILD_*`/`EXECUTOR_ENABLE_*` → `KAIRO_*`，
+  目标 `executor::executor` → `kairo::kairo`，`heyakiConfig.cmake.in` 改
+  `find_dependency(kairo CONFIG)`；licenses.lock 仍按检出目录名 `executor` 记录
+  （`third_party/executor/LICENSE` 未移动），打包产物中的 `executor-LICENSE`
+  文件名不变。heyaki 自有指标名（`executor_submit_rejected_total` 等）不属于
+  kairo API 词汇，维持不变。
+- **Scheduling Runtime（新能力，非 breaking）**：deadline/EDF、QoS 预设、affinity
+  诊断、resource 准入。heyaki 暂未接入，留作 P3（有而未用）待办；接入前重读
+  `<kairo/scheduling.hpp>` 与 skill `scheduling.md`。
+- **门控不变**：T2（asio strand/外部 context adapter、与 IO 对象同 strand 的
+  timer）0.6.0 未交付，P1-1/P1-2 条目维持原判。
+- **验证**（Independent-Verification-Agent）：debug 预设全量编译零错误；ctest
+  79 项：69 运行全部通过、0 失败、10 项环境门控跳过（coturn/NAT matrix、soak、
+  bench、扫描器，SKIP_RETURN_CODE 77 既有设计）；升级直接相关的
+  m2_runtime/m2_profile/m3b_relay/m5/m6/m7/m8 与 supply-chain lock 校验全绿；
+  2026-10-02 条目的环境性失败 `heyaki_m3a_lan` 本次未复现；旧 API/namespace
+  残留符号 grep 零命中。
+- **流程教训重申**：`scripts/fetch_third_party.sh` 在 configure 时强制切回 lock
+  提交，executor 检出与 `third_party/dependencies.lock` 必须同一变更落地（2026-10-02
+  条目教训继续有效）。
+
+---
+
 ## 上游收敛状态（2026-10-02 pin 升级）
 
 executor 上游 master 前进至 `e236273`（v0.5.2 标签 + 20 个后续提交，PR #196–#207，

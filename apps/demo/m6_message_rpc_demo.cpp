@@ -19,7 +19,7 @@
 #include <heyaki/rpc.hpp>
 #include <heyaki/trust_grant.hpp>
 
-#include <executor/comm.hpp>
+#include <kairo/comm.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -41,7 +41,7 @@ using heyaki::ErrorCode;
 bool wait_until(const std::function<bool()>& predicate,
                 std::chrono::milliseconds timeout) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
-  executor::comm::PhaseGate poll{"heyaki-m6-demo-poll"};
+  kairo::comm::PhaseGate poll{"heyaki-m6-demo-poll"};
   while (std::chrono::steady_clock::now() < deadline) {
     if (predicate()) {
       return true;
@@ -206,23 +206,23 @@ int run_demo(const std::filesystem::path& database, std::string_view application
   // Cross-thread event transfer from the node callbacks to the demo loop via
   // bounded executor comm channels (drop-oldest); the caller drains them into
   // local vectors instead of sharing mutex-protected state.
-  executor::comm::ChannelOptions event_options;
+  kairo::comm::ChannelOptions event_options;
   event_options.capacity = 64U;
-  event_options.drop_policy = executor::comm::DropPolicy::DropOldest;
+  event_options.drop_policy = kairo::comm::DropPolicy::DropOldest;
   event_options.enable_stats = true;
-  executor::comm::MpscChannel<std::string> delivery_events{
+  kairo::comm::MpscChannel<std::string> delivery_events{
       [&event_options] {
         auto options = event_options;
         options.name = "heyaki-m6-demo-delivery-events";
         return options;
       }()};
-  executor::comm::MpscChannel<std::string> inbound{
+  kairo::comm::MpscChannel<std::string> inbound{
       [&event_options] {
         auto options = event_options;
         options.name = "heyaki-m6-demo-inbound";
         return options;
       }()};
-  executor::comm::MpscChannel<std::string> rpc_results{
+  kairo::comm::MpscChannel<std::string> rpc_results{
       [&event_options] {
         auto options = event_options;
         options.name = "heyaki-m6-demo-rpc-results";

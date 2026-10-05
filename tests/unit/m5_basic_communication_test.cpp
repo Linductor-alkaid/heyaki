@@ -40,7 +40,7 @@
 #include "m4_support.hpp"
 #include "peer_session.hpp"
 
-#include <executor/comm.hpp>
+#include <kairo/comm.hpp>
 
 #include <gtest/gtest.h>
 
@@ -520,7 +520,7 @@ class M5BasicCommunicationTest : public ::testing::Test {
   template <typename Predicate>
   bool wait_until(Predicate&& predicate, std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
-    executor::comm::PhaseGate poll{"m5-basic-comm-poll"};
+    kairo::comm::PhaseGate poll{"m5-basic-comm-poll"};
     while (std::chrono::steady_clock::now() < deadline) {
       if (predicate()) {
         return true;

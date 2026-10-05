@@ -41,7 +41,7 @@
 #include <heyaki/signaling_protocol.hpp>
 #include <heyaki/wire.hpp>
 
-#include <executor/comm.hpp>
+#include <kairo/comm.hpp>
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -660,7 +660,7 @@ int run_restart_isolation_child(const std::filesystem::path& root) {
   const auto deadline_for = [](std::chrono::milliseconds budget) {
     return std::chrono::steady_clock::now() + budget;
   };
-  executor::comm::PhaseGate child_poll{"m10-isolation-child-poll"};
+  kairo::comm::PhaseGate child_poll{"m10-isolation-child-poll"};
   const auto wait_for = [&](const std::function<bool()>& predicate,
                             std::chrono::milliseconds budget) {
     const auto deadline = deadline_for(budget);

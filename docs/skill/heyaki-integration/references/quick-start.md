@@ -24,7 +24,7 @@ cmake --build build
 ```
 
 Toolchain floor: GCC 11+ or VS 2022, CMake ≥ 3.25, OpenSSL 3.x (< 4.0).
-Everything else (executor, libdatachannel, libsodium, BLAKE3, SQLite,
+Everything else (kairo, libdatachannel, libsodium, BLAKE3, SQLite,
 usrsctp, libjuice) is statically inside the SDK. Ubuntu 20.04 and Windows
 details (bundled OpenSSL, `OPENSSL_ROOT_DIR`, DLL layout):
 [client-library.md](../../../client-library.md).
@@ -89,10 +89,10 @@ per-OS-user variants under the platform state directory.
 ## First Boundary
 
 `Node::create` returns after admission; the node's identity, LAN presence,
-and relay registration come up asynchronously on the pinned `executor`
+and relay registration come up asynchronously on the pinned `kairo`
 runtime. Application code never creates threads. `Node` callbacks fire on
 executor contexts — keep handlers cheap and hand off through
-`executor::comm` components when crossing into application code.
+`kairo::comm` components when crossing into application code.
 `shutdown()` is the only teardown path and returns a `NodeShutdownReport`.
 
 The state directory must be per-user and permission-tight (0700): the

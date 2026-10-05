@@ -11,11 +11,11 @@ details that are not `safe_detail`. `error_code_name()` renders the code.
 ## Concurrency model
 
 All asynchronous work — timers, socket workers, service pumps, the shell PTY
-worker — runs on the pinned `executor` dependency. Application code never
+worker — runs on the pinned `kairo` dependency. Application code never
 creates threads. Consequences:
 
 - `Node` callbacks fire on executor contexts, not on your thread. Handlers
-  must be cheap and non-blocking; hand off via `executor::comm` components
+  must be cheap and non-blocking; hand off via `kairo::comm` components
   (bounded channels, `LatestMailbox`, `Topic`) to cross into application
   code.
 - Queues are bounded everywhere. Overload surfaces as admission failures

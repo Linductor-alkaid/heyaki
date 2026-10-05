@@ -4,7 +4,7 @@
 
 #include <heyaki/relay_wss_control.hpp>
 
-#include <executor/comm.hpp>
+#include <kairo/comm.hpp>
 
 #include <boost/asio/connect.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -151,14 +151,14 @@ struct RelayWssClient::Impl : std::enable_shared_from_this<RelayWssClient::Impl>
         websocket(strand, ssl_context),
         resolver(strand),
         timer(strand),
-        received(executor::comm::ChannelOptions{
+        received(kairo::comm::ChannelOptions{
             .capacity = config_value.receive_capacity,
-            .drop_policy = executor::comm::DropPolicy::RejectNewest,
+            .drop_policy = kairo::comm::DropPolicy::RejectNewest,
             .enable_stats = true,
             .name = "heyaki-wss-received"}),
-        outgoing(executor::comm::ChannelOptions{
+        outgoing(kairo::comm::ChannelOptions{
             .capacity = config_value.send_capacity,
-            .drop_policy = executor::comm::DropPolicy::RejectNewest,
+            .drop_policy = kairo::comm::DropPolicy::RejectNewest,
             .enable_stats = true,
             .name = "heyaki-wss-outgoing"}),
         snapshots("heyaki-wss-snapshots") {}
@@ -210,8 +210,8 @@ struct RelayWssClient::Impl : std::enable_shared_from_this<RelayWssClient::Impl>
   tcp::resolver resolver;
   boost::asio::steady_timer timer;
   boost::beast::flat_buffer read_buffer;
-  executor::comm::MpscChannel<RelayWssMessage> received;
-  executor::comm::MpscChannel<std::vector<std::byte>> outgoing;
+  kairo::comm::MpscChannel<RelayWssMessage> received;
+  kairo::comm::MpscChannel<std::vector<std::byte>> outgoing;
   std::deque<std::vector<std::byte>> write_queue;
   bool write_in_flight{false};
   bool connect_pending{false};
@@ -221,7 +221,7 @@ struct RelayWssClient::Impl : std::enable_shared_from_this<RelayWssClient::Impl>
   std::shared_future<Result<void>> connect_completion;
   std::promise<Result<void>> close_promise;
   std::shared_future<Result<void>> close_completion;
-  executor::comm::DoubleBuffer<RelayWssSnapshot> snapshots;
+  kairo::comm::DoubleBuffer<RelayWssSnapshot> snapshots;
   RelayWssSnapshot current;
 };
 
@@ -773,7 +773,7 @@ Result<RelayWssMessage> RelayWssClient::receive(std::chrono::milliseconds timeou
   auto received = impl_->received.receive_for(message, timeout);
   if (!received) {
     return Result<RelayWssMessage>::failure(
-        received.error_code == executor::comm::CommErrorCode::Timeout
+        received.error_code == kairo::comm::CommErrorCode::Timeout
             ? wss_error(ErrorCode::timeout, "wss_receive_timeout")
             : wss_error(ErrorCode::cancelled, "wss_receive_closed"));
   }

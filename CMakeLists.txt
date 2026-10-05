@@ -142,13 +142,13 @@ if(OPENSSL_VERSION VERSION_GREATER_EQUAL 4.0)
     "Heyaki M3A freezes the OpenSSL 3.x ABI line; got ${OPENSSL_VERSION}")
 endif()
 
-set(EXECUTOR_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(EXECUTOR_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(EXECUTOR_BUILD_SHARED OFF CACHE BOOL "" FORCE)
-set(EXECUTOR_ENABLE_GPU OFF CACHE BOOL "" FORCE)
-set(EXECUTOR_ENABLE_CUDA OFF CACHE BOOL "" FORCE)
-set(EXECUTOR_ENABLE_OPENCL OFF CACHE BOOL "" FORCE)
-set(EXECUTOR_ENABLE_TSAN OFF CACHE BOOL "" FORCE)
+set(KAIRO_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(KAIRO_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(KAIRO_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(KAIRO_ENABLE_GPU OFF CACHE BOOL "" FORCE)
+set(KAIRO_ENABLE_CUDA OFF CACHE BOOL "" FORCE)
+set(KAIRO_ENABLE_OPENCL OFF CACHE BOOL "" FORCE)
+set(KAIRO_ENABLE_TSAN OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/executor)
 
 # Heyaki owns the libdatachannel lifecycle through WebRtcTransportSession. Keep the
@@ -212,9 +212,9 @@ if(NOT HEYAKI_SANITIZER STREQUAL "none" AND
   elseif(HEYAKI_SANITIZER STREQUAL "thread")
     set(heyaki_executor_sanitizer_flag -fsanitize=thread)
   endif()
-  target_compile_options(executor PRIVATE
+  target_compile_options(kairo PRIVATE
     "${heyaki_executor_sanitizer_flag}" -fno-omit-frame-pointer)
-  target_link_options(executor PUBLIC
+  target_link_options(kairo PUBLIC
     "${heyaki_executor_sanitizer_flag}" -fno-omit-frame-pointer)
 endif()
 
@@ -320,7 +320,7 @@ target_include_directories(heyaki_client PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src/transport")
 target_link_libraries(heyaki_client
   PUBLIC heyaki::profile
-  PRIVATE executor::executor heyaki::sodium heyaki::blake3 OpenSSL::SSL OpenSSL::Crypto)
+  PRIVATE kairo::kairo heyaki::sodium heyaki::blake3 OpenSSL::SSL OpenSSL::Crypto)
 if(WIN32)
   target_link_libraries(heyaki_client PRIVATE iphlpapi ws2_32)
 endif()
@@ -338,7 +338,7 @@ heyaki_enable_executor_exception_adapter_source(src/client/node.cpp)
 heyaki_enable_executor_exception_adapter_source(src/client/relay_wss_client.cpp)
 heyaki_enable_executor_exception_adapter_source(src/client/runtime.cpp)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-  # GCC 13 Release optimization reports executor::comm::BoundedQueue's
+  # GCC 13 Release optimization reports kairo::comm::BoundedQueue's
   # std::optional<Item> storage as uninitialized when Item contains this
   # translation unit's variant with a vector. Retain the diagnostic without
   # treating this pinned dependency false positive as a Heyaki build failure.
@@ -366,7 +366,7 @@ target_compile_features(heyaki_socks PUBLIC cxx_std_20)
 target_include_directories(heyaki_socks PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/src/socks")
 target_link_libraries(heyaki_socks
-  PUBLIC heyaki::client executor::executor)
+  PUBLIC heyaki::client kairo::kairo)
 heyaki_configure_target(heyaki_socks)
 heyaki_target_use_pinned_boost_beast(heyaki_socks)
 heyaki_enable_executor_exception_adapter_source(src/socks/socks_frontend.cpp)
@@ -383,7 +383,7 @@ target_include_directories(heyaki_transport_webrtc PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src/transport")
 target_include_directories(heyaki_transport_webrtc SYSTEM PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libdatachannel/include")
-target_link_libraries(heyaki_transport_webrtc PRIVATE executor::executor heyaki::core)
+target_link_libraries(heyaki_transport_webrtc PRIVATE kairo::kairo heyaki::core)
 if(WIN32)
   target_link_libraries(heyaki_transport_webrtc PRIVATE
     $<BUILD_INTERFACE:LibDataChannel::LibDataChannelStatic>
@@ -419,7 +419,7 @@ target_include_directories(heyaki_relay
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(heyaki_relay
   PUBLIC heyaki::client
-  PRIVATE executor::executor heyaki::sodium heyaki::sqlite OpenSSL::SSL OpenSSL::Crypto)
+  PRIVATE kairo::kairo heyaki::sodium heyaki::sqlite OpenSSL::SSL OpenSSL::Crypto)
 heyaki_target_use_pinned_boost_beast(heyaki_relay)
 heyaki_configure_target(heyaki_relay)
 heyaki_enable_executor_exception_adapter_source(src/relay/relay_server.cpp)
@@ -447,7 +447,7 @@ set(HEYAKI_INSTALL_TARGETS
 
 if(HEYAKI_BUILD_APPS)
   add_executable(heyaki-relay apps/relay/main.cpp)
-  target_link_libraries(heyaki-relay PRIVATE heyaki::relay executor::executor)
+  target_link_libraries(heyaki-relay PRIVATE heyaki::relay kairo::kairo)
   heyaki_configure_target(heyaki-relay)
 
   add_library(heyaki_tui_setup STATIC
@@ -460,7 +460,7 @@ if(HEYAKI_BUILD_APPS)
 
   add_executable(heyaki-tui apps/tui/main.cpp)
   target_link_libraries(heyaki-tui PRIVATE
-    heyaki_tui_setup heyaki::services heyaki::socks executor::executor)
+    heyaki_tui_setup heyaki::services heyaki::socks kairo::kairo)
   heyaki_target_use_pinned_boost_beast(heyaki-tui)
   heyaki_configure_target(heyaki-tui)
   heyaki_enable_executor_exception_adapter_source(apps/tui/main.cpp)
@@ -470,17 +470,17 @@ if(HEYAKI_BUILD_APPS)
   heyaki_configure_target(heyaki-m2-profile-demo)
 
   add_executable(heyaki-m3b-relay-demo apps/demo/m3b_relay_demo.cpp)
-  target_link_libraries(heyaki-m3b-relay-demo PRIVATE heyaki::relay executor::executor)
+  target_link_libraries(heyaki-m3b-relay-demo PRIVATE heyaki::relay kairo::kairo)
   heyaki_configure_target(heyaki-m3b-relay-demo)
   heyaki_enable_executor_exception_adapter_source(apps/demo/m3b_relay_demo.cpp)
 
   add_executable(heyaki-m6-message-rpc-demo apps/demo/m6_message_rpc_demo.cpp)
-  target_link_libraries(heyaki-m6-message-rpc-demo PRIVATE heyaki::client executor::executor)
+  target_link_libraries(heyaki-m6-message-rpc-demo PRIVATE heyaki::client kairo::kairo)
   heyaki_configure_target(heyaki-m6-message-rpc-demo)
   heyaki_enable_executor_exception_adapter_source(apps/demo/m6_message_rpc_demo.cpp)
 
   add_executable(heyaki-m7-data-demo apps/demo/m7_data_demo.cpp)
-  target_link_libraries(heyaki-m7-data-demo PRIVATE heyaki::client executor::executor)
+  target_link_libraries(heyaki-m7-data-demo PRIVATE heyaki::client kairo::kairo)
   heyaki_configure_target(heyaki-m7-data-demo)
   heyaki_enable_executor_exception_adapter_source(apps/demo/m7_data_demo.cpp)
 
@@ -488,7 +488,7 @@ if(HEYAKI_BUILD_APPS)
   # M10 Round 6: --gateway-socks serves the loopback SOCKS5 frontend from the
   # matrix node, so the app links the optional frontend component.
   target_link_libraries(heyaki-m4-matrix-node
-    PRIVATE heyaki::client heyaki::profile heyaki::socks executor::executor OpenSSL::SSL OpenSSL::Crypto)
+    PRIVATE heyaki::client heyaki::profile heyaki::socks kairo::kairo OpenSSL::SSL OpenSSL::Crypto)
   heyaki_target_use_pinned_boost_asio(heyaki-m4-matrix-node)
   heyaki_configure_target(heyaki-m4-matrix-node)
   heyaki_enable_executor_exception_adapter_source(apps/demo/m4_matrix_node.cpp)
@@ -538,7 +538,7 @@ if(HEYAKI_ANDROID)
   # explicit LAN readiness contract). Runs under adb on an emulator/device;
   # no external servers. scripts/run_android_smoke.sh drives it in CI.
   add_executable(heyaki_android_smoke apps/android/heyaki_smoke.cpp)
-  target_link_libraries(heyaki_android_smoke PRIVATE heyaki::services executor::executor)
+  target_link_libraries(heyaki_android_smoke PRIVATE heyaki::services kairo::kairo)
   heyaki_configure_target(heyaki_android_smoke)
   list(APPEND HEYAKI_INSTALL_TARGETS heyaki_android_smoke)
 endif()

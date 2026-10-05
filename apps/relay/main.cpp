@@ -3,7 +3,7 @@
 
 #include <heyaki/version.hpp>
 
-#include <executor/comm.hpp>
+#include <kairo/comm.hpp>
 
 #include <chrono>
 #include <cstdint>
@@ -236,7 +236,7 @@ int main(int argc, char** argv) {
 
   // The server reports observable state changes on its strand; blocking on the
   // gate replaces sleep-polling the snapshot.
-  executor::comm::PhaseGate server_events{"heyaki-relay-main"};
+  kairo::comm::PhaseGate server_events{"heyaki-relay-main"};
   config.on_state_changed = [&server_events] {
     (void)server_events.advance();
   };

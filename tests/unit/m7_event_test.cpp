@@ -1,10 +1,10 @@
 // M7 event service tests over the loopback pair: QoS semantics, per-
 // subscriber staging, scope/limit admission, sequence rules, session loss,
-// and the local executor::comm topic bridge (M7-01..M7-06).
+// and the local kairo::comm topic bridge (M7-01..M7-06).
 
 #include "m7_support.hpp"
 
-#include <executor/comm/topic.hpp>
+#include <kairo/comm/topic.hpp>
 
 #include <gtest/gtest.h>
 
@@ -409,7 +409,7 @@ TEST(M7EventService, SessionLossStopsLocalSubscriptions) {
 TEST(M7EventService, LocalTopicBridgeFansOutRemoteItems) {
   M7ServicePair harness(event_options());
   auto local = harness.right_local_topic.subscribe(
-      executor::comm::TopicSubscriptionOptions{64U, executor::comm::DropPolicy::DropOldest,
+      kairo::comm::TopicSubscriptionOptions{64U, kairo::comm::DropPolicy::DropOldest,
                                                true, "m7-test-local"});
   ASSERT_TRUE(harness.right_events->subscribe("telemetry.cpu", false,
                                               EventQos::reliable_live));

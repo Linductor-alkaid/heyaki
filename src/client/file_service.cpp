@@ -156,7 +156,7 @@ Result<void> FileService::attach() {
   for (const auto& root : config_.receive_roots) {
     const auto directory = root.directory;
     (void)blocking_dispatch_(
-        "heyaki-file-staging-sweep", [directory](executor::StopToken) {
+        "heyaki-file-staging-sweep", [directory](kairo::StopToken) {
           (void)file_store::sweep_stale_staging(directory, kStagingOrphanMaxAge);
         });
   }
@@ -563,7 +563,7 @@ void FileService::start_probe(SenderState& sender) {
   // Co-owned for the same teardown-while-queued reason as the read record.
   auto record = sender.probe;
   const auto dispatched = blocking_dispatch_(
-      "heyaki-file-probe", [weak, id, path, record](executor::StopToken stop) {
+      "heyaki-file-probe", [weak, id, path, record](kairo::StopToken stop) {
         bool ok = false;
         std::uint64_t size = 0U;
         file_store::Digest digest{};
@@ -772,7 +772,7 @@ void FileService::start_next_read(SenderState& sender) {
   // strand drops its own reference after merging.
   auto record = sender.read;
   const auto dispatched = blocking_dispatch_(
-      "heyaki-file-read", [weak, id, path, offset, length, record](executor::StopToken stop) {
+      "heyaki-file-read", [weak, id, path, offset, length, record](kairo::StopToken stop) {
         std::vector<std::byte> data;
         bool ok = false;
         std::string detail;
@@ -1272,7 +1272,7 @@ void FileService::accept_transfer(ReceiverState& receive) {
   state.chunk_bitmap = live->chunk_bitmap;
   auto path = live->state_path;
   (void)blocking_dispatch_(
-      "heyaki-file-state", [path, state = std::move(state)](executor::StopToken) mutable {
+      "heyaki-file-state", [path, state = std::move(state)](kairo::StopToken) mutable {
         (void)file_store::write_resume_state(path, state);
       });
   emit_event({id,
@@ -1453,7 +1453,7 @@ void FileService::dispatch_chunk_write(ReceiverState& receive) {
   auto dispatched = blocking_dispatch_(
       "heyaki-file-write",
       [weak, id, offset, temp_path, state_path, state = std::move(state), moved](
-          executor::StopToken stop) {
+          kairo::StopToken stop) {
         bool ok = false;
         std::string detail;
         if (stop.stop_requested()) {
@@ -1542,7 +1542,7 @@ void FileService::start_verify(ReceiverState& receive) {
   auto dispatched = blocking_dispatch_(
       "heyaki-file-verify",
       [weak, id, temp_path, expected, staging = std::move(staging)](
-          executor::StopToken stop) {
+          kairo::StopToken stop) {
         bool ok = false;
         std::string detail;
         if (stop.stop_requested()) {
@@ -1639,7 +1639,7 @@ void FileService::cleanup_receive(ReceiverState& receive) {
   const auto state_path = receive.state_path;
   const auto temp_path = receive.temp_path;
   (void)blocking_dispatch_(
-      "heyaki-file-cleanup", [temp_path, state_path](executor::StopToken) {
+      "heyaki-file-cleanup", [temp_path, state_path](kairo::StopToken) {
         (void)file_store::discard_staging(file_store::StagingFile{temp_path, state_path, {}});
       });
 }

@@ -7,7 +7,7 @@
 #include <heyaki/password.hpp>
 #include <heyaki/profile_store.hpp>
 
-#include <executor/comm.hpp>
+#include <kairo/comm.hpp>
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/multicast.hpp>
@@ -91,7 +91,7 @@ class M3aNodeTest : public ::testing::Test {
   template <typename Predicate>
   bool wait_until(Predicate&& predicate, std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
-    executor::comm::PhaseGate poll{"m3a-test-poll"};
+    kairo::comm::PhaseGate poll{"m3a-test-poll"};
     while (std::chrono::steady_clock::now() < deadline) {
       if (predicate()) {
         return true;
@@ -2502,7 +2502,7 @@ TEST_F(M3aNodeTest, LanLifecyclePressureRemainsBounded) {
   auto runtime = Runtime::create_owned(runtime_configuration);
   ASSERT_TRUE(runtime) << runtime.error_if()->safe_detail();
 
-  executor::comm::PhaseGate delivered{"m3a-pressure-delivered"};
+  kairo::comm::PhaseGate delivered{"m3a-pressure-delivered"};
   auto first_handler = [](const LanSignalingMessage&) {
     return Result<void>::success();
   };
@@ -2561,7 +2561,7 @@ TEST_F(M3aNodeTest, LanLifecyclePressureRemainsBounded) {
       if (cancel_while_connecting) {
         ASSERT_TRUE(first.value_if()->close_lan(second_key));
         ASSERT_TRUE(second.value_if()->close_lan(first_key));
-        executor::comm::PhaseGate cancellation_window{"m3a-pressure-cancel"};
+        kairo::comm::PhaseGate cancellation_window{"m3a-pressure-cancel"};
         (void)cancellation_window.wait_for(1U, std::chrono::milliseconds{10});
         ASSERT_TRUE(first.value_if()->close_lan(second_key));
         ASSERT_TRUE(second.value_if()->close_lan(first_key));
@@ -2751,8 +2751,8 @@ TEST_F(M3aNodeTest, ShutdownDrainsPendingSignalingHandlerWithinBudget) {
                                               *second_profile.value_if(),
                                               {"m4.test"}));
 
-  executor::comm::PhaseGate handler_entered{"m3a-handler-entered"};
-  executor::comm::PhaseGate handler_release{"m3a-handler-release"};
+  kairo::comm::PhaseGate handler_entered{"m3a-handler-entered"};
+  kairo::comm::PhaseGate handler_release{"m3a-handler-release"};
   auto blocking_handler = [&](const LanSignalingMessage&) {
     (void)handler_entered.advance_to(1U);
     (void)handler_release.wait_for(1U, std::chrono::milliseconds{200});

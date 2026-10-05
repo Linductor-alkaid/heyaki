@@ -19,8 +19,8 @@
 
 #include <heyaki/error.hpp>
 
-#include <executor/stop_token.hpp>
-#include <executor/task_cancellation.hpp>
+#include <kairo/stop_token.hpp>
+#include <kairo/task_cancellation.hpp>
 
 #include <functional>
 #include <string_view>
@@ -33,12 +33,12 @@ using ServiceDispatch =
 
 // Task body for cancellable dispatch: the executor injects its StopToken as
 // the only argument.
-using CancellableTask = std::function<void(executor::StopToken)>;
+using CancellableTask = std::function<void(kairo::StopToken)>;
 
 // Handle returned by cancellable dispatch. Idempotent and safe to call after
 // the task reached any terminal state; reports the executor's cancellation
 // arbitration (queued removal vs cooperative request vs already terminal).
-using TaskCancelRequest = std::function<executor::TaskCancellationResponse()>;
+using TaskCancelRequest = std::function<kairo::TaskCancellationResponse()>;
 
 using CancellableServiceDispatch =
     std::function<Result<TaskCancelRequest>(std::string_view task_name, CancellableTask task)>;

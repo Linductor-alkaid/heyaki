@@ -31,5 +31,5 @@ touching the value.
 Read [adoption](references/adoption.md) only when the AI runs from a
 downstream project and cannot already access this skill. Do not load Heyaki
 implementation sources unless reproducing a library defect; questions about
-the pinned `executor` concurrency layer itself belong to executor's own
-`executor-integration` skill, not this one.
+the pinned `kairo` concurrency layer itself belong to kairo's own
+`kairo-integration` skill, not this one.

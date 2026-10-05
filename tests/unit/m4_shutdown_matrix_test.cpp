@@ -22,7 +22,7 @@
 #include <heyaki/password.hpp>
 #include <heyaki/profile_store.hpp>
 
-#include <executor/comm.hpp>
+#include <kairo/comm.hpp>
 
 #include <gtest/gtest.h>
 
@@ -133,7 +133,7 @@ class M4ShutdownMatrixTest : public ::testing::Test {
   template <typename Predicate>
   bool wait_until(Predicate&& predicate, std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
-    executor::comm::PhaseGate poll{"m4-shutdown-poll"};
+    kairo::comm::PhaseGate poll{"m4-shutdown-poll"};
     while (std::chrono::steady_clock::now() < deadline) {
       if (predicate()) {
         return true;
@@ -158,7 +158,7 @@ class M4ShutdownMatrixTest : public ::testing::Test {
         DeviceEndpointKey{first.snapshot().device_id, first.snapshot().endpoint_id};
     int stable_polls = 0;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
-    executor::comm::PhaseGate poll{"m4-stable-discovery"};
+    kairo::comm::PhaseGate poll{"m4-stable-discovery"};
     while (std::chrono::steady_clock::now() < deadline) {
       const bool mutual =
           discovered(first, second_key) && discovered(second, first_key);
@@ -225,7 +225,7 @@ TEST_P(M4ShutdownPhaseMatrix, ShutdownAtPhaseStopsAndDrains) {
                         (*second.value_if())->snapshot().endpoint_id};
   ASSERT_TRUE(wait_mutual_discovery(**first.value_if(), **second.value_if()));
   (void)(*first.value_if())->connect_lan(second_key);
-  executor::comm::PhaseGate delay{"m4-shutdown-delay"};
+  kairo::comm::PhaseGate delay{"m4-shutdown-delay"};
   (void)delay.wait_for(1U, phase_delay);
   const auto report = (*first.value_if())->shutdown();
   EXPECT_TRUE(report.stopped);
@@ -395,7 +395,7 @@ TEST_F(M4ShutdownMatrixTest, CloseLanDuringSignalingCancelsAndDrains) {
                         (*second.value_if())->snapshot().endpoint_id};
   ASSERT_TRUE(wait_mutual_discovery(**first.value_if(), **second.value_if()));
   ASSERT_TRUE((*first.value_if())->connect_lan(second_key));
-  executor::comm::PhaseGate delay{"m4-cancel-delay"};
+  kairo::comm::PhaseGate delay{"m4-cancel-delay"};
   (void)delay.wait_for(1U, std::chrono::milliseconds{20});
   (void)(*first.value_if())->close_lan(second_key);
   const auto report = (*first.value_if())->shutdown();

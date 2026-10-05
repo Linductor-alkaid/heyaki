@@ -18,11 +18,11 @@ Headers live under `include/heyaki/`; everything public is in namespace
 ## Concurrency model
 
 All asynchronous work — timers, socket workers, service pumps, the shell PTY
-worker — runs on the pinned `executor` dependency. Application code never
+worker — runs on the pinned `kairo` dependency. Application code never
 creates threads. Consequences for API use:
 
 - **Node callbacks fire on executor contexts**, not on your thread. Handlers
-  must be cheap and non-blocking; hand off via `executor::comm` components
+  must be cheap and non-blocking; hand off via `kairo::comm` components
   (bounded channels, `LatestMailbox`, `Topic`) if you need to cross into
   application code.
 - **Blocking calls** (`shutdown`, `wait_for`, file reads) belong to executor

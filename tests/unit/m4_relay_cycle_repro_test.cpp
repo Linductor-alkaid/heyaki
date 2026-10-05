@@ -9,7 +9,7 @@
 #include "../../src/relay/relay_config.hpp"
 #include "../../src/client/relay_wss_client.hpp"
 
-#include <executor/comm.hpp>
+#include <kairo/comm.hpp>
 
 #include <openssl/pem.h>
 #include <openssl/evp.h>
@@ -110,7 +110,7 @@ std::optional<RelayTlsPin> certificate_pin(const std::filesystem::path& path) {
 bool wait_until(const std::function<bool()>& predicate,
                 std::chrono::milliseconds timeout) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
-  executor::comm::PhaseGate poll{"m4-cycle-repro-poll"};
+  kairo::comm::PhaseGate poll{"m4-cycle-repro-poll"};
   while (std::chrono::steady_clock::now() < deadline) {
     if (predicate()) {
       return true;

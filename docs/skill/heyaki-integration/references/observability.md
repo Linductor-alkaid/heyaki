@@ -3,7 +3,7 @@
 ## Device side
 
 - `Node::metrics()` returns the aggregated `NodeMetrics` — node, pairing,
-  connectivity, transport, channels, services, plus the embedded executor
+  connectivity, transport, channels, services, plus the embedded execution
   runtime snapshot. `snapshot()` is live state; `metrics()` aggregates on
   the node's periodic tick.
 - `format_node_metrics_prometheus()` renders the Prometheus text (300+

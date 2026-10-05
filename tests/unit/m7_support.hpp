@@ -11,7 +11,7 @@
 #include "file_service.hpp"
 #include "peer_session.hpp"
 
-#include <executor/comm/topic.hpp>
+#include <kairo/comm/topic.hpp>
 
 #include <gtest/gtest.h>
 
@@ -50,7 +50,7 @@ namespace heyaki::test {
 // calls run_all(); cooperative cancellation mirrors the queued-stop shape.
 struct ManualBlockingDispatch {
   struct Entry {
-    std::function<void(executor::StopToken)> task;
+    std::function<void(kairo::StopToken)> task;
     bool done{false};
     bool cancel_requested{false};
   };
@@ -67,9 +67,9 @@ struct ManualBlockingDispatch {
       entry->task = std::move(task);
       tasks.push_back(entry);
       return Result<TaskCancelRequest>::success(
-          [entry]() -> executor::TaskCancellationResponse {
+          [entry]() -> kairo::TaskCancellationResponse {
             entry->cancel_requested = true;
-            return {executor::TaskCancellationResult::RequestedRunning};
+            return {kairo::TaskCancellationResult::RequestedRunning};
           });
     };
   }
@@ -83,7 +83,7 @@ struct ManualBlockingDispatch {
         continue;
       }
       entry->done = true;
-      executor::StopSource source;
+      kairo::StopSource source;
       if (entry->cancel_requested) {
         source.request_stop();
       }
@@ -149,8 +149,8 @@ struct M7ServicePair {
   std::shared_ptr<FileService> right_files;
   std::shared_ptr<FileTransferBook> left_book = std::make_shared<FileTransferBook>();
   std::shared_ptr<FileTransferBook> right_book = std::make_shared<FileTransferBook>();
-  executor::comm::Topic<LocalEventMessage> left_local_topic{"heyaki-test-left"};
-  executor::comm::Topic<LocalEventMessage> right_local_topic{"heyaki-test-right"};
+  kairo::comm::Topic<LocalEventMessage> left_local_topic{"heyaki-test-left"};
+  kairo::comm::Topic<LocalEventMessage> right_local_topic{"heyaki-test-right"};
 
   struct EventSinkContext {
     std::function<void(const DeviceEndpointKey&, std::string_view, const EventItemBody&)>

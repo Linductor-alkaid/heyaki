@@ -340,22 +340,22 @@ TEST(M8ShellPtyWorker, SessionLimitRefusalIsObservableNotSilent) {
   // A direct worker with a one-session limit (security-review finding F2):
   // the refused open must answer spawn_failed with worker_session_limit
   // instead of vanishing while the strand side waits for a verdict.
-  executor::comm::MpscChannel<ShellPtyCommand> commands{
-      executor::comm::ChannelOptions{16U, executor::comm::DropPolicy::RejectNewest,
+  kairo::comm::MpscChannel<ShellPtyCommand> commands{
+      kairo::comm::ChannelOptions{16U, kairo::comm::DropPolicy::RejectNewest,
                                      true, "m8-pty-limit-commands"}};
-  executor::comm::MpscChannel<ShellPtyEvent> events{
-      executor::comm::ChannelOptions{16U, executor::comm::DropPolicy::RejectNewest,
+  kairo::comm::MpscChannel<ShellPtyEvent> events{
+      kairo::comm::ChannelOptions{16U, kairo::comm::DropPolicy::RejectNewest,
                                      true, "m8-pty-limit-events"}};
-  executor::comm::PhaseGate exit_gate{"m8-pty-limit-exit"};
+  kairo::comm::PhaseGate exit_gate{"m8-pty-limit-exit"};
   auto wake = make_shell_pty_wake();
   ASSERT_NE(wake, nullptr);
 
-  executor::Executor executor;
-  executor::ExecutorConfig executor_config;
+  kairo::Executor executor;
+  kairo::ExecutorConfig executor_config;
   executor_config.min_threads = 1U;
   executor_config.max_threads = 2U;
-  ASSERT_TRUE(executor.initialize_ex(executor_config));
-  executor::BlockingWorkerSpec worker_spec;
+  ASSERT_TRUE(executor.initialize(executor_config));
+  kairo::BlockingWorkerSpec worker_spec;
   worker_spec.name = "m8-pty-limit-worker";
   worker_spec.config.thread_name = "m8-pty-limit-worker";
   worker_spec.worker =

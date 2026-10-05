@@ -27,7 +27,7 @@
 #include <heyaki/protocol.hpp>
 #include <heyaki/signaling_protocol.hpp>
 
-#include <executor/comm.hpp>
+#include <kairo/comm.hpp>
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -640,7 +640,7 @@ TEST_F(M10GatewayServiceTest, InitiatorReadStaysPendedWithoutPrelude) {
   pair_->pump_all();
   // Bounded real wait: the pending read must stay pending, not complete as a
   // zero-byte (empty) read.
-  executor::comm::PhaseGate gate{"m10-gateway-pend"};
+  kairo::comm::PhaseGate gate{"m10-gateway-pend"};
   (void)gate.wait_for(1U, std::chrono::milliseconds{100});
   pair_->pump_all();
   EXPECT_FALSE(read->completed);
@@ -1281,7 +1281,7 @@ class M10NodeGatewayApiTest : public ::testing::Test {
   template <typename Predicate>
   bool wait_until(Predicate&& predicate, std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
-    executor::comm::PhaseGate poll{"m10-gateway-service-poll"};
+    kairo::comm::PhaseGate poll{"m10-gateway-service-poll"};
     while (std::chrono::steady_clock::now() < deadline) {
       if (predicate()) {
         return true;
@@ -1522,7 +1522,7 @@ TEST_F(M10NodeGatewayApiTest, EndToEndEchoThroughPublicApi) {
   // hard failure.
   {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{12};
-    executor::comm::PhaseGate poll{"m10-gateway-service-connect-poll"};
+    kairo::comm::PhaseGate poll{"m10-gateway-service-connect-poll"};
     while (stream.state() == ByteStreamState::opening &&
            std::chrono::steady_clock::now() < deadline) {
       (void)pump_echo();
@@ -1560,7 +1560,7 @@ TEST_F(M10NodeGatewayApiTest, EndToEndEchoThroughPublicApi) {
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{12};
   while (!read_state->done.load() && std::chrono::steady_clock::now() < deadline) {
     (void)pump_echo();
-    executor::comm::PhaseGate poll{"m10-gateway-service-echo-poll"};
+    kairo::comm::PhaseGate poll{"m10-gateway-service-echo-poll"};
     (void)poll.wait_for(1U, std::chrono::milliseconds{2});
   }
   ASSERT_TRUE(read_state->done.load()) << "echo never reached the public stream";
@@ -1584,7 +1584,7 @@ TEST_F(M10NodeGatewayApiTest, EndToEndEchoThroughPublicApi) {
   const auto eof_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{12};
   while (!eof_state->done.load() && std::chrono::steady_clock::now() < eof_deadline) {
     (void)pump_echo();
-    executor::comm::PhaseGate poll{"m10-gateway-service-eof-poll"};
+    kairo::comm::PhaseGate poll{"m10-gateway-service-eof-poll"};
     (void)poll.wait_for(1U, std::chrono::milliseconds{2});
   }
   ASSERT_TRUE(eof_state->done.load()) << "clean EOF never reached the public stream";

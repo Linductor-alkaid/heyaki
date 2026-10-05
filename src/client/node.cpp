@@ -22,7 +22,7 @@
 #include <heyaki/relay_wss_control.hpp>
 #include <heyaki/session_restart.hpp>
 
-#include <executor/comm.hpp>
+#include <kairo/comm.hpp>
 
 #include <boost/asio/buffer.hpp>
 #include <boost/asio/ip/multicast.hpp>
@@ -422,16 +422,16 @@ Result<TlsCertificateFingerprint> peer_certificate_fingerprint(SSL* ssl) {
   return Result<TlsCertificateFingerprint>::success(fingerprint);
 }
 
-executor::comm::ChannelOptions scan_channel_options() {
-  executor::comm::ChannelOptions options;
+kairo::comm::ChannelOptions scan_channel_options() {
+  kairo::comm::ChannelOptions options;
   options.capacity = 1U;
   options.name = "heyaki-interface-scan";
   return options;
 }
 
-executor::comm::ChannelOptions signaling_channel_options(std::size_t capacity,
+kairo::comm::ChannelOptions signaling_channel_options(std::size_t capacity,
                                                          std::string name) {
-  executor::comm::ChannelOptions options;
+  kairo::comm::ChannelOptions options;
   options.capacity = capacity;
   options.name = std::move(name);
   return options;
@@ -6599,20 +6599,20 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     std::optional<boost::asio::steady_timer> deadline;
   };
   std::map<DeviceEndpointKey, StashedRelayRequest> stashed_relay_requests;
-  executor::comm::MpscChannel<InterfaceScanResult> scan_results;
-  executor::comm::DoubleBuffer<NodeSnapshot> snapshots;
-  executor::comm::DoubleBuffer<NodeServiceDiagnostics> service_diagnostics_snapshots;
+  kairo::comm::MpscChannel<InterfaceScanResult> scan_results;
+  kairo::comm::DoubleBuffer<NodeSnapshot> snapshots;
+  kairo::comm::DoubleBuffer<NodeServiceDiagnostics> service_diagnostics_snapshots;
   // M9-01: connectivity counters mutate strand-side in the session observer;
   // the full metrics snapshot publishes on the prune tick like the service
   // diagnostics beside it.
   NodeConnectivityMetrics connectivity_metrics;
-  executor::comm::DoubleBuffer<NodeMetrics> metrics_snapshots;
-  executor::comm::DoubleBuffer<std::vector<EndpointDirectoryEntrySnapshot>> endpoint_snapshots;
-  executor::comm::MpscChannel<SignalingCommand> signaling_commands;
-  executor::comm::MpscChannel<SignalingCallbackResult> signaling_results;
-  executor::comm::DoubleBuffer<std::vector<LanSignalingConnectionSnapshot>> signaling_snapshots;
-  executor::comm::DoubleBuffer<std::vector<NodePeerSessionSnapshot>> peer_session_snapshots;
-  executor::comm::PhaseGate stopped;
+  kairo::comm::DoubleBuffer<NodeMetrics> metrics_snapshots;
+  kairo::comm::DoubleBuffer<std::vector<EndpointDirectoryEntrySnapshot>> endpoint_snapshots;
+  kairo::comm::MpscChannel<SignalingCommand> signaling_commands;
+  kairo::comm::MpscChannel<SignalingCallbackResult> signaling_results;
+  kairo::comm::DoubleBuffer<std::vector<LanSignalingConnectionSnapshot>> signaling_snapshots;
+  kairo::comm::DoubleBuffer<std::vector<NodePeerSessionSnapshot>> peer_session_snapshots;
+  kairo::comm::PhaseGate stopped;
   std::set<DeviceId> trusted_devices;
   // ---- M5 pairing, trust, and streams ----
   std::unique_ptr<PairingService> pairing_service;
@@ -6648,7 +6648,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   std::map<DeviceEndpointKey, std::shared_ptr<EventService>> event_services;
   std::map<DeviceEndpointKey, std::shared_ptr<FileService>> file_services;
   std::map<DeviceEndpointKey, std::shared_ptr<FileTransferBook>> transfer_books;
-  executor::comm::Topic<LocalEventMessage> local_event_topic_{"heyaki-node-events"};
+  kairo::comm::Topic<LocalEventMessage> local_event_topic_{"heyaki-node-events"};
   NodeEventInboundHandler event_inbound_handler;
   NodeFileEventObserver file_event_observer;
   // ---- M8 Remote Shell ----
@@ -7716,8 +7716,8 @@ NodeLocalEventSubscription Node::subscribe_local_events() {
     return subscription;
   }
   subscription.impl_ = std::make_unique<NodeLocalEventSubscription::Impl>(
-      impl_->local_event_topic_.subscribe(executor::comm::TopicSubscriptionOptions{
-          512U, executor::comm::DropPolicy::DropOldest, true, "heyaki-node-events"}));
+      impl_->local_event_topic_.subscribe(kairo::comm::TopicSubscriptionOptions{
+          512U, kairo::comm::DropPolicy::DropOldest, true, "heyaki-node-events"}));
   return subscription;
 }
 
@@ -7876,9 +7876,9 @@ NodeLocalEventSubscription& NodeLocalEventSubscription::operator=(
     NodeLocalEventSubscription&&) noexcept = default;
 
 struct NodeLocalEventSubscription::Impl {
-  explicit Impl(executor::comm::TopicSubscription<LocalEventMessage> subscription)
+  explicit Impl(kairo::comm::TopicSubscription<LocalEventMessage> subscription)
       : subscription(std::move(subscription)) {}
-  executor::comm::TopicSubscription<LocalEventMessage> subscription;
+  kairo::comm::TopicSubscription<LocalEventMessage> subscription;
 };
 
 bool NodeLocalEventSubscription::try_receive(NodeLocalEvent& out) {

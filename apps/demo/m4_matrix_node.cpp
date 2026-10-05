@@ -15,7 +15,7 @@
 
 #include "socks_frontend.hpp"
 
-#include <executor/comm.hpp>
+#include <kairo/comm.hpp>
 
 #include <openssl/hmac.h>
 #include <openssl/sha.h>
@@ -179,7 +179,7 @@ bool wait_until(const std::function<bool()>& predicate,
                 std::chrono::milliseconds timeout,
                 const std::function<bool()>& on_poll = {}) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
-  executor::comm::PhaseGate poll{"heyaki-m4-matrix-poll"};
+  kairo::comm::PhaseGate poll{"heyaki-m4-matrix-poll"};
   while (std::chrono::steady_clock::now() < deadline) {
     if (predicate()) {
       return true;
@@ -289,7 +289,7 @@ void print_bench_metric(std::string_view name, const std::vector<std::uint64_t>&
 // single-outstanding sections drain before each send so a straggler from a
 // previous (timed-out) operation can never be misattributed to the next one.
 template <typename T>
-void drain_channel(executor::comm::MpscChannel<T>& channel) {
+void drain_channel(kairo::comm::MpscChannel<T>& channel) {
   T value{};
   while (channel.try_receive(value)) {
   }
@@ -545,11 +545,11 @@ void run_gateway_echo(heyaki::Node& node, const heyaki::DeviceEndpointKey& peer,
     std::size_t bytes{0};
     std::array<std::byte, 256U> data{};
   };
-  executor::comm::ChannelOptions event_options;
+  kairo::comm::ChannelOptions event_options;
   event_options.capacity = 64U;
   event_options.name = "heyaki-m4-matrix-gateway-events";
   const auto events =
-      std::make_shared<executor::comm::MpscChannel<GatewayEchoEvent>>(
+      std::make_shared<kairo::comm::MpscChannel<GatewayEchoEvent>>(
           std::move(event_options));
   const auto fail = [](const char* detail, int code) {
     std::cout << "GATEWAY_METRIC name=echo_roundtrip_ms value=0 ok=0 detail="
@@ -596,7 +596,7 @@ void run_gateway_echo(heyaki::Node& node, const heyaki::DeviceEndpointKey& peer,
       }
     }
     if (connected || connect_failed) break;
-    executor::comm::PhaseGate poll{"heyaki-m4-matrix-gateway-connect"};
+    kairo::comm::PhaseGate poll{"heyaki-m4-matrix-gateway-connect"};
     (void)poll.wait_for(1U, std::chrono::milliseconds{5});
   }
   if (connect_failed) {
@@ -639,7 +639,7 @@ void run_gateway_echo(heyaki::Node& node, const heyaki::DeviceEndpointKey& peer,
       }
     }
     if (write_ok || write_failed) break;
-    executor::comm::PhaseGate poll{"heyaki-m4-matrix-gateway-write"};
+    kairo::comm::PhaseGate poll{"heyaki-m4-matrix-gateway-write"};
     (void)poll.wait_for(1U, std::chrono::milliseconds{5});
   }
   if (write_failed || !write_ok) {
@@ -696,7 +696,7 @@ void run_gateway_echo(heyaki::Node& node, const heyaki::DeviceEndpointKey& peer,
     }
     if (read_failed) break;
     if (rearm) post_read();
-    executor::comm::PhaseGate poll{"heyaki-m4-matrix-gateway-read"};
+    kairo::comm::PhaseGate poll{"heyaki-m4-matrix-gateway-read"};
     (void)poll.wait_for(1U, std::chrono::milliseconds{5});
   }
   if (read_failed) {
@@ -775,7 +775,7 @@ void run_gateway_socks(heyaki::Node& node, heyaki::Runtime& runtime,
       std::cout << "MATRIX_PHASE gateway-socks-peer-session-lost\n";
       break;
     }
-    executor::comm::PhaseGate poll{"heyaki-m4-matrix-gateway-socks"};
+    kairo::comm::PhaseGate poll{"heyaki-m4-matrix-gateway-socks"};
     (void)poll.wait_for(1U, std::chrono::milliseconds{100});
   }
   // Observability for the harness: the CI coturn job once saw the initiator
@@ -785,7 +785,7 @@ void run_gateway_socks(heyaki::Node& node, heyaki::Runtime& runtime,
   if (g_gateway_socks_stop != 0) {
     std::cout << "MATRIX_PHASE gateway-socks-stop-signal\n";
   }
-  executor::comm::PhaseGate settle{"heyaki-m4-matrix-gateway-socks-stats"};
+  kairo::comm::PhaseGate settle{"heyaki-m4-matrix-gateway-socks-stats"};
   (void)settle.wait_for(1U, std::chrono::milliseconds{50});
   const auto stats = (*frontend.value_if())->stats();
   std::cout << "GATEWAY_SOCKS_SUMMARY"
@@ -1034,11 +1034,11 @@ int run_node(const std::filesystem::path& database, std::string_view application
   // forced-TURN) because it rides the session, never the path (RULE-09).
   // Latest outcomes cross from the node callbacks into this loop through
   // executor comm mailboxes (latest-value semantics, observable stats).
-  executor::comm::LatestMailbox<bool> m6_message_acked{"heyaki-m4-matrix-acked"};
-  executor::comm::LatestMailbox<int> m6_rpc_status{"heyaki-m4-matrix-rpc-status"};
-  executor::comm::LatestMailbox<bool> m7_event_received{"heyaki-m4-matrix-m7-event"};
-  executor::comm::LatestMailbox<bool> m7_file_committed{"heyaki-m4-matrix-m7-file"};
-  executor::comm::LatestMailbox<bool> m7_transferring{"heyaki-m4-matrix-m7-transferring"};
+  kairo::comm::LatestMailbox<bool> m6_message_acked{"heyaki-m4-matrix-acked"};
+  kairo::comm::LatestMailbox<int> m6_rpc_status{"heyaki-m4-matrix-rpc-status"};
+  kairo::comm::LatestMailbox<bool> m7_event_received{"heyaki-m4-matrix-m7-event"};
+  kairo::comm::LatestMailbox<bool> m7_file_committed{"heyaki-m4-matrix-m7-file"};
+  kairo::comm::LatestMailbox<bool> m7_transferring{"heyaki-m4-matrix-m7-transferring"};
   (void)m6_message_acked.try_publish(false);
   (void)m6_rpc_status.try_publish(-1);
   (void)m7_event_received.try_publish(false);
@@ -1224,7 +1224,7 @@ int run_node(const std::filesystem::path& database, std::string_view application
             std::cout << "MATRIX_PHASE m7-pause-error="
                       << paused.error_if()->safe_detail() << "\n";
           }
-          executor::comm::PhaseGate pause_hold{"heyaki-m4-matrix-m7-pause"};
+          kairo::comm::PhaseGate pause_hold{"heyaki-m4-matrix-m7-pause"};
           (void)pause_hold.wait_for(1U, options.m7_pause_hold);
           const auto resumed = node.value_if()->resume_file_transfer(
               peer_key, *pushed.value_if());
@@ -1286,7 +1286,7 @@ int run_node(const std::filesystem::path& database, std::string_view application
     double file_multi_mib_s{0.0};
   };
   const auto channel_options = [](std::string name) {
-    executor::comm::ChannelOptions options;
+    kairo::comm::ChannelOptions options;
     options.capacity = 64U;
     options.name = std::move(name);
     return options;
@@ -1297,30 +1297,30 @@ int run_node(const std::filesystem::path& database, std::string_view application
   // caused a use-after-free in the first local run (a late RPC completion
   // fired after its section's channel had been destroyed). The endpoints are
   // torn down only after shutdown() has returned.
-  executor::comm::MpscChannel<std::int64_t> bench_ack_channel{
+  kairo::comm::MpscChannel<std::int64_t> bench_ack_channel{
       channel_options("heyaki-bench-msg-ack")};
-  executor::comm::MpscChannel<std::int64_t> bench_rpc_channel{
+  kairo::comm::MpscChannel<std::int64_t> bench_rpc_channel{
       channel_options("heyaki-bench-rpc-done")};
   struct BenchRpcDone {
     heyaki::RequestId request;
     std::uint64_t done_micros{};
     bool ok{};
   };
-  executor::comm::MpscChannel<BenchRpcDone> bench_rpc_concurrent_channel{
+  kairo::comm::MpscChannel<BenchRpcDone> bench_rpc_concurrent_channel{
       channel_options("heyaki-bench-rpc-concurrent-done")};
   struct BenchFileEvent {
     heyaki::TransferId transfer;
     int phase{0};
     std::uint64_t done_micros{};
   };
-  executor::comm::ChannelOptions bench_file_channel_options;
+  kairo::comm::ChannelOptions bench_file_channel_options;
   bench_file_channel_options.capacity = 1024U;  // never drop a committed event
   bench_file_channel_options.name = "heyaki-bench-file-events";
-  executor::comm::MpscChannel<BenchFileEvent> bench_file_channel{
+  kairo::comm::MpscChannel<BenchFileEvent> bench_file_channel{
       bench_file_channel_options};
-  executor::comm::LatestMailbox<std::string> bench_shell_output{
+  kairo::comm::LatestMailbox<std::string> bench_shell_output{
       "heyaki-bench-shell-output"};
-  executor::comm::LatestMailbox<int> bench_shell_phase{"heyaki-bench-shell-phase"};
+  kairo::comm::LatestMailbox<int> bench_shell_phase{"heyaki-bench-shell-phase"};
   // Appended on the node strand only (shell observer); published as copies
   // through bench_shell_output for the caller thread.
   std::string bench_shell_accumulated;
@@ -1561,7 +1561,7 @@ int run_node(const std::filesystem::path& database, std::string_view application
             matched_min = std::min(matched_min, *published.value_if());
             matched_max = std::max(matched_max, *published.value_if());
           }
-          executor::comm::PhaseGate pace{"heyaki-bench-fanout-pace"};
+          kairo::comm::PhaseGate pace{"heyaki-bench-fanout-pace"};
           (void)pace.wait_for(1U, std::chrono::milliseconds{20});
         }
         if (matched_min == std::numeric_limits<std::size_t>::max()) {
@@ -1627,7 +1627,7 @@ int run_node(const std::filesystem::path& database, std::string_view application
                       static_cast<int>(heyaki::FileTransferPhase::committed);
           return steady_micros_now();
         }
-        executor::comm::PhaseGate poll{"heyaki-bench-file-poll"};
+        kairo::comm::PhaseGate poll{"heyaki-bench-file-poll"};
         (void)poll.wait_for(1U, std::chrono::milliseconds{2});
       }
       // Timeout forensics: the public transfer summaries plus channel stats
@@ -1773,7 +1773,7 @@ int run_node(const std::filesystem::path& database, std::string_view application
             if (rtt != std::numeric_limits<std::uint64_t>::max()) {
               idle_samples.push_back(rtt);
             }
-            executor::comm::PhaseGate pace{"heyaki-bench-shell-pace"};
+            kairo::comm::PhaseGate pace{"heyaki-bench-shell-pace"};
             (void)pace.wait_for(1U, std::chrono::milliseconds{200});
           }
           bench.shell_idle_p95 = summarize_latencies(idle_samples).p95;
@@ -1792,7 +1792,7 @@ int run_node(const std::filesystem::path& database, std::string_view application
               if (rtt != std::numeric_limits<std::uint64_t>::max()) {
                 contended_samples.push_back(rtt);
               }
-              executor::comm::PhaseGate pace{"heyaki-bench-shell-pace"};
+              kairo::comm::PhaseGate pace{"heyaki-bench-shell-pace"};
               (void)pace.wait_for(1U, std::chrono::milliseconds{100});
             }
             bench.shell_contended_p95 = summarize_latencies(contended_samples).p95;
@@ -1906,7 +1906,7 @@ int run_node(const std::filesystem::path& database, std::string_view application
         // Synchronous admission failure (for example coordinator capacity):
         // give the respawned peer a moment to republish, then try once more
         // before the bounded authenticated wait.
-        executor::comm::PhaseGate redial_gap{"heyaki-m4-matrix-redial"};
+        kairo::comm::PhaseGate redial_gap{"heyaki-m4-matrix-redial"};
         (void)redial_gap.wait_for(1U, std::chrono::milliseconds{500});
         const auto peer_retry = find_peer();
         if (peer_retry.has_value()) {
@@ -2178,7 +2178,7 @@ int run_node(const std::filesystem::path& database, std::string_view application
           if ((bool)connected) {
             ++dialed;
           }
-          executor::comm::PhaseGate dial_gap{"heyaki-bench-dial-gap"};
+          kairo::comm::PhaseGate dial_gap{"heyaki-bench-dial-gap"};
           (void)dial_gap.wait_for(1U, std::chrono::milliseconds{300});
         }
       }
@@ -2338,7 +2338,7 @@ int run_node(const std::filesystem::path& database, std::string_view application
         (void)exercise_initiator_services(peer_key, "matrix/m7.bin");
       }
     }
-    executor::comm::PhaseGate hold{"heyaki-m4-matrix-hold"};
+    kairo::comm::PhaseGate hold{"heyaki-m4-matrix-hold"};
     (void)hold.wait_for(1U, options.hold);
     // A relay restart mid-hold races this exit against the bounded-backoff
     // re-login. Give the recovery a bounded grace to reach ready before
@@ -2351,7 +2351,7 @@ int run_node(const std::filesystem::path& database, std::string_view application
       while (node.value_if()->snapshot().relay.state !=
                  heyaki::RelayNodeState::ready &&
              std::chrono::steady_clock::now() < grace_deadline) {
-        executor::comm::PhaseGate grace{"heyaki-m4-matrix-grace"};
+        kairo::comm::PhaseGate grace{"heyaki-m4-matrix-grace"};
         (void)grace.wait_for(1U, std::chrono::milliseconds{100});
       }
     }

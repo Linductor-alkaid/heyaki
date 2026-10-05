@@ -246,7 +246,7 @@ ASan/UBSan/TSAN 全部通过。尚未在真实 coturn 实例上做 allocation �
   TLS peer/hostname 验证、可选 CA file、可选 32 字节证书 pin、连接/握手/关闭 deadline。
 - 安全错误分类：DNS/连接失败 -> `relay_unavailable`，TLS 验证/pin 失败 -> `authentication`，
   超时 -> `timeout`，取消 -> `cancelled`，WebSocket/transport 错误保持稳定分类。
-- 有界通信：接收与发送均使用 `executor::comm::MpscChannel`，满载显式拒绝；
+- 有界通信：接收与发送均使用 `kairo::comm::MpscChannel`，满载显式拒绝；
   发送串行化于 strand，关闭时 close channels。连接状态通过 `DoubleBuffer` 发布。
 - 测试新增 4 项：TLS pin 匹配 + health 接收、错误 pin、无信任 CA 的 peer 验证失败、
   非法 URL/空或超大 payload。relay 测试现含 48 项。

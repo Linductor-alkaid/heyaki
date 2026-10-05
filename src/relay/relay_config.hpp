@@ -39,7 +39,7 @@ struct RelayServerConfig {
   std::size_t control_write_queue_bytes{1024U * 1024U};
   // Invoked on the server strand whenever the observable snapshot tuple
   // (state, stop_requested) changes. Lets embedders block on a completion
-  // notification (e.g. executor::comm::PhaseGate) instead of polling.
+  // notification (e.g. kairo::comm::PhaseGate) instead of polling.
   std::function<void()> on_state_changed;
   // Structured log sink (M9-02). Invoked synchronously on the relay's
   // execution context for every emitted event; must return promptly and

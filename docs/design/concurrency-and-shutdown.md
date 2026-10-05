@@ -17,7 +17,7 @@ Heyaki 只允许一个明确 owner 初始化和关闭每个 executor 实例。�
 | `heyaki-relay` | `main()` | 不适用 | 进程 runtime | `main()` |
 | 单元/集成测试 | fixture | 显式借用或隔离实例 | fixture | fixture |
 
-独立应用使用独立 `executor::Executor`，在第一次提交前调用 `initialize_ex()`。只有明确需要
+独立应用使用独立 `kairo::Executor`，在第一次提交前调用 `initialize()`。只有明确需要
 全进程共享资源时才使用 `Executor::instance()`。Node 配置必须携带借用的 executor/runtime，
 不得在库内部偷偷创建第二套线程池。
 
@@ -111,7 +111,7 @@ SQLite，只放入有界 `RelayTtlTable` 内存结构并在 strand 内过期。
    有界回收并发出终态 exit 事件，节点在自身 service teardown 阶段已 drain 这些事件。
 8. 在预算内等待本 Node 提交的 future/operation；借用模式不得等待或 drain 其他组件任务。
 9. 运行 `flush_persistence` hook，刷新 ProfileStore、文件恢复状态和审计记录。
-10. 仅进程 owner 调用 executor `wait_for_completion_ex()`，再按结果选择
+10. 仅进程 owner 调用 executor `wait_for_completion()`，再按结果选择
     `shutdown(true)` 或记录后执行 `shutdown(false)`。
 
 每个 hook 的 `begin` 必须只发起非阻塞的协作停止并立即返回 completion shared future，不得在

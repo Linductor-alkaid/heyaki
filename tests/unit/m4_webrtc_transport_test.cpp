@@ -4,7 +4,7 @@
 #include <heyaki/detail/build_config.hpp>
 #include <heyaki/runtime.hpp>
 
-#include <executor/comm.hpp>
+#include <kairo/comm.hpp>
 
 #include <gtest/gtest.h>
 
@@ -161,10 +161,10 @@ TEST(M4WebRtcTransport, HostCandidateDataChannelUsesExecutorDispatcher) {
       heyaki::RuntimeContextKind::peer_session, "m4-webrtc-pair");
   ASSERT_TRUE(context) << context.error_if()->safe_detail();
 
-  executor::comm::PhaseGate left_authenticated("m4-left-authenticated");
-  executor::comm::PhaseGate right_authenticated("m4-right-authenticated");
-  executor::comm::PhaseGate pong_received("m4-pong-received");
-  executor::comm::PhaseGate sessions_closed("m4-sessions-closed");
+  kairo::comm::PhaseGate left_authenticated("m4-left-authenticated");
+  kairo::comm::PhaseGate right_authenticated("m4-right-authenticated");
+  kairo::comm::PhaseGate pong_received("m4-pong-received");
+  kairo::comm::PhaseGate sessions_closed("m4-sessions-closed");
 
   std::shared_ptr<WebRtcTransportSession> left;
   std::shared_ptr<WebRtcTransportSession> right;
@@ -350,13 +350,13 @@ TEST(M4WebRtcTransport, ConcurrentTeardownDoesNotRaceStoredCallbacks) {
   // One gate per wait condition, one phase per round: round N waits for and
   // advances phase N, so the gates never need to be recreated (and handlers
   // captured by the sessions can never dangle).
-  executor::comm::PhaseGate left_connected("m4-teardown-left-connected");
-  executor::comm::PhaseGate right_connected("m4-teardown-right-connected");
-  executor::comm::PhaseGate right_channel_up("m4-teardown-right-channel-up");
-  executor::comm::PhaseGate data_flowing("m4-teardown-data-flowing");
-  executor::comm::PhaseGate teardown_go("m4-teardown-go");
-  executor::comm::PhaseGate left_closed("m4-teardown-left-closed");
-  executor::comm::PhaseGate right_closed("m4-teardown-right-closed");
+  kairo::comm::PhaseGate left_connected("m4-teardown-left-connected");
+  kairo::comm::PhaseGate right_connected("m4-teardown-right-connected");
+  kairo::comm::PhaseGate right_channel_up("m4-teardown-right-channel-up");
+  kairo::comm::PhaseGate data_flowing("m4-teardown-data-flowing");
+  kairo::comm::PhaseGate teardown_go("m4-teardown-go");
+  kairo::comm::PhaseGate left_closed("m4-teardown-left-closed");
+  kairo::comm::PhaseGate right_closed("m4-teardown-right-closed");
 
   for (int round = 1; round <= kTeardownRounds; ++round) {
     const auto phase = static_cast<std::uint64_t>(round);
@@ -524,12 +524,12 @@ TEST(M4WebRtcTransport, PropagatesHighAndLowWaterBackpressure) {
       heyaki::RuntimeContextKind::peer_session, "m4-webrtc-backpressure");
   ASSERT_TRUE(context) << context.error_if()->safe_detail();
 
-  executor::comm::PhaseGate left_connected("m4-backpressure-left-connected");
-  executor::comm::PhaseGate right_connected("m4-backpressure-right-connected");
-  executor::comm::PhaseGate send_paused("m4-backpressure-paused");
-  executor::comm::PhaseGate send_resumed("m4-backpressure-resumed");
-  executor::comm::PhaseGate retry_sent("m4-backpressure-retry");
-  executor::comm::PhaseGate sessions_closed("m4-backpressure-closed");
+  kairo::comm::PhaseGate left_connected("m4-backpressure-left-connected");
+  kairo::comm::PhaseGate right_connected("m4-backpressure-right-connected");
+  kairo::comm::PhaseGate send_paused("m4-backpressure-paused");
+  kairo::comm::PhaseGate send_resumed("m4-backpressure-resumed");
+  kairo::comm::PhaseGate retry_sent("m4-backpressure-retry");
+  kairo::comm::PhaseGate sessions_closed("m4-backpressure-closed");
 
   std::shared_ptr<WebRtcTransportSession> left;
   std::shared_ptr<WebRtcTransportSession> right;
@@ -672,13 +672,13 @@ TEST(M4WebRtcTransport, SimultaneousSameKindOpensResolveToRegisteredChannel) {
       heyaki::RuntimeContextKind::peer_session, "m4-webrtc-duplicate-kind");
   ASSERT_TRUE(context) << context.error_if()->safe_detail();
 
-  executor::comm::PhaseGate left_connected("m4-dup-left-connected");
-  executor::comm::PhaseGate right_connected("m4-dup-right-connected");
-  executor::comm::PhaseGate left_open("m4-dup-left-open");
-  executor::comm::PhaseGate right_open("m4-dup-right-open");
-  executor::comm::PhaseGate left_received("m4-dup-left-received");
-  executor::comm::PhaseGate right_received("m4-dup-right-received");
-  executor::comm::PhaseGate sessions_closed("m4-dup-closed");
+  kairo::comm::PhaseGate left_connected("m4-dup-left-connected");
+  kairo::comm::PhaseGate right_connected("m4-dup-right-connected");
+  kairo::comm::PhaseGate left_open("m4-dup-left-open");
+  kairo::comm::PhaseGate right_open("m4-dup-right-open");
+  kairo::comm::PhaseGate left_received("m4-dup-left-received");
+  kairo::comm::PhaseGate right_received("m4-dup-right-received");
+  kairo::comm::PhaseGate sessions_closed("m4-dup-closed");
 
   std::shared_ptr<WebRtcTransportSession> left;
   std::shared_ptr<WebRtcTransportSession> right;
@@ -812,7 +812,7 @@ TEST(M4WebRtcTransport, SimultaneousSameKindOpensResolveToRegisteredChannel) {
   const auto wait_rejections = [&](WebRtcTransportSession& session) {
     for (int attempt = 0; attempt < 200; ++attempt) {
       if (session.diagnostics().channels_rejected >= 1U) return true;
-      executor::comm::PhaseGate poll{"m4-dup-reject-poll"};
+      kairo::comm::PhaseGate poll{"m4-dup-reject-poll"};
       (void)poll.wait_for(1U, 50ms);
     }
     return false;

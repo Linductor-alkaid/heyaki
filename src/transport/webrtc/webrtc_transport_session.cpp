@@ -3,7 +3,7 @@
 #include <heyaki/detail/build_config.hpp>
 #include <heyaki/signaling_protocol.hpp>
 
-#include <executor/comm.hpp>
+#include <kairo/comm.hpp>
 
 #include <rtc/candidate.hpp>
 #include <rtc/configuration.hpp>
@@ -29,10 +29,10 @@ Error transport_error(ErrorCode code, const char* detail) {
   return Error{code, "webrtc_transport", detail};
 }
 
-executor::comm::ChannelOptions callback_options(std::size_t capacity) {
-  executor::comm::ChannelOptions options;
+kairo::comm::ChannelOptions callback_options(std::size_t capacity) {
+  kairo::comm::ChannelOptions options;
   options.capacity = capacity;
-  options.drop_policy = executor::comm::DropPolicy::RejectNewest;
+  options.drop_policy = kairo::comm::DropPolicy::RejectNewest;
   options.name = "heyaki-webrtc-callbacks";
   return options;
 }
@@ -950,8 +950,8 @@ class WebRtcTransportSession::Impl
   RuntimeDispatcher dispatcher_;
   WebRtcSignalingHandler signaling_;
   std::shared_ptr<rtc::PeerConnection> peer_;
-  executor::comm::MpscChannel<Event> events_;
-  executor::comm::DoubleBuffer<TransportSessionSnapshot> snapshots_;
+  kairo::comm::MpscChannel<Event> events_;
+  kairo::comm::DoubleBuffer<TransportSessionSnapshot> snapshots_;
   std::map<ChannelKind, std::shared_ptr<Channel>> channels_;
   // Duplicate wrappers for a kind we already registered: the answerer holds
   // the offerer's stream (promotable — its OpenEvent converges the sides),

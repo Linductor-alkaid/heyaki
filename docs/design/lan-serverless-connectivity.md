@@ -197,7 +197,7 @@ UDP multicast socket、接口变化处理、TLS acceptor/client、握手 deadlin
 注册的 `BlockingIoWorker` 承载，不新增 `std::thread`、独立 poll loop 或第三方后台 worker。
 
 所有外部/第三方 callback 只做有界校验和投递。逐条发现/信令事件使用
-`executor::comm::MpscChannel`，低频 endpoint/session 快照使用 `DoubleBuffer`，可覆盖计数或
+`kairo::comm::MpscChannel`，低频 endpoint/session 快照使用 `DoubleBuffer`，可覆盖计数或
 进度使用 `LatestMailbox`。channel admission 不是协议完成；connect operation 以最终 session
 状态或显式错误为完成事实源。
 

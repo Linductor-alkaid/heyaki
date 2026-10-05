@@ -5,7 +5,7 @@
 #include <heyaki/profile_store.hpp>
 #include <heyaki/version.hpp>
 
-#include <executor/comm.hpp>
+#include <kairo/comm.hpp>
 
 #include "device_view.hpp"
 
@@ -72,13 +72,13 @@ struct Options {
 struct UiBridge {
   explicit UiBridge(std::size_t capacity)
       : events([capacity] {
-          executor::comm::ChannelOptions options;
+          kairo::comm::ChannelOptions options;
           options.capacity = capacity;
           options.name = "heyaki-tui-signaling-events";
           return options;
         }()) {}
 
-  executor::comm::MpscChannel<heyaki::LanSignalingMessage> events;
+  kairo::comm::MpscChannel<heyaki::LanSignalingMessage> events;
   std::atomic<std::uint64_t> rejected{0U};
 };
 
@@ -121,10 +121,10 @@ struct UiState {
         rpc_channel(event_channel_options<RpcResult>(32U, "heyaki-tui-rpc-results")),
         pairing("heyaki-tui-pairing") {}
 
-  executor::comm::MpscChannel<InboundMessage> inbound_channel;
-  executor::comm::MpscChannel<AckEvent> ack_channel;
-  executor::comm::MpscChannel<RpcResult> rpc_channel;
-  executor::comm::LatestMailbox<PairingStatus> pairing;
+  kairo::comm::MpscChannel<InboundMessage> inbound_channel;
+  kairo::comm::MpscChannel<AckEvent> ack_channel;
+  kairo::comm::MpscChannel<RpcResult> rpc_channel;
+  kairo::comm::LatestMailbox<PairingStatus> pairing;
 
   // ---- M7 event & file view state ----
   struct EventItemView {
@@ -136,9 +136,9 @@ struct UiState {
     heyaki::DeviceEndpointKey peer;
     heyaki::FileTransferEvent event;
   };
-  executor::comm::MpscChannel<EventItemView> event_channel{
+  kairo::comm::MpscChannel<EventItemView> event_channel{
       event_channel_options<EventItemView>(64U, "heyaki-tui-event-items")};
-  executor::comm::MpscChannel<FileEventView> file_channel{
+  kairo::comm::MpscChannel<FileEventView> file_channel{
       event_channel_options<FileEventView>(64U, "heyaki-tui-file-events")};
   std::deque<EventItemView> event_items;
   std::deque<FileEventView> file_events;
@@ -148,7 +148,7 @@ struct UiState {
     heyaki::DeviceEndpointKey peer;
     heyaki::ShellServiceEvent event;
   };
-  executor::comm::MpscChannel<ShellEventView> shell_channel{
+  kairo::comm::MpscChannel<ShellEventView> shell_channel{
       event_channel_options<ShellEventView>(128U, "heyaki-tui-shell-events")};
   std::deque<ShellEventView> shell_events;
 
@@ -159,7 +159,7 @@ struct UiState {
     heyaki::GatewayConfirmRequest request;
     std::function<void(bool)> decide;
   };
-  executor::comm::MpscChannel<GatewayConfirmPrompt> gateway_confirm_channel{
+  kairo::comm::MpscChannel<GatewayConfirmPrompt> gateway_confirm_channel{
       event_channel_options<GatewayConfirmPrompt>(8U,
                                                   "heyaki-tui-gateway-confirms")};
   std::deque<GatewayConfirmPrompt> gateway_confirms;
@@ -241,11 +241,11 @@ struct UiState {
 
  private:
   template <typename Event>
-  static executor::comm::ChannelOptions event_channel_options(std::size_t capacity,
+  static kairo::comm::ChannelOptions event_channel_options(std::size_t capacity,
                                                               std::string_view name) {
-    executor::comm::ChannelOptions options;
+    kairo::comm::ChannelOptions options;
     options.capacity = capacity;
-    options.drop_policy = executor::comm::DropPolicy::DropOldest;
+    options.drop_policy = kairo::comm::DropPolicy::DropOldest;
     options.enable_stats = true;
     options.name = std::string{name};
     return options;
@@ -617,7 +617,7 @@ void render_node(std::string_view profile_name, heyaki::Node& node,
   // 延迟"): every cross-thread channel's live/peak depth and drop counts come
   // from executor comm stats; the pairing mailbox reports overwrites (merges).
   const auto print_queue = [](std::string_view name,
-                              const executor::comm::CommStats& stats) {
+                              const kairo::comm::CommStats& stats) {
     std::cout << ' ' << name << '=' << stats.current_depth << '/'
               << stats.capacity << "@peak" << stats.peak_depth << ":drop"
               << stats.dropped_count;
@@ -1088,7 +1088,7 @@ heyaki::Result<heyaki::RpcCallOutcome> wait_rpc_result(UiState& state,
                                                        std::uint32_t deadline_ms) {
   const auto limit = std::chrono::steady_clock::now() +
                      std::chrono::milliseconds{deadline_ms + 2000U};
-  executor::comm::PhaseGate poll{"heyaki-tui-rpc-wait"};
+  kairo::comm::PhaseGate poll{"heyaki-tui-rpc-wait"};
   while (std::chrono::steady_clock::now() < limit) {
     state.drain_service_events();
     if (!state.rpc_results.empty()) {
@@ -1461,7 +1461,7 @@ void run_shell_view(const heyaki::DeviceEndpointKey& peer, heyaki::Node& node,
   heyaki::SafeTerminalModel terminal;
   std::optional<heyaki::ShellId> shell_id;
   bool shell_terminal = false;
-  executor::comm::PhaseGate poll{"heyaki-tui-shell-wait"};
+  kairo::comm::PhaseGate poll{"heyaki-tui-shell-wait"};
 
   const auto render_output = [&]() {
     const auto lines = terminal.render_tail(20U);
@@ -2145,7 +2145,7 @@ int run_tui(const Options& options) {
     const auto relay_enabled = node->snapshot().relay.enabled;
     if (relay_enabled) {
       const auto deadline = std::chrono::steady_clock::now() + 3s;
-      executor::comm::PhaseGate poll{"heyaki-tui-relay-status"};
+      kairo::comm::PhaseGate poll{"heyaki-tui-relay-status"};
       while (std::chrono::steady_clock::now() < deadline) {
         const auto relay_state = node->snapshot().relay.state;
         if (relay_state == heyaki::RelayNodeState::ready ||

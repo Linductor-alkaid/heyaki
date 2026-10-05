@@ -1,6 +1,6 @@
 #include "relay_database.hpp"
 
-#include <executor/executor.hpp>
+#include <kairo/executor.hpp>
 
 #include <gtest/gtest.h>
 
@@ -345,11 +345,11 @@ TEST(M3BRelayDatabaseTest, ConcurrentConsumptionAllowsExactlyOneWinner) {
     ASSERT_TRUE(created) << created.error_if()->safe_detail();
   }
 
-  executor::Executor executor;
-  executor::ExecutorConfig executor_config;
+  kairo::Executor executor;
+  kairo::ExecutorConfig executor_config;
   executor_config.min_threads = 2U;
   executor_config.max_threads = 2U;
-  ASSERT_TRUE(executor.initialize_ex(executor_config));
+  ASSERT_TRUE(executor.initialize(executor_config));
 
   auto first_db = RelayDatabase::open(database_path);
   auto second_db = RelayDatabase::open(database_path);
@@ -361,11 +361,11 @@ TEST(M3BRelayDatabaseTest, ConcurrentConsumptionAllowsExactlyOneWinner) {
   auto* second = second_db.value_if();
 
   auto first_future = executor.submit_auto(
-      executor::task([first, token, now]() {
+      kairo::task([first, token, now]() {
         return first->consume_bootstrap_token(token, "tenant-a", std::nullopt, now + 1U);
       }).name("relay-token-consume-1"));
   auto second_future = executor.submit_auto(
-      executor::task([second, token, now]() {
+      kairo::task([second, token, now]() {
         return second->consume_bootstrap_token(token, "tenant-a", std::nullopt, now + 1U);
       }).name("relay-token-consume-2"));
   ASSERT_TRUE(first_future.wait_for(5s) == std::future_status::ready);

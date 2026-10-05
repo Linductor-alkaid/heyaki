@@ -456,7 +456,7 @@ struct NodeGatewayStreamOptions {
 // ---- M7 remote events & file transfer ----
 // One local fan-out message bridged at the device boundary (M7-05): the
 // local counterpart of a remote EventItemBody with deliberately distinct
-// naming and lifecycle (executor::comm topic semantics, not wire QoS).
+// naming and lifecycle (kairo::comm topic semantics, not wire QoS).
 struct NodeLocalEvent {
   std::string topic;
   std::uint32_t schema_version{1U};
@@ -851,7 +851,7 @@ class Node {
       std::function<void(const DeviceEndpointKey&, std::string_view pattern,
                          const EventItemBody& item)> handler);
   // The local half of the M7-05 bridge: remote events fan out through the
-  // node's executor::comm topic, and locally published messages bridge to
+  // node's kairo::comm topic, and locally published messages bridge to
   // matching remote subscriptions.
   [[nodiscard]] NodeLocalEventSubscription subscribe_local_events();
   [[nodiscard]] Result<std::size_t> publish_local_event(const DeviceEndpointKey& peer,

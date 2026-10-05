@@ -6,7 +6,7 @@
 #include <heyaki/password.hpp>
 #include <heyaki/profile_store.hpp>
 
-#include <executor/comm.hpp>
+#include <kairo/comm.hpp>
 
 #include <gtest/gtest.h>
 
@@ -96,7 +96,7 @@ class M4SessionRestartE2ETest : public ::testing::Test {
         DeviceEndpointKey{first.snapshot().device_id, first.snapshot().endpoint_id};
     int stable_polls = 0;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
-    executor::comm::PhaseGate poll{"m4-restart-stable-discovery"};
+    kairo::comm::PhaseGate poll{"m4-restart-stable-discovery"};
     while (std::chrono::steady_clock::now() < deadline) {
       const bool mutual =
           discovered(first, second_key) && discovered(second, first_key);
@@ -112,7 +112,7 @@ class M4SessionRestartE2ETest : public ::testing::Test {
   template <typename Predicate>
   bool wait_until(Predicate&& predicate, std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
-    executor::comm::PhaseGate poll{"m4-restart-poll"};
+    kairo::comm::PhaseGate poll{"m4-restart-poll"};
     while (std::chrono::steady_clock::now() < deadline) {
       if (predicate()) {
         return true;

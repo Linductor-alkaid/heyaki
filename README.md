@@ -52,7 +52,7 @@ flowchart LR
 | **Mutual authentication everywhere** | Ed25519 device identities, signed offers/answers/candidates with replay protection, session keys bound to verified signaling. Unknown peers are pairing-restricted by default. |
 | **Five services on one session** | Messages (best-effort / peer-acked), unary RPC (deadlines, cancellation, `outcome_unknown` semantics), pub-sub events (keep-latest / reliable-live), resumable file transfer (BLAKE3-verified, atomic commit), and a default-off remote shell with a safe VT renderer. |
 | **Password pairing & TrustGrants** | Argon2id-verified password pairing issues signed, scoped trust grants — effective scope is always the policy intersection. |
-| **Bounded by construction** | Every queue, window, cache, and history ring has an explicit frozen cap; overload surfaces as admission errors or backpressure, never silent loss. All concurrency runs on the pinned `executor` — no ad-hoc threads. |
+| **Bounded by construction** | Every queue, window, cache, and history ring has an explicit frozen cap; overload surfaces as admission errors or backpressure, never silent loss. All concurrency runs on the pinned `kairo` — no ad-hoc threads. |
 | **Production observability** | nearly 400 Prometheus metric families across device and relay, JSON Lines structured logs with correlation ids, 20 SLO alerts + Grafana dashboard, and a full operations runbook. |
 | **Hardened supply chain** | Commit-pinned dependencies with verified SBOM (SPDX) and permissive-only license gates, secret & OSV vulnerability scanning in CI, PIE/RELRO/FORTIFY/CET hardening, and Ed25519 release-artifact signing. |
 

@@ -471,7 +471,7 @@ TEST(M9ParameterFreeze, ServiceAttachCapsRejectOversized) {
   ManualBlockingDispatch blocking;
   ManualPoster poster;
   auto book = std::make_shared<FileTransferBook>();
-  executor::comm::Topic<LocalEventMessage> topic{"heyaki-m9-freeze-topic"};
+  kairo::comm::Topic<LocalEventMessage> topic{"heyaki-m9-freeze-topic"};
 
   // Message: byte queue above the 256 MiB cap.
   MessageServiceConfig message;

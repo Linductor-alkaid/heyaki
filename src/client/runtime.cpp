@@ -4,9 +4,9 @@
 
 #include <heyaki/identity.hpp>
 
-#include <executor/comm.hpp>
-#include <executor/executor.hpp>
-#include <executor/stop_token.hpp>
+#include <kairo/comm.hpp>
+#include <kairo/executor.hpp>
+#include <kairo/stop_token.hpp>
 
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
@@ -78,19 +78,19 @@ Error attach_operation(const Error& error, const OperationId& operation_id) {
                error.underlying_code(), error.peer_id(), operation_id};
 }
 
-executor::comm::ChannelOptions callback_channel_options(std::size_t capacity) {
-  executor::comm::ChannelOptions options;
+kairo::comm::ChannelOptions callback_channel_options(std::size_t capacity) {
+  kairo::comm::ChannelOptions options;
   options.capacity = capacity;
-  options.drop_policy = executor::comm::DropPolicy::RejectNewest;
+  options.drop_policy = kairo::comm::DropPolicy::RejectNewest;
   options.enable_stats = true;
   options.name = "heyaki-runtime-callbacks";
   return options;
 }
 
-executor::comm::ChannelOptions shutdown_hook_channel_options(std::size_t capacity) {
-  executor::comm::ChannelOptions options;
+kairo::comm::ChannelOptions shutdown_hook_channel_options(std::size_t capacity) {
+  kairo::comm::ChannelOptions options;
   options.capacity = capacity;
-  options.drop_policy = executor::comm::DropPolicy::RejectNewest;
+  options.drop_policy = kairo::comm::DropPolicy::RejectNewest;
   options.enable_stats = true;
   options.name = "heyaki-runtime-shutdown-hooks";
   return options;
@@ -154,7 +154,7 @@ class RuntimeDiagnostics {
     return true;
   }
 
-  executor::comm::CommStats metric_stats() const noexcept { return metrics_.stats(); }
+  kairo::comm::CommStats metric_stats() const noexcept { return metrics_.stats(); }
 
  private:
   RuntimeMetricSample sample() const noexcept {
@@ -177,7 +177,7 @@ class RuntimeDiagnostics {
   std::atomic<std::uint64_t> handler_exception_count_{0U};
   std::atomic<std::uint64_t> outstanding_operations_{0U};
   mutable std::atomic<std::uint64_t> last_read_sequence_{0U};
-  mutable executor::comm::LatestMailbox<RuntimeMetricSample> metrics_;
+  mutable kairo::comm::LatestMailbox<RuntimeMetricSample> metrics_;
 };
 
 class RuntimeOperationState {
@@ -245,7 +245,7 @@ struct RuntimeCoreState {
 
 struct TrackedTask {
   std::shared_ptr<RuntimeOperationState> operation;
-  executor::TaskHandle handle;
+  kairo::TaskHandle handle;
   std::future<void> future;
 };
 
@@ -254,15 +254,15 @@ struct InternalTask {
   std::future<void> future;
 };
 
-class AsioWorker final : public executor::IBlockingIoWorker {
+class AsioWorker final : public kairo::IBlockingIoWorker {
  public:
   static constexpr std::uint64_t exit_phase = 1U;
 
   explicit AsioWorker(boost::asio::io_context& io,
-                      executor::comm::PhaseGate& exit_gate) noexcept
+                      kairo::comm::PhaseGate& exit_gate) noexcept
       : io_(io), exit_gate_(exit_gate) {}
 
-  void run(executor::StopToken stop_token) override {
+  void run(kairo::StopToken stop_token) override {
     if (!stop_token.stop_requested()) {
       io_.run();
     }
@@ -274,30 +274,30 @@ class AsioWorker final : public executor::IBlockingIoWorker {
 
  private:
   boost::asio::io_context& io_;
-  executor::comm::PhaseGate& exit_gate_;
+  kairo::comm::PhaseGate& exit_gate_;
 };
 
 // M7-12: blocking file I/O runs on this dedicated executor-managed worker,
 // never on the asio event loop (which the network callbacks share) and never
-// on a general CPU task. Work items arrive through a bounded executor::comm
+// on a general CPU task. Work items arrive through a bounded kairo::comm
 // channel; wakeup() closes the channel so the receive wait releases. A stop
 // token alone cannot interrupt an in-flight open/read/fsync, so cancellation
 // is cooperative between file operations: each item owns a StopSource the
 // cancel request fires.
 struct FileIoWorkItem {
-  std::function<void(executor::StopToken)> task;
-  std::shared_ptr<executor::StopSource> stop;
+  std::function<void(kairo::StopToken)> task;
+  std::shared_ptr<kairo::StopSource> stop;
 };
 
-class FileIoWorker final : public executor::IBlockingIoWorker {
+class FileIoWorker final : public kairo::IBlockingIoWorker {
  public:
   static constexpr std::uint64_t exit_phase = 1U;
 
-  explicit FileIoWorker(executor::comm::MpscChannel<FileIoWorkItem>& queue,
-                        executor::comm::PhaseGate& exit_gate) noexcept
+  explicit FileIoWorker(kairo::comm::MpscChannel<FileIoWorkItem>& queue,
+                        kairo::comm::PhaseGate& exit_gate) noexcept
       : queue_(queue), exit_gate_(exit_gate) {}
 
-  void run(executor::StopToken stop_token) override {
+  void run(kairo::StopToken stop_token) override {
     while (!stop_token.stop_requested()) {
       FileIoWorkItem item;
       const auto received =
@@ -306,7 +306,7 @@ class FileIoWorker final : public executor::IBlockingIoWorker {
         continue;
       }
       if (item.task) {
-        item.task(item.stop ? item.stop->get_token() : executor::StopToken{});
+        item.task(item.stop ? item.stop->get_token() : kairo::StopToken{});
       }
     }
     // Items still queued at shutdown are dropped: admission for new file work
@@ -319,15 +319,15 @@ class FileIoWorker final : public executor::IBlockingIoWorker {
   void wakeup() noexcept override { queue_.close(); }
 
  private:
-  executor::comm::MpscChannel<FileIoWorkItem>& queue_;
-  executor::comm::PhaseGate& exit_gate_;
+  kairo::comm::MpscChannel<FileIoWorkItem>& queue_;
+  kairo::comm::PhaseGate& exit_gate_;
 };
 
 class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
  public:
   RuntimeState(RuntimeOwnership ownership, RuntimeConfig config,
-               std::unique_ptr<executor::Executor> owned_executor,
-               executor::Executor* borrowed_executor)
+               std::unique_ptr<kairo::Executor> owned_executor,
+               kairo::Executor* borrowed_executor)
       : owned_executor_(std::move(owned_executor)),
         executor_(owned_executor_ ? owned_executor_.get() : borrowed_executor),
         ownership_(ownership), config_(std::move(config)),
@@ -362,14 +362,14 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
   Result<void> start() {
     if (ownership_ == RuntimeOwnership::owned) {
       std::weak_ptr<RuntimeDiagnostics> diagnostics = diagnostics_;
-      executor_->set_failure_callback([diagnostics](const executor::ExecutorFailureEvent&) {
+      executor_->set_failure_callback([diagnostics](const kairo::ExecutorFailureEvent&) {
         if (auto current = diagnostics.lock()) {
           current->record_executor_event();
         }
       });
     }
     work_guard_.emplace(boost::asio::make_work_guard(io_));
-    executor::BlockingWorkerSpec spec;
+    kairo::BlockingWorkerSpec spec;
     spec.name = config_.worker_name;
     spec.config.thread_name = config_.worker_name;
     spec.config.startup_timeout = config_.worker_start_timeout;
@@ -382,7 +382,7 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
           Error{ErrorCode::internal, "runtime", "asio_worker_start_failed",
                 static_cast<std::int64_t>(worker_.start_result().error_code)});
     }
-    executor::BlockingWorkerSpec file_spec;
+    kairo::BlockingWorkerSpec file_spec;
     file_spec.name = config_.worker_name + "-file-io";
     file_spec.config.thread_name = config_.worker_name + "-file-io";
     file_spec.config.startup_timeout = config_.worker_start_timeout;
@@ -406,7 +406,7 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
         return Result<void>::failure(
             Error{ErrorCode::internal, "runtime", "shell_wake_init_failed"});
       }
-      executor::BlockingWorkerSpec shell_spec;
+      kairo::BlockingWorkerSpec shell_spec;
       shell_spec.name = config_.worker_name + "-shell-pty";
       shell_spec.config.thread_name = config_.worker_name + "-shell-pty";
       shell_spec.config.startup_timeout = config_.worker_start_timeout;
@@ -435,7 +435,7 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
       return Result<TaskCancelRequest>::failure(
           Error{ErrorCode::cancelled, "runtime", "runtime_admission_closed"});
     }
-    auto stop = std::make_shared<executor::StopSource>();
+    auto stop = std::make_shared<kairo::StopSource>();
     FileIoWorkItem item;
     item.task = std::move(task);
     item.stop = stop;
@@ -454,9 +454,9 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
     // cooperative result — consumers key on acceptance, not the variant.
     return Result<TaskCancelRequest>::success([stop]() {
       const bool first = stop->request_stop();
-      return executor::TaskCancellationResponse{
-          first ? executor::TaskCancellationResult::RequestedRunning
-                : executor::TaskCancellationResult::AlreadyRequested};
+      return kairo::TaskCancellationResponse{
+          first ? kairo::TaskCancellationResult::RequestedRunning
+                : kairo::TaskCancellationResult::AlreadyRequested};
     });
   }
 
@@ -714,7 +714,7 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
     run_shutdown_stage(RuntimeShutdownStage::flush_persistence, shutdown_hooks, report);
 
     if (ownership_ == RuntimeOwnership::owned) {
-      const auto waited = executor_->wait_for_completion_ex(config_.executor_drain_timeout);
+      const auto waited = executor_->wait_for_completion(config_.executor_drain_timeout);
       report.executor_drain_timed_out = waited.timed_out;
       (void)executor_->shutdown(waited.completed);
       report.executor_shutdown_performed = true;
@@ -735,9 +735,9 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
     }
     try {
       auto future = executor_->submit_auto(
-          executor::task(std::move(task))
+          kairo::task(std::move(task))
               .name(name)
-              .intent(executor::ExecutionIntent::GeneralCpu));
+              .intent(kairo::ExecutionIntent::GeneralCpu));
       if (future.wait_for(std::chrono::milliseconds{0}) == std::future_status::ready) {
         future.get();
         return Result<void>::success();
@@ -953,7 +953,7 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
       // and cooperatively request running work to stop (EXEC-07).
       auto submission = executor_->submit_cancellable(
           [operation, security = std::move(security), handler = std::move(handler),
-           diagnostics](executor::StopToken) mutable {
+           diagnostics](kairo::StopToken) mutable {
             try {
               auto result = handler(security);
               if (result) {
@@ -992,12 +992,12 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
     }
     try {
       task->future.get();
-    } catch (const executor::TimedOutException&) {
+    } catch (const kairo::TimedOutException&) {
       task->operation->complete(
           OperationState::error,
           Error{ErrorCode::timeout, "runtime", "executor_task_timeout", std::nullopt,
                 std::nullopt, task->operation->id()});
-    } catch (const executor::TaskCancelled&) {
+    } catch (const kairo::TaskCancelled&) {
       task->operation->complete(
           OperationState::cancelled,
           Error{ErrorCode::cancelled, "runtime", "operation_cancelled", std::nullopt,
@@ -1055,7 +1055,7 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
     }
     try {
       task->future.get();
-    } catch (const executor::TaskCancelled&) {
+    } catch (const kairo::TaskCancelled&) {
       // Queued cancellation is a normal lifecycle outcome (wire-level
       // RPC_CANCEL on a still-queued handler), not an executor failure event.
     } catch (...) {
@@ -1163,38 +1163,38 @@ class RuntimeState : public std::enable_shared_from_this<RuntimeState> {
     pending_context_callbacks_.store(0U, std::memory_order_release);
   }
 
-  std::unique_ptr<executor::Executor> owned_executor_;
-  executor::Executor* executor_;
+  std::unique_ptr<kairo::Executor> owned_executor_;
+  kairo::Executor* executor_;
   RuntimeOwnership ownership_;
   RuntimeConfig config_;
   boost::asio::io_context io_;
   boost::asio::steady_timer task_sweep_timer_{io_};
   bool task_sweep_active_{false};
-  executor::comm::PhaseGate asio_exit_{"heyaki-asio-worker-exit"};
-  executor::comm::PhaseGate file_io_exit_{"heyaki-file-io-worker-exit"};
-  executor::comm::MpscChannel<FileIoWorkItem> file_io_queue_{
-      executor::comm::ChannelOptions{64U, executor::comm::DropPolicy::RejectNewest, true,
+  kairo::comm::PhaseGate asio_exit_{"heyaki-asio-worker-exit"};
+  kairo::comm::PhaseGate file_io_exit_{"heyaki-file-io-worker-exit"};
+  kairo::comm::MpscChannel<FileIoWorkItem> file_io_queue_{
+      kairo::comm::ChannelOptions{64U, kairo::comm::DropPolicy::RejectNewest, true,
                                      "heyaki-runtime-file-io"}};
   // M8 shell PTY worker state; only armed when the config enables it.
-  executor::comm::PhaseGate shell_exit_{"heyaki-shell-pty-worker-exit"};
-  executor::comm::MpscChannel<ShellPtyCommand> shell_commands_{
-      executor::comm::ChannelOptions{config_.shell_command_capacity,
-                                     executor::comm::DropPolicy::RejectNewest, true,
+  kairo::comm::PhaseGate shell_exit_{"heyaki-shell-pty-worker-exit"};
+  kairo::comm::MpscChannel<ShellPtyCommand> shell_commands_{
+      kairo::comm::ChannelOptions{config_.shell_command_capacity,
+                                     kairo::comm::DropPolicy::RejectNewest, true,
                                      "heyaki-runtime-shell-commands"}};
-  executor::comm::MpscChannel<ShellPtyEvent> shell_events_{
-      executor::comm::ChannelOptions{config_.shell_event_capacity,
-                                     executor::comm::DropPolicy::RejectNewest, true,
+  kairo::comm::MpscChannel<ShellPtyEvent> shell_events_{
+      kairo::comm::ChannelOptions{config_.shell_event_capacity,
+                                     kairo::comm::DropPolicy::RejectNewest, true,
                                      "heyaki-runtime-shell-events"}};
   std::unique_ptr<ShellPtyWake> shell_wake_{make_shell_pty_wake()};
   std::optional<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>
       work_guard_;
-  executor::comm::MpscChannel<RuntimeCallbackEvent> callbacks_;
-  executor::comm::MpscChannel<RuntimeShutdownHook> shutdown_hooks_;
+  kairo::comm::MpscChannel<RuntimeCallbackEvent> callbacks_;
+  kairo::comm::MpscChannel<RuntimeShutdownHook> shutdown_hooks_;
   std::shared_ptr<RuntimeDiagnostics> diagnostics_;
-  executor::comm::DoubleBuffer<RuntimeCoreState> core_state_;
-  executor::WorkerHandle worker_;
-  executor::WorkerHandle file_worker_;
-  executor::WorkerHandle shell_worker_;
+  kairo::comm::DoubleBuffer<RuntimeCoreState> core_state_;
+  kairo::WorkerHandle worker_;
+  kairo::WorkerHandle file_worker_;
+  kairo::WorkerHandle shell_worker_;
   std::vector<std::shared_ptr<RuntimeOperationState>> operations_;
   std::vector<std::shared_ptr<TrackedTask>> tracked_tasks_;
   std::vector<std::shared_ptr<InternalTask>> internal_tasks_;
@@ -1352,7 +1352,7 @@ void detail::RuntimeAccess::shell_pty_drain(
   runtime.state_->shell_pty_drain(sink);
 }
 
-Result<Runtime> Runtime::create_borrowed(executor::Executor& executor,
+Result<Runtime> Runtime::create_borrowed(kairo::Executor& executor,
                                          const RuntimeConfig& config) {
   auto valid = validate_config(config);
   if (!valid) {
@@ -1363,7 +1363,7 @@ Result<Runtime> Runtime::create_borrowed(executor::Executor& executor,
     return Result<Runtime>::failure(*crypto.error_if());
   }
   const auto executor_snapshot = executor.get_snapshot();
-  if (executor_snapshot.lifecycle != executor::ExecutorLifecycleState::Running ||
+  if (executor_snapshot.lifecycle != kairo::ExecutorLifecycleState::Running ||
       !executor_snapshot.async.is_running) {
     return Result<Runtime>::failure(
         Error{ErrorCode::configuration, "runtime", "borrowed_executor_not_running"});
@@ -1386,13 +1386,13 @@ Result<Runtime> Runtime::create_owned(const RuntimeConfig& config) {
   if (!crypto) {
     return Result<Runtime>::failure(*crypto.error_if());
   }
-  auto owned_executor = std::make_unique<executor::Executor>();
-  executor::ExecutorConfig executor_config;
+  auto owned_executor = std::make_unique<kairo::Executor>();
+  kairo::ExecutorConfig executor_config;
   executor_config.min_threads = config.executor_min_threads;
   executor_config.max_threads = config.executor_max_threads;
   executor_config.queue_capacity = config.executor_queue_capacity;
   executor_config.enable_monitoring = true;
-  const auto initialized = owned_executor->initialize_ex(executor_config);
+  const auto initialized = owned_executor->initialize(executor_config);
   if (!initialized) {
     return Result<Runtime>::failure(
         Error{ErrorCode::configuration, "runtime", "executor_initialize_failed",
