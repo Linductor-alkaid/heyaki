@@ -1352,13 +1352,17 @@ TEST_F(M3aNodeTest, SlowTrickledHandshakeTimesOutAndLegitimatePeerStillAuthentic
   }
 
   // The reclaimed listener still authenticates a real peer. The property is
-  // eventual authentication, not latency: budget 12s like the rest of the
-  // suite's auth waits (a loaded CI runner must not fail this on scheduling
-  // alone; the 300ms handshake timeouts above remain the actual gate).
+  // eventual authentication, not latency. The victim keeps the slowloris
+  // budgets (300ms handshake/hello timeouts), so on a loaded runner a single
+  // legitimate handshake can transiently exceed the window and the initiator
+  // attempt dies without an automatic retry (the coordinator only dedups
+  // non-closed attempts via attempt_already_active). Re-issue connect_lan on
+  // every poll: it is a rejected no-op while an attempt is still active and
+  // opens a fresh 300ms window once the previous attempt closed.
   const auto peer_key = victim.value_if()->endpoints().front().key;
-  ASSERT_TRUE(victim.value_if()->connect_lan(peer_key));
   EXPECT_TRUE(wait_until(
       [&] {
+        (void)victim.value_if()->connect_lan(peer_key);
         const auto victim_connections = victim.value_if()->signaling_connections();
         const auto peer_connections = peer.value_if()->signaling_connections();
         const auto authenticated = [](const auto& connection) {
@@ -1369,7 +1373,11 @@ TEST_F(M3aNodeTest, SlowTrickledHandshakeTimesOutAndLegitimatePeerStillAuthentic
                std::count_if(peer_connections.begin(), peer_connections.end(),
                              authenticated) == 1;
       },
-      std::chrono::seconds{12}));
+      std::chrono::seconds{12}))
+      << "legitimate peer never authenticated after reclaim: tls.timed_out="
+      << victim.value_if()->snapshot().tls.timed_out
+      << " provisional_connections="
+      << victim.value_if()->snapshot().tls.provisional_connections;
   EXPECT_TRUE(victim.value_if()->shutdown().stopped);
   EXPECT_TRUE(peer.value_if()->shutdown().stopped);
 }
