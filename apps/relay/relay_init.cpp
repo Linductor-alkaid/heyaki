@@ -236,6 +236,13 @@ Result<std::array<std::byte, 32U>> generate_self_signed_relay_certificate(
     const std::filesystem::path& certificate_file,
     const std::filesystem::path& private_key_file,
     const std::vector<std::string>& san_entries) {
+  // Never-overwrite guard for every platform: POSIX additionally enforces it
+  // with O_EXCL below, but BIO file creation (Windows) would truncate, so the
+  // check is unconditional.
+  if (regular_file_exists(certificate_file) || regular_file_exists(private_key_file)) {
+    return Result<std::array<std::byte, 32U>>::failure(
+        init_error(ErrorCode::configuration, "relay_init_certificate_exists"));
+  }
   if (san_entries.empty()) {
     return Result<std::array<std::byte, 32U>>::failure(
         init_error(ErrorCode::configuration, "relay_init_san_entries_invalid"));

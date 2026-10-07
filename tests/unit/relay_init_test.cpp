@@ -202,10 +202,14 @@ TEST(RelayInitTest, GeneratesSelfSignedCertificateWithDigestAndOwnerOnlyKey) {
   ASSERT_TRUE(std::filesystem::is_regular_file(certificate));
   ASSERT_TRUE(std::filesystem::is_regular_file(private_key));
 
-  // The key file is owner-only (0600).
+  // The key file is owner-only (0600). Windows reports synthetic POSIX
+  // permissions from the read-only attribute (0777 unless marked read-only),
+  // so the mode assertion is meaningful on POSIX only.
+#if !defined(_WIN32)
   const auto permissions = key_permissions(private_key);
   EXPECT_EQ(permissions & std::filesystem::perms::mask,
             std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
+#endif
 
   // The certificate is parseable PEM and the returned digest is its SHA-256.
   BIO* file = BIO_new_file(certificate.string().c_str(), "rb");
@@ -346,8 +350,10 @@ TEST(RelayInitTest, RunInitProvisionsConfigCertificateDatabaseAndTurnSecret) {
   EXPECT_EQ(turn_contents.find("HEYAKI_TURN_SECRET=" + std::string(40U, 'x')),
             std::string::npos)
       << "the TURN secret must be random";
+#if !defined(_WIN32)
   EXPECT_EQ(key_permissions(turn_env) & std::filesystem::perms::mask,
             std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
+#endif
 }
 
 TEST(RelayInitTest, RunInitIsIdempotentWithoutNewPasswordInput) {
