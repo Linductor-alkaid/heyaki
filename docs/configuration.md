@@ -53,6 +53,17 @@ All keys, defaults, and accepted ranges:
 | `endpoint_expose_record_generation` | `false` | bool | Publish endpoint record generations |
 | `endpoint_expose_manifest_sha256` | `false` | bool | Publish service manifest hashes |
 | `endpoint_expose_manifest_generation` | `false` | bool | Publish service manifest generations |
+| `turn_credentials_enabled` | `false` | bool | Issue short-lived coturn REST credentials to authenticated devices and deliver them in the `ice_config` field of `login_result`/`heartbeat_ack`. Only takes effect for devices advertising the `relay_ice_config_v1` capability; the shared secret is never a config-file key (see below) |
+| `turn_credential_ttl_seconds` | `600` | 1–86400 | Lifetime of each issued TURN credential; requires `turn_credentials_enabled = true` |
+| `turn_secret_file` | unset | readable file, ≤4 KiB, 16–256 printable-ASCII bytes after trailing-newline strip | TURN shared secret (`use-auth-secret`); falls back to the `HEYAKI_TURN_SECRET` environment variable when unset. Never set the secret itself in the config file. Requires `turn_credentials_enabled = true` |
+| `turn_servers` | unset | 1–4 comma-separated `stun:host:port` / `turn:host:port[?transport=udp\|tcp]` URIs, bracketed IPv6 (`turn:[2001:db8::1]:3478`), no whitespace, no `turns:` | Advertised ICE servers delivered with every issued credential; should match the deployed coturn listeners (`deploy/coturn/turnserver.conf` baseline: 3478 UDP+TCP). Requires `turn_credentials_enabled = true` |
+
+Setting any of the three non-flag TURN keys while
+`turn_credentials_enabled = false` is a configuration error
+(`turn_config_disabled_conflict`) so staged-but-inactive keys never decay
+silently. With the feature enabled, `RelayServer::create` fails fast unless
+the secret resolves (`turn_secret_file` first, then `HEYAKI_TURN_SECRET`) and
+`--check-config` verifies the same.
 
 Struct-only knobs with no config-file key (embedding callers set them on
 `RelayServerConfig`): `control_write_queue_frames` (default 64, 1–65536),

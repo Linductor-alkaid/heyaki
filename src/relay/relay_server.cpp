@@ -10,6 +10,7 @@
 #include "relay_metrics.hpp"
 
 #include <heyaki/lan_protocol.hpp>
+#include <heyaki/protocol.hpp>
 #include <heyaki/relay_wss_control.hpp>
 #include <heyaki/signaling_protocol.hpp>
 
@@ -186,6 +187,12 @@ struct RelayServer::Impl : std::enable_shared_from_this<RelayServer::Impl> {
                                      const std::string* precomputed_rate_key = nullptr);
   Result<void> require_active_device(const std::shared_ptr<RelaySession>& session,
                                      std::uint64_t now_unix_milliseconds);
+  // Builds the relay-issued ICE configuration for a logged-in session, or
+  // nullopt when issuance is disabled, the login advertisement lacked the
+  // relay_ice_config_v1 capability, or issuance failed (the failure also
+  // bumps turn_issue_failures and logs; the control reply still goes out).
+  [[nodiscard]] std::optional<RelayWssIceConfig> issue_ice_config(
+      const RelaySession& session);
   void session_handle_logged_in(const std::shared_ptr<RelaySession>& session,
                                 RelayWssControlType type,
                                 std::span<const std::byte> payload);
@@ -217,6 +224,7 @@ struct RelayServer::Impl : std::enable_shared_from_this<RelayServer::Impl> {
   std::optional<RelayRateLimiter> rate_limiter;
   std::optional<RelayEnrollmentService> enrollment_service;
   std::optional<RelayLoginService> login_service;
+  std::optional<RelayTurnCredentialService> turn_credentials;
   std::optional<RelayLeaseTable> lease_table;
   std::optional<RelayEndpointDirectory> endpoint_directory;
   RelayId relay_id{};
@@ -629,6 +637,9 @@ class RelaySession : public std::enable_shared_from_this<RelaySession> {
   std::optional<DeviceId> logged_in_device_id;
   std::optional<EndpointId> logged_in_endpoint_id;
   std::string logged_in_tenant;
+  // Capability set granted at login (advertisement ∩ negotiated version);
+  // gates control-plane extras such as the relay-issued ice_config field.
+  CapabilitySet logged_in_capabilities;
   // SHA-256 rate-limit key of the logged-in tenant, computed once at login
   // instead of on every admitted control message.
   std::optional<std::string> logged_in_rate_key;
@@ -769,6 +780,31 @@ Result<void> RelayServer::Impl::initialize() {
     return Result<void>::failure(*login.error_if());
   }
   login_service.emplace(std::move(*login.value_if()));
+
+  // Relay-issued TURN credentials: fail fast at create when enabled without
+  // a resolvable secret — a half-configured issuer would silently break the
+  // TURN fallback the feature exists to provide. The secret lives only in
+  // the credential service (zeroed on shutdown); this buffer is wiped here.
+  if (config.turn_credentials_enabled) {
+    auto service = RelayTurnCredentialService::create(RelayTurnSecretConfig{
+        .max_secrets = 4U, .credential_ttl = config.turn_credential_ttl});
+    if (!service) {
+      return Result<void>::failure(*service.error_if());
+    }
+    auto secret = load_relay_turn_secret(config);
+    if (!secret) {
+      return Result<void>::failure(*secret.error_if());
+    }
+    const auto activated =
+        unix_milliseconds_now() / 1000U;  // UNIX seconds for coturn REST.
+    auto stored = service.value_if()->set_secret(1U, *secret.value_if(), activated);
+    sodium_memzero(secret.value_if()->data(), secret.value_if()->size());
+    if (!stored) {
+      return Result<void>::failure(*stored.error_if());
+    }
+    turn_credentials.emplace(std::move(*service.value_if()));
+    current.turn = turn_credentials->diagnostics();
+  }
 
   auto leases = RelayLeaseTable::create(config.lease);
   if (!leases) {
@@ -1310,6 +1346,7 @@ void RelayServer::Impl::session_handle_control(
     session->logged_in_device_id = authenticated.value_if()->device_id;
     session->logged_in_endpoint_id = authenticated.value_if()->endpoint_id;
     session->logged_in_tenant = authenticated.value_if()->tenant;
+    session->logged_in_capabilities = authenticated.value_if()->capabilities;
     auto tenant_key = tenant_rate_key(authenticated.value_if()->tenant);
     session->logged_in_rate_key =
         tenant_key ? std::optional<std::string>{std::move(*tenant_key.value_if())}
@@ -1324,16 +1361,22 @@ void RelayServer::Impl::session_handle_control(
     online_endpoints[RelayLeaseKey{.device_id = *session->logged_in_device_id,
                                    .endpoint_id = *session->logged_in_endpoint_id}] =
         session;
+    // Relay-issued TURN credentials ride the login reply (capability-gated
+    // inside issue_ice_config); a failed issuance degrades to the plain
+    // reply instead of failing the login. Issued before the snapshot flush
+    // so the turn counters land in the same publication.
+    RelayWssLoginResult result;
+    result.tenant = authenticated.value_if()->tenant;
+    result.enrollment_generation = authenticated.value_if()->enrollment_generation;
+    result.lease_milliseconds =
+        static_cast<std::uint32_t>(config.lease.default_lease.count());
+    result.ice_config = issue_ice_config(*session);
+    current.turn = turn_credentials ? turn_credentials->diagnostics()
+                                    : RelayTurnCredentialDiagnostics{};
     current.database = database->cached_snapshot();
     current.login = login_service->diagnostics();
     publish();
 
-    RelayWssLoginResult result{
-        .tenant = authenticated.value_if()->tenant,
-        .enrollment_generation =
-            authenticated.value_if()->enrollment_generation,
-        .lease_milliseconds =
-            static_cast<std::uint32_t>(config.lease.default_lease.count())};
     auto encoded = encode_relay_wss_login_result(result);
     if (!encoded) {
       ++current.control_rejected;
@@ -1413,6 +1456,43 @@ Result<void> RelayServer::Impl::require_active_device(
                     "relay_device_revoked_or_generation_changed"));
   }
   return Result<void>::success();
+}
+
+std::optional<RelayWssIceConfig> RelayServer::Impl::issue_ice_config(
+    const RelaySession& session) {
+  if (!turn_credentials || !session.logged_in_device_id ||
+      !session.logged_in_capabilities.has(Capability::relay_ice_config_v1)) {
+    return std::nullopt;
+  }
+  auto credential =
+      turn_credentials->issue(session.logged_in_tenant,
+                              *session.logged_in_device_id,
+                              unix_milliseconds_now() / 1000U);
+  if (!credential) {
+    ++current.turn_issue_failures;
+    current.turn = turn_credentials->diagnostics();
+    // Never carries the username/password; only the stable failure token.
+    log_event(RelayLogEventKind::turn_issue_failed, RelayLogLevel::warn,
+              credential.error_if()->safe_detail(), log_context(&session));
+    return std::nullopt;
+  }
+  RelayWssIceConfig ice;
+  ice.expires_unix_seconds = credential.value_if()->expires_unix_seconds;
+  ice.servers.reserve(config.turn_servers.size());
+  for (const auto& advertised : config.turn_servers) {
+    RelayWssIceServer server;
+    server.kind = advertised.kind;
+    server.hostname = advertised.hostname;
+    server.port = advertised.port;
+    // The TURN REST credential is only meaningful — and only legal on the
+    // wire — for TURN entries; STUN entries stay anonymous.
+    if (advertised.kind != RelayWssIceServerKind::stun) {
+      server.username = credential.value_if()->username;
+      server.credential = credential.value_if()->password;
+    }
+    ice.servers.push_back(std::move(server));
+  }
+  return ice;
 }
 
 void RelayServer::Impl::session_cleanup(
@@ -1626,9 +1706,14 @@ void RelayServer::Impl::session_handle_heartbeat(
       1, std::chrono::duration_cast<std::chrono::milliseconds>(
              heartbeat.value_if()->expires_at - before)
              .count());
-  RelayWssHeartbeatAck ack{
-      .lease_generation = heartbeat.value_if()->lease_generation,
-      .granted_lease_milliseconds = static_cast<std::uint32_t>(granted)};
+  // Refresh the issued credentials on the heartbeat cadence so the client
+  // always holds a credential that outlives its current operations.
+  RelayWssHeartbeatAck ack;
+  ack.lease_generation = heartbeat.value_if()->lease_generation;
+  ack.granted_lease_milliseconds = static_cast<std::uint32_t>(granted);
+  ack.ice_config = issue_ice_config(*session);
+  current.turn = turn_credentials ? turn_credentials->diagnostics()
+                                  : RelayTurnCredentialDiagnostics{};
   auto encoded = encode_relay_wss_heartbeat_ack(ack);
   if (!encoded) {
     session->send_error(*encoded.error_if(), false);

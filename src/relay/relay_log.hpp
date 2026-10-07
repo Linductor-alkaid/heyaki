@@ -41,6 +41,10 @@ enum class RelayLogEventKind : std::uint8_t {
   signaling_rejected,
   heartbeat_refreshed,
   endpoint_query_served,
+  // Relay-issued TURN credential issuance failed for an authenticated
+  // session; the control reply degrades to the plain message. Never sampled
+  // and never carries the credential material.
+  turn_issue_failed,
 };
 
 struct RelayLogRecord {

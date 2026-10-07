@@ -79,6 +79,18 @@ contract (short-lived REST credentials bound to device+tenant+expiry) and
 the four-secret rotation window are documented in
 [deploy/coturn/README.md](../deploy/coturn/README.md) and the runbook.
 
+**Relay-issued credentials (recommended).** Set
+`turn_credentials_enabled = true` plus `turn_servers` in the relay config
+and give the relay the same `HEYAKI_TURN_SECRET` (via `turn_secret_file` or
+the environment). Enrolled devices then receive a fresh short-lived
+credential in the control plane (`ice_config` on `login_result` and every
+`heartbeat_ack`) — nobody configures a TURN username, password, host, or
+port by hand, and the TURN fallback engages automatically when hole punching
+fails. The flag is capability-gated (`relay_ice_config_v1`): mixed fleets
+with pre-update devices keep them on the static path, and deployments
+without the flag behave exactly as before. Key rotations are a runbook
+procedure (restart coturn and the relay inside one credential TTL).
+
 ## Observability
 
 [deploy/observability/](../deploy/observability/) ships the reference stack:

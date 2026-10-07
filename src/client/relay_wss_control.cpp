@@ -363,6 +363,16 @@ constexpr std::size_t relay_wss_manifest_sha256_bytes = 32U;
 constexpr std::uint32_t max_relay_wss_lease_milliseconds = 120000U;
 constexpr std::size_t max_relay_wss_endpoint_record_bytes = 16U * 1024U;
 constexpr std::size_t max_relay_wss_service_manifest_bytes = 16U * 1024U;
+// Relay-issued ICE entries (heyaki.protocol.relay.v1.IceServer bounds).
+constexpr std::size_t max_relay_wss_ice_hostname_bytes = 255U;
+constexpr std::size_t max_relay_wss_ice_credential_bytes = 256U;
+// Payload acceptance bounds for the messages that carry the optional
+// ice_config field (frozen in docs/operations/parameter-freeze.md). The
+// previous bounds (1024/32) held for ice_config-free payloads; the raised
+// bounds only widen acceptance, and relays without TURN issuance keep
+// producing byte-identical payloads.
+constexpr std::size_t max_relay_wss_login_result_bytes = 4096U;
+constexpr std::size_t max_relay_wss_heartbeat_ack_bytes = 2048U;
 
 Result<void> copy_control_bytes(std::span<const std::byte> input,
                                 std::span<std::byte> output,
@@ -526,6 +536,161 @@ Result<void> validate_control_lease_milliseconds(std::uint64_t value,
   return Result<void>::success();
 }
 
+// Nested relay.v1.IceConfig codec (field 1 = repeated IceServer servers,
+// field 2 = uint64 expires_unix_seconds). Encoded only for non-empty server
+// lists so an absent optional field and an empty list are the same bytes.
+// Canonical-protobuf field hygiene: stun (=0) entries omit the kind varint
+// exactly like protoc omits zero-valued scalars, so the encoder output is
+// byte-identical to the generated runtime for every server kind.
+void append_ice_config(std::vector<std::byte>& output, std::uint32_t field,
+                       const RelayWssIceConfig& config) {
+  std::vector<std::byte> nested;
+  for (const auto& server : config.servers) {
+    std::vector<std::byte> entry;
+    if (server.kind != RelayWssIceServerKind::stun) {
+      append_uint(entry, 1U, static_cast<std::uint64_t>(server.kind));
+    }
+    append_string(entry, 2U, server.hostname);
+    append_uint(entry, 3U, server.port);
+    if (!server.username.empty()) {
+      append_string(entry, 4U, server.username);
+    }
+    if (!server.credential.empty()) {
+      append_string(entry, 5U, server.credential);
+    }
+    append_bytes(nested, 1U, entry);
+  }
+  append_uint(nested, 2U, config.expires_unix_seconds);
+  append_bytes(output, field, nested);
+}
+
+Result<RelayWssIceConfig> parse_ice_config(std::span<const std::byte> payload) {
+  if (payload.empty() || payload.size() > max_relay_wss_login_result_bytes) {
+    return Result<RelayWssIceConfig>::failure(control_error("ice_config_size_invalid"));
+  }
+  ProtoReader reader(payload);
+  RelayWssIceConfig config;
+  bool seen_expiry = false;
+  while (!reader.done()) {
+    auto field = reader.next();
+    if (!field) {
+      return Result<RelayWssIceConfig>::failure(*field.error_if());
+    }
+    if (field.value_if()->number == 1U) {
+      if (field.value_if()->wire_type != 2U ||
+          config.servers.size() >= max_relay_wss_ice_servers) {
+        return Result<RelayWssIceConfig>::failure(
+            control_error("ice_config_field_invalid"));
+      }
+      ProtoReader entry_reader(field.value_if()->bytes);
+      RelayWssIceServer server;
+      std::array<bool, 5U> seen{};
+      if (field.value_if()->bytes.empty() ||
+          field.value_if()->bytes.size() > max_relay_wss_login_result_bytes) {
+        return Result<RelayWssIceConfig>::failure(
+            control_error("ice_config_field_invalid"));
+      }
+      while (!entry_reader.done()) {
+        auto entry_field = entry_reader.next();
+        if (!entry_field) {
+          return Result<RelayWssIceConfig>::failure(*entry_field.error_if());
+        }
+        if (entry_field.value_if()->number == 0U ||
+            entry_field.value_if()->number > seen.size() ||
+            seen[entry_field.value_if()->number - 1U]) {
+          return Result<RelayWssIceConfig>::failure(
+              control_error("ice_config_field_conflict"));
+        }
+        seen[entry_field.value_if()->number - 1U] = true;
+        const auto number = entry_field.value_if()->number;
+        if (number == 2U || number == 4U || number == 5U) {
+          if (entry_field.value_if()->wire_type != 2U) {
+            return Result<RelayWssIceConfig>::failure(
+                control_error("ice_config_field_invalid"));
+          }
+          const auto* text = reinterpret_cast<const char*>(
+              entry_field.value_if()->bytes.data());
+          if (number == 2U) {
+            if (entry_field.value_if()->bytes.empty() ||
+                entry_field.value_if()->bytes.size() >
+                    max_relay_wss_ice_hostname_bytes ||
+                !valid_utf8({text, entry_field.value_if()->bytes.size()})) {
+              return Result<RelayWssIceConfig>::failure(
+                  control_error("ice_config_hostname_invalid"));
+            }
+            server.hostname.assign(text, entry_field.value_if()->bytes.size());
+          } else if (number == 4U) {
+            if (entry_field.value_if()->bytes.empty() ||
+                entry_field.value_if()->bytes.size() >
+                    max_relay_wss_ice_credential_bytes) {
+              return Result<RelayWssIceConfig>::failure(
+                  control_error("ice_config_username_invalid"));
+            }
+            server.username.assign(text, entry_field.value_if()->bytes.size());
+          } else {
+            if (entry_field.value_if()->bytes.empty() ||
+                entry_field.value_if()->bytes.size() >
+                    max_relay_wss_ice_credential_bytes) {
+              return Result<RelayWssIceConfig>::failure(
+                  control_error("ice_config_credential_invalid"));
+            }
+            server.credential.assign(text, entry_field.value_if()->bytes.size());
+          }
+          continue;
+        }
+        if (entry_field.value_if()->wire_type != 0U) {
+          return Result<RelayWssIceConfig>::failure(
+              control_error("ice_config_field_invalid"));
+        }
+        if (number == 1U) {
+          // kind is stun(0) by default like any proto3 scalar: absent and
+          // explicit zero both decode to stun; unknown kinds are rejected.
+          if (entry_field.value_if()->integer > static_cast<std::uint64_t>(
+                  RelayWssIceServerKind::turn_tls)) {
+            return Result<RelayWssIceConfig>::failure(
+                control_error("ice_config_kind_invalid"));
+          }
+          server.kind = static_cast<RelayWssIceServerKind>(
+              entry_field.value_if()->integer);
+        } else if (number != 3U || entry_field.value_if()->integer == 0U ||
+                   entry_field.value_if()->integer > 65535U) {
+          return Result<RelayWssIceConfig>::failure(
+              control_error("ice_config_port_invalid"));
+        } else {
+          server.port = static_cast<std::uint16_t>(entry_field.value_if()->integer);
+        }
+      }
+      if (!seen[1U] || !seen[2U]) {
+        return Result<RelayWssIceConfig>::failure(
+            control_error("ice_config_field_missing"));
+      }
+      if (server.kind == RelayWssIceServerKind::stun) {
+        if (!server.username.empty() || !server.credential.empty()) {
+          return Result<RelayWssIceConfig>::failure(
+              control_error("ice_config_stun_credentials_invalid"));
+        }
+      } else if (server.username.empty() || server.credential.empty()) {
+        return Result<RelayWssIceConfig>::failure(
+            control_error("ice_config_turn_credentials_missing"));
+      }
+      config.servers.push_back(std::move(server));
+      continue;
+    }
+    if (field.value_if()->number != 2U || field.value_if()->wire_type != 0U ||
+        field.value_if()->integer == 0U || seen_expiry) {
+      return Result<RelayWssIceConfig>::failure(
+          control_error("ice_config_field_invalid"));
+    }
+    seen_expiry = true;
+    config.expires_unix_seconds = field.value_if()->integer;
+  }
+  if (config.servers.empty() || !seen_expiry) {
+    return Result<RelayWssIceConfig>::failure(
+        control_error("ice_config_field_missing"));
+  }
+  return Result<RelayWssIceConfig>::success(std::move(config));
+}
+
 }  // namespace
 
 Result<std::vector<std::byte>> encode_relay_wss_login_result(
@@ -540,17 +705,20 @@ Result<std::vector<std::byte>> encode_relay_wss_login_result(
   append_string(output, 1U, result.tenant);
   append_uint(output, 2U, result.enrollment_generation);
   append_uint(output, 3U, result.lease_milliseconds);
+  if (result.ice_config) {
+    append_ice_config(output, 4U, *result.ice_config);
+  }
   return Result<std::vector<std::byte>>::success(std::move(output));
 }
 
 Result<RelayWssLoginResult> parse_relay_wss_login_result(
     std::span<const std::byte> payload) {
-  if (payload.empty() || payload.size() > 1024U) {
+  if (payload.empty() || payload.size() > max_relay_wss_login_result_bytes) {
     return Result<RelayWssLoginResult>::failure(control_error("login_result_size_invalid"));
   }
   ProtoReader reader(payload);
   RelayWssLoginResult result;
-  std::array<bool, 3U> seen{};
+  std::array<bool, 4U> seen{};
   while (!reader.done()) {
     auto field = reader.next();
     if (!field) {
@@ -571,6 +739,17 @@ Result<RelayWssLoginResult> parse_relay_wss_login_result(
       if (!valid_utf8(result.tenant)) {
         return Result<RelayWssLoginResult>::failure(control_error("login_result_tenant_invalid"));
       }
+    } else if (field.value_if()->number == 4U) {
+      // Optional relay-issued ICE configuration; nested message.
+      if (field.value_if()->wire_type != 2U || field.value_if()->bytes.empty()) {
+        return Result<RelayWssLoginResult>::failure(
+            control_error("login_result_field_invalid"));
+      }
+      auto ice_config = parse_ice_config(field.value_if()->bytes);
+      if (!ice_config) {
+        return Result<RelayWssLoginResult>::failure(*ice_config.error_if());
+      }
+      result.ice_config = std::move(*ice_config.value_if());
     } else {
       if (field.value_if()->wire_type != 0U || field.value_if()->integer == 0U) {
         return Result<RelayWssLoginResult>::failure(control_error("login_result_field_invalid"));
@@ -587,7 +766,7 @@ Result<RelayWssLoginResult> parse_relay_wss_login_result(
       }
     }
   }
-  if (!std::all_of(seen.begin(), seen.end(), [](bool value) { return value; })) {
+  if (!seen[0U] || !seen[1U] || !seen[2U]) {
     return Result<RelayWssLoginResult>::failure(control_error("login_result_field_missing"));
   }
   return Result<RelayWssLoginResult>::success(std::move(result));
@@ -642,25 +821,44 @@ Result<std::vector<std::byte>> encode_relay_wss_heartbeat_ack(
   std::vector<std::byte> output;
   append_uint(output, 1U, ack.lease_generation);
   append_uint(output, 2U, ack.granted_lease_milliseconds);
+  if (ack.ice_config) {
+    append_ice_config(output, 3U, *ack.ice_config);
+  }
   return Result<std::vector<std::byte>>::success(std::move(output));
 }
 
 Result<RelayWssHeartbeatAck> parse_relay_wss_heartbeat_ack(
     std::span<const std::byte> payload) {
-  if (payload.empty() || payload.size() > 32U) {
+  if (payload.empty() || payload.size() > max_relay_wss_heartbeat_ack_bytes) {
     return Result<RelayWssHeartbeatAck>::failure(control_error("heartbeat_ack_size_invalid"));
   }
   ProtoReader reader(payload);
   RelayWssHeartbeatAck ack;
-  std::array<bool, 2U> seen{};
+  std::array<bool, 3U> seen{};
   while (!reader.done()) {
     auto field = reader.next();
     if (!field) {
       return Result<RelayWssHeartbeatAck>::failure(*field.error_if());
     }
     if (field.value_if()->number == 0U || field.value_if()->number > seen.size() ||
-        seen[field.value_if()->number - 1U] || field.value_if()->wire_type != 0U ||
-        field.value_if()->integer == 0U) {
+        seen[field.value_if()->number - 1U]) {
+      return Result<RelayWssHeartbeatAck>::failure(control_error("heartbeat_ack_field_invalid"));
+    }
+    if (field.value_if()->number == 3U) {
+      // Optional relay-issued ICE configuration; nested message.
+      if (field.value_if()->wire_type != 2U || field.value_if()->bytes.empty()) {
+        return Result<RelayWssHeartbeatAck>::failure(
+            control_error("heartbeat_ack_field_invalid"));
+      }
+      seen[2U] = true;
+      auto ice_config = parse_ice_config(field.value_if()->bytes);
+      if (!ice_config) {
+        return Result<RelayWssHeartbeatAck>::failure(*ice_config.error_if());
+      }
+      ack.ice_config = std::move(*ice_config.value_if());
+      continue;
+    }
+    if (field.value_if()->wire_type != 0U || field.value_if()->integer == 0U) {
       return Result<RelayWssHeartbeatAck>::failure(control_error("heartbeat_ack_field_invalid"));
     }
     seen[field.value_if()->number - 1U] = true;
@@ -675,7 +873,7 @@ Result<RelayWssHeartbeatAck> parse_relay_wss_heartbeat_ack(
       ack.granted_lease_milliseconds = static_cast<std::uint32_t>(field.value_if()->integer);
     }
   }
-  if (!std::all_of(seen.begin(), seen.end(), [](bool value) { return value; })) {
+  if (!seen[0U] || !seen[1U]) {
     return Result<RelayWssHeartbeatAck>::failure(control_error("heartbeat_ack_field_missing"));
   }
   return Result<RelayWssHeartbeatAck>::success(std::move(ack));

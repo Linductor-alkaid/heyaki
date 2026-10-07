@@ -302,7 +302,15 @@ issues use the latest generation. Rotation: set the new
 `HEYAKI_TURN_SECRET` wherever credentials are issued and in the coturn
 environment (`deploy/coturn/heyaki-turn.env.example`), restart coturn,
 and let the issuer generation window retire the old secret. Never place
-the secret in the repository, relay config, or logs.
+the secret in the repository, relay config, or logs. With relay-issued
+credentials enabled (`turn_credentials_enabled = true`), the relay is the
+issuer: set the new secret for the relay process (environment, or the file
+named by `turn_secret_file`) and restart `heyaki-relay` in the same
+window — there is no hot reload. Devices pick up the new generation on
+their next heartbeat, so credentials signed by the old secret simply age
+out within one TTL; verify via `/metrics` that
+`heyaki_relay_turn_credentials_issued_total` keeps advancing while
+`heyaki_relay_turn_issue_failures_total` stays flat.
 
 ### Rotate bootstrap tokens
 

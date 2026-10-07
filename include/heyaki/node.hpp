@@ -164,6 +164,41 @@ struct PeerPathPolicy {
 [[nodiscard]] Result<void> validate_peer_path_policy(const PeerPathPolicy& policy,
                                                     ConnectivityMode mode);
 
+// One relay-issued ICE server held between control-plane deliveries: the
+// wire entry plus the UNIX seconds after which its TURN credential expires.
+// Secret discipline: credential/username stay in memory only and never
+// enter snapshots, logs, or error details.
+struct RelayIssuedIceServer {
+  NodeIceServerKind kind{NodeIceServerKind::stun};
+  std::string hostname;
+  std::uint16_t port{};
+  std::string username;
+  std::string credential;
+  std::uint64_t expires_unix_seconds{};
+};
+
+// Outcome counters of one merge_relay_ice_servers call; feeds tests and
+// diagnostics without exposing credential material.
+struct RelayIceMergeStats {
+  std::size_t relay_considered{};
+  std::size_t relay_expired_dropped{};
+  std::size_t relay_class_dropped{};
+  std::size_t relay_capacity_dropped{};
+  std::size_t relay_active{};
+  std::size_t static_active{};
+};
+
+// Combines the static policy servers with the relay-issued list for one
+// transport start: static entries first (their order is configuration), then
+// fresh relay entries whose candidate class the policy allows, capped at the
+// frozen 8-server total. Expired relay credentials are dropped so a relay
+// that stopped issuing degrades back to the pure static behavior instead of
+// feeding dead TURN accounts to ICE.
+[[nodiscard]] std::vector<NodeIceServer> merge_relay_ice_servers(
+    const PeerPathPolicy& policy,
+    const std::vector<RelayIssuedIceServer>& relay_issued,
+    std::uint64_t now_unix_seconds, RelayIceMergeStats* stats = nullptr);
+
 struct NodePeerSessionSnapshot {
   DeviceEndpointKey peer;
   RequestId request_id;
@@ -304,6 +339,15 @@ struct RelayNodeSnapshot {
   std::uint64_t heartbeats_missed{};
   std::uint64_t reconnect_count{};
   std::chrono::milliseconds backoff{};
+  // Relay-issued ICE configuration (relay_ice_config_v1): deliveries
+  // accepted from login_result/heartbeat_ack, malformed payloads (rejected
+  // by the wire codec), the number of relay servers currently held, and the
+  // UNIX-seconds expiry of the newest credential (0 = none held). Counters
+  // only — credential material never enters the snapshot.
+  std::uint64_t ice_config_updates{};
+  std::uint64_t ice_config_rejected{};
+  std::size_t ice_config_servers_active{};
+  std::uint64_t ice_config_expires_unix_seconds{};
   std::optional<Error> last_error;
 };
 

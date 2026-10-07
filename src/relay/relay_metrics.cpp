@@ -233,6 +233,28 @@ void write_login_section(MetricsWriter& writer,
                "Peak login challenges.");
 }
 
+void write_turn_section(MetricsWriter& writer,
+                        const RelayServerSnapshot& snapshot) {
+  // Relay-issued TURN credential families. Counters report zero for
+  // deployments without turn_credentials_enabled so dashboards stay stable
+  // across the rollout. No secret material: only aggregate counters.
+  writer.counter("heyaki_relay_turn_credentials_issued_total",
+                 snapshot.turn.issued,
+                 "Short-lived TURN REST credentials issued.");
+  writer.counter("heyaki_relay_turn_issue_failures_total",
+                 snapshot.turn_issue_failures,
+                 "Control replies that degraded because issuance failed.");
+  writer.counter("heyaki_relay_turn_credentials_validated_total",
+                 snapshot.turn.validated,
+                 "Issued credentials validated locally (diagnostic path).");
+  writer.counter("heyaki_relay_turn_credentials_rejected_total",
+                 snapshot.turn.validation_rejected,
+                 "Local validation rejections (diagnostic path).");
+  writer.gauge("heyaki_relay_turn_secret_generations",
+               snapshot.turn.active_secrets,
+               "Active TURN shared-secret generations (0 when disabled).");
+}
+
 void write_enrollment_section(
     MetricsWriter& writer, const RelayEnrollmentServiceDiagnostics& enrollment) {
   writer.counter("heyaki_relay_enrollment_challenges_issued_total",
@@ -289,6 +311,7 @@ std::string format_relay_metrics_prometheus(const RelayServerSnapshot& snapshot,
   write_endpoint_directory_section(writer, snapshot.endpoints);
   write_login_section(writer, snapshot.login);
   write_enrollment_section(writer, snapshot.enrollment);
+  write_turn_section(writer, snapshot);
   return writer.output();
 }
 

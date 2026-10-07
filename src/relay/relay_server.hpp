@@ -6,6 +6,7 @@
 #include "relay_enrollment_service.hpp"
 #include "relay_lease_table.hpp"
 #include "relay_login_service.hpp"
+#include "relay_turn_credentials.hpp"
 
 #include <heyaki/error.hpp>
 
@@ -56,6 +57,12 @@ struct RelayServerSnapshot {
   // counters bump whether or not a log sink is configured.
   std::uint64_t log_events_emitted{};
   std::uint64_t log_events_sampled_out{};
+  // Relay-issued TURN credentials: service diagnostics (issued count,
+  // active secret generations) plus the control-plane send failures. A
+  // failed issuance degrades gracefully — the login_result/heartbeat_ack
+  // still goes out without the optional ice_config field.
+  std::uint64_t turn_issue_failures{};
+  RelayTurnCredentialDiagnostics turn;
   // Public relay identity (SHA-256 of the serving certificate); joins the
   // Prometheus instance label with the structured log stream.
   RelayId relay_id{};

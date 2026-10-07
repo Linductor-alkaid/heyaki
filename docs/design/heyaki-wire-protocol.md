@@ -120,6 +120,27 @@ message is charged to the connection, global-request, and source-IP rate limits 
 valid enrollment/login/publish/query request is additionally charged to the tenant limit using a
 SHA-256-derived bounded key.
 
+### 1.2a Relay-issued ICE configuration (`relay_ice_config_v1`)
+
+When the relay operator enables TURN credential issuance
+(`turn_credentials_enabled`, short-lived coturn REST credentials per
+[deploy/coturn](../../deploy/coturn/README.md)), the optional
+`ice_config` field of `LoginResult` (field 4) and `HeartbeatAck` (field 3)
+carries a nested `IceConfig`: 1–4 `IceServer` entries (kind, hostname ≤255,
+port, TURN REST `username`/`credential`) plus `expires_unix_seconds`. The
+field is **capability-gated in both directions**: the relay includes it only
+for sessions whose login advertisement carried the optional
+`relay_ice_config_v1` capability bit (1 ≪ 15, part of the protocol 1.3 known
+set), and devices merge it into the session ICE configuration as fresh
+relay-issued entries alongside their static policy servers (static entries
+first, expired credentials dropped, combined cap 8). Deliveries ride the
+existing login/heartbeat cadence, so a credential (default TTL 600 s) is
+always refreshed well before expiry without a new connection. Deployments
+without the flag produce byte-identical `login_result`/`heartbeat_ack`
+payloads; enabling it requires all capability-advertising clients to be at
+this protocol version, and the TURN credential material is never logged,
+snapshotted, or mirrored into error details on either side.
+
 ## 2. Frame encoding
 
 Every transport channel carries a sequence of frames:

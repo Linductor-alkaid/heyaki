@@ -1,6 +1,7 @@
 #include "relay_config.hpp"
 
 #include "relay_rate_limiter.hpp"
+#include "relay_turn_credentials.hpp"
 
 #include <heyaki/error.hpp>
 #include <heyaki/relay_wss_control.hpp>
@@ -11,6 +12,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -18,14 +20,22 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
+#include <vector>
 
 namespace heyaki {
 namespace {
 
 constexpr std::size_t max_relay_config_file_bytes = 64U * 1024U;
+constexpr std::size_t max_turn_secret_file_bytes = 4096U;
 
 Error config_error(const char* detail, std::optional<std::int64_t> line = std::nullopt) {
   return Error{ErrorCode::configuration, "relay_config", detail, line};
+}
+
+Error turn_secret_error(const char* detail,
+                        std::optional<std::int64_t> underlying = std::nullopt) {
+  return Error{ErrorCode::configuration, "relay_turn", detail, underlying};
 }
 
 bool is_printable_ascii(std::string_view value) noexcept {
@@ -98,6 +108,104 @@ bool valid_listen_address(std::string_view value) noexcept {
          });
 }
 
+// Hostname of an advertised ICE server: printable ASCII without whitespace
+// and without characters that would collide with the URI grammar or the
+// comma-separated turn_servers list.
+bool valid_advertised_hostname(std::string_view value) noexcept {
+  if (value.empty() || value.size() > 253U) {
+    return false;
+  }
+  return std::all_of(value.begin(), value.end(), [](unsigned char character) {
+    if (character < 0x21U || character > 0x7eU) {
+      return false;
+    }
+    return character != ',' && character != '?' && character != '#' &&
+           character != '/' && character != '\\';
+  });
+}
+
+// Parses one `turn:host:port[?transport=udp|tcp]` / `stun:host:port` URI.
+// IPv6 literals must be bracketed (`turn:[2001:db8::1]:3478`); `turn:` with
+// no query defaults to UDP, matching coturn URI conventions. `turns:` is
+// rejected: no pinned ICE backend implements TURN/TLS.
+Result<RelayTurnAdvertisedServer> parse_turn_server_uri(std::string_view uri,
+                                                        std::int64_t line) {
+  RelayTurnAdvertisedServer server;
+  std::string_view rest;
+  if (uri.starts_with("turn:")) {
+    server.kind = RelayWssIceServerKind::turn_udp;
+    rest = uri.substr(5U);
+  } else if (uri.starts_with("stun:")) {
+    server.kind = RelayWssIceServerKind::stun;
+    rest = uri.substr(5U);
+  } else {
+    return Result<RelayTurnAdvertisedServer>::failure(
+        config_error("relay_config_turn_server_uri_invalid", line));
+  }
+  const bool turn = server.kind != RelayWssIceServerKind::stun;
+  if (rest.empty()) {
+    return Result<RelayTurnAdvertisedServer>::failure(
+        config_error("relay_config_turn_server_uri_invalid", line));
+  }
+  if (turn) {
+    const auto query = rest.find('?');
+    if (query != std::string_view::npos) {
+      const auto parameters = rest.substr(query + 1U);
+      rest = rest.substr(0U, query);
+      if (parameters == "transport=udp") {
+        server.kind = RelayWssIceServerKind::turn_udp;
+      } else if (parameters == "transport=tcp") {
+        server.kind = RelayWssIceServerKind::turn_tcp;
+      } else {
+        return Result<RelayTurnAdvertisedServer>::failure(
+            config_error("relay_config_turn_server_uri_invalid", line));
+      }
+    }
+  } else if (rest.find('?') != std::string_view::npos) {
+    return Result<RelayTurnAdvertisedServer>::failure(
+        config_error("relay_config_turn_server_uri_invalid", line));
+  }
+  std::string_view host;
+  std::string_view port_text;
+  bool bracketed = false;
+  if (rest.starts_with('[')) {
+    const auto closing = rest.find(']');
+    if (closing == std::string_view::npos || closing == 1U ||
+        closing + 1U >= rest.size() || rest[closing + 1U] != ':') {
+      return Result<RelayTurnAdvertisedServer>::failure(
+          config_error("relay_config_turn_server_uri_invalid", line));
+    }
+    host = rest.substr(1U, closing - 1U);
+    port_text = rest.substr(closing + 2U);
+    bracketed = true;
+  } else {
+    const auto separator = rest.rfind(':');
+    if (separator == std::string_view::npos || separator == 0U ||
+        separator + 1U >= rest.size()) {
+      return Result<RelayTurnAdvertisedServer>::failure(
+          config_error("relay_config_turn_server_uri_invalid", line));
+    }
+    host = rest.substr(0U, separator);
+    port_text = rest.substr(separator + 1U);
+  }
+  // An unbracketed host must be a name or IPv4 literal: a bare IPv6 literal
+  // without brackets is ambiguous against the `host:port` split, so it is
+  // rejected in favour of the bracketed form.
+  if (!valid_advertised_hostname(host) ||
+      (!bracketed && host.find(':') != std::string_view::npos)) {
+    return Result<RelayTurnAdvertisedServer>::failure(
+        config_error("relay_config_turn_server_uri_invalid", line));
+  }
+  auto port = parse_port(port_text, line);
+  if (!port) {
+    return Result<RelayTurnAdvertisedServer>::failure(
+        config_error("relay_config_turn_server_uri_invalid", line));
+  }
+  server.hostname = std::string{host};
+  server.port = *port.value_if();
+  return Result<RelayTurnAdvertisedServer>::success(std::move(server));
+}
+
 }  // namespace
 
 Result<void> validate_relay_server_config(const RelayServerConfig& config) {
@@ -141,7 +249,71 @@ Result<void> validate_relay_server_config(const RelayServerConfig& config) {
       config.signaling_rate_per_second > 1024U) {
     return Result<void>::failure(config_error("relay_config_invalid"));
   }
+  // Relay-issued TURN credentials: enabled requires a bounded TTL, at least
+  // one advertised server, and no TURN/TLS (no pinned backend); disabled
+  // rejects any stray TURN key so configurations never decay silently.
+  if (config.turn_credentials_enabled) {
+    if (config.turn_credential_ttl.count() <= 0 ||
+        config.turn_credential_ttl.count() > turn_credential_max_ttl_seconds ||
+        config.turn_servers.empty() ||
+        config.turn_servers.size() > max_relay_wss_ice_servers) {
+      return Result<void>::failure(config_error("relay_config_invalid"));
+    }
+    for (const auto& server : config.turn_servers) {
+      if (!valid_advertised_hostname(server.hostname) || server.port == 0U ||
+          server.kind == RelayWssIceServerKind::turn_tls) {
+        return Result<void>::failure(config_error("relay_config_invalid"));
+      }
+    }
+  } else if (!config.turn_servers.empty() || config.turn_secret_file.has_value() ||
+             config.turn_credential_ttl != std::chrono::seconds{600}) {
+    return Result<void>::failure(config_error("turn_config_disabled_conflict"));
+  }
   return RelayRateLimiter::validate_policy(config.rate_limits);
+}
+
+Result<std::string> load_relay_turn_secret(const RelayServerConfig& config) {
+  if (config.turn_secret_file) {
+    std::error_code error;
+    const auto size = std::filesystem::file_size(*config.turn_secret_file, error);
+    if (error || size == 0U || size > max_turn_secret_file_bytes) {
+      return Result<std::string>::failure(
+          turn_secret_error("turn_secret_file_unreadable",
+                            error ? std::optional<std::int64_t>{error.value()}
+                                  : std::nullopt));
+    }
+    std::ifstream input(*config.turn_secret_file, std::ios::binary);
+    if (!input) {
+      return Result<std::string>::failure(turn_secret_error("turn_secret_file_unreadable",
+                                                            errno));
+    }
+    std::string contents(static_cast<std::size_t>(size), '\0');
+    input.read(contents.data(), static_cast<std::streamsize>(contents.size()));
+    if (!input && !input.eof()) {
+      return Result<std::string>::failure(turn_secret_error("turn_secret_file_unreadable"));
+    }
+    // A single trailing newline (editor artifact) is tolerated: all trailing
+    // CR/LF bytes are stripped, everything else inside the file is secret.
+    while (!contents.empty() &&
+           (contents.back() == '\n' || contents.back() == '\r')) {
+      contents.pop_back();
+    }
+    auto valid = validate_turn_secret(contents);
+    if (!valid) {
+      return Result<std::string>::failure(turn_secret_error("turn_secret_invalid"));
+    }
+    return Result<std::string>::success(std::move(contents));
+  }
+  const char* environment = std::getenv(relay_turn_secret_env.data());
+  if (environment != nullptr && environment[0] != '\0') {
+    std::string secret{environment};
+    auto valid = validate_turn_secret(secret);
+    if (!valid) {
+      return Result<std::string>::failure(turn_secret_error("turn_secret_invalid"));
+    }
+    return Result<std::string>::success(std::move(secret));
+  }
+  return Result<std::string>::failure(turn_secret_error("turn_secret_unavailable"));
 }
 
 Result<RelayServerConfig> load_relay_config_file(
@@ -197,6 +369,10 @@ Result<RelayServerConfig> load_relay_config_file(
   std::optional<bool> expose_record_generation;
   std::optional<bool> expose_manifest_sha256;
   std::optional<bool> expose_manifest_generation;
+  std::optional<bool> turn_credentials_enabled;
+  std::optional<std::chrono::seconds> turn_credential_ttl;
+  std::optional<std::filesystem::path> turn_secret_file;
+  bool turn_servers_seen{false};
 
   std::size_t offset = 0U;
   std::int64_t line_number = 1;
@@ -501,6 +677,71 @@ Result<RelayServerConfig> load_relay_config_file(
       }
       config.shutdown_timeout = std::chrono::milliseconds{*parsed.value_if()};
       shutdown_timeout = config.shutdown_timeout;
+    } else if (key == "turn_credentials_enabled") {
+      if (turn_credentials_enabled) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_duplicate_key", line_number));
+      }
+      auto parsed = parse_bool(value, "relay_config_turn_enabled_invalid", line_number);
+      if (!parsed) {
+        return Result<RelayServerConfig>::failure(*parsed.error_if());
+      }
+      config.turn_credentials_enabled = *parsed.value_if();
+      turn_credentials_enabled = config.turn_credentials_enabled;
+    } else if (key == "turn_credential_ttl_seconds") {
+      if (turn_credential_ttl) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_duplicate_key", line_number));
+      }
+      auto parsed =
+          parse_u64(value, "relay_config_turn_ttl_invalid", line_number);
+      if (!parsed || *parsed.value_if() == 0U ||
+          *parsed.value_if() > turn_credential_max_ttl_seconds) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_turn_ttl_invalid", line_number));
+      }
+      config.turn_credential_ttl = std::chrono::seconds{*parsed.value_if()};
+      turn_credential_ttl = config.turn_credential_ttl;
+    } else if (key == "turn_secret_file") {
+      if (turn_secret_file) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_duplicate_key", line_number));
+      }
+      std::filesystem::path path{std::string{value}};
+      if (path.is_relative()) {
+        path = config_file.parent_path() / path;
+      }
+      config.turn_secret_file = std::move(path);
+      turn_secret_file = config.turn_secret_file;
+    } else if (key == "turn_servers") {
+      if (turn_servers_seen) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_duplicate_key", line_number));
+      }
+      turn_servers_seen = true;
+      std::string_view remaining{value};
+      std::vector<RelayTurnAdvertisedServer> servers;
+      while (!remaining.empty()) {
+        const auto comma = remaining.find(',');
+        const auto token = remaining.substr(0U, comma);
+        remaining = comma == std::string_view::npos
+                        ? std::string_view{}
+                        : remaining.substr(comma + 1U);
+        auto server = parse_turn_server_uri(token, line_number);
+        if (!server) {
+          return Result<RelayServerConfig>::failure(*server.error_if());
+        }
+        if (servers.size() >= max_relay_wss_ice_servers) {
+          return Result<RelayServerConfig>::failure(
+              config_error("relay_config_turn_server_capacity", line_number));
+        }
+        servers.push_back(std::move(*server.value_if()));
+      }
+      if (servers.empty()) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_turn_server_uri_invalid", line_number));
+      }
+      config.turn_servers = std::move(servers);
     } else {
       return Result<RelayServerConfig>::failure(
           config_error("relay_config_unknown_key", line_number));

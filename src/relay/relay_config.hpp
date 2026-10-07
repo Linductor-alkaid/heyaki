@@ -6,6 +6,7 @@
 #include "relay_log.hpp"
 #include "relay_rate_limiter.hpp"
 
+#include <heyaki/relay_wss_control.hpp>
 #include <heyaki/runtime.hpp>
 
 #include <chrono>
@@ -13,9 +14,25 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace heyaki {
+
+// Environment variable carrying the TURN shared secret when no
+// `turn_secret_file` is configured. Same variable the coturn deployment
+// (deploy/coturn) consumes, so one secret serves both sides.
+inline constexpr std::string_view relay_turn_secret_env = "HEYAKI_TURN_SECRET";
+
+// One advertised ICE server handed to devices through the relay-issued
+// `ice_config` field. Kind uses the wire enum; `turn_tls` is rejected by
+// validate_relay_server_config because no pinned ICE backend implements it.
+struct RelayTurnAdvertisedServer {
+  RelayWssIceServerKind kind{RelayWssIceServerKind::turn_udp};
+  std::string hostname;
+  std::uint16_t port{};
+};
 
 struct RelayServerConfig {
   std::string listen_address{"0.0.0.0"};
@@ -58,12 +75,28 @@ struct RelayServerConfig {
   std::size_t signaling_rate_per_second{32U};
   bool close_revoked_sessions{true};
   RelayRateLimitPolicy rate_limits;
+  // Relay-issued short-lived TURN REST credentials (coturn use-auth-secret).
+  // Default off: deployments without the flag keep byte-identical control
+  // traffic. The shared secret never enters this struct or the config file;
+  // it is loaded at server start from `turn_secret_file` or the
+  // HEYAKI_TURN_SECRET environment variable (in that precedence).
+  bool turn_credentials_enabled{false};
+  std::chrono::seconds turn_credential_ttl{600};
+  std::vector<RelayTurnAdvertisedServer> turn_servers;
+  std::optional<std::filesystem::path> turn_secret_file;
   RuntimeConfig runtime;
 };
 
 [[nodiscard]] Result<RelayServerConfig> load_relay_config_file(
     const std::filesystem::path& config_file);
 [[nodiscard]] Result<void> validate_relay_server_config(
+    const RelayServerConfig& config);
+// Resolves the TURN shared secret for an enabled configuration: reads
+// `turn_secret_file` when set (a single trailing newline is stripped),
+// otherwise the HEYAKI_TURN_SECRET environment variable. The secret is
+// validated with validate_turn_secret (16–256 printable ASCII bytes) and
+// never appears in the returned error details.
+[[nodiscard]] Result<std::string> load_relay_turn_secret(
     const RelayServerConfig& config);
 
 }  // namespace heyaki

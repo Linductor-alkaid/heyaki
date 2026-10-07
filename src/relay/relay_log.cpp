@@ -87,6 +87,8 @@ std::string_view relay_log_event_name(RelayLogEventKind kind) noexcept {
       return "heartbeat_refreshed";
     case RelayLogEventKind::endpoint_query_served:
       return "endpoint_query_served";
+    case RelayLogEventKind::turn_issue_failed:
+      return "turn_issue_failed";
   }
   return "unknown";
 }
