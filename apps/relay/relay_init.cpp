@@ -9,6 +9,7 @@
 #include <heyaki/password.hpp>
 #include <heyaki/security.hpp>
 
+#include <openssl/bio.h>
 #include <openssl/evp.h>
 #include <openssl/obj_mac.h>
 #include <openssl/pem.h>
@@ -108,17 +109,20 @@ std::string_view advertised_host(const std::vector<std::string>& san_entries,
 
 Result<std::array<std::byte, 32U>> certificate_digest(
     const std::filesystem::path& certificate_file) {
+  // PEM I/O goes through OpenSSL BIO, never FILE*: on Windows the FILE*-based
+  // PEM helpers require an OPENSSL_Applink table the app/test builds do not
+  // provide and abort at runtime (OPENSSL_Uplink ... no OPENSSL_Applink).
 #if defined(_WIN32)
-  std::FILE* file = _wfopen(certificate_file.c_str(), L"rb");
+  BIO* file = BIO_new_file(certificate_file.string().c_str(), "rb");
 #else
-  std::FILE* file = std::fopen(certificate_file.c_str(), "rb");
+  BIO* file = BIO_new_file(certificate_file.c_str(), "rb");
 #endif
   if (file == nullptr) {
-    return Result<std::array<std::byte, 32U>>::failure(init_error(
-        ErrorCode::configuration, "relay_init_certificate_unreadable", errno));
+    return Result<std::array<std::byte, 32U>>::failure(
+        init_error(ErrorCode::configuration, "relay_init_certificate_unreadable"));
   }
-  X509* certificate = PEM_read_X509(file, nullptr, nullptr, nullptr);
-  std::fclose(file);
+  X509* certificate = PEM_read_bio_X509(file, nullptr, nullptr, nullptr);
+  BIO_free(file);
   if (certificate == nullptr) {
     return Result<std::array<std::byte, 32U>>::failure(
         init_error(ErrorCode::configuration, "relay_init_certificate_unreadable"));
@@ -348,46 +352,53 @@ Result<std::array<std::byte, 32U>> generate_self_signed_relay_certificate(
   }
 
 #if defined(_WIN32)
-  std::FILE* key_file = nullptr;
-  if (fopen_s(&key_file, private_key_file.string().c_str(), "wb") != 0 ||
-      key_file == nullptr) {
+  BIO* key_file = BIO_new_file(private_key_file.string().c_str(), "wb");
+  if (key_file == nullptr) {
     return fail("relay_init_key_write_failed");
   }
 #else
+  // POSIX keeps the race-safe exclusive create with owner-only mode; the
+  // descriptor is wrapped as a BIO so the same bio PEM writer serves both
+  // platforms.
   const int key_fd = ::open(private_key_file.c_str(),
                             O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
   if (key_fd < 0) {
     return fail("relay_init_key_write_failed");
   }
-  std::FILE* key_file = ::fdopen(key_fd, "wb");
-  if (key_file == nullptr) {
+  std::FILE* key_stream = ::fdopen(key_fd, "wb");
+  if (key_stream == nullptr) {
     ::close(key_fd);
     return fail("relay_init_key_write_failed");
   }
-#endif
-  if (PEM_write_PrivateKey(key_file, key, nullptr, nullptr, 0, nullptr, nullptr) != 1 ||
-      std::fflush(key_file) != 0) {
-    std::fclose(key_file);
+  BIO* key_file = BIO_new_fp(key_stream, BIO_CLOSE);
+  if (key_file == nullptr) {
+    std::fclose(key_stream);
     return fail("relay_init_key_write_failed");
   }
-  std::fclose(key_file);
+#endif
+  if (PEM_write_bio_PrivateKey(key_file, key, nullptr, nullptr, 0, nullptr,
+                               nullptr) != 1) {
+    BIO_free_all(key_file);
+    return fail("relay_init_key_write_failed");
+  }
+  BIO_free_all(key_file);
 #if defined(_WIN32)
   restrict_owner_permissions(private_key_file);
 #endif
 
 #if defined(_WIN32)
-  std::FILE* cert_file = _wfopen(certificate_file.c_str(), L"wb");
+  BIO* cert_file = BIO_new_file(certificate_file.string().c_str(), "wb");
 #else
-  std::FILE* cert_file = std::fopen(certificate_file.c_str(), "wb");
+  BIO* cert_file = BIO_new_file(certificate_file.c_str(), "wb");
 #endif
   if (cert_file == nullptr) {
     return fail("relay_init_cert_write_failed");
   }
-  if (PEM_write_X509(cert_file, certificate) != 1 || std::fflush(cert_file) != 0) {
-    std::fclose(cert_file);
+  if (PEM_write_bio_X509(cert_file, certificate) != 1) {
+    BIO_free_all(cert_file);
     return fail("relay_init_cert_write_failed");
   }
-  std::fclose(cert_file);
+  BIO_free_all(cert_file);
 
   X509_free(certificate);
   EVP_PKEY_free(key);

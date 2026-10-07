@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 
 #include <openssl/evp.h>
+#include <openssl/bio.h>
 #include <openssl/pem.h>
 #include <openssl/x509.h>
 
@@ -129,13 +130,15 @@ std::string hex_encode(const EnrollmentPasswordProof& proof) {
 // SHA-256 of a PEM certificate — the relay id `relay --init` provisions
 // against and the running relay derives for itself.
 Result<RelayId> certificate_digest(const std::filesystem::path& certificate_file) {
-  std::FILE* file = std::fopen(certificate_file.string().c_str(), "rb");
+  // BIO, not FILE*: the FILE*-based PEM helpers abort on Windows without an
+  // OPENSSL_Applink table.
+  BIO* file = BIO_new_file(certificate_file.string().c_str(), "rb");
   if (file == nullptr) {
     return Result<RelayId>::failure(
         Error{ErrorCode::configuration, "test", "certificate_unreadable"});
   }
-  X509* certificate = PEM_read_X509(file, nullptr, nullptr, nullptr);
-  std::fclose(file);
+  X509* certificate = PEM_read_bio_X509(file, nullptr, nullptr, nullptr);
+  BIO_free(file);
   if (certificate == nullptr) {
     return Result<RelayId>::failure(
         Error{ErrorCode::configuration, "test", "certificate_unparseable"});
@@ -205,10 +208,10 @@ TEST(RelayInitTest, GeneratesSelfSignedCertificateWithDigestAndOwnerOnlyKey) {
             std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
 
   // The certificate is parseable PEM and the returned digest is its SHA-256.
-  std::FILE* file = std::fopen(certificate.string().c_str(), "rb");
+  BIO* file = BIO_new_file(certificate.string().c_str(), "rb");
   ASSERT_NE(file, nullptr);
-  X509* parsed = PEM_read_X509(file, nullptr, nullptr, nullptr);
-  std::fclose(file);
+  X509* parsed = PEM_read_bio_X509(file, nullptr, nullptr, nullptr);
+  BIO_free(file);
   ASSERT_NE(parsed, nullptr);
   std::array<unsigned char, 32U> digest{};
   const int matched = X509_digest(parsed, EVP_sha256(), digest.data(), nullptr);
