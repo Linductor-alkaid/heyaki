@@ -271,6 +271,8 @@ struct RelayNodeConfig {
   std::chrono::milliseconds poll_interval{100};
   std::size_t receive_capacity{64U};
   std::size_t send_capacity{64U};
+  // Field-wise equality for the runtime update_relay_config no-op check.
+  bool operator==(const RelayNodeConfig&) const = default;
 };
 
 // M9-11: heartbeat/backoff/queue bounds (frozen defaults plus hard upper
@@ -714,6 +716,24 @@ class Node {
   // The same path is triggered automatically when the interface binding set
   // changes; it is not a lossless migration.
   [[nodiscard]] Result<void> restart_session(DeviceEndpointKey peer);
+  // Runtime relay reconfiguration (issue #19). The call posts to the node
+  // strand and reports success once accepted; the outcome is observable
+  // through the relay state machine (RelayNodeSnapshot.state/last_error).
+  // - std::nullopt re-derives the configuration from the profile's enrollment
+  //   records (first auto_connect && !revoked record): after enrolling, this
+  //   connects; after removing or revoking the record, the control-plane
+  //   connection is torn down and relay reports disabled. With no active
+  //   enrollment the entry safely degrades to disabled.
+  // - A value replaces the running configuration: the old control-plane
+  //   connection is torn down in the shutdown order (stashed relay-signaling
+  //   requests re-routed, relay-only signaling attempts ended, authenticated
+  //   sessions keep their direct transports) and the new configuration
+  //   connects through the normal login machine. A configuration that fails
+  //   validation keeps the previous control plane and surfaces the error
+  //   through RelayNodeSnapshot.last_error. A request that races node
+  //   shutdown is a no-op: the shutdown sequence owns the relay teardown.
+  [[nodiscard]] Result<void> update_relay_config(
+      std::optional<RelayNodeConfig> relay_override);
   [[nodiscard]] Result<void> send_lan_signaling(LanSignalingMessage message);
   [[nodiscard]] Result<void> close_lan(DeviceEndpointKey peer);
 

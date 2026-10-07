@@ -1099,32 +1099,52 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     publish_resource_snapshot();
   }
 
+  // Reads the profile's first active enrollment record (auto_connect &&
+  // !revoked) into a RelayNodeConfig; success with nullopt means the profile
+  // has no active enrollment (relay disabled). Shared by the create-time
+  // initialization and the runtime update_relay_config reload.
+  Result<std::optional<RelayNodeConfig>> load_relay_config_from_profile() {
+    auto enrollments = profile.relay_enrollments();
+    if (!enrollments) {
+      return Result<std::optional<RelayNodeConfig>>::failure(
+          *enrollments.error_if());
+    }
+    const auto found = std::find_if(
+        enrollments.value_if()->begin(), enrollments.value_if()->end(),
+        [](const RelayEnrollmentRecord& enrollment) {
+          return enrollment.auto_connect && !enrollment.revoked;
+        });
+    if (found == enrollments.value_if()->end()) {
+      return Result<std::optional<RelayNodeConfig>>::success(std::nullopt);
+    }
+    RelayNodeConfig config;
+    config.enabled = true;
+    config.relay_url = found->relay_url;
+    config.relay_pin = found->relay_pin;
+    config.tenant = found->tenant;
+    config.enrollment_generation = found->enrollment_generation;
+    if (config.relay_pin) {
+      config.tls_verify_peer = false;
+    }
+    return Result<std::optional<RelayNodeConfig>>::success(
+        std::optional<RelayNodeConfig>{std::move(config)});
+  }
+
   Result<void> initialize_relay() {
     if (relay_override) {
       relay = *relay_override;
     } else {
-      auto enrollments = profile.relay_enrollments();
-      if (!enrollments) {
-        return Result<void>::failure(*enrollments.error_if());
+      auto loaded = load_relay_config_from_profile();
+      if (!loaded) {
+        return Result<void>::failure(*loaded.error_if());
       }
-      const auto found = std::find_if(
-          enrollments.value_if()->begin(), enrollments.value_if()->end(),
-          [](const RelayEnrollmentRecord& enrollment) {
-            return enrollment.auto_connect && !enrollment.revoked;
-          });
-      if (found == enrollments.value_if()->end()) {
+      if (!loaded.value_if()->has_value()) {
+        relay = RelayNodeConfig{};
         relay.enabled = false;
         relay_phase = RelayLoginPhase::disabled;
         return Result<void>::success();
       }
-      relay.enabled = true;
-      relay.relay_url = found->relay_url;
-      relay.relay_pin = found->relay_pin;
-      relay.tenant = found->tenant;
-      relay.enrollment_generation = found->enrollment_generation;
-      if (relay.relay_pin) {
-        relay.tls_verify_peer = false;
-      }
+      relay = **loaded.value_if();
     }
     auto valid = validate_relay_node_config(relay);
     if (!valid) {
@@ -1207,6 +1227,129 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       snapshot.relay.last_error.reset();
     });
     schedule_relay_poll();
+  }
+
+  // Closes the relay control plane without touching the phase machine: the
+  // timers and the WSS client go down in the same order as the shutdown
+  // sequence, and in-flight control state is dropped with the connection.
+  void close_relay_control() {
+    (void)relay_poll_timer.cancel();
+    (void)relay_heartbeat_timer.cancel();
+    (void)relay_reconnect_timer.cancel();
+    relay_poll_timer_active = false;
+    relay_heartbeat_timer_active = false;
+    relay_challenge.reset();
+    relay_heartbeat_pending = false;
+    if (relay_client) {
+      (void)relay_client->start_close();
+      relay_client.reset();
+    }
+  }
+
+  // Relay loss without a failure transition: re-routes stashed relay-signaling
+  // requests through the normal delivery path (LAN or explicit failure) and
+  // ends the attempts that still depend on relay signaling. Authenticated
+  // sessions are untouched - they own their direct transports.
+  void sever_relay_signaling(const Error& error) {
+    for (auto entry = stashed_relay_requests.begin();
+         entry != stashed_relay_requests.end();) {
+      SignalingEnvelope envelope = entry->second.envelope;
+      entry = stashed_relay_requests.erase(entry);
+      deliver_relay_envelope(envelope);
+    }
+    std::vector<RequestId> relay_attempts;
+    for (const auto& [request_id, attempt] : peer_attempts) {
+      if (attempt.snapshot.signaling_route == SignalingRouteKind::relay &&
+          !attempt.session) {
+        relay_attempts.push_back(request_id);
+      }
+    }
+    for (const auto request_id : relay_attempts) {
+      fail_peer_attempt(request_id, error);
+    }
+  }
+
+  // Runtime update to the disabled state (issue #19): bounded teardown, no
+  // failure/backoff machinery, clean snapshot.
+  void disable_relay_control() {
+    close_relay_control();
+    sever_relay_signaling(
+        node_error(ErrorCode::cancelled, "relay_disabled_at_runtime"));
+    relay.enabled = false;
+    relay_phase = RelayLoginPhase::disabled;
+    update_snapshot([](NodeSnapshot& snapshot) {
+      snapshot.relay = RelayNodeSnapshot{};
+    });
+  }
+
+  // Runtime relay reconfiguration (update_relay_config). Runs on the node
+  // strand. nullopt re-derives the configuration from the profile enrollment
+  // records; a value replaces the running configuration. Validation failures
+  // keep the previous control plane and surface through the relay snapshot;
+  // a request racing the shutdown sequence is a no-op.
+  void apply_relay_update(std::optional<RelayNodeConfig> updated) {
+    if (producers_stopped || peers_closed) {
+      return;
+    }
+    if (!updated.has_value()) {
+      auto loaded = load_relay_config_from_profile();
+      if (!loaded) {
+        // Profile read failure: keep the running control plane, surface it.
+        update_snapshot([&](NodeSnapshot& snapshot) {
+          snapshot.relay.last_error = *loaded.error_if();
+        });
+        return;
+      }
+      updated = std::move(*loaded.value_if());
+      if (!updated.has_value()) {
+        // No active enrollment in the profile: degrade safely to disabled.
+        if (relay_phase == RelayLoginPhase::disabled && !relay_client) {
+          return;
+        }
+        disable_relay_control();
+        return;
+      }
+    }
+    auto valid = validate_relay_node_config(*updated);
+    if (!valid) {
+      update_snapshot([&](NodeSnapshot& snapshot) {
+        snapshot.relay.last_error = *valid.error_if();
+      });
+      return;
+    }
+    const bool already_running =
+        relay.enabled && relay == *updated &&
+        relay_phase != RelayLoginPhase::disabled &&
+        relay_phase != RelayLoginPhase::failed &&
+        relay_phase != RelayLoginPhase::stopped;
+    if (already_running) {
+      return;
+    }
+    close_relay_control();
+    sever_relay_signaling(
+        node_error(ErrorCode::cancelled, "relay_replaced_at_runtime"));
+    relay = std::move(*updated);
+    if (!relay.enabled) {
+      disable_relay_control();
+      return;
+    }
+    // A fresh configuration starts a fresh registration cycle: no inherited
+    // reconnect backoff from the replaced one.
+    relay_registration_attempts = 0U;
+    relay_registration_failures = 0U;
+    relay_reconnect_count = 0U;
+    relay_reconnect_attempt = 0U;
+    relay_backoff = relay.minimum_backoff;
+    relay_phase = RelayLoginPhase::connecting;
+    update_snapshot([&](NodeSnapshot& snapshot) {
+      snapshot.relay.enabled = true;
+      snapshot.relay.relay_url = relay.relay_url;
+      snapshot.relay.tenant = relay.tenant;
+      snapshot.relay.enrollment_generation = relay.enrollment_generation;
+      snapshot.relay.state = RelayNodeState::starting;
+      snapshot.relay.last_error.reset();
+    });
+    start_relay_connect();
   }
 
   // Wake-up path for relay control traffic: the WSS client reports activity on
@@ -7087,6 +7230,24 @@ Result<void> Node::restart_session(DeviceEndpointKey peer) {
   } catch (...) {
     return Result<void>::failure(node_error(ErrorCode::internal,
                                             "session_restart_schedule_failed"));
+  }
+  return Result<void>::success();
+}
+
+Result<void> Node::update_relay_config(std::optional<RelayNodeConfig> relay_config) {
+  if (!impl_) {
+    return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
+  }
+  auto weak = std::weak_ptr<Impl>{impl_};
+  try {
+    boost::asio::post(impl_->strand, [weak, config = std::move(relay_config)]() mutable {
+      if (auto self = weak.lock()) {
+        self->apply_relay_update(std::move(config));
+      }
+    });
+  } catch (...) {
+    return Result<void>::failure(node_error(ErrorCode::internal,
+                                            "relay_update_schedule_failed"));
   }
   return Result<void>::success();
 }

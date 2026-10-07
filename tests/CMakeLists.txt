@@ -400,6 +400,33 @@ heyaki_configure_target(heyaki_m4_relay_cycle_repro)
 target_compile_definitions(heyaki_m4_relay_cycle_repro PRIVATE
   "HEYAKI_M4_REPRO_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}/repro\"")
 
+# Issue #19 regression: the Node runtime relay reconfiguration entry point
+# (Node::update_relay_config) observed through a real in-process relay server:
+# profile-driven connect/teardown, validation-failure preservation, explicit
+# replacement, and the shutdown race.
+add_executable(heyaki_m4_node_relay_update_tests unit/m4_node_relay_update_test.cpp)
+heyaki_enable_executor_exception_adapter_source(unit/m4_node_relay_update_test.cpp)
+target_link_libraries(heyaki_m4_node_relay_update_tests PRIVATE
+  heyaki::client
+  heyaki::profile
+  heyaki::sqlite
+  heyaki::relay
+  kairo::kairo
+  GTest::gtest_main
+  OpenSSL::SSL OpenSSL::Crypto)
+heyaki_target_use_pinned_boost_beast(heyaki_m4_node_relay_update_tests)
+target_include_directories(heyaki_m4_node_relay_update_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/relay"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/client"
+  "${CMAKE_CURRENT_SOURCE_DIR}/unit")
+heyaki_configure_target(heyaki_m4_node_relay_update_tests)
+target_compile_definitions(heyaki_m4_node_relay_update_tests PRIVATE
+  "HEYAKI_M4_RELAY_UPDATE_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}/m4-node-relay-update\"")
+heyaki_add_runtime_test(
+  heyaki_m4_node_relay_update heyaki_m4_node_relay_update_tests
+  "relay;regression;concurrency")
+
 add_executable(heyaki_m4_topology_matrix_tests unit/m4_topology_matrix_test.cpp)
 heyaki_enable_executor_exception_adapter_source(unit/m4_topology_matrix_test.cpp)
 target_link_libraries(heyaki_m4_topology_matrix_tests PRIVATE
