@@ -15,6 +15,7 @@
 #include <heyaki/profile_store.hpp>
 #include <heyaki/trust_grant.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -34,17 +35,24 @@ namespace heyaki {
 // Counters mirrored from the audit funnel (M9-01): every audit event bumps
 // exactly one counter regardless of whether an audit sink is configured, so
 // NodeMetrics pairing totals stay complete without the event stream.
+//
+// The counters are atomic because audit() has no single owning context:
+// session callbacks drive evaluate/approve/accept_grant on the node strand,
+// public Node methods (revoke/rotate) increment on the caller's thread, and
+// the Node metrics timer reads this struct from the expiry tick without any
+// lock shared with those writers. Relaxed ordering is enough: the totals are
+// diagnostics and never gate a synchronization decision.
 struct PairingServiceStats {
-  std::uint64_t attempts{};
-  std::uint64_t granted{};
-  std::uint64_t denied_password{};
-  std::uint64_t denied_policy{};
-  std::uint64_t denied_backoff{};
-  std::uint64_t grant_accepted{};
-  std::uint64_t grant_rejected{};
-  std::uint64_t grant_revoked{};
-  std::uint64_t password_rotated{};
-  std::uint64_t grants_revoked{};
+  std::atomic<std::uint64_t> attempts{0};
+  std::atomic<std::uint64_t> granted{0};
+  std::atomic<std::uint64_t> denied_password{0};
+  std::atomic<std::uint64_t> denied_policy{0};
+  std::atomic<std::uint64_t> denied_backoff{0};
+  std::atomic<std::uint64_t> grant_accepted{0};
+  std::atomic<std::uint64_t> grant_rejected{0};
+  std::atomic<std::uint64_t> grant_revoked{0};
+  std::atomic<std::uint64_t> password_rotated{0};
+  std::atomic<std::uint64_t> grants_revoked{0};
 };
 
 struct PairingServiceConfig {

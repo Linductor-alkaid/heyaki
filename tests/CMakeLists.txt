@@ -912,6 +912,28 @@ heyaki_add_runtime_test(
   heyaki_m5_pairing heyaki_m5_pairing_service_tests
   "unit;security;profile;session")
 
+# Issue #21 regression: the PairingServiceStats audit counters are written
+# from public-API caller threads (rotate/revoke) and read by the Node metrics
+# expiry tick with no shared lock; the counters must be atomic so a
+# concurrent rotate writer against a metrics-style reader stays race-free
+# under ThreadSanitizer and keeps exact totals.
+add_executable(heyaki_m5_pairing_stats_race_tests unit/m5_pairing_stats_race_test.cpp)
+target_link_libraries(heyaki_m5_pairing_stats_race_tests PRIVATE
+  heyaki::client
+  heyaki::profile
+  heyaki::sqlite
+  kairo::kairo
+  GTest::gtest_main)
+target_include_directories(heyaki_m5_pairing_stats_race_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/client"
+  "${CMAKE_CURRENT_SOURCE_DIR}/unit")
+heyaki_configure_target(heyaki_m5_pairing_stats_race_tests)
+heyaki_enable_executor_exception_adapter_source(unit/m5_pairing_stats_race_test.cpp)
+heyaki_add_runtime_test(
+  heyaki_m5_pairing_stats_race heyaki_m5_pairing_stats_race_tests
+  "unit;security;concurrency;regression")
+
 # Issue #2 passwordless pairing approval: the Node-level receiver-approval
 # contract (request observer fires once per admitted submission,
 # approve_pairing/reject_pairing resolve exactly once with policy-intersected

@@ -51,36 +51,39 @@ void PairingService::audit(PairingAuditKind kind, const DeviceId& peer,
                            const GrantId* grant_id) {
   // Metrics counters increment even without an audit sink (M9-01): the
   // NodeMetrics pairing totals must not depend on observer configuration.
+  // Relaxed fetch_add: audit() runs on the node strand (session callbacks)
+  // and on public-API caller threads (revoke/rotate) while the Node metrics
+  // timer reads the counters from the expiry tick - no common lock exists.
   switch (kind) {
     case PairingAuditKind::attempt:
-      ++stats_.attempts;
+      stats_.attempts.fetch_add(1U, std::memory_order_relaxed);
       break;
     case PairingAuditKind::granted:
-      ++stats_.granted;
+      stats_.granted.fetch_add(1U, std::memory_order_relaxed);
       break;
     case PairingAuditKind::denied_password:
-      ++stats_.denied_password;
+      stats_.denied_password.fetch_add(1U, std::memory_order_relaxed);
       break;
     case PairingAuditKind::denied_policy:
-      ++stats_.denied_policy;
+      stats_.denied_policy.fetch_add(1U, std::memory_order_relaxed);
       break;
     case PairingAuditKind::denied_backoff:
-      ++stats_.denied_backoff;
+      stats_.denied_backoff.fetch_add(1U, std::memory_order_relaxed);
       break;
     case PairingAuditKind::grant_accepted:
-      ++stats_.grant_accepted;
+      stats_.grant_accepted.fetch_add(1U, std::memory_order_relaxed);
       break;
     case PairingAuditKind::grant_rejected:
-      ++stats_.grant_rejected;
+      stats_.grant_rejected.fetch_add(1U, std::memory_order_relaxed);
       break;
     case PairingAuditKind::grant_revoked:
-      ++stats_.grant_revoked;
+      stats_.grant_revoked.fetch_add(1U, std::memory_order_relaxed);
       break;
     case PairingAuditKind::password_rotated:
-      ++stats_.password_rotated;
+      stats_.password_rotated.fetch_add(1U, std::memory_order_relaxed);
       break;
     case PairingAuditKind::grants_revoked:
-      ++stats_.grants_revoked;
+      stats_.grants_revoked.fetch_add(1U, std::memory_order_relaxed);
       break;
   }
   if (!config_.audit_sink) return;

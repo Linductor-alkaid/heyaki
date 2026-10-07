@@ -4610,17 +4610,28 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     metrics.unix_milliseconds = unix_milliseconds_now();
     metrics.node = snapshots.load().value;
     if (pairing_service) {
+      // The atomic counters tolerate concurrent increments from public-API
+      // caller threads (revoke/rotate) while this strand-context tick reads;
+      // each total is loaded relaxed, diagnostics only.
       const auto& stats = pairing_service->stats();
-      metrics.pairing.attempts = stats.attempts;
-      metrics.pairing.granted = stats.granted;
-      metrics.pairing.denied_password = stats.denied_password;
-      metrics.pairing.denied_policy = stats.denied_policy;
-      metrics.pairing.denied_backoff = stats.denied_backoff;
-      metrics.pairing.grant_accepted = stats.grant_accepted;
-      metrics.pairing.grant_rejected = stats.grant_rejected;
-      metrics.pairing.grant_revoked = stats.grant_revoked;
-      metrics.pairing.password_rotated = stats.password_rotated;
-      metrics.pairing.grants_revoked = stats.grants_revoked;
+      metrics.pairing.attempts = stats.attempts.load(std::memory_order_relaxed);
+      metrics.pairing.granted = stats.granted.load(std::memory_order_relaxed);
+      metrics.pairing.denied_password =
+          stats.denied_password.load(std::memory_order_relaxed);
+      metrics.pairing.denied_policy =
+          stats.denied_policy.load(std::memory_order_relaxed);
+      metrics.pairing.denied_backoff =
+          stats.denied_backoff.load(std::memory_order_relaxed);
+      metrics.pairing.grant_accepted =
+          stats.grant_accepted.load(std::memory_order_relaxed);
+      metrics.pairing.grant_rejected =
+          stats.grant_rejected.load(std::memory_order_relaxed);
+      metrics.pairing.grant_revoked =
+          stats.grant_revoked.load(std::memory_order_relaxed);
+      metrics.pairing.password_rotated =
+          stats.password_rotated.load(std::memory_order_relaxed);
+      metrics.pairing.grants_revoked =
+          stats.grants_revoked.load(std::memory_order_relaxed);
     }
     metrics.connectivity = connectivity_metrics;
     metrics.services = services;
