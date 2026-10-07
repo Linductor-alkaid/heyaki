@@ -196,8 +196,8 @@ TEST(M3BRelayEnrollmentBootstrapTest, PasswordVerifierRoundTripReplaceAndPersist
 
   RelayEnrollmentPasswordRecord record;
   record.format_version = 1U;
-  record.argon2_operations = 3U;
-  record.argon2_memory_kib = 131072U;
+  record.kdf_operations = 3U;
+  record.kdf_memory_kib = 131072U;
   record.encoded =
       "$argon2id$v=19$m=131072,t=3,c29tZXNhbHRzb21lc2FsdA$Zkm2p3Fq0Y0vWqfEeQ7PQg";
   record.updated_unix_milliseconds = 1'770'000'000'000U;
@@ -208,8 +208,8 @@ TEST(M3BRelayEnrollmentBootstrapTest, PasswordVerifierRoundTripReplaceAndPersist
   ASSERT_TRUE(loaded) << loaded.error_if()->safe_detail();
   ASSERT_TRUE(loaded.value_if()->has_value());
   EXPECT_EQ((*loaded.value_if())->format_version, record.format_version);
-  EXPECT_EQ((*loaded.value_if())->argon2_operations, record.argon2_operations);
-  EXPECT_EQ((*loaded.value_if())->argon2_memory_kib, record.argon2_memory_kib);
+  EXPECT_EQ((*loaded.value_if())->kdf_operations, record.kdf_operations);
+  EXPECT_EQ((*loaded.value_if())->kdf_memory_kib, record.kdf_memory_kib);
   EXPECT_EQ((*loaded.value_if())->encoded, record.encoded);
   EXPECT_EQ((*loaded.value_if())->updated_unix_milliseconds,
             record.updated_unix_milliseconds);
@@ -217,8 +217,8 @@ TEST(M3BRelayEnrollmentBootstrapTest, PasswordVerifierRoundTripReplaceAndPersist
   // Setting again replaces the single row.
   RelayEnrollmentPasswordRecord replacement;
   replacement.format_version = 1U;
-  replacement.argon2_operations = 2U;
-  replacement.argon2_memory_kib = 65536U;
+  replacement.kdf_operations = 2U;
+  replacement.kdf_memory_kib = 65536U;
   replacement.encoded =
       "$argon2id$v=19$m=65536,t=2,yetFhXRoZXJzYWx0eWV0$Zkm2p3Fq0Y0vWqfEeQ7PQg";
   replacement.updated_unix_milliseconds = 1'770'000'100'000U;
@@ -247,8 +247,8 @@ TEST(M3BRelayEnrollmentBootstrapTest, RejectsInvalidPasswordVerifierRecords) {
 
   RelayEnrollmentPasswordRecord base;
   base.format_version = 1U;
-  base.argon2_operations = 2U;
-  base.argon2_memory_kib = 65536U;
+  base.kdf_operations = 2U;
+  base.kdf_memory_kib = 65536U;
   base.encoded = "$argon2id$v=19$m=65536,t=2,c2FsdA$aGFzaA";
   base.updated_unix_milliseconds = 42U;
 
@@ -280,15 +280,15 @@ TEST(M3BRelayEnrollmentBootstrapTest, RejectsInvalidPasswordVerifierRecords) {
   expect_rejected(with_whitespace);
 
   auto zero_operations = base;
-  zero_operations.argon2_operations = 0U;
+  zero_operations.kdf_operations = 0U;
   expect_rejected(zero_operations);
 
   auto too_many_operations = base;
-  too_many_operations.argon2_operations = 17U;
+  too_many_operations.kdf_operations = 17U;
   expect_rejected(too_many_operations);
 
   auto tiny_memory = base;
-  tiny_memory.argon2_memory_kib = 8191U;
+  tiny_memory.kdf_memory_kib = 8191U;
   expect_rejected(tiny_memory);
 
   auto zero_updated = base;
@@ -449,7 +449,8 @@ TEST(M3BRelayEnrollmentBootstrapTest, RejectsInvalidEnrollmentKeys) {
 TEST(M3BRelayEnrollmentBootstrapTest, EnrollmentResultWithoutFingerprintKeepsLegacyBytes) {
   RelayWssEnrollmentResult result{.tenant = "tenant-a",
                                   .enrollment_generation = 7U,
-                                  .token_remaining_uses_after = 2U};
+                                  .token_remaining_uses_after = 2U,
+                                  .relay_certificate_sha256 = std::nullopt};
   auto encoded = encode_relay_wss_enrollment_result(result);
   ASSERT_TRUE(encoded) << encoded.error_if()->safe_detail();
 
@@ -518,7 +519,8 @@ TEST(M3BRelayEnrollmentBootstrapTest, EnrollmentResultFingerprintRoundTrip) {
 TEST(M3BRelayEnrollmentBootstrapTest, EnrollmentResultRejectsWrongFingerprintLength) {
   RelayWssEnrollmentResult result{.tenant = "default",
                                   .enrollment_generation = 1U,
-                                  .token_remaining_uses_after = 0U};
+                                  .token_remaining_uses_after = 0U,
+                                  .relay_certificate_sha256 = std::nullopt};
   auto encoded = encode_relay_wss_enrollment_result(result);
   ASSERT_TRUE(encoded) << encoded.error_if()->safe_detail();
 

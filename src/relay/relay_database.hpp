@@ -53,8 +53,8 @@ struct RelayBootstrapConsumption {
 
 struct RelayEnrollmentPasswordRecord {
   std::uint16_t format_version{1U};
-  std::uint32_t argon2_operations{2U};
-  std::uint32_t argon2_memory_kib{65536U};
+  std::uint32_t kdf_operations{2U};
+  std::uint32_t kdf_memory_kib{65536U};
   std::string encoded;
   std::uint64_t updated_unix_milliseconds{};
 };

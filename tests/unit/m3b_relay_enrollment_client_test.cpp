@@ -96,7 +96,8 @@ TEST(M3BRelayEnrollmentClientTest, PersistsOnlyAfterSuccessfulExchange) {
         .relay_url = "wss://relay.example/enroll",
         .tenant = "tenant-a",
         .enrollment_generation = 1U,
-        .token_remaining_uses_after = 2U});
+        .token_remaining_uses_after = 2U,
+        .relay_certificate_sha256 = std::nullopt});
   };
 
   auto enrolled = enroll_relay_profile(config, "TEST-ONLY-enrollment-token-012345",
@@ -157,7 +158,8 @@ TEST(M3BRelayEnrollmentClientTest, MismatchedExchangeResultRollsBackAndDoesNotPe
         .relay_url = "wss://other.example/enroll",
         .tenant = "tenant-a",
         .enrollment_generation = 1U,
-        .token_remaining_uses_after = 0U});
+        .token_remaining_uses_after = 0U,
+        .relay_certificate_sha256 = std::nullopt});
   };
   config.rollback = [&](const DeviceId& device_id, std::string_view tenant,
                         std::uint64_t generation) -> Result<void> {
@@ -196,7 +198,8 @@ TEST(M3BRelayEnrollmentClientTest, UninitializedProfileIsNotCreatedImplicitly) {
     return Result<RelayEnrollmentExchangeResult>::success(RelayEnrollmentExchangeResult{
         .relay_url = "wss://relay.example/enroll",
         .tenant = "tenant-a",
-        .enrollment_generation = 1U});
+        .enrollment_generation = 1U,
+        .relay_certificate_sha256 = std::nullopt});
   };
 
   auto enrolled = enroll_relay_profile(config, "TEST-ONLY-enrollment-token-012345",

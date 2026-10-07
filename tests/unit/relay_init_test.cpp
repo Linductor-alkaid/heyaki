@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 
 #include <openssl/evp.h>
+#include <openssl/bio.h>
 #include <openssl/pem.h>
 #include <openssl/x509.h>
 
@@ -105,9 +106,9 @@ std::uint64_t now_milliseconds() {
 PasswordVerifier to_verifier(const RelayEnrollmentPasswordRecord& record) {
   PasswordVerifier verifier;
   verifier.format_version = record.format_version;
-  verifier.parameters.operations = record.argon2_operations;
+  verifier.parameters.operations = record.kdf_operations;
   verifier.parameters.memory_bytes =
-      static_cast<std::size_t>(record.argon2_memory_kib) * 1024U;
+      static_cast<std::size_t>(record.kdf_memory_kib) * 1024U;
   verifier.encoded = record.encoded;
   return verifier;
 }
@@ -129,13 +130,15 @@ std::string hex_encode(const EnrollmentPasswordProof& proof) {
 // SHA-256 of a PEM certificate — the relay id `relay --init` provisions
 // against and the running relay derives for itself.
 Result<RelayId> certificate_digest(const std::filesystem::path& certificate_file) {
-  std::FILE* file = std::fopen(certificate_file.string().c_str(), "rb");
+  // BIO, not FILE*: the FILE*-based PEM helpers abort on Windows without an
+  // OPENSSL_Applink table.
+  BIO* file = BIO_new_file(certificate_file.string().c_str(), "rb");
   if (file == nullptr) {
     return Result<RelayId>::failure(
         Error{ErrorCode::configuration, "test", "certificate_unreadable"});
   }
-  X509* certificate = PEM_read_X509(file, nullptr, nullptr, nullptr);
-  std::fclose(file);
+  X509* certificate = PEM_read_bio_X509(file, nullptr, nullptr, nullptr);
+  BIO_free(file);
   if (certificate == nullptr) {
     return Result<RelayId>::failure(
         Error{ErrorCode::configuration, "test", "certificate_unparseable"});
@@ -199,16 +202,20 @@ TEST(RelayInitTest, GeneratesSelfSignedCertificateWithDigestAndOwnerOnlyKey) {
   ASSERT_TRUE(std::filesystem::is_regular_file(certificate));
   ASSERT_TRUE(std::filesystem::is_regular_file(private_key));
 
-  // The key file is owner-only (0600).
+  // The key file is owner-only (0600). Windows reports synthetic POSIX
+  // permissions from the read-only attribute (0777 unless marked read-only),
+  // so the mode assertion is meaningful on POSIX only.
+#if !defined(_WIN32)
   const auto permissions = key_permissions(private_key);
   EXPECT_EQ(permissions & std::filesystem::perms::mask,
             std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
+#endif
 
   // The certificate is parseable PEM and the returned digest is its SHA-256.
-  std::FILE* file = std::fopen(certificate.string().c_str(), "rb");
+  BIO* file = BIO_new_file(certificate.string().c_str(), "rb");
   ASSERT_NE(file, nullptr);
-  X509* parsed = PEM_read_X509(file, nullptr, nullptr, nullptr);
-  std::fclose(file);
+  X509* parsed = PEM_read_bio_X509(file, nullptr, nullptr, nullptr);
+  BIO_free(file);
   ASSERT_NE(parsed, nullptr);
   std::array<unsigned char, 32U> digest{};
   const int matched = X509_digest(parsed, EVP_sha256(), digest.data(), nullptr);
@@ -343,8 +350,10 @@ TEST(RelayInitTest, RunInitProvisionsConfigCertificateDatabaseAndTurnSecret) {
   EXPECT_EQ(turn_contents.find("HEYAKI_TURN_SECRET=" + std::string(40U, 'x')),
             std::string::npos)
       << "the TURN secret must be random";
+#if !defined(_WIN32)
   EXPECT_EQ(key_permissions(turn_env) & std::filesystem::perms::mask,
             std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
+#endif
 }
 
 TEST(RelayInitTest, RunInitIsIdempotentWithoutNewPasswordInput) {
@@ -375,7 +384,11 @@ TEST(RelayInitTest, RunInitIsIdempotentWithoutNewPasswordInput) {
   // and stdin (/dev/null) makes the interactive prompt fail fast), so the
   // existing verifier is kept and no artifact is rewritten.
   options.password_file.reset();
+#if defined(_WIN32)
+  std::FILE* null_stdin = std::freopen("NUL", "r", stdin);
+#else
   std::FILE* null_stdin = std::freopen("/dev/null", "r", stdin);
+#endif
   ASSERT_NE(null_stdin, nullptr);
   std::string output;
   {
@@ -408,9 +421,17 @@ TEST(RelayInitTest, RunInitFailsWithoutAnyPasswordSourceOnFreshDatabase) {
   const char* saved_environment = std::getenv("HEYAKI_INIT_PASSWORD");
   const bool had_environment = saved_environment != nullptr;
   const std::string saved_value = had_environment ? saved_environment : "";
+#if defined(_WIN32)
+  _putenv_s("HEYAKI_INIT_PASSWORD", "");
+#else
   unsetenv("HEYAKI_INIT_PASSWORD");
+#endif
 
+#if defined(_WIN32)
+  std::FILE* null_stdin = std::freopen("NUL", "r", stdin);
+#else
   std::FILE* null_stdin = std::freopen("/dev/null", "r", stdin);
+#endif
   ASSERT_NE(null_stdin, nullptr);
 
   std::string failure_detail;
@@ -423,11 +444,19 @@ TEST(RelayInitTest, RunInitFailsWithoutAnyPasswordSourceOnFreshDatabase) {
   }
 
   // Restore the caller's environment.
+#if defined(_WIN32)
+  if (had_environment) {
+    _putenv_s("HEYAKI_INIT_PASSWORD", saved_value.c_str());
+  } else {
+    _putenv_s("HEYAKI_INIT_PASSWORD", "");
+  }
+#else
   if (had_environment) {
     setenv("HEYAKI_INIT_PASSWORD", saved_value.c_str(), 1);
   } else {
     unsetenv("HEYAKI_INIT_PASSWORD");
   }
+#endif
 
   // The config and certificate may exist, but no verifier may have been
   // provisioned without a password.

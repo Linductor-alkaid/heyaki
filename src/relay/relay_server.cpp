@@ -1306,7 +1306,8 @@ void RelayServer::Impl::session_handle_control(
         .tenant = completed.value_if()->tenant,
         .enrollment_generation = completed.value_if()->enrollment_generation,
         .token_remaining_uses_after =
-            completed.value_if()->token_remaining_uses_after.value_or(0U)};
+            completed.value_if()->token_remaining_uses_after.value_or(0U),
+        .relay_certificate_sha256 = std::nullopt};
     // Password-mode completions anchor the TLS pin for URL+password clients:
     // the relay id already is the SHA-256 digest of the leaf certificate.
     // Token-mode responses stay byte-identical to older relays so legacy

@@ -159,9 +159,9 @@ Result<EnrollmentPasswordProof> provision_verifier(RelayDatabase& database,
   }
   RelayEnrollmentPasswordRecord record;
   record.format_version = verifier.value_if()->format_version;
-  record.argon2_operations =
+  record.kdf_operations =
       static_cast<std::uint32_t>(verifier.value_if()->parameters.operations);
-  record.argon2_memory_kib = static_cast<std::uint32_t>(
+  record.kdf_memory_kib = static_cast<std::uint32_t>(
       verifier.value_if()->parameters.memory_bytes / 1024U);
   record.encoded = verifier.value_if()->encoded;
   record.updated_unix_milliseconds = now_milliseconds();

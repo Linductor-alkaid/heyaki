@@ -120,7 +120,10 @@ TEST(M3BRelayWssControlTest, FramesAndPayloadsRoundTrip) {
   EXPECT_EQ(parsed.value_if()->payload, std::vector<std::byte>(payload.begin(), payload.end()));
 
   RelayWssEnrollmentResult result{
-      .tenant = "tenant-a", .enrollment_generation = 7U, .token_remaining_uses_after = 2U};
+      .tenant = "tenant-a",
+      .enrollment_generation = 7U,
+      .token_remaining_uses_after = 2U,
+      .relay_certificate_sha256 = std::nullopt};
   auto result_bytes = encode_relay_wss_enrollment_result(result);
   ASSERT_TRUE(result_bytes) << result_bytes.error_if()->safe_detail();
   protocol::enrollment::v1::EnrollmentResult protobuf_result;
@@ -185,9 +188,11 @@ TEST(M3BRelayWssControlTest, RejectsMalformedAndUnboundedInput) {
   EXPECT_FALSE(parse_relay_wss_control_frame(oversized));
   EXPECT_FALSE(encode_relay_wss_control_frame(RelayWssControlType::enrollment_request, oversized));
 
-  RelayWssEnrollmentResult invalid_result{.tenant = std::string{"\xc0\x80", 2U},
-                                          .enrollment_generation = 1U,
-                                          .token_remaining_uses_after = 0U};
+  RelayWssEnrollmentResult invalid_result{
+      .tenant = std::string{"\xc0\x80", 2U},
+      .enrollment_generation = 1U,
+      .token_remaining_uses_after = 0U,
+      .relay_certificate_sha256 = std::nullopt};
   EXPECT_FALSE(encode_relay_wss_enrollment_result(invalid_result));
   invalid_result.tenant = std::string{"tenant\0a", 8U};
   EXPECT_FALSE(encode_relay_wss_enrollment_result(invalid_result));
