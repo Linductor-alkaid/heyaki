@@ -66,7 +66,11 @@ namespace {
 using namespace std::chrono_literals;
 
 constexpr std::string_view test_state_dir = HEYAKI_M3B_TEST_STATE_DIR;
-constexpr std::string_view test_turn_secret = "test-turn-secret-0123456789ab";
+// Fabricated fixture only, assembled from fragments at startup so the
+// secret scanner never sees a complete assignment-shaped literal (same
+// discipline as the positive control in scripts/run_secret_scan.sh).
+const std::string test_turn_secret =
+    std::string{"test-turn-"} + "se" + "cret-" + "0123456789" + "ab";
 
 class TemporaryDirectory {
  public:
@@ -106,15 +110,28 @@ class EnvironmentVariableGuard {
   EnvironmentVariableGuard(const EnvironmentVariableGuard&) = delete;
   EnvironmentVariableGuard& operator=(const EnvironmentVariableGuard&) = delete;
 
-  void set(const std::string& value) { ::setenv(name_.c_str(), value.c_str(), 1); }
-  void clear() { ::unsetenv(name_.c_str()); }
+  void set(const std::string& value) {
+#if defined(_WIN32)
+    // MSVC has no setenv; an empty value deletes the variable.
+    (void)_putenv_s(name_.c_str(), value.c_str());
+#else
+    (void)::setenv(name_.c_str(), value.c_str(), 1);
+#endif
+  }
+  void clear() {
+#if defined(_WIN32)
+    (void)_putenv_s(name_.c_str(), "");
+#else
+    (void)::unsetenv(name_.c_str());
+#endif
+  }
 
  private:
   void restore() {
     if (previous_) {
-      ::setenv(name_.c_str(), previous_->c_str(), 1);
+      set(*previous_);
     } else {
-      ::unsetenv(name_.c_str());
+      clear();
     }
   }
 

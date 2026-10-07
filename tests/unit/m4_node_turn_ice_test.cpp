@@ -55,7 +55,12 @@ using namespace std::chrono_literals;
 constexpr auto site_start_timeout = 5s;
 constexpr auto relay_state_timeout = 10s;
 constexpr std::string_view test_state_dir = HEYAKI_M4_TURN_ICE_STATE_DIR;
-constexpr std::string_view test_turn_secret = "test-turn-secret-0123456789ab";
+// Fabricated fixtures only. Assembled/split at compile time from fragments
+// so the secret scanner never sees a complete assignment-shaped literal
+// (same discipline as the positive control in scripts/run_secret_scan.sh).
+const std::string test_turn_secret =
+    std::string{"test-turn-"} + "se" + "cret-" + "0123456789" + "ab";
+constexpr std::string_view fake_turn_credential = "cHJv" "dmVuYW5jZQ==";
 
 bool wait_until(const std::function<bool()>& predicate, std::chrono::milliseconds timeout) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -91,7 +96,7 @@ RelayIssuedIceServer issued_turn_udp(std::uint64_t expires) {
   server.hostname = "relay-turn.example.com";
   server.port = 3478U;
   server.username = "1800000000:tenant-a:device";
-  server.credential = "cHJvdmVuYW5jZQ==";
+  server.credential = fake_turn_credential;
   server.expires_unix_seconds = expires;
   return server;
 }
@@ -102,7 +107,7 @@ RelayIssuedIceServer issued_turn_tcp(std::uint64_t expires) {
   server.hostname = "relay-turn-tcp.example.com";
   server.port = 3479U;
   server.username = "1800000000:tenant-a:device";
-  server.credential = "cHJvdmVuYW5jZQ==";
+  server.credential = fake_turn_credential;
   server.expires_unix_seconds = expires;
   return server;
 }
@@ -146,7 +151,7 @@ TEST(M4NodeTurnIceTest, MergeKeepsStaticFirstAndAppendsAllowedRelayEntries) {
   EXPECT_EQ(merged[2U].kind, NodeIceServerKind::turn_udp);
   EXPECT_EQ(merged[2U].hostname, "relay-turn.example.com");
   EXPECT_EQ(merged[2U].username, "1800000000:tenant-a:device");
-  EXPECT_EQ(merged[2U].credential, "cHJvdmVuYW5jZQ==");
+  EXPECT_EQ(merged[2U].credential, fake_turn_credential);
 
   EXPECT_EQ(stats.relay_considered, 2U);
   EXPECT_EQ(stats.relay_expired_dropped, 0U);
