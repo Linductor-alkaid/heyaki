@@ -296,8 +296,8 @@ const char* migration_v3 = R"SQL(
 CREATE TABLE enrollment_password(
   id INTEGER PRIMARY KEY CHECK(id = 1),
   format_version INTEGER NOT NULL CHECK(format_version = 1),
-  argon2_operations INTEGER NOT NULL CHECK(argon2_operations BETWEEN 1 AND 16),
-  argon2_memory_kib INTEGER NOT NULL CHECK(argon2_memory_kib >= 8192),
+  kdf_operations INTEGER NOT NULL CHECK(kdf_operations BETWEEN 1 AND 16),
+  kdf_memory_kib INTEGER NOT NULL CHECK(kdf_memory_kib >= 8192),
   encoded TEXT NOT NULL,
   updated_unix_milliseconds INTEGER NOT NULL
 );
@@ -1206,8 +1206,8 @@ Result<void> RelayDatabase::record_device_audit(DeviceId device_id, std::string_
 }
 
 bool valid_enrollment_password_record(const RelayEnrollmentPasswordRecord& record) noexcept {
-  if (record.format_version != 1U || record.argon2_operations == 0U ||
-      record.argon2_operations > 16U || record.argon2_memory_kib < 8192U ||
+  if (record.format_version != 1U || record.kdf_operations == 0U ||
+      record.kdf_operations > 16U || record.kdf_memory_kib < 8192U ||
       record.updated_unix_milliseconds == 0U || record.encoded.empty() ||
       record.encoded.size() > relay_enrollment_password_encoded_max_bytes) {
     return false;
@@ -1236,12 +1236,12 @@ Result<void> RelayDatabase::set_enrollment_password_verifier(
   }
   auto upsert = prepare(
       impl_->database,
-      "INSERT INTO enrollment_password(id, format_version, argon2_operations, "
-      "argon2_memory_kib, encoded, updated_unix_milliseconds) "
+      "INSERT INTO enrollment_password(id, format_version, kdf_operations, "
+      "kdf_memory_kib, encoded, updated_unix_milliseconds) "
       "VALUES(1, ?, ?, ?, ?, ?) "
       "ON CONFLICT(id) DO UPDATE SET format_version=excluded.format_version, "
-      "argon2_operations=excluded.argon2_operations, "
-      "argon2_memory_kib=excluded.argon2_memory_kib, encoded=excluded.encoded, "
+      "kdf_operations=excluded.kdf_operations, "
+      "kdf_memory_kib=excluded.kdf_memory_kib, encoded=excluded.encoded, "
       "updated_unix_milliseconds=excluded.updated_unix_milliseconds");
   if (!upsert) {
     rollback_best_effort(impl_->database);
@@ -1250,9 +1250,9 @@ Result<void> RelayDatabase::set_enrollment_password_verifier(
   if (sqlite3_bind_int64(upsert.value_if()->get(), 1,
                          static_cast<sqlite3_int64>(record.format_version)) != SQLITE_OK ||
       sqlite3_bind_int64(upsert.value_if()->get(), 2,
-                         static_cast<sqlite3_int64>(record.argon2_operations)) != SQLITE_OK ||
+                         static_cast<sqlite3_int64>(record.kdf_operations)) != SQLITE_OK ||
       sqlite3_bind_int64(upsert.value_if()->get(), 3,
-                         static_cast<sqlite3_int64>(record.argon2_memory_kib)) != SQLITE_OK ||
+                         static_cast<sqlite3_int64>(record.kdf_memory_kib)) != SQLITE_OK ||
       sqlite3_bind_text(upsert.value_if()->get(), 4, record.encoded.c_str(),
                         static_cast<int>(record.encoded.size()),
                         SQLITE_TRANSIENT) != SQLITE_OK ||
@@ -1283,7 +1283,7 @@ RelayDatabase::enrollment_password_verifier() const {
         Error{ErrorCode::cancelled, "relay_database", "relay_database_not_open"});
   }
   auto select = prepare(impl_->database,
-                        "SELECT format_version, argon2_operations, argon2_memory_kib, "
+                        "SELECT format_version, kdf_operations, kdf_memory_kib, "
                         "encoded, updated_unix_milliseconds FROM enrollment_password "
                         "WHERE id = 1");
   if (!select) {
@@ -1301,9 +1301,9 @@ RelayDatabase::enrollment_password_verifier() const {
   RelayEnrollmentPasswordRecord record;
   record.format_version = static_cast<std::uint16_t>(
       sqlite3_column_int(select.value_if()->get(), 0));
-  record.argon2_operations = static_cast<std::uint32_t>(
+  record.kdf_operations = static_cast<std::uint32_t>(
       sqlite3_column_int64(select.value_if()->get(), 1));
-  record.argon2_memory_kib = static_cast<std::uint32_t>(
+  record.kdf_memory_kib = static_cast<std::uint32_t>(
       sqlite3_column_int64(select.value_if()->get(), 2));
   const auto encoded = column_string_view(select.value_if()->get(), 3);
   record.encoded.assign(encoded.begin(), encoded.end());

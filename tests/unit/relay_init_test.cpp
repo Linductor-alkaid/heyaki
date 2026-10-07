@@ -105,9 +105,9 @@ std::uint64_t now_milliseconds() {
 PasswordVerifier to_verifier(const RelayEnrollmentPasswordRecord& record) {
   PasswordVerifier verifier;
   verifier.format_version = record.format_version;
-  verifier.parameters.operations = record.argon2_operations;
+  verifier.parameters.operations = record.kdf_operations;
   verifier.parameters.memory_bytes =
-      static_cast<std::size_t>(record.argon2_memory_kib) * 1024U;
+      static_cast<std::size_t>(record.kdf_memory_kib) * 1024U;
   verifier.encoded = record.encoded;
   return verifier;
 }
