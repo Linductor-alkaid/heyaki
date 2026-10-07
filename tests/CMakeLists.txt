@@ -934,6 +934,34 @@ heyaki_add_runtime_test(
   heyaki_m5_pairing_stats_race heyaki_m5_pairing_stats_race_tests
   "unit;security;concurrency;regression")
 
+# Issue #20 regression: the enrollment WSS exchange must be able to borrow the
+# integrator's host Runtime (RelayEnrollmentWssTransportConfig::runtime_borrowed)
+# so the exchange runs inside the host runtime's executor lifecycle view and a
+# host shutdown ends an in-flight exchange in bounded time; nullptr keeps the
+# original owned-runtime fallback (fast failure on its own transport errors).
+add_executable(heyaki_m3b_relay_enrollment_borrow_runtime_tests
+  unit/m3b_relay_enrollment_borrow_runtime_test.cpp)
+target_link_libraries(heyaki_m3b_relay_enrollment_borrow_runtime_tests PRIVATE
+  heyaki::client
+  heyaki::profile
+  heyaki::sqlite
+  kairo::kairo
+  GTest::gtest_main)
+target_include_directories(heyaki_m3b_relay_enrollment_borrow_runtime_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/client"
+  "${CMAKE_CURRENT_SOURCE_DIR}/unit")
+heyaki_target_use_pinned_boost_asio(heyaki_m3b_relay_enrollment_borrow_runtime_tests)
+heyaki_configure_target(heyaki_m3b_relay_enrollment_borrow_runtime_tests)
+heyaki_enable_executor_exception_adapter_source(
+  unit/m3b_relay_enrollment_borrow_runtime_test.cpp)
+heyaki_add_runtime_test(
+  heyaki_m3b_enrollment_borrow_runtime
+  heyaki_m3b_relay_enrollment_borrow_runtime_tests
+  "unit;relay;concurrency;regression")
+set_tests_properties(heyaki_m3b_enrollment_borrow_runtime PROPERTIES
+  TIMEOUT 240)
+
 # Issue #2 passwordless pairing approval: the Node-level receiver-approval
 # contract (request observer fires once per admitted submission,
 # approve_pairing/reject_pairing resolve exactly once with policy-intersected

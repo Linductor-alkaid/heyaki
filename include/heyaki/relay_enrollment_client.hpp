@@ -40,6 +40,14 @@ struct RelayEnrollmentWssTransportConfig {
   std::chrono::milliseconds handshake_timeout{5000};
   std::chrono::milliseconds close_timeout{2000};
   RuntimeConfig runtime;
+  // Optional borrowed host Runtime (same discipline as NodeConfig::runtime):
+  // when set, the exchange's WSS transport runs on this runtime's executor
+  // and enters its lifecycle view, so a host shutdown cancels an in-flight
+  // exchange instead of leaving an unmonitored owned runtime behind. When
+  // null, the exchange creates its own owned runtime from `runtime` (the
+  // original behavior, kept for existing callers). The borrowed runtime must
+  // outlive the exchange call.
+  Runtime* runtime_borrowed{nullptr};
 };
 
 struct RelayEnrollmentClientConfig {

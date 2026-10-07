@@ -90,7 +90,10 @@ Result<RelayEnrollmentExchangeResult> enroll_relay_over_wss(
   client_config.close_timeout = transport.close_timeout;
   client_config.runtime = transport.runtime;
 
-  auto client = RelayWssClient::create(std::move(client_config));
+  // Borrowed host runtime (when injected) keeps the exchange inside the
+  // host's executor lifecycle view; nullptr keeps the owned-runtime fallback.
+  auto client = RelayWssClient::create(std::move(client_config),
+                                       transport.runtime_borrowed);
   if (!client) {
     return Result<RelayEnrollmentExchangeResult>::failure(*client.error_if());
   }
