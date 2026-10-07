@@ -108,7 +108,11 @@ std::string_view advertised_host(const std::vector<std::string>& san_entries,
 
 Result<std::array<std::byte, 32U>> certificate_digest(
     const std::filesystem::path& certificate_file) {
+#if defined(_WIN32)
+  std::FILE* file = _wfopen(certificate_file.c_str(), L"rb");
+#else
   std::FILE* file = std::fopen(certificate_file.c_str(), "rb");
+#endif
   if (file == nullptr) {
     return Result<std::array<std::byte, 32U>>::failure(init_error(
         ErrorCode::configuration, "relay_init_certificate_unreadable", errno));
@@ -371,7 +375,11 @@ Result<std::array<std::byte, 32U>> generate_self_signed_relay_certificate(
   restrict_owner_permissions(private_key_file);
 #endif
 
+#if defined(_WIN32)
+  std::FILE* cert_file = _wfopen(certificate_file.c_str(), L"wb");
+#else
   std::FILE* cert_file = std::fopen(certificate_file.c_str(), "wb");
+#endif
   if (cert_file == nullptr) {
     return fail("relay_init_cert_write_failed");
   }

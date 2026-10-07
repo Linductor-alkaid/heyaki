@@ -375,7 +375,11 @@ TEST(RelayInitTest, RunInitIsIdempotentWithoutNewPasswordInput) {
   // and stdin (/dev/null) makes the interactive prompt fail fast), so the
   // existing verifier is kept and no artifact is rewritten.
   options.password_file.reset();
+#if defined(_WIN32)
+  std::FILE* null_stdin = std::freopen("NUL", "r", stdin);
+#else
   std::FILE* null_stdin = std::freopen("/dev/null", "r", stdin);
+#endif
   ASSERT_NE(null_stdin, nullptr);
   std::string output;
   {
@@ -408,9 +412,17 @@ TEST(RelayInitTest, RunInitFailsWithoutAnyPasswordSourceOnFreshDatabase) {
   const char* saved_environment = std::getenv("HEYAKI_INIT_PASSWORD");
   const bool had_environment = saved_environment != nullptr;
   const std::string saved_value = had_environment ? saved_environment : "";
+#if defined(_WIN32)
+  _putenv_s("HEYAKI_INIT_PASSWORD", "");
+#else
   unsetenv("HEYAKI_INIT_PASSWORD");
+#endif
 
+#if defined(_WIN32)
+  std::FILE* null_stdin = std::freopen("NUL", "r", stdin);
+#else
   std::FILE* null_stdin = std::freopen("/dev/null", "r", stdin);
+#endif
   ASSERT_NE(null_stdin, nullptr);
 
   std::string failure_detail;
@@ -423,11 +435,19 @@ TEST(RelayInitTest, RunInitFailsWithoutAnyPasswordSourceOnFreshDatabase) {
   }
 
   // Restore the caller's environment.
+#if defined(_WIN32)
+  if (had_environment) {
+    _putenv_s("HEYAKI_INIT_PASSWORD", saved_value.c_str());
+  } else {
+    _putenv_s("HEYAKI_INIT_PASSWORD", "");
+  }
+#else
   if (had_environment) {
     setenv("HEYAKI_INIT_PASSWORD", saved_value.c_str(), 1);
   } else {
     unsetenv("HEYAKI_INIT_PASSWORD");
   }
+#endif
 
   // The config and certificate may exist, but no verifier may have been
   // provisioned without a password.
