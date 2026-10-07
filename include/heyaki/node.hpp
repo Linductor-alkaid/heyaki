@@ -895,6 +895,12 @@ class Node {
                                                  const TransferId& id);
   [[nodiscard]] Result<void> resume_file_transfer(const DeviceEndpointKey& peer,
                                                   const TransferId& id);
+  // Cancels one transfer. A transfer parked in the peer's transfer book
+  // (its session ended mid-transfer; issue #15) has no live session service
+  // but stays visible through file_transfers() and stays cancellable: the
+  // cancel retires the book entry and reports one terminal cancelled event
+  // through the file observer. The peer is not notified (nothing rides the
+  // gone transport); a fresh session resumes-or-fails nothing for the id.
   [[nodiscard]] Result<void> cancel_file_transfer(const DeviceEndpointKey& peer,
                                                   const TransferId& id);
   void set_file_event_observer(

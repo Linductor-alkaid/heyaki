@@ -924,6 +924,38 @@ heyaki_add_runtime_test(
   heyaki_m7_service heyaki_m7_service_tests
   "unit;session;security;protocol;concurrency;m7")
 
+# Issue #15 regression (M5-34 / HEY-20261002-001): parked-transfer semantics
+# for transfers whose session ended (book fallback in cancel_file_transfer_
+# strand / file_transfers_strand), plus the service-level offer-deadline,
+# FILE_REJECT, park, and resume contracts on an authenticated loopback pair.
+# Node-level cases run a real two-node LAN pair (A basic communication on,
+# B off) adapted from the m5 basic-communication harness.
+add_executable(heyaki_m7_issue15_repro_tests
+  unit/m7_file_parked_transfer_repro_test.cpp)
+heyaki_enable_executor_exception_adapter_source(
+  unit/m7_file_parked_transfer_repro_test.cpp)
+target_link_libraries(heyaki_m7_issue15_repro_tests PRIVATE
+  heyaki::client
+  heyaki::core
+  heyaki::blake3
+  kairo::kairo
+  GTest::gtest_main
+  OpenSSL::SSL)
+heyaki_target_use_pinned_boost_asio(heyaki_m7_issue15_repro_tests)
+heyaki_configure_target(heyaki_m7_issue15_repro_tests)
+target_include_directories(heyaki_m7_issue15_repro_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/client"
+  "${CMAKE_CURRENT_SOURCE_DIR}/unit")
+target_compile_definitions(heyaki_m7_issue15_repro_tests PRIVATE
+  "HEYAKI_M7_ISSUE15_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}/m7-issue15\"")
+heyaki_add_runtime_test(
+  heyaki_m7_issue15_repro heyaki_m7_issue15_repro_tests
+  "unit;session;file;security;regression;m7;issue15")
+set_tests_properties(heyaki_m7_issue15_repro PROPERTIES
+  RESOURCE_LOCK heyaki_m3a_profile_state
+  TIMEOUT 240)
+
 add_executable(heyaki_m5_pairing_service_tests unit/m5_pairing_service_test.cpp)
 target_link_libraries(heyaki_m5_pairing_service_tests PRIVATE
   heyaki::client

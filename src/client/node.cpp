@@ -4494,27 +4494,69 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   Result<void> cancel_file_transfer_strand(const DeviceEndpointKey& peer,
                                            const TransferId& id) {
     const auto service = file_services.find(peer);
-    if (service == file_services.end()) {
+    if (service != file_services.end()) {
+      // Issue #16: the cancel sends a FileAbort whose pump can fail the
+      // transport synchronously; the observer then tears the peer services
+      // down (handle_session_closed) and erases this service from the map
+      // while the cancel is still on the stack. Without this local strong
+      // reference the erase is the service's last reference and the rest of
+      // the call runs on a freed object.
+      auto file = service->second;
+      return file->cancel_transfer(id);
+    }
+    // Issue #15: the peer's session ended, so its FileService is gone while
+    // the parked sender entries remain in the transfer book. The parked
+    // transfer stays cancellable: retire the book entry with one terminal
+    // cancelled event on the strand (the same context the file event sink
+    // always fires on). Nothing rides the gone transport.
+    const auto book = transfer_books.find(peer);
+    if (book == transfer_books.end()) {
       return Result<void>::failure(node_error(ErrorCode::peer_offline,
                                               "peer_session_missing"));
     }
-    // Issue #16: the cancel sends a FileAbort whose pump can fail the
-    // transport synchronously; the observer then tears the peer services
-    // down (handle_session_closed) and erases this service from the map
-    // while the cancel is still on the stack. Without this local strong
-    // reference the erase is the service's last reference and the rest of
-    // the call runs on a freed object.
-    auto file = service->second;
-    return file->cancel_transfer(id);
+    auto entry = book->second->mutable_entries().find(id);
+    if (entry == book->second->mutable_entries().end()) {
+      return Result<void>::failure(node_error(ErrorCode::peer_offline,
+                                              "transfer_unknown"));
+    }
+    FileTransferEvent event{id, FileTransferDirection::push,
+                            FileTransferPhase::cancelled, entry->second.root,
+                            entry->second.logical_name, entry->second.bytes_done,
+                            entry->second.bytes_total, std::nullopt};
+    book->second->mutable_entries().erase(entry);
+    file_event_sink(this, peer, event);
+    return Result<void>::success();
   }
 
   std::vector<FileTransferSummary> file_transfers_strand(const DeviceEndpointKey& peer) {
     const auto service = file_services.find(peer);
-    if (service == file_services.end()) {
-      return {};
+    if (service != file_services.end()) {
+      auto file = service->second;
+      return file->transfers();
     }
-    auto file = service->second;
-    return file->transfers();
+    // Issue #15: with the session gone the parked book entries are the only
+    // remaining transfer state; report them so a parked transfer is visible
+    // (and cancellable) instead of disappearing from the public API.
+    std::vector<FileTransferSummary> transfers;
+    const auto book = transfer_books.find(peer);
+    if (book == transfer_books.end()) {
+      return transfers;
+    }
+    transfers.reserve(book->second->entries().size());
+    for (const auto& [id, entry] : book->second->entries()) {
+      (void)id;
+      FileTransferSummary summary;
+      summary.transfer_id = entry.transfer_id;
+      summary.direction = FileTransferDirection::push;
+      summary.phase = entry.phase;
+      summary.root = entry.root;
+      summary.logical_name = entry.logical_name;
+      summary.bytes_done = entry.bytes_done;
+      summary.bytes_total = entry.bytes_total;
+      summary.sender_role = true;
+      transfers.push_back(std::move(summary));
+    }
+    return transfers;
   }
 
   NodeServiceDiagnostics service_diagnostics_strand() {
