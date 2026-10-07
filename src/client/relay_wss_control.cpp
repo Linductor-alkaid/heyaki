@@ -243,6 +243,9 @@ Result<std::vector<std::byte>> encode_relay_wss_enrollment_result(
   if (result.token_remaining_uses_after != 0U) {
     append_uint(output, 3U, result.token_remaining_uses_after);
   }
+  if (result.relay_certificate_sha256) {
+    append_bytes(output, 4U, *result.relay_certificate_sha256);
+  }
   return Result<std::vector<std::byte>>::success(std::move(output));
 }
 
@@ -254,7 +257,7 @@ Result<RelayWssEnrollmentResult> parse_relay_wss_enrollment_result(
   }
   ProtoReader reader(payload);
   RelayWssEnrollmentResult result;
-  std::array<bool, 3U> seen{};
+  std::array<bool, 4U> seen{};
   while (!reader.done()) {
     auto field = reader.next();
     if (!field) {
@@ -278,6 +281,15 @@ Result<RelayWssEnrollmentResult> parse_relay_wss_enrollment_result(
         return Result<RelayWssEnrollmentResult>::failure(
             control_error("enrollment_result_tenant_invalid"));
       }
+    } else if (field.value_if()->number == 4U) {
+      if (field.value_if()->wire_type != 2U ||
+          field.value_if()->bytes.size() != 32U) {
+        return Result<RelayWssEnrollmentResult>::failure(
+            control_error("enrollment_result_field_invalid"));
+      }
+      std::array<std::byte, 32U> fingerprint{};
+      std::copy_n(field.value_if()->bytes.begin(), 32U, fingerprint.begin());
+      result.relay_certificate_sha256 = fingerprint;
     } else if (field.value_if()->wire_type != 0U ||
                (field.value_if()->number == 2U && field.value_if()->integer == 0U)) {
       return Result<RelayWssEnrollmentResult>::failure(

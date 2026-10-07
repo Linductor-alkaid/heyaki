@@ -16,12 +16,16 @@
 
 namespace heyaki {
 
-inline constexpr std::uint32_t relay_database_schema_version = 2U;
+inline constexpr std::uint32_t relay_database_schema_version = 3U;
 inline constexpr std::size_t relay_bootstrap_token_hash_bytes = 32U;
 inline constexpr std::size_t relay_bootstrap_token_id_bytes = 16U;
 inline constexpr std::size_t relay_bootstrap_token_min_bytes = 16U;
 inline constexpr std::size_t relay_bootstrap_token_max_bytes = 256U;
 inline constexpr std::uint64_t relay_bootstrap_token_max_uses = 1000000U;
+// Single-row owner password verifier for password-mode enrollment (Argon2id
+// modular-crypt string as produced by create_password_verifier). The plaintext
+// password never touches the database.
+inline constexpr std::size_t relay_enrollment_password_encoded_max_bytes = 512U;
 
 using RelayBootstrapTokenId = std::array<std::byte, relay_bootstrap_token_id_bytes>;
 using RelayBootstrapTokenHash = std::array<std::byte, relay_bootstrap_token_hash_bytes>;
@@ -45,6 +49,14 @@ struct RelayBootstrapConsumption {
   std::uint64_t expires_unix_milliseconds{};
   std::uint64_t remaining_uses_before{};
   std::uint64_t remaining_uses_after{};
+};
+
+struct RelayEnrollmentPasswordRecord {
+  std::uint16_t format_version{1U};
+  std::uint32_t argon2_operations{2U};
+  std::uint32_t argon2_memory_kib{65536U};
+  std::string encoded;
+  std::uint64_t updated_unix_milliseconds{};
 };
 
 enum class RelayDeviceStatus : std::uint8_t {
@@ -115,6 +127,13 @@ class RelayDatabase {
   [[nodiscard]] Result<void> revoke_device(DeviceId device_id,
                                            std::uint64_t enrollment_generation,
                                            std::uint64_t revoked_unix_milliseconds);
+  // Owner password verifier for password-mode enrollment (single row,
+  // id = 1). Setting it again replaces the previous verifier, which silently
+  // invalidates the admission credential every enrolled device used.
+  [[nodiscard]] Result<void> set_enrollment_password_verifier(
+      const RelayEnrollmentPasswordRecord& record);
+  [[nodiscard]] Result<std::optional<RelayEnrollmentPasswordRecord>>
+  enrollment_password_verifier() const;
 
  private:
   explicit RelayDatabase(std::unique_ptr<Impl> impl) noexcept;

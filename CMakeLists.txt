@@ -405,6 +405,7 @@ add_library(heyaki_relay
   src/relay/relay_database.cpp
   src/relay/relay_endpoint_directory.cpp
   src/relay/relay_enrollment_service.cpp
+  src/relay/relay_enrollment_throttle.cpp
   src/relay/relay_login_service.cpp
   src/relay/relay_lease_table.cpp
   src/relay/relay_log.cpp
@@ -446,8 +447,10 @@ set(HEYAKI_INSTALL_TARGETS
   heyaki_transport_webrtc)
 
 if(HEYAKI_BUILD_APPS)
-  add_executable(heyaki-relay apps/relay/main.cpp)
-  target_link_libraries(heyaki-relay PRIVATE heyaki::relay kairo::kairo)
+  add_executable(heyaki-relay apps/relay/main.cpp apps/relay/relay_init.cpp)
+  target_link_libraries(heyaki-relay PRIVATE
+    heyaki::relay kairo::kairo heyaki::sodium OpenSSL::Crypto)
+  heyaki_target_use_pinned_boost_beast(heyaki-relay)
   heyaki_configure_target(heyaki-relay)
 
   add_library(heyaki_tui_setup STATIC

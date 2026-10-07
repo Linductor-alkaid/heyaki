@@ -1,4 +1,6 @@
+#include "relay_init.hpp"
 #include "relay_log.hpp"
+#include "relay_database.hpp"
 #include "relay_server.hpp"
 
 #include <heyaki/version.hpp>
@@ -27,18 +29,27 @@ struct CommandLine {
   std::optional<std::string> metrics_path;
   std::optional<std::uint32_t> success_log_period;
   bool check_config{false};
+  bool init{false};
+  std::optional<std::filesystem::path> init_password_file;
+  std::string init_tenant{"default"};
   bool help{false};
 };
 
 void print_usage() {
   std::cout << "Usage: heyaki-relay [--version] [--help]\n"
                "       heyaki-relay --config <path> [--check-config] "
-               "[--listen <ip>] [--port <n>]\n"
+                "[--listen <ip>] [--port <n>]\n"
                "                   [--tls-cert <path>] [--tls-key <path>] "
-               "[--database <path>]\n"
+                "[--database <path>]\n"
                "                   [--health-path <path>] "
-               "[--metrics-path <path>]\n"
-               "                   [--success-log-period <n>]\n";
+                "[--metrics-path <path>]\n"
+               "                   [--success-log-period <n>]\n"
+               "       heyaki-relay --init [--config <path>] [--listen <ip>] "
+                "[--port <n>]\n"
+               "                   [--tls-cert <path>] [--tls-key <path>] "
+                "[--database <path>]\n"
+               "                   [--init-password-file <path>] "
+                "[--init-tenant <name>]\n";
 }
 
 std::optional<std::uint16_t> parse_port(std::string_view text) {
@@ -74,10 +85,6 @@ std::optional<CommandLine> parse_arguments(int argc, char** argv) {
       output.help = true;
       return output;
     }
-    if (argument == "--check-config") {
-      output.check_config = true;
-      continue;
-    }
     auto require_value = [&](std::string_view option) -> std::optional<std::string_view> {
       if (index + 1 >= argc) {
         std::cerr << "heyaki-relay: missing value for " << option << "\n";
@@ -86,6 +93,30 @@ std::optional<CommandLine> parse_arguments(int argc, char** argv) {
       ++index;
       return std::string_view{argv[index]};
     };
+    if (argument == "--check-config") {
+      output.check_config = true;
+      continue;
+    }
+    if (argument == "--init") {
+      output.init = true;
+      continue;
+    }
+    if (argument == "--init-password-file") {
+      auto value = require_value(argument);
+      if (!value) {
+        return std::nullopt;
+      }
+      output.init_password_file = std::filesystem::path{std::string{*value}};
+      continue;
+    }
+    if (argument == "--init-tenant") {
+      auto value = require_value(argument);
+      if (!value) {
+        return std::nullopt;
+      }
+      output.init_tenant = std::string{*value};
+      continue;
+    }
     if (argument == "--config") {
       auto value = require_value(argument);
       if (!value) {
@@ -192,6 +223,29 @@ int main(int argc, char** argv) {
     return 0;
   }
 
+  if (parsed->init) {
+    if (parsed->check_config) {
+      std::cerr << "heyaki-relay: --init and --check-config are mutually exclusive\n";
+      return 2;
+    }
+    heyaki::RelayInitOptions options;
+    if (parsed->config_file) {
+      options.config_file = *parsed->config_file;
+    }
+    options.listen_address = parsed->listen_address;
+    options.listen_port = parsed->listen_port;
+    options.tls_certificate_file = parsed->tls_certificate_file;
+    options.tls_private_key_file = parsed->tls_private_key_file;
+    options.database_file = parsed->database_file;
+    options.enrollment_tenant = parsed->init_tenant;
+    options.password_file = parsed->init_password_file;
+    auto initialized = heyaki::run_relay_init(options);
+    if (!initialized) {
+      return print_error(*initialized.error_if());
+    }
+    return 0;
+  }
+
   heyaki::RelayServerConfig config;
   if (parsed->config_file) {
     auto loaded = heyaki::load_relay_config_file(*parsed->config_file);
@@ -240,6 +294,33 @@ int main(int argc, char** argv) {
       }
     }
     std::cout << "heyaki-relay configuration OK\n";
+    std::cout << "enrollment_mode="
+              << (config.enrollment_mode == heyaki::RelayEnrollmentMode::token
+                      ? "token"
+                      : config.enrollment_mode == heyaki::RelayEnrollmentMode::password
+                            ? "password"
+                            : "closed")
+              << "\n";
+    std::cout << "enrollment_default_tenant=" << config.enrollment_default_tenant
+              << "\n";
+    if (config.enrollment_mode == heyaki::RelayEnrollmentMode::password) {
+      heyaki::RelayDatabaseOpenOptions database_options;
+      database_options.create_if_missing = false;
+      auto database = heyaki::RelayDatabase::open(config.database_file,
+                                                  database_options);
+      if (!database) {
+        std::cerr << "heyaki-relay: relay database unavailable\n";
+        return 1;
+      }
+      auto owner_password = database.value_if()->enrollment_password_verifier();
+      if (!owner_password ||
+          !owner_password.value_if()->has_value()) {
+        std::cerr << "heyaki-relay: enrollment password not provisioned "
+                     "(run heyaki-relay --init)\n";
+        return 1;
+      }
+      std::cout << "enrollment_password=provisioned\n";
+    }
     return 0;
   }
 

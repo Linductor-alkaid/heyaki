@@ -30,6 +30,30 @@ Requirements:
 - Linux is the CI-verified server platform; Windows runs the relay for
   development (see [operations/cross-os-matrix.md](operations/cross-os-matrix.md)).
 
+### First-run bootstrap (`heyaki-relay --init`)
+
+For owner-operated single-tenant hosts, `heyaki-relay --init` provisions a
+working setup in one run: it writes a baseline `relay.conf` when none exists,
+generates a self-signed P-256 certificate whose SANs cover the local
+hostname, all non-loopback addresses, and localhost, stores an Argon2id
+verifier of the relay-bound password proof in the relay database (the
+plaintext password never reaches or rests on the relay), writes the coturn
+shared secret to `heyaki-turn.env` (0600, same contract as
+`deploy/coturn/heyaki-turn.env.example`), and prints the client access card
+(URL, leaf SHA-256 pin, tenant). It never overwrites existing files, so it is
+safe to re-run. Re-running with a new password rotates the enrollment
+credential immediately. Because the proof is derived from the leaf
+certificate digest, rotating the relay TLS certificate requires re-running
+`--init` to re-provision the verifier. Unattended provisioning:
+`--init-password-file <path>` or the `HEYAKI_INIT_PASSWORD` environment
+variable plus `--init-tenant <name>`; without a password source it prompts
+interactively (a terminal is required — under systemd use `ExecStartPre` with
+the password file, and delete the file afterwards). The resulting config uses
+`enrollment_mode = password`; devices then enroll with the URL and the
+password only. The database schema migrates to v3 on first open (new
+`enrollment_password` table); this is a one-way migration — an older relay
+binary refuses the migrated database with `schema_too_new`.
+
 Minimal systemd unit (`/etc/systemd/system/heyaki-relay.service`):
 
 ```ini

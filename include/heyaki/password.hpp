@@ -23,6 +23,12 @@ struct PasswordVerifier {
 
 [[nodiscard]] Result<PasswordHashParameters> calibrate_password_parameters(
     const PasswordSecurityPolicy& policy = {});
+// Checks a candidate password against the policy (length and Unicode scalar
+// minimums) without hashing. `create_password_verifier` enforces the same
+// policy; this exposes it for flows that hash a derived secret instead of the
+// password itself but still must enforce the password policy up front.
+[[nodiscard]] Result<void> validate_password_policy(
+    std::string_view password, const PasswordSecurityPolicy& policy = {});
 [[nodiscard]] Result<PasswordVerifier> create_password_verifier(
     std::string_view password, PasswordHashParameters parameters,
     const PasswordSecurityPolicy& policy = {});

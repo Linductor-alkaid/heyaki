@@ -139,6 +139,64 @@ health system.
   grants immediately. Existing grants remain until explicit revocation unless the user selects rotation
   with generation revocation.
 
+## 5a. Relay password enrollment (`enrollment_mode = password`)
+
+Password enrollment lets a device register with the relay URL and an
+owner-chosen password only. The admission proof never replaces the device
+identity chain: the request still carries the Ed25519 identity signature over
+the `EnrollmentChallenge` transcript (relay id, 32-byte nonce, expiry), and
+the nonce stays single-use through the existing challenge TTL table. The
+password factor is layered on top, exactly as bootstrap tokens were.
+
+Construction. The client derives
+`proof = Argon2id(password, BLAKE2b-128("heyaki/relay-enrollment-password/v1" ‖ relay_id))`
+with fixed wire parameters (2 operations, 64 MiB, frozen in
+parameter-freeze.md) and sends the 32-byte proof in the optional
+`enrollment_password_proof` field. The relay id is the leaf-certificate
+digest, so the derivation is bound to one relay and its current certificate.
+The proof is treated like the bootstrap token secret: never logged, never
+part of the signed canonical object. The relay stores an Argon2id verifier of
+the proof (hex-encoded input, calibrated at `--init`) in the schema-v3
+`enrollment_password` table; the plaintext password never reaches or rests on
+the relay, and a database leak must break two Argon2id layers (verifier →
+proof, then proof → password with a known salt).
+
+Design honesty — why the proof is relay-bound, not challenge-bound: a relay
+that stores only a verifier cannot verify a derivation whose input changes
+per challenge (it would need to recompute `f(password, nonce)` for the
+client's nonce, which requires the recoverable password). Verifier storage
+therefore forces the presented secret to be a *bearer credential*. We chose
+the relay-bound stretch over sending the raw password so the bearer secret is
+useless against every other service the owner may have reused the password
+on, and so a database leak costs two Argon2id evaluations per guess. An
+explicit challenge-binding construction — and with it per-attempt proof
+freshness with single-use enforcement — is exactly the PAKE gap: OPAQUE/SRP
+remains recorded future work, and until then password mode is documented as
+*equivalent in kind to token mode*: the credential is long-lived, TLS
+protects it in transit, and interception implies endpoint compromise.
+
+Controls and their honest limits:
+
+- **Online guessing is rate-limited**, not information-theoretically bounded:
+  a per-IP throttle applies exponential backoff (0.5 s base, ×2, capped at
+  60 s) after every failed verification and resets on success. This is the
+  same class of control as pairing backoff.
+- **A stolen proof is a stolen enrollment credential** (like a stolen
+  bootstrap token): usable against this relay until the owner rotates the
+  password (`--init` replaces the verifier). Rotation invalidates the stolen
+  value immediately.
+- **Certificate rotation changes the relay id**, hence the derivation salt:
+  after rotating the relay certificate, re-run `heyaki-relay --init` to
+  re-provision the verifier (the rotation runbook covers this).
+- **Enumeration side channels are structurally absent**: there is a single
+  owner password and a single tenant. Wrong-password responses take the full
+  Argon2id path; throttled responses fail fast by design (the throttle state
+  is not a secret). Success responses additionally carry the leaf certificate
+  SHA-256 so first-time clients can anchor the TLS pin (TOFU).
+- **Password mode requires the relay's default tenant** and the
+  `relay_enrollment_password_v1` capability bit; token mode remains the
+  multi-tenant path and the two modes are never mixed.
+
 ## 6. LAN TLS, relay TLS, DTLS, and signaling-transcript review
 
 A LAN attacker can present its own TLS certificate to both devices and relay plaintext between two TLS

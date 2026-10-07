@@ -130,7 +130,7 @@ carries a nested `IceConfig`: 1–4 `IceServer` entries (kind, hostname ≤255,
 port, TURN REST `username`/`credential`) plus `expires_unix_seconds`. The
 field is **capability-gated in both directions**: the relay includes it only
 for sessions whose login advertisement carried the optional
-`relay_ice_config_v1` capability bit (1 ≪ 15, part of the protocol 1.3 known
+`relay_ice_config_v1` capability bit (1 ≪ 16, part of the protocol 1.3 known
 set), and devices merge it into the session ICE configuration as fresh
 relay-issued entries alongside their static policy servers (static entries
 first, expired credentials dropped, combined cap 8). Deliveries ride the

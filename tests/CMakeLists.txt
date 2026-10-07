@@ -1882,3 +1882,91 @@ if(WIN32)
   set_tests_properties(heyaki_installed_consumer
     PROPERTIES LABELS "integration;windows")
 endif()
+
+# Issue #22: relay password-admission enrollment and first-run bootstrap.
+# Protocol layer (challenge-bound proof derivation, credential-XOR wire
+# grammar, legacy token-mode byte compatibility) plus the RelayEnrollmentService
+# password/closed admission modes over a real relay database.
+add_executable(heyaki_m3b_relay_enrollment_password_tests
+  unit/m3b_relay_enrollment_password_test.cpp)
+target_link_libraries(heyaki_m3b_relay_enrollment_password_tests PRIVATE
+  heyaki::relay
+  heyaki::sodium
+  kairo::kairo
+  GTest::gtest_main
+  OpenSSL::SSL
+  OpenSSL::Crypto)
+heyaki_target_use_pinned_boost_beast(heyaki_m3b_relay_enrollment_password_tests)
+heyaki_configure_target(heyaki_m3b_relay_enrollment_password_tests)
+target_compile_definitions(heyaki_m3b_relay_enrollment_password_tests PRIVATE
+  "HEYAKI_M3B_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}\"")
+heyaki_add_runtime_test(
+  heyaki_m3b_relay_enrollment_password heyaki_m3b_relay_enrollment_password_tests
+  "unit;relay;security")
+set_tests_properties(heyaki_m3b_relay_enrollment_password PROPERTIES
+  RESOURCE_LOCK heyaki_m3a_profile_state
+  TIMEOUT 300)
+
+# Issue #22: per-IP enrollment admission throttle (exponential backoff,
+# success reset, capacity, entry TTL) with an injected steady clock.
+add_executable(heyaki_m3b_relay_enrollment_throttle_tests
+  unit/m3b_relay_enrollment_throttle_test.cpp)
+target_link_libraries(heyaki_m3b_relay_enrollment_throttle_tests PRIVATE
+  heyaki::relay
+  kairo::kairo
+  GTest::gtest_main)
+heyaki_target_use_pinned_boost_beast(heyaki_m3b_relay_enrollment_throttle_tests)
+heyaki_configure_target(heyaki_m3b_relay_enrollment_throttle_tests)
+heyaki_add_runtime_test(
+  heyaki_m3b_relay_enrollment_throttle heyaki_m3b_relay_enrollment_throttle_tests
+  "unit;relay;security")
+set_tests_properties(heyaki_m3b_relay_enrollment_throttle PROPERTIES
+  TIMEOUT 60)
+
+# Issue #22: schema-v3 enrollment_password table, v2->v3 migration,
+# relay.conf enrollment keys, and the RelayWssEnrollmentResult certificate
+# fingerprint field (legacy bytes unchanged, roundtrip, length validation).
+add_executable(heyaki_m3b_relay_enrollment_bootstrap_tests
+  unit/m3b_relay_enrollment_bootstrap_test.cpp)
+target_link_libraries(heyaki_m3b_relay_enrollment_bootstrap_tests PRIVATE
+  heyaki::relay
+  heyaki_protocol_lite
+  heyaki::sqlite
+  kairo::kairo
+  GTest::gtest_main
+  OpenSSL::SSL
+  OpenSSL::Crypto)
+heyaki_target_use_pinned_boost_beast(heyaki_m3b_relay_enrollment_bootstrap_tests)
+heyaki_configure_target(heyaki_m3b_relay_enrollment_bootstrap_tests)
+target_compile_definitions(heyaki_m3b_relay_enrollment_bootstrap_tests PRIVATE
+  "HEYAKI_M3B_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}\"")
+heyaki_add_runtime_test(
+  heyaki_m3b_relay_enrollment_bootstrap heyaki_m3b_relay_enrollment_bootstrap_tests
+  "unit;relay;security")
+set_tests_properties(heyaki_m3b_relay_enrollment_bootstrap PROPERTIES
+  RESOURCE_LOCK heyaki_m3a_profile_state
+  TIMEOUT 300)
+
+# Issue #22: `heyaki-relay --init` first-run bootstrap (self-signed relay
+# certificate with local SANs, owner password verifier provisioning, TURN
+# secret, access card, idempotence) and the verifier/enrollment contract.
+add_executable(heyaki_relay_init_tests
+  unit/relay_init_test.cpp
+  ../apps/relay/relay_init.cpp)
+target_include_directories(heyaki_relay_init_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../apps/relay")
+target_link_libraries(heyaki_relay_init_tests PRIVATE
+  heyaki::relay
+  heyaki::sodium
+  kairo::kairo
+  GTest::gtest_main
+  OpenSSL::Crypto)
+heyaki_target_use_pinned_boost_beast(heyaki_relay_init_tests)
+heyaki_configure_target(heyaki_relay_init_tests)
+target_compile_definitions(heyaki_relay_init_tests PRIVATE
+  "HEYAKI_M3B_TEST_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}\"")
+heyaki_add_runtime_test(
+  heyaki_relay_init heyaki_relay_init_tests "unit;relay;security")
+set_tests_properties(heyaki_relay_init PROPERTIES
+  RESOURCE_LOCK heyaki_m3a_profile_state
+  TIMEOUT 300)

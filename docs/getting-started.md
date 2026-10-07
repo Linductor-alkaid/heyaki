@@ -120,6 +120,34 @@ curl --cacert certs/relay.crt https://localhost:8443/health       # readiness
 signed the leaf certificate; production deployments pin the leaf (see
 [deployment.md](deployment.md#relay-host)).
 
+### Password enrollment (first-run bootstrap)
+
+For a personal deployment, `heyaki-relay --init` replaces every manual step
+with one interactive prompt (the enrollment password). It generates whatever
+is missing — config, self-signed TLS certificate with local SANs, the owner
+password verifier in the relay database, and the coturn shared-secret env
+file — without overwriting anything that already exists:
+
+```sh
+cd /opt/heyaki-relay
+/opt/heyaki/bin/heyaki-relay --init
+# → set the enrollment password once, then it prints the access card:
+#     URL:     wss://<host>:8443
+#     PIN:     <leaf certificate sha-256>
+#     Tenant:  default
+```
+
+Devices then enroll with just the URL and the password: the tenant, bootstrap
+token, and certificate file all disappear from the user-facing flow, and the
+TLS pin is anchored automatically from the enrollment result. Unattended
+provisioning passes `--init-password-file <path>` (or the
+`HEYAKI_INIT_PASSWORD` environment variable) and `--init-tenant <name>`;
+`--check-config` reports the enrollment mode and whether the password is
+provisioned. Wrong-password attempts are rate-limited per source IP with
+exponential backoff. The token flow above remains the advanced path for
+multi-tenant deployments (`enrollment_mode = token` is still the default; see
+[configuration.md](configuration.md#enrollment-modes)).
+
 ## Bring up a first device (TUI)
 
 `heyaki-tui` is the first-party device application:

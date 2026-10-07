@@ -297,6 +297,13 @@ void write_enrollment_section(
   writer.gauge("heyaki_relay_enrollment_challenge_table_peak_entries",
                enrollment.challenge_table.peak_entries,
                "Peak enrollment challenges.");
+  writer.counter("heyaki_relay_enrollment_password_rejected_total",
+                 enrollment.password_rejected,
+                 "Password-mode enrollments rejected by proof verification.");
+  writer.counter("heyaki_relay_enrollment_mode_rejected_total",
+                 enrollment.mode_rejected,
+                 "Enrollments rejected by the admission mode (closed mode, "
+                 "wrong tenant, missing proof or capability).");
 }
 
 }  // namespace

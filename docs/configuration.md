@@ -49,6 +49,8 @@ All keys, defaults, and accepted ranges:
 | `endpoint_query_max_results` | `256` | 1–4096 | Max results per endpoint query |
 | `signaling_rate_per_second` | `32` | 1–1024 | Per-peer signaling forwarding rate (per-second sustained) |
 | `close_revoked_sessions` | `true` | bool | Close control sessions of revoked devices |
+| `enrollment_mode` | `token` | `token` \| `password` \| `closed` | Enrollment admission policy: `token` keeps the historical bootstrap-token flow; `password` admits devices with relay URL + owner enrollment password only (requires a provisioned password verifier in the relay database — `heyaki-relay --init`); `closed` refuses every new enrollment while enrolled devices keep logging in |
+| `enrollment_default_tenant` | `default` | printable ASCII 1–128 chars, no whitespace | The single tenant `password`-mode enrollments land in; requests naming any other tenant are rejected. Token mode is unaffected (multi-tenant) |
 | `endpoint_expose_application_id` | `false` | bool | Publish application ids in endpoint query results |
 | `endpoint_expose_record_generation` | `false` | bool | Publish endpoint record generations |
 | `endpoint_expose_manifest_sha256` | `false` | bool | Publish service manifest hashes |
@@ -100,11 +102,26 @@ endpoint_directory_capacity = 4096
 endpoint_query_max_results = 256
 signaling_rate_per_second = 32
 close_revoked_sessions = true
+enrollment_mode = token
+enrollment_default_tenant = default
 endpoint_expose_application_id = false
 endpoint_expose_record_generation = false
 endpoint_expose_manifest_sha256 = false
 endpoint_expose_manifest_generation = false
 ```
+
+### Enrollment modes
+
+`enrollment_mode = token`（默认）保持既有 bootstrap-token 流程。
+`enrollment_mode = password` 面向单机主自用部署：设备只凭「中继 URL + 注册
+密码」完成注册，租户字段必须等于 `enrollment_default_tenant`，凭据为
+relay 绑定的 Argon2id 证明（bearer 凭据，同级于 bootstrap token；设计取舍见
+[security/threat-model.md](security/threat-model.md) 第 5a 节）。
+密码本身不出现在 wire 或配置文件中——线上是 32 字节派生证明，库里是
+Argon2id verifier（schema v3 的 `enrollment_password` 表）；
+`enrollment_mode = password` 启动时若库中尚无 verifier 会以
+`relay_enrollment_password_not_provisioned` 拒绝启动。`closed` 拒绝一切新
+注册，供封闭部署。
 
 ### CLI overrides
 
@@ -112,8 +129,15 @@ endpoint_expose_manifest_generation = false
 `--database <path>`, `--health-path <path>`, `--metrics-path <path>`,
 `--success-log-period <n>` are applied after the config file.
 `--check-config` validates everything (including certificate file presence)
-and exits 0/1. `--version` prints version + build commit; `--help` prints
-usage.
+and additionally reports the enrollment mode, default tenant, and — for
+`password` mode — whether a password verifier is provisioned; it exits 0/1.
+`--init` runs the first-run bootstrap (generates a missing config and
+self-signed certificate, provisions the owner enrollment password, writes the
+coturn shared-secret env file, and prints the client access card); it never
+overwrites existing files. `--init-password-file <path>` and
+`--init-tenant <name>` make it unattended; the password can also come from
+the `HEYAKI_INIT_PASSWORD` environment variable.
+`--version` prints version + build commit; `--help` prints usage.
 
 ### Validation errors
 

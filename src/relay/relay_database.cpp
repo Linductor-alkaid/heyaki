@@ -289,8 +289,28 @@ VALUES(2, CAST(unixepoch('subsec') * 1000 AS INTEGER));
 PRAGMA user_version=2;
 )SQL";
 
+// Schema v3 adds the single-row owner password verifier used by
+// enrollment_mode = password. Token-mode deployments migrate to v3 with an
+// empty table and unchanged behavior.
+const char* migration_v3 = R"SQL(
+CREATE TABLE enrollment_password(
+  id INTEGER PRIMARY KEY CHECK(id = 1),
+  format_version INTEGER NOT NULL CHECK(format_version = 1),
+  argon2_operations INTEGER NOT NULL CHECK(argon2_operations BETWEEN 1 AND 16),
+  argon2_memory_kib INTEGER NOT NULL CHECK(argon2_memory_kib >= 8192),
+  encoded TEXT NOT NULL,
+  updated_unix_milliseconds INTEGER NOT NULL
+);
+INSERT INTO schema_migrations(version, applied_unix_milliseconds)
+VALUES(3, CAST(unixepoch('subsec') * 1000 AS INTEGER));
+PRAGMA user_version=3;
+)SQL";
+
 const char* migration_for(int version) noexcept {
-  return version == 2 ? migration_v2 : nullptr;
+  if (version == 2) {
+    return migration_v2;
+  }
+  return version == 3 ? migration_v3 : nullptr;
 }
 
 Result<void> apply_migration(sqlite3* database, int target_version) {
@@ -324,6 +344,9 @@ Result<void> initialize_database(sqlite3* database) {
   auto applied = execute(database, schema_v1);
   if (applied) {
     applied = execute(database, migration_v2);
+  }
+  if (applied) {
+    applied = execute(database, migration_v3);
   }
   if (!applied) {
     rollback_best_effort(database);
@@ -1180,6 +1203,118 @@ Result<void> RelayDatabase::record_device_audit(DeviceId device_id, std::string_
     ++impl_->cached_snapshot.device_audit_count;
   }
   return inserted;
+}
+
+bool valid_enrollment_password_record(const RelayEnrollmentPasswordRecord& record) noexcept {
+  if (record.format_version != 1U || record.argon2_operations == 0U ||
+      record.argon2_operations > 16U || record.argon2_memory_kib < 8192U ||
+      record.updated_unix_milliseconds == 0U || record.encoded.empty() ||
+      record.encoded.size() > relay_enrollment_password_encoded_max_bytes) {
+    return false;
+  }
+  // Argon2id modular-crypt string: printable ASCII only, no whitespace.
+  return std::all_of(record.encoded.begin(), record.encoded.end(),
+                     [](unsigned char character) {
+                       return character >= 0x21U && character <= 0x7eU;
+                     });
+}
+
+Result<void> RelayDatabase::set_enrollment_password_verifier(
+    const RelayEnrollmentPasswordRecord& record) {
+  if (!impl_) {
+    return Result<void>::failure(
+        Error{ErrorCode::cancelled, "relay_database", "relay_database_not_open"});
+  }
+  if (!valid_enrollment_password_record(record)) {
+    return Result<void>::failure(
+        Error{ErrorCode::configuration, "relay_database",
+              "relay_enrollment_password_record_invalid"});
+  }
+  auto begin = execute(impl_->database, "BEGIN IMMEDIATE");
+  if (!begin) {
+    return begin;
+  }
+  auto upsert = prepare(
+      impl_->database,
+      "INSERT INTO enrollment_password(id, format_version, argon2_operations, "
+      "argon2_memory_kib, encoded, updated_unix_milliseconds) "
+      "VALUES(1, ?, ?, ?, ?, ?) "
+      "ON CONFLICT(id) DO UPDATE SET format_version=excluded.format_version, "
+      "argon2_operations=excluded.argon2_operations, "
+      "argon2_memory_kib=excluded.argon2_memory_kib, encoded=excluded.encoded, "
+      "updated_unix_milliseconds=excluded.updated_unix_milliseconds");
+  if (!upsert) {
+    rollback_best_effort(impl_->database);
+    return Result<void>::failure(*upsert.error_if());
+  }
+  if (sqlite3_bind_int64(upsert.value_if()->get(), 1,
+                         static_cast<sqlite3_int64>(record.format_version)) != SQLITE_OK ||
+      sqlite3_bind_int64(upsert.value_if()->get(), 2,
+                         static_cast<sqlite3_int64>(record.argon2_operations)) != SQLITE_OK ||
+      sqlite3_bind_int64(upsert.value_if()->get(), 3,
+                         static_cast<sqlite3_int64>(record.argon2_memory_kib)) != SQLITE_OK ||
+      sqlite3_bind_text(upsert.value_if()->get(), 4, record.encoded.c_str(),
+                        static_cast<int>(record.encoded.size()),
+                        SQLITE_TRANSIENT) != SQLITE_OK ||
+      sqlite3_bind_int64(upsert.value_if()->get(), 5,
+                         static_cast<sqlite3_int64>(record.updated_unix_milliseconds)) !=
+          SQLITE_OK) {
+    rollback_best_effort(impl_->database);
+    return Result<void>::failure(
+        database_error(impl_->database, "relay_enrollment_password_bind_failed"));
+  }
+  auto written = step_done(*upsert.value_if());
+  if (!written) {
+    rollback_best_effort(impl_->database);
+    return Result<void>::failure(*written.error_if());
+  }
+  auto committed = execute(impl_->database, "COMMIT");
+  if (!committed) {
+    rollback_best_effort(impl_->database);
+    return Result<void>::failure(*committed.error_if());
+  }
+  return Result<void>::success();
+}
+
+Result<std::optional<RelayEnrollmentPasswordRecord>>
+RelayDatabase::enrollment_password_verifier() const {
+  if (!impl_) {
+    return Result<std::optional<RelayEnrollmentPasswordRecord>>::failure(
+        Error{ErrorCode::cancelled, "relay_database", "relay_database_not_open"});
+  }
+  auto select = prepare(impl_->database,
+                        "SELECT format_version, argon2_operations, argon2_memory_kib, "
+                        "encoded, updated_unix_milliseconds FROM enrollment_password "
+                        "WHERE id = 1");
+  if (!select) {
+    return Result<std::optional<RelayEnrollmentPasswordRecord>>::failure(
+        *select.error_if());
+  }
+  const int step = sqlite3_step(select.value_if()->get());
+  if (step == SQLITE_DONE) {
+    return Result<std::optional<RelayEnrollmentPasswordRecord>>::success(std::nullopt);
+  }
+  if (step != SQLITE_ROW) {
+    return Result<std::optional<RelayEnrollmentPasswordRecord>>::failure(
+        database_error(impl_->database, "relay_enrollment_password_select_failed", step));
+  }
+  RelayEnrollmentPasswordRecord record;
+  record.format_version = static_cast<std::uint16_t>(
+      sqlite3_column_int(select.value_if()->get(), 0));
+  record.argon2_operations = static_cast<std::uint32_t>(
+      sqlite3_column_int64(select.value_if()->get(), 1));
+  record.argon2_memory_kib = static_cast<std::uint32_t>(
+      sqlite3_column_int64(select.value_if()->get(), 2));
+  const auto encoded = column_string_view(select.value_if()->get(), 3);
+  record.encoded.assign(encoded.begin(), encoded.end());
+  record.updated_unix_milliseconds = static_cast<std::uint64_t>(
+      sqlite3_column_int64(select.value_if()->get(), 4));
+  if (!valid_enrollment_password_record(record)) {
+    return Result<std::optional<RelayEnrollmentPasswordRecord>>::failure(
+        database_corrupt_error("relay_enrollment_password_record_corrupt"));
+  }
+  return Result<std::optional<RelayEnrollmentPasswordRecord>>::success(
+      std::optional<RelayEnrollmentPasswordRecord>{std::move(record)});
 }
 
 }  // namespace heyaki

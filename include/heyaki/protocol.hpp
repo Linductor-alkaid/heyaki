@@ -37,11 +37,18 @@ enum class Capability : std::uint64_t {
   // Optional: the peer understands the passwordless pairing-approval
   // request frame and answers with a pairing_result.
   pairing_approval_v1 = 1ULL << 14U,
+  // Optional: the peer understands password-based relay enrollment. A client
+  // advertising the bit may put a relay-bound Argon2id proof (32 bytes) into
+  // `EnrollmentRequest.enrollment_password_proof` (wire field 10); a relay
+  // running `enrollment_mode = password` requires the bit and rejects
+  // requests without it. Token-mode exchanges never carry the field, so
+  // builds without the bit are unaffected.
+  relay_enrollment_password_v1 = 1ULL << 15U,
   // Optional: the peer consumes the relay-issued `ice_config` field of
   // login_result/heartbeat_ack (short-lived TURN REST credentials). The
   // relay includes the field only for sessions whose login advertisement
   // carried the bit, so legacy peers keep byte-identical control traffic.
-  relay_ice_config_v1 = 1ULL << 15U,
+  relay_ice_config_v1 = 1ULL << 16U,
 };
 
 inline constexpr std::uint64_t protocol_1_0_capability_bits =
@@ -66,18 +73,15 @@ inline constexpr std::uint64_t protocol_1_1_capability_bits =
 inline constexpr std::uint64_t protocol_1_2_capability_bits =
     protocol_1_1_capability_bits |
     static_cast<std::uint64_t>(Capability::session_restart_v1);
-// Protocol 1.3 adds the optional gateway proxy capability: STREAM_OPEN may
-// carry the `heyaki.protocol.gateway.v1.GatewayConnect gateway = 4` field,
-// turning the stream into a dial-through L4 proxy connection announced by
-// a 2-byte prelude (M10-01 change sheet). A peer below 1.3 never negotiates
-// the bit and must reject a gateway-carrying STREAM_OPEN with `protocol`
-// on that channel only.
 // Protocol 1.3 also carries the passwordless pairing-approval capability:
 // peers advertising 1.3 understand the approval request frame. Older peers
 // never advertise the bit (their build's known-bit set excludes it) and the
 // version mask strips it from every negotiation with them, so hello
 // compatibility is unchanged; the receiving side's
 // NodeConfig::pairing_approval_enabled still gates actual use.
+// Protocol 1.3 additionally carries the relay password-enrollment capability,
+// which follows the same optional-bit pattern: only password-mode enrollment
+// exchanges put the matching proof field on the wire.
 // Protocol 1.3 additionally carries the relay-ice-config capability: peers
 // advertising it accept the optional `ice_config` field of relay
 // login_result/heartbeat_ack. The relay gates the field on the login
@@ -86,6 +90,7 @@ inline constexpr std::uint64_t protocol_1_3_capability_bits =
     protocol_1_2_capability_bits |
     static_cast<std::uint64_t>(Capability::gateway_v1) |
     static_cast<std::uint64_t>(Capability::pairing_approval_v1) |
+    static_cast<std::uint64_t>(Capability::relay_enrollment_password_v1) |
     static_cast<std::uint64_t>(Capability::relay_ice_config_v1);
 inline constexpr std::uint64_t known_capability_bits = protocol_1_3_capability_bits;
 

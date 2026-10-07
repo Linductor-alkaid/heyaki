@@ -81,6 +81,11 @@ struct RelayWssEnrollmentResult {
   std::string tenant;
   std::uint64_t enrollment_generation{};
   std::uint64_t token_remaining_uses_after{};
+  // Password-mode completions only: SHA-256 of the relay leaf certificate
+  // (equals the relay id), for TOFU pin anchoring by URL+password clients.
+  // Absent in token-mode responses, which stay byte-identical to older
+  // relays.
+  std::optional<std::array<std::byte, 32U>> relay_certificate_sha256;
 };
 
 struct RelayWssLoginResult {
