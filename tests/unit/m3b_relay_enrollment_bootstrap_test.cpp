@@ -449,7 +449,8 @@ TEST(M3BRelayEnrollmentBootstrapTest, RejectsInvalidEnrollmentKeys) {
 TEST(M3BRelayEnrollmentBootstrapTest, EnrollmentResultWithoutFingerprintKeepsLegacyBytes) {
   RelayWssEnrollmentResult result{.tenant = "tenant-a",
                                   .enrollment_generation = 7U,
-                                  .token_remaining_uses_after = 2U};
+                                  .token_remaining_uses_after = 2U,
+                                  .relay_certificate_sha256 = std::nullopt};
   auto encoded = encode_relay_wss_enrollment_result(result);
   ASSERT_TRUE(encoded) << encoded.error_if()->safe_detail();
 
@@ -518,7 +519,8 @@ TEST(M3BRelayEnrollmentBootstrapTest, EnrollmentResultFingerprintRoundTrip) {
 TEST(M3BRelayEnrollmentBootstrapTest, EnrollmentResultRejectsWrongFingerprintLength) {
   RelayWssEnrollmentResult result{.tenant = "default",
                                   .enrollment_generation = 1U,
-                                  .token_remaining_uses_after = 0U};
+                                  .token_remaining_uses_after = 0U,
+                                  .relay_certificate_sha256 = std::nullopt};
   auto encoded = encode_relay_wss_enrollment_result(result);
   ASSERT_TRUE(encoded) << encoded.error_if()->safe_detail();
 
