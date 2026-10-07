@@ -150,6 +150,15 @@ Result<PasswordHashParameters> calibrate_password_parameters(
   }
 }
 
+Result<void> validate_password_policy(std::string_view password,
+                                      const PasswordSecurityPolicy& policy) {
+  const auto valid_policy = validate_security_policy({}, policy);
+  if (!valid_policy) {
+    return valid_policy;
+  }
+  return validate_password(password, policy);
+}
+
 Result<PasswordVerifier> create_password_verifier(
     std::string_view password, PasswordHashParameters parameters,
     const PasswordSecurityPolicy& policy) {

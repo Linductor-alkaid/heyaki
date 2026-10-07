@@ -2,6 +2,7 @@
 
 #include "client/runtime_access.hpp"
 #include "relay_enrollment_service.hpp"
+#include "relay_enrollment_throttle.hpp"
 #include "relay_endpoint.hpp"
 #include "relay_endpoint_directory.hpp"
 #include "relay_lease_table.hpp"
@@ -216,6 +217,7 @@ struct RelayServer::Impl : std::enable_shared_from_this<RelayServer::Impl> {
   std::optional<RelayDatabase> database;
   std::optional<RelayRateLimiter> rate_limiter;
   std::optional<RelayEnrollmentService> enrollment_service;
+  std::optional<RelayEnrollmentThrottle> enrollment_throttle;
   std::optional<RelayLoginService> login_service;
   std::optional<RelayLeaseTable> lease_table;
   std::optional<RelayEndpointDirectory> endpoint_directory;
@@ -758,11 +760,32 @@ Result<void> RelayServer::Impl::initialize() {
                                              "relay_id_derivation_failed"));
   }
   current.relay_id = relay_id;
-  auto enrollment = RelayEnrollmentService::create(&*database, relay_id);
+  if (config.enrollment_mode == RelayEnrollmentMode::password) {
+    // Fail fast at startup instead of rejecting enrollments one by one later:
+    // password mode without a provisioned verifier is a configuration error.
+    auto owner_password = database->enrollment_password_verifier();
+    if (!owner_password) {
+      return Result<void>::failure(*owner_password.error_if());
+    }
+    if (!owner_password.value_if()->has_value()) {
+      return Result<void>::failure(relay_error(
+          ErrorCode::configuration, "relay_enrollment_password_not_provisioned"));
+    }
+  }
+  RelayEnrollmentServiceConfig enrollment_config;
+  enrollment_config.mode = config.enrollment_mode;
+  enrollment_config.default_tenant = config.enrollment_default_tenant;
+  auto enrollment = RelayEnrollmentService::create(&*database, relay_id,
+                                                   enrollment_config);
   if (!enrollment) {
     return Result<void>::failure(*enrollment.error_if());
   }
   enrollment_service.emplace(std::move(*enrollment.value_if()));
+  auto throttle = RelayEnrollmentThrottle::create();
+  if (!throttle) {
+    return Result<void>::failure(*throttle.error_if());
+  }
+  enrollment_throttle.emplace(std::move(*throttle.value_if()));
 
   auto login = RelayLoginService::create(&*database, relay_id);
   if (!login) {
@@ -1206,10 +1229,30 @@ void RelayServer::Impl::session_handle_control(
       session->send_error(*tenant_admitted.error_if(), false);
       return;
     }
+    if (enrollment_throttle) {
+      auto throttle_admitted =
+          enrollment_throttle->admit(session->source_ip, std::chrono::steady_clock::now());
+      if (!throttle_admitted) {
+        ++current.control_rejected;
+        log_event(RelayLogEventKind::rate_limited, RelayLogLevel::warn,
+                  throttle_admitted.error_if()->safe_detail(),
+                  log_context(session.get()));
+        current.enrollment = enrollment_service
+                                 ? enrollment_service->diagnostics()
+                                 : RelayEnrollmentServiceDiagnostics{};
+        publish();
+        session->send_error(*throttle_admitted.error_if(), false);
+        return;
+      }
+    }
     auto completed =
         enrollment_service->complete(frame.value_if()->payload, unix_milliseconds_now());
     if (!completed) {
       ++current.control_rejected;
+      if (completed.error_if()->code() == ErrorCode::authentication && enrollment_throttle) {
+        enrollment_throttle->record_failure(session->source_ip,
+                                            std::chrono::steady_clock::now());
+      }
       log_event(RelayLogEventKind::enrollment_rejected, RelayLogLevel::warn,
                 completed.error_if()->safe_detail(), claimed);
       current.database = database->cached_snapshot();
@@ -1219,11 +1262,22 @@ void RelayServer::Impl::session_handle_control(
       session->send_error(*completed.error_if(), false);
       return;
     }
+    if (enrollment_throttle) {
+      enrollment_throttle->record_success(session->source_ip,
+                                          std::chrono::steady_clock::now());
+    }
     RelayWssEnrollmentResult result{
         .tenant = completed.value_if()->tenant,
         .enrollment_generation = completed.value_if()->enrollment_generation,
         .token_remaining_uses_after =
             completed.value_if()->token_remaining_uses_after.value_or(0U)};
+    // Password-mode completions anchor the TLS pin for URL+password clients:
+    // the relay id already is the SHA-256 digest of the leaf certificate.
+    // Token-mode responses stay byte-identical to older relays so legacy
+    // clients (strict parsers) are unaffected.
+    if (config.enrollment_mode == RelayEnrollmentMode::password) {
+      result.relay_certificate_sha256 = relay_id;
+    }
     auto encoded = encode_relay_wss_enrollment_result(result);
     if (!encoded) {
       ++current.control_rejected;

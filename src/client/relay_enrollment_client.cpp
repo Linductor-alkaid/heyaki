@@ -59,14 +59,28 @@ Error enrollment_wss_error(ErrorCode code, const char* detail) {
   return Error{code, "relay_enrollment_wss", detail};
 }
 
-Result<RelayEnrollmentExchangeResult> enroll_relay_over_wss(
+bool valid_enrollment_password(std::string_view password) noexcept {
+  return !password.empty() && password.size() <= enrollment_password_max_bytes;
+}
+
+bool valid_credential(const RelayEnrollmentCredential& credential) noexcept {
+  switch (credential.kind) {
+    case RelayEnrollmentCredential::Kind::token:
+      return valid_enrollment_token(credential.secret);
+    case RelayEnrollmentCredential::Kind::password:
+      return valid_enrollment_password(credential.secret);
+  }
+  return false;
+}
+
+Result<RelayEnrollmentExchangeResult> enroll_relay_over_wss_with_credential(
     const RelayEnrollmentWssTransportConfig& transport,
     const IdentityKeyPair& identity, const EndpointId& endpoint_id,
-    std::string_view tenant, std::string_view bootstrap_token,
+    std::string_view tenant, const RelayEnrollmentCredential& credential,
     std::uint64_t now_unix_milliseconds) {
   if (transport.relay_url.empty() || transport.relay_url.size() > 2048U ||
-      endpoint_id.is_zero() || !valid_tenant(tenant) ||
-      !valid_enrollment_token(bootstrap_token) || transport.connect_timeout.count() <= 0 ||
+      endpoint_id.is_zero() || !valid_tenant(tenant) || !valid_credential(credential) ||
+      transport.connect_timeout.count() <= 0 ||
       transport.handshake_timeout.count() <= 0 || transport.close_timeout.count() <= 0) {
     return Result<RelayEnrollmentExchangeResult>::failure(
         enrollment_wss_error(ErrorCode::configuration, "enrollment_transport_invalid"));
@@ -154,7 +168,20 @@ Result<RelayEnrollmentExchangeResult> enroll_relay_over_wss(
   request.identity_public_key = identity.public_key();
   request.challenge_nonce = challenge.value_if()->nonce;
   request.tenant = std::string{tenant};
-  request.bootstrap_token = std::string{bootstrap_token};
+  // Password mode: derive the relay-bound proof and advertise the capability
+  // (already part of this build's known bits; set explicitly so the intent is
+  // visible). Token mode: keep the bootstrap-token field.
+  if (credential.kind == RelayEnrollmentCredential::Kind::password) {
+    auto proof = derive_enrollment_password_proof(credential.secret,
+                                                  challenge.value_if()->relay_id);
+    if (!proof) {
+      close_best_effort();
+      return Result<RelayEnrollmentExchangeResult>::failure(*proof.error_if());
+    }
+    request.password_proof = *proof.value_if();
+  } else {
+    request.bootstrap_token = credential.secret;
+  }
   request.protocol_version = current_protocol_version;
   request.supported.bits = known_capability_bits;
   request.required.bits = static_cast<std::uint64_t>(Capability::enrollment);
@@ -228,11 +255,31 @@ Result<RelayEnrollmentExchangeResult> enroll_relay_over_wss(
                              "enrollment_tenant_mismatch"));
   }
   close_best_effort();
+  std::optional<std::vector<std::byte>> certificate_pin;
+  if (result.value_if()->relay_certificate_sha256) {
+    certificate_pin = std::vector<std::byte>{
+        result.value_if()->relay_certificate_sha256->begin(),
+        result.value_if()->relay_certificate_sha256->end()};
+  }
   return Result<RelayEnrollmentExchangeResult>::success(RelayEnrollmentExchangeResult{
       .relay_url = transport.relay_url,
       .tenant = result.value_if()->tenant,
       .enrollment_generation = result.value_if()->enrollment_generation,
-      .token_remaining_uses_after = result.value_if()->token_remaining_uses_after});
+      .token_remaining_uses_after = result.value_if()->token_remaining_uses_after,
+      .relay_certificate_sha256 = std::move(certificate_pin)});
+}
+
+Result<RelayEnrollmentExchangeResult> enroll_relay_over_wss(
+    const RelayEnrollmentWssTransportConfig& transport,
+    const IdentityKeyPair& identity, const EndpointId& endpoint_id,
+    std::string_view tenant, std::string_view bootstrap_token,
+    std::uint64_t now_unix_milliseconds) {
+  RelayEnrollmentCredential credential;
+  credential.kind = RelayEnrollmentCredential::Kind::token;
+  credential.secret = std::string{bootstrap_token};
+  return enroll_relay_over_wss_with_credential(transport, identity, endpoint_id,
+                                               tenant, credential,
+                                               now_unix_milliseconds);
 }
 
 RelayEnrollmentExchange make_relay_enrollment_wss_exchange(
@@ -246,13 +293,25 @@ RelayEnrollmentExchange make_relay_enrollment_wss_exchange(
   };
 }
 
-Result<RelayEnrollmentClientResult> enroll_relay_profile(
-    const RelayEnrollmentClientConfig& config, std::string_view bootstrap_token,
+RelayEnrollmentCredentialExchange make_relay_enrollment_wss_credential_exchange(
+    RelayEnrollmentWssTransportConfig transport) {
+  return [transport = std::move(transport)](
+             const IdentityKeyPair& identity, const EndpointId& endpoint_id,
+             std::string_view tenant, const RelayEnrollmentCredential& credential,
+             std::uint64_t now_unix_milliseconds) mutable {
+    return enroll_relay_over_wss_with_credential(transport, identity, endpoint_id,
+                                                 tenant, credential,
+                                                 now_unix_milliseconds);
+  };
+}
+
+Result<RelayEnrollmentClientResult> enroll_relay_profile_with_credential(
+    const RelayEnrollmentClientConfig& config, const RelayEnrollmentCredential& credential,
     std::uint64_t now_unix_milliseconds) {
   if (config.profile == nullptr || config.application_id.empty() ||
       config.relay_url.empty() || config.relay_url.size() > 2048U ||
-      !valid_tenant(config.tenant) || !valid_enrollment_token(bootstrap_token) ||
-      (!config.exchange && !config.wss_transport)) {
+      !valid_tenant(config.tenant) || !valid_credential(credential) ||
+      (!config.exchange && !config.credential_exchange && !config.wss_transport)) {
     return Result<RelayEnrollmentClientResult>::failure(
         enrollment_client_error(ErrorCode::configuration, "enrollment_config_invalid"));
   }
@@ -282,13 +341,26 @@ Result<RelayEnrollmentClientResult> enroll_relay_profile(
         enrollment_client_error(ErrorCode::identity, "endpoint_invalid"));
   }
 
-  const auto exchange = config.exchange
-                               ? config.exchange
-                               : make_relay_enrollment_wss_exchange(
-                                     *config.wss_transport);
-  auto exchanged = exchange(*identity.value_if(), *endpoint.value_if(),
-                            config.tenant, bootstrap_token,
-                            now_unix_milliseconds);
+  Result<RelayEnrollmentExchangeResult> exchanged =
+      Result<RelayEnrollmentExchangeResult>::failure(
+          enrollment_client_error(ErrorCode::cancelled,
+                                  "enrollment_exchange_unavailable"));
+  if (config.credential_exchange) {
+    exchanged = config.credential_exchange(*identity.value_if(), *endpoint.value_if(),
+                                           config.tenant, credential,
+                                           now_unix_milliseconds);
+  } else if (config.exchange && credential.kind ==
+                                     RelayEnrollmentCredential::Kind::token) {
+    exchanged = config.exchange(*identity.value_if(), *endpoint.value_if(),
+                                config.tenant, credential.secret,
+                                now_unix_milliseconds);
+  } else if (config.wss_transport) {
+    exchanged = enroll_relay_over_wss_with_credential(*config.wss_transport,
+                                                      *identity.value_if(),
+                                                      *endpoint.value_if(),
+                                                      config.tenant, credential,
+                                                      now_unix_milliseconds);
+  }
   if (!exchanged) {
     return Result<RelayEnrollmentClientResult>::failure(*exchanged.error_if());
   }
@@ -332,7 +404,18 @@ Result<RelayEnrollmentClientResult> enroll_relay_profile(
       .relay_url = record.relay_url,
       .tenant = record.tenant,
       .enrollment_generation = record.enrollment_generation,
-      .token_remaining_uses_after = exchange_result.token_remaining_uses_after});
+      .token_remaining_uses_after = exchange_result.token_remaining_uses_after,
+      .relay_certificate_sha256 = exchange_result.relay_certificate_sha256});
+}
+
+Result<RelayEnrollmentClientResult> enroll_relay_profile(
+    const RelayEnrollmentClientConfig& config, std::string_view bootstrap_token,
+    std::uint64_t now_unix_milliseconds) {
+  RelayEnrollmentCredential credential;
+  credential.kind = RelayEnrollmentCredential::Kind::token;
+  credential.secret = std::string{bootstrap_token};
+  return enroll_relay_profile_with_credential(config, credential,
+                                              now_unix_milliseconds);
 }
 
 }  // namespace heyaki

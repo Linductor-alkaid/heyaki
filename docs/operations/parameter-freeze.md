@@ -182,6 +182,27 @@ mapped 环回绕过）不可配置移除，只可叠加。
 其余（sweep 周期 1s、信令滑窗 1s、HTTP header_limit 8KiB、TLS 1.3、challenge
 capacity 256 / validity 60s）为**协议/安全冻结常量**：无配置面，调整等于协议变更。
 
+### 7a. 注册准入（密码模式，`enrollment_mode = password`）
+
+本轮新增（issue：relay 密码准入 + 首次运行引导）。参数分两层：
+
+**Wire 冻结常量**（客户端证明派生，改动等于协议变更）：
+
+| 常量 | 值 | 位置 | 依据 |
+|---|---|---|---|
+| enrollment_proof_argon2_operations | 2 | src/relay/relay_enrollment.hpp | 与 PasswordHashParameters 默认 ops 对齐；移动端 64MiB/t=2 实测 ~150-400ms，与配对密码同级 |
+| enrollment_proof_argon2_memory_bytes | 64MiB | 同上 | 同上（libsodium Argon2id v1.3） |
+| 证明长度 | 32 字节 | 同上 | 256-bit 输出 |
+| 盐构造 | BLAKE2b-128("heyaki/relay-enrollment-password/v1" ‖ relay_id) | src/relay/relay_enrollment.cpp | 证明绑定单个 relay（relay_id = 证书摘要），对 (relay, password) 稳定，使静态 Argon2id verifier 可校验每次尝试；verifier 输入为证明的小写 hex（create_password_verifier 的 UTF-8 策略约束）。逐挑战绑定需 PAKE——见 threat-model §5a 的设计取舍记录 |
+
+**服务端防爆破参数**（`RelayEnrollmentThrottleConfig` 默认值，无配置面）：
+per-IP 退避 base 500ms、×2/次失败、指数帽 2^7、上限 60s、条目 TTL 10min、
+容量 4096 IP（NAT 共享出口 IP 命中退避由 60s 上限与成功重置兜底；对齐配对
+退避的冻结流程）。证明为长生命周期 bearer 凭据（同级于 bootstrap token），
+无单次使用缓存；重放/新鲜度防线 = 单次挑战 + 设备签名链。新指标
+`heyaki_relay_enrollment_password_rejected_total` / `..._mode_rejected_total`
+供部署观察，调整需重跑注册爆破回归面。
+
 ## 8. 硬编码设计常量冻结
 
 无配置面的行为常量，本轮逐一核可并冻结（改动须重新过对应矩阵）：

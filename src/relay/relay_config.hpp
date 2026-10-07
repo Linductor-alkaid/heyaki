@@ -2,6 +2,7 @@
 
 #include "relay_endpoint.hpp"
 #include "relay_endpoint_directory.hpp"
+#include "relay_enrollment_service.hpp"
 #include "relay_lease_table.hpp"
 #include "relay_log.hpp"
 #include "relay_rate_limiter.hpp"
@@ -58,6 +59,15 @@ struct RelayServerConfig {
   std::size_t signaling_rate_per_second{32U};
   bool close_revoked_sessions{true};
   RelayRateLimitPolicy rate_limits;
+  // Enrollment admission policy (issue: password enrollment + first-run
+  // bootstrap). `token` keeps the historical behavior; `password` requires a
+  // provisioned owner password verifier in the relay database and admits
+  // devices with URL + password only; `closed` refuses all new enrollments.
+  RelayEnrollmentMode enrollment_mode{RelayEnrollmentMode::token};
+  // Single tenant password-mode enrollments land in. Must stay in sync with
+  // what clients send; the access card printed by `heyaki-relay --init`
+  // shows it.
+  std::string enrollment_default_tenant{"default"};
   RuntimeConfig runtime;
 };
 

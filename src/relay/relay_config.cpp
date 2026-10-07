@@ -98,6 +98,30 @@ bool valid_listen_address(std::string_view value) noexcept {
          });
 }
 
+bool valid_enrollment_default_tenant(std::string_view value) noexcept {
+  if (value.empty() || value.size() > 128U) {
+    return false;
+  }
+  return std::all_of(value.begin(), value.end(), [](unsigned char character) {
+    return character >= 0x21U && character <= 0x7eU;
+  });
+}
+
+Result<RelayEnrollmentMode> parse_enrollment_mode(std::string_view text,
+                                                  std::int64_t line) {
+  if (text == "token") {
+    return Result<RelayEnrollmentMode>::success(RelayEnrollmentMode::token);
+  }
+  if (text == "password") {
+    return Result<RelayEnrollmentMode>::success(RelayEnrollmentMode::password);
+  }
+  if (text == "closed") {
+    return Result<RelayEnrollmentMode>::success(RelayEnrollmentMode::closed);
+  }
+  return Result<RelayEnrollmentMode>::failure(
+      config_error("relay_config_enrollment_mode_invalid", line));
+}
+
 }  // namespace
 
 Result<void> validate_relay_server_config(const RelayServerConfig& config) {
@@ -138,7 +162,8 @@ Result<void> validate_relay_server_config(const RelayServerConfig& config) {
       config.endpoint_query_max_results == 0U ||
       config.endpoint_query_max_results > 4096U ||
       config.signaling_rate_per_second == 0U ||
-      config.signaling_rate_per_second > 1024U) {
+      config.signaling_rate_per_second > 1024U ||
+      !valid_enrollment_default_tenant(config.enrollment_default_tenant)) {
     return Result<void>::failure(config_error("relay_config_invalid"));
   }
   return RelayRateLimiter::validate_policy(config.rate_limits);
@@ -197,6 +222,8 @@ Result<RelayServerConfig> load_relay_config_file(
   std::optional<bool> expose_record_generation;
   std::optional<bool> expose_manifest_sha256;
   std::optional<bool> expose_manifest_generation;
+  std::optional<std::string> enrollment_default_tenant;
+  bool enrollment_mode_key_seen = false;
 
   std::size_t offset = 0U;
   std::int64_t line_number = 1;
@@ -488,6 +515,28 @@ Result<RelayServerConfig> load_relay_config_file(
       }
       config.endpoint_exposure.expose_manifest_generation = *parsed.value_if();
       expose_manifest_generation = config.endpoint_exposure.expose_manifest_generation;
+    } else if (key == "enrollment_mode") {
+      if (enrollment_mode_key_seen) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_duplicate_key", line_number));
+      }
+      auto parsed = parse_enrollment_mode(value, line_number);
+      if (!parsed) {
+        return Result<RelayServerConfig>::failure(*parsed.error_if());
+      }
+      config.enrollment_mode = *parsed.value_if();
+      enrollment_mode_key_seen = true;
+    } else if (key == "enrollment_default_tenant") {
+      if (enrollment_default_tenant) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_duplicate_key", line_number));
+      }
+      if (!valid_enrollment_default_tenant(value)) {
+        return Result<RelayServerConfig>::failure(
+            config_error("relay_config_enrollment_tenant_invalid", line_number));
+      }
+      config.enrollment_default_tenant = std::string{value};
+      enrollment_default_tenant = config.enrollment_default_tenant;
     } else if (key == "shutdown_timeout_milliseconds") {
       if (shutdown_timeout) {
         return Result<RelayServerConfig>::failure(

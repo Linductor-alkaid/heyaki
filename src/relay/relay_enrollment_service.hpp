@@ -14,9 +14,23 @@
 
 namespace heyaki {
 
+// Relay admission policy for new enrollments. `token` is the historical
+// bootstrap-token flow and stays the default; `password` admits devices with
+// the challenge-bound Argon2id proof of the owner password; `closed` refuses
+// every new enrollment (existing devices keep logging in).
+enum class RelayEnrollmentMode : std::uint8_t {
+  token = 1U,
+  password = 2U,
+  closed = 3U,
+};
+
 struct RelayEnrollmentServiceConfig {
   std::size_t challenge_capacity{256U};
   std::chrono::milliseconds challenge_validity{60U * 1000U};
+  RelayEnrollmentMode mode{RelayEnrollmentMode::token};
+  // Only used by `password` mode: the single tenant password enrollment lands
+  // in; requests naming any other tenant are rejected.
+  std::string default_tenant{"default"};
 };
 
 struct RelayEnrollmentCompletion {
@@ -35,6 +49,11 @@ struct RelayEnrollmentServiceDiagnostics {
   std::uint64_t validation_rejected{};
   std::uint64_t token_rejected{};
   std::uint64_t database_rejected{};
+  // Password mode: wrong-proof verifications and requests rejected by the
+  // admission mode itself (closed mode, wrong tenant, missing capability bit
+  // or proof).
+  std::uint64_t password_rejected{};
+  std::uint64_t mode_rejected{};
   RelayTtlDiagnostics challenge_table;
 };
 

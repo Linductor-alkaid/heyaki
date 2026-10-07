@@ -403,7 +403,68 @@ std::vector<std::byte> encode_signature_message(IdentitySignature signature) {
   return output;
 }
 
+bool enrollment_credential_valid(const EnrollmentRequest& request) noexcept {
+  const bool has_token = !request.bootstrap_token.empty();
+  const bool has_proof = request.password_proof.has_value();
+  if (has_token == has_proof) {
+    return false;  // Exactly one admission credential must be present.
+  }
+  if (has_token) {
+    return is_printable_non_space(request.bootstrap_token);
+  }
+  return request.password_proof->size() == enrollment_password_proof_bytes &&
+         *request.password_proof != EnrollmentPasswordProof{};
+}
+
 }  // namespace
+
+Result<EnrollmentPasswordProof> derive_enrollment_password_proof(
+    std::string_view password, RelayId relay_id) {
+  if (password.empty() || password.size() > enrollment_password_max_bytes ||
+      relay_id == RelayId{}) {
+    return Result<EnrollmentPasswordProof>::failure(
+        enrollment_error(ErrorCode::configuration, "enrollment_proof_input_invalid"));
+  }
+  const auto crypto = initialize_crypto();
+  if (!crypto) {
+    return Result<EnrollmentPasswordProof>::failure(*crypto.error_if());
+  }
+  // Relay-bound salt: BLAKE2b-128 over a domain tag and the relay id (which
+  // is the leaf certificate digest). The proof is stable per (relay,
+  // password), so the relay can hold a static Argon2id verifier of the proof
+  // and verify every attempt; binding the proof to the relay prevents a
+  // captured proof from being replayed against any other service the password
+  // may have been reused on. Challenge freshness is provided by the existing
+  // single-use challenge/signature chain, not by the proof (a verifier-stored
+  // relay cannot verify challenge-bound derivations — that gap is exactly
+  // what a PAKE would close; see docs/security/threat-model.md §5a).
+  static constexpr std::string_view salt_domain =
+      "heyaki/relay-enrollment-password/v1";
+  std::vector<std::byte> transcript;
+  transcript.reserve(salt_domain.size() + relay_id_bytes);
+  for (const char character : salt_domain) {
+    transcript.push_back(static_cast<std::byte>(character));
+  }
+  transcript.insert(transcript.end(), relay_id.begin(), relay_id.end());
+  std::array<unsigned char, crypto_pwhash_SALTBYTES> salt{};
+  if (crypto_generichash(salt.data(), salt.size(),
+                         reinterpret_cast<const unsigned char*>(transcript.data()),
+                         transcript.size(), nullptr, 0U) != 0) {
+    return Result<EnrollmentPasswordProof>::failure(
+        enrollment_error(ErrorCode::internal, "enrollment_proof_salt_failed"));
+  }
+  EnrollmentPasswordProof proof{};
+  if (crypto_pwhash(reinterpret_cast<unsigned char*>(proof.data()), proof.size(),
+                    password.data(), password.size(), salt.data(),
+                    enrollment_proof_argon2_operations,
+                    enrollment_proof_argon2_memory_bytes,
+                    crypto_pwhash_ALG_ARGON2ID13) != 0) {
+    sodium_memzero(proof.data(), proof.size());
+    return Result<EnrollmentPasswordProof>::failure(
+        enrollment_error(ErrorCode::resource_exhausted, "enrollment_proof_derive_failed"));
+  }
+  return Result<EnrollmentPasswordProof>::success(proof);
+}
 
 Result<EnrollmentChallenge> create_enrollment_challenge(
     RelayId relay_id, std::uint64_t now_unix_milliseconds,
@@ -521,7 +582,7 @@ Result<std::vector<std::byte>> encode_enrollment_request(
   if (request.device_id.is_zero() || request.endpoint_id.is_zero() ||
       request.identity_public_key == IdentityPublicKey{} ||
       request.challenge_nonce == EnrollmentChallengeNonce{} ||
-      !is_nonempty_utf8(request.tenant) || !is_printable_non_space(request.bootstrap_token) ||
+      !is_nonempty_utf8(request.tenant) || !enrollment_credential_valid(request) ||
       request.protocol_version.major == 0U ||
       request.supported.bits == 0U || !request.supported.contains(request.required) ||
       request.expires_unix_milliseconds == 0U ||
@@ -535,11 +596,16 @@ Result<std::vector<std::byte>> encode_enrollment_request(
   append_bytes(output, 2U, request.identity_public_key);
   append_bytes(output, 3U, request.challenge_nonce);
   append_string(output, 4U, request.tenant);
-  append_string(output, 5U, request.bootstrap_token);
+  if (!request.bootstrap_token.empty()) {
+    append_string(output, 5U, request.bootstrap_token);
+  }
   append_bytes(output, 6U, encode_version_message(request.protocol_version));
   append_bytes(output, 7U, encode_capabilities_message(request.supported, request.required));
   append_uint(output, 8U, request.expires_unix_milliseconds);
   append_bytes(output, 9U, encode_signature_message(request.signature));
+  if (request.password_proof) {
+    append_bytes(output, 10U, *request.password_proof);
+  }
   return Result<std::vector<std::byte>>::success(std::move(output));
 }
 
@@ -550,7 +616,13 @@ Result<EnrollmentRequest> parse_enrollment_request(std::span<const std::byte> pa
   }
   ProtoReader reader(payload);
   EnrollmentRequest request;
-  std::array<bool, 9U> seen{};
+  // Fields 1-4 and 6-9 are mandatory; the admission credential (field 5 token
+  // or field 10 password proof) is optional per field but exactly one of the
+  // two must be present. Older parsers rejected field 10 outright, which is
+  // the documented wire-compatibility boundary for password enrollment.
+  std::array<bool, 10U> seen{};
+  const std::array<bool, 10U> required{true, true, true, true, false,
+                                       true, true, true, true, false};
   while (!reader.done()) {
     auto field = reader.next();
     if (!field) {
@@ -662,14 +734,36 @@ Result<EnrollmentRequest> parse_enrollment_request(std::span<const std::byte> pa
         request.signature = *signature.value_if();
         break;
       }
+      case 10U: {
+        if (field.value_if()->wire_type != 2U ||
+            field.value_if()->bytes.size() != enrollment_password_proof_bytes) {
+          return Result<EnrollmentRequest>::failure(
+              enrollment_error(ErrorCode::protocol, "enrollment_proof_invalid"));
+        }
+        EnrollmentPasswordProof proof{};
+        std::copy_n(field.value_if()->bytes.begin(), enrollment_password_proof_bytes,
+                    proof.begin());
+        request.password_proof = proof;
+        break;
+      }
       default:
         return Result<EnrollmentRequest>::failure(
             enrollment_error(ErrorCode::protocol, "enrollment_unknown_field"));
     }
   }
-  if (!std::all_of(seen.begin(), seen.end(), [](bool value) { return value; })) {
+  for (std::size_t index = 0U; index < seen.size(); ++index) {
+    if (required[index] && !seen[index]) {
+      return Result<EnrollmentRequest>::failure(
+          enrollment_error(ErrorCode::protocol, "enrollment_field_missing"));
+    }
+  }
+  // Structural credential XOR; charset/length policy stays in
+  // validate_enrollment_request as before. Reject when both or neither
+  // admission credential is present.
+  const bool has_token = !request.bootstrap_token.empty();
+  if (has_token == request.password_proof.has_value()) {
     return Result<EnrollmentRequest>::failure(
-        enrollment_error(ErrorCode::protocol, "enrollment_field_missing"));
+        enrollment_error(ErrorCode::protocol, "enrollment_credential_invalid"));
   }
   return Result<EnrollmentRequest>::success(std::move(request));
 }
@@ -717,7 +811,7 @@ Result<void> validate_enrollment_request(const EnrollmentRequest& request,
   if (request.device_id.is_zero() || request.endpoint_id.is_zero() ||
       request.identity_public_key == IdentityPublicKey{} ||
       request.challenge_nonce == EnrollmentChallengeNonce{} ||
-      !is_nonempty_utf8(request.tenant) || !is_printable_non_space(request.bootstrap_token) ||
+      !is_nonempty_utf8(request.tenant) || !enrollment_credential_valid(request) ||
       request.supported.bits == 0U ||
       request.expires_unix_milliseconds == 0U ||
       request.signature == IdentitySignature{} || challenge.relay_id == RelayId{} ||

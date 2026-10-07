@@ -22,12 +22,24 @@ message EnrollmentRequest {
   heyaki.protocol.common.v1.CapabilityAdvertisement capabilities = 7;
   uint64 expires_unix_milliseconds = 8;
   heyaki.protocol.common.v1.Signature signature = 9;
+  // Password-mode admission proof (capability relay_enrollment_password_v1):
+  // exactly 32 Argon2id output bytes, relay-bound via
+  // Argon2id(password, BLAKE2b-128(domain_tag || relay_id)) — the relay holds
+  // a static verifier of this proof, so it is a bearer admission credential
+  // in the same class as bootstrap_token. Secret: never log or include in the
+  // signature object. Exactly one of bootstrap_token and
+  // enrollment_password_proof is present.
+  bytes enrollment_password_proof = 10;
 }
 
 message EnrollmentResult {
   string tenant = 1;
   uint64 enrollment_generation = 2;
   uint64 token_remaining_uses_after = 3;
+  // Password-mode completions only: SHA-256 of the relay leaf certificate
+  // (equals the relay id), so URL+password clients can anchor the TLS pin on
+  // first use. Token-mode responses omit this field byte-for-byte.
+  bytes relay_certificate_sha256 = 4;
 }
 
 message ControlError {
