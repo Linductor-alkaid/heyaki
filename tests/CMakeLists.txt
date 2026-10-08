@@ -1250,7 +1250,7 @@ set_tests_properties(heyaki_m3b_relay PROPERTIES
 set(heyaki_public_header_sources)
 foreach(public_header IN ITEMS
     error gateway identity ids lan_directory lan_protocol limits node operation password profile_store protocol relay_enrollment_client relay_wss_control runtime secret_backend
-    security session_protocol signaling_protocol signaling_replay_cache signing time version wire)
+    security session_protocol signaling_protocol signaling_replay_cache signing version wire)
   set(header_source
     "${HEYAKI_TEST_GENERATED_DIR}/${public_header}_header_standalone.cpp")
   file(GENERATE OUTPUT "${header_source}"

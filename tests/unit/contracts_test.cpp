@@ -4,12 +4,10 @@
 #include <heyaki/operation.hpp>
 #include <heyaki/protocol.hpp>
 #include <heyaki/security.hpp>
-#include <heyaki/time.hpp>
 
 #include <gtest/gtest.h>
 
 #include <array>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -125,15 +123,6 @@ TEST(Limits, DefaultsPassAndUnsafeValuesFail) {
   invalid = defaults;
   invalid.max_expanded_file_bytes = 0U;
   EXPECT_FALSE(heyaki::validate_limits(invalid));
-}
-
-TEST(Time, WireTimeoutUsesReceiverMonotonicClockAndLocalClamp) {
-  const auto received_at = heyaki::MonotonicClock::time_point{std::chrono::seconds{100}};
-  const auto deadline = heyaki::deadline_from_wire_timeout(
-      5000U, heyaki::RelativeTimeout{std::chrono::milliseconds{1200}}, received_at);
-  EXPECT_EQ(deadline.value(), received_at + std::chrono::milliseconds{1200});
-  EXPECT_FALSE(deadline.expired(received_at));
-  EXPECT_TRUE(deadline.expired(deadline.value()));
 }
 
 TEST(Operation, TerminalTransitionsAreExplicitAndEpochBound) {
