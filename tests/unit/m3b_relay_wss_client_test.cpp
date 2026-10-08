@@ -1,4 +1,5 @@
 #include "relay_server.hpp"
+#include "relay_test_support.hpp"
 #include "relay_database.hpp"
 #include "relay_enrollment.hpp"
 #include "relay_endpoint.hpp"
@@ -49,249 +50,17 @@
 namespace heyaki {
 namespace {
 
+using namespace heyaki::test;
+
 using namespace std::chrono_literals;
 
 constexpr std::string_view test_state_dir = HEYAKI_M3B_TEST_STATE_DIR;
 
-class TemporaryDirectory {
- public:
-  explicit TemporaryDirectory(std::string_view name) {
-    std::error_code error;
-    path_ = std::filesystem::path{test_state_dir} / name;
-    std::filesystem::remove_all(path_, error);
-    error.clear();
-    std::filesystem::create_directories(path_, error);
-    EXPECT_FALSE(error);
-  }
-  ~TemporaryDirectory() {
-    std::error_code ignored;
-    std::filesystem::remove_all(path_, ignored);
-  }
-  TemporaryDirectory(const TemporaryDirectory&) = delete;
-  TemporaryDirectory& operator=(const TemporaryDirectory&) = delete;
-
-  [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
-
- private:
-  std::filesystem::path path_;
-};
-
-bool write_test_certificate(const std::filesystem::path& directory) {
-  const auto certificate_path = directory / "test-only-cert.pem";
-  const auto key_path = directory / "test-only-key.pem";
-  EVP_PKEY* key = EVP_PKEY_Q_keygen(nullptr, nullptr, "EC", "prime256v1");
-  if (key == nullptr) {
-    return false;
-  }
-  X509* certificate = X509_new();
-  if (certificate == nullptr) {
-    EVP_PKEY_free(key);
-    return false;
-  }
-  std::array<unsigned char, 8U> serial_bytes{};
-  std::uint64_t serial = 1U;
-  if (RAND_bytes(serial_bytes.data(), static_cast<int>(serial_bytes.size())) == 1) {
-    std::memcpy(&serial, serial_bytes.data(), serial_bytes.size());
-    serial &= (std::numeric_limits<std::uint64_t>::max)() >> 1U;
-    serial = std::max<std::uint64_t>(serial, 1U);
-  }
-  bool configured =
-      X509_set_version(certificate, 2L) == 1 &&
-      ASN1_INTEGER_set_uint64(X509_get_serialNumber(certificate), serial) == 1 &&
-      X509_gmtime_adj(X509_getm_notBefore(certificate), -60L) != nullptr &&
-      X509_gmtime_adj(X509_getm_notAfter(certificate), 24L * 60L * 60L) != nullptr &&
-      X509_set_pubkey(certificate, key) == 1;
-  X509_NAME* name = X509_get_subject_name(certificate);
-  configured = configured && name != nullptr &&
-               X509_NAME_add_entry_by_txt(
-                   name, "CN", MBSTRING_ASC,
-                   reinterpret_cast<const unsigned char*>("127.0.0.1"), -1, -1, 0) == 1 &&
-               X509_set_issuer_name(certificate, name) == 1;
-  configured = configured && X509_sign(certificate, key, EVP_sha256()) > 0;
-  BIO* certificate_output = BIO_new_file(certificate_path.string().c_str(), "wb");
-  BIO* key_output = BIO_new_file(key_path.string().c_str(), "wb");
-  configured = configured && certificate_output != nullptr && key_output != nullptr &&
-               PEM_write_bio_X509(certificate_output, certificate) == 1 &&
-               PEM_write_bio_PrivateKey(key_output, key, nullptr, nullptr, 0, nullptr, nullptr) == 1;
-  if (certificate_output != nullptr) {
-    BIO_free(certificate_output);
-  }
-  if (key_output != nullptr) {
-    BIO_free(key_output);
-  }
-  X509_free(certificate);
-  EVP_PKEY_free(key);
-  return configured;
-}
-
-std::optional<RelayTlsPin> certificate_pin(const std::filesystem::path& path) {
-  BIO* input = BIO_new_file(path.string().c_str(), "rb");
-  if (input == nullptr) {
-    return std::nullopt;
-  }
-  X509* certificate = PEM_read_bio_X509(input, nullptr, nullptr, nullptr);
-  BIO_free(input);
-  if (certificate == nullptr) {
-    return std::nullopt;
-  }
-  RelayTlsPin pin{};
-  unsigned int size = 0U;
-  const bool ok = X509_digest(certificate, EVP_sha256(),
-                              reinterpret_cast<unsigned char*>(pin.data()), &size) == 1 &&
-                  size == pin.size();
-  X509_free(certificate);
-  return ok ? std::optional<RelayTlsPin>{pin} : std::nullopt;
-}
-
-RelayServerConfig server_config(const std::filesystem::path& root) {
-  RelayServerConfig config;
-  config.listen_address = "127.0.0.1";
-  config.listen_port = 0U;
-  config.tls_certificate_file = root / "test-only-cert.pem";
-  config.tls_private_key_file = root / "test-only-key.pem";
-  config.database_file = root / "relay.sqlite";
-  config.health_path = "/health";
-  config.install_signal_handlers = false;
-  config.runtime.worker_name = "heyaki-m3b-wss-client-test";
-  return config;
-}
-
-bool wait_until(const std::function<bool()>& predicate, std::chrono::milliseconds timeout) {
-  const auto deadline = std::chrono::steady_clock::now() + timeout;
-  while (std::chrono::steady_clock::now() < deadline) {
-    if (predicate()) {
-      return true;
-    }
-    std::this_thread::yield();
-  }
-  return predicate();
-}
-
-std::uint64_t now_milliseconds() {
-  return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                        std::chrono::system_clock::now().time_since_epoch())
-                                        .count());
-}
-
-Result<RelayWssControlFrame> receive_control(RelayWssClient& client) {
-  auto received = client.receive(3s);
-  if (!received) {
-    return Result<RelayWssControlFrame>::failure(*received.error_if());
-  }
-  if (received.value_if()->text) {
-    return Result<RelayWssControlFrame>::failure(
-        Error{ErrorCode::protocol, "test", "control_response_not_binary"});
-  }
-  return parse_relay_wss_control_frame(received.value_if()->payload);
-}
-
-Result<void> send_control(RelayWssClient& client, RelayWssControlType type,
-                          std::span<const std::byte> payload = {}) {
-  auto frame = encode_relay_wss_control_frame(type, payload);
-  if (!frame) {
-    return Result<void>::failure(*frame.error_if());
-  }
-  return client.send(*frame.value_if());
-}
-
-Result<EnrollmentRequest> make_enrollment_request(
-    const IdentityKeyPair& identity, const EnrollmentChallenge& challenge,
-    std::string_view token, std::string_view tenant = "tenant-a",
-    bool tamper_signature = false) {
-  EnrollmentRequest request;
-  request.device_id = identity.device_id();
-  EndpointId::Storage endpoint_bytes{};
-  endpoint_bytes[0U] = std::byte{0x42U};
-  request.endpoint_id = EndpointId{endpoint_bytes};
-  request.identity_public_key = identity.public_key();
-  request.challenge_nonce = challenge.nonce;
-  request.tenant = std::string{tenant};
-  request.bootstrap_token = std::string{token};
-  request.protocol_version = current_protocol_version;
-  request.supported.bits = known_capability_bits;
-  request.required.bits = static_cast<std::uint64_t>(Capability::enrollment);
-  request.expires_unix_milliseconds = challenge.expires_unix_milliseconds - 1U;
-  auto signed_request = sign_enrollment_request(request, challenge.relay_id, identity);
-  if (!signed_request) {
-    return Result<EnrollmentRequest>::failure(*signed_request.error_if());
-  }
-  if (tamper_signature) {
-    request.signature[0U] ^= std::byte{0x01U};
-  }
-  return Result<EnrollmentRequest>::success(std::move(request));
-}
-
-Result<RelayLoginRequest> make_login_request(
-    const IdentityKeyPair& identity, const EnrollmentChallenge& challenge,
-    std::uint64_t generation, std::uint64_t now, std::uint8_t endpoint_byte,
-    std::string_view tenant = "tenant-a") {
-  RelayLoginRequest request;
-  request.device_id = identity.device_id();
-  EndpointId::Storage endpoint{};
-  endpoint[0] = static_cast<std::byte>(endpoint_byte);
-  request.endpoint_id = EndpointId{endpoint};
-  request.identity_public_key = identity.public_key();
-  request.challenge_nonce = challenge.nonce;
-  request.tenant = std::string{tenant};
-  request.protocol_version = current_protocol_version;
-  request.supported.bits = known_capability_bits;
-  request.required.bits = static_cast<std::uint64_t>(Capability::enrollment);
-  request.enrollment_generation = generation;
-  request.expires_unix_milliseconds = now + 30U * 1000U;
-  auto signature = sign_relay_login_request(request, challenge.relay_id, identity);
-  if (!signature) {
-    return Result<RelayLoginRequest>::failure(*signature.error_if());
-  }
-  return Result<RelayLoginRequest>::success(std::move(request));
-}
-
-Result<RelayEndpointRecord> make_endpoint_record(
-    const IdentityKeyPair& identity, std::uint8_t endpoint_byte,
-    std::uint64_t now, std::uint64_t generation = 1U) {
-  RelayEndpointRecord record;
-  EndpointId::Storage endpoint{};
-  endpoint[0] = static_cast<std::byte>(endpoint_byte);
-  record.endpoint = RelayEndpointKey{.device_id = identity.device_id(),
-                                     .endpoint_id = EndpointId{endpoint}};
-  record.application_id = "com.example.device";
-  record.record_generation = generation;
-  record.manifest_sha256[0] = std::byte{0x5aU};
-  record.expires_unix_milliseconds = now + 60U * 1000U;
-  auto signature = sign_relay_endpoint_record(record, identity);
-  if (!signature) {
-    return Result<RelayEndpointRecord>::failure(*signature.error_if());
-  }
-  return Result<RelayEndpointRecord>::success(std::move(record));
-}
-
-Result<RelayWssClient> connect_control_client(const std::filesystem::path& root,
-                                              std::uint16_t port) {
-  auto pin = certificate_pin(root / "test-only-cert.pem");
-  if (!pin) {
-    return Result<RelayWssClient>::failure(
-        Error{ErrorCode::internal, "test", "certificate_pin_failed"});
-  }
-  RelayWssClientConfig config;
-  config.url = "wss://127.0.0.1:" + std::to_string(port) +
-               std::string{relay_wss_control_path};
-  config.relay_pin = pin;
-  config.tls_verify_peer = false;
-  config.runtime.worker_name = "heyaki-m3b-wss-control-client";
-  auto client = RelayWssClient::create(std::move(config));
-  if (!client) {
-    return client;
-  }
-  auto connected = client.value_if()->connect(3s);
-  if (!connected) {
-    return Result<RelayWssClient>::failure(*connected.error_if());
-  }
-  return client;
-}
-
 TEST(M3BRelayWssClientTest, ConnectsWithTlsPinAndReceivesHealth) {
-  TemporaryDirectory directory{"m3b-wss-client"};
+  TemporaryDirectory directory{test_state_dir, "m3b-wss-client"};
   ASSERT_TRUE(write_test_certificate(directory.path()));
-  auto server = RelayServer::create(server_config(directory.path()));
+  auto server =
+      RelayServer::create(relay_test_server_config(directory.path(), "heyaki-m3b-wss-client-test"));
   ASSERT_TRUE(server) << server.error_if()->safe_detail();
   ASSERT_TRUE(wait_until(
       [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
@@ -331,9 +100,10 @@ TEST(M3BRelayWssClientTest, ConnectsWithTlsPinAndReceivesHealth) {
 }
 
 TEST(M3BRelayWssClientTest, WrongPinFailsAuthentication) {
-  TemporaryDirectory directory{"m3b-wss-client-pin"};
+  TemporaryDirectory directory{test_state_dir, "m3b-wss-client-pin"};
   ASSERT_TRUE(write_test_certificate(directory.path()));
-  auto server = RelayServer::create(server_config(directory.path()));
+  auto server =
+      RelayServer::create(relay_test_server_config(directory.path(), "heyaki-m3b-wss-client-test"));
   ASSERT_TRUE(server) << server.error_if()->safe_detail();
   ASSERT_TRUE(wait_until(
       [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
@@ -355,9 +125,10 @@ TEST(M3BRelayWssClientTest, WrongPinFailsAuthentication) {
 }
 
 TEST(M3BRelayWssClientTest, VerifyPeerWithoutTrustedCaFails) {
-  TemporaryDirectory directory{"m3b-wss-client-ca"};
+  TemporaryDirectory directory{test_state_dir, "m3b-wss-client-ca"};
   ASSERT_TRUE(write_test_certificate(directory.path()));
-  auto server = RelayServer::create(server_config(directory.path()));
+  auto server =
+      RelayServer::create(relay_test_server_config(directory.path(), "heyaki-m3b-wss-client-test"));
   ASSERT_TRUE(server) << server.error_if()->safe_detail();
   ASSERT_TRUE(wait_until(
       [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
@@ -389,9 +160,10 @@ TEST(M3BRelayWssClientTest, RejectsInvalidUrlsAndPayloads) {
   config.url = "wss://127.0.0.1:notaport/health";
   EXPECT_FALSE(RelayWssClient::create(config));
 
-  TemporaryDirectory directory{"m3b-wss-client-invalid"};
+  TemporaryDirectory directory{test_state_dir, "m3b-wss-client-invalid"};
   ASSERT_TRUE(write_test_certificate(directory.path()));
-  auto server = RelayServer::create(server_config(directory.path()));
+  auto server =
+      RelayServer::create(relay_test_server_config(directory.path(), "heyaki-m3b-wss-client-test"));
   ASSERT_TRUE(server) << server.error_if()->safe_detail();
   ASSERT_TRUE(wait_until(
       [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
@@ -407,7 +179,7 @@ TEST(M3BRelayWssClientTest, RejectsInvalidUrlsAndPayloads) {
 }
 
 TEST(M3BRelayWssClientTest, EnrollsThroughBinaryControlPath) {
-  TemporaryDirectory directory{"m3b-wss-control-enrollment"};
+  TemporaryDirectory directory{test_state_dir, "m3b-wss-control-enrollment"};
   ASSERT_TRUE(write_test_certificate(directory.path()));
   const std::string token = "TEST-ONLY-wss-enrollment-token-0123456789";
   const std::string tenant = "\xe7\xa7\x9f\xe6\x88\xb7-a";
@@ -420,12 +192,13 @@ TEST(M3BRelayWssClientTest, EnrollsThroughBinaryControlPath) {
     ASSERT_TRUE(created) << created.error_if()->safe_detail();
   }
 
-  auto server = RelayServer::create(server_config(directory.path()));
+  auto server =
+      RelayServer::create(relay_test_server_config(directory.path(), "heyaki-m3b-wss-client-test"));
   ASSERT_TRUE(server) << server.error_if()->safe_detail();
   ASSERT_TRUE(wait_until(
       [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
-  auto client = connect_control_client(
-      directory.path(), server.value_if()->snapshot().listen_port);
+  auto client = connect_control_client(directory.path(), server.value_if()->snapshot().listen_port,
+                                       "heyaki-m3b-wss-control-client");
   ASSERT_TRUE(client) << client.error_if()->safe_detail();
 
   auto challenge_request = send_control(
@@ -485,22 +258,23 @@ TEST(M3BRelayWssClientTest, EnrollsThroughBinaryControlPath) {
 }
 
 TEST(M3BRelayWssClientTest, RejectsTamperedEnrollmentOverControlPath) {
-  TemporaryDirectory directory{"m3b-wss-control-reject"};
+  TemporaryDirectory directory{test_state_dir, "m3b-wss-control-reject"};
   ASSERT_TRUE(write_test_certificate(directory.path()));
   const std::string token = "TEST-ONLY-wss-reject-token-0123456789";
   const auto now = now_milliseconds();
   {
     auto database = RelayDatabase::open(directory.path() / "relay.sqlite");
     ASSERT_TRUE(database) << database.error_if()->safe_detail();
-    ASSERT_TRUE(database.value_if()->create_bootstrap_token(
-        "tenant-a", token, now + 60U * 1000U, 1U));
+    ASSERT_TRUE(
+        database.value_if()->create_bootstrap_token("tenant-a", token, now + 60U * 1000U, 1U));
   }
-  auto server = RelayServer::create(server_config(directory.path()));
+  auto server =
+      RelayServer::create(relay_test_server_config(directory.path(), "heyaki-m3b-wss-client-test"));
   ASSERT_TRUE(server) << server.error_if()->safe_detail();
   ASSERT_TRUE(wait_until(
       [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
-  auto client = connect_control_client(
-      directory.path(), server.value_if()->snapshot().listen_port);
+  auto client = connect_control_client(directory.path(), server.value_if()->snapshot().listen_port,
+                                       "heyaki-m3b-wss-control-client");
   ASSERT_TRUE(client) << client.error_if()->safe_detail();
 
   ASSERT_TRUE(send_control(*client.value_if(),
@@ -542,17 +316,17 @@ TEST(M3BRelayWssClientTest, RejectsTamperedEnrollmentOverControlPath) {
 }
 
 TEST(M3BRelayWssClientTest, ChargesEveryBaseRateLimitBeforeRejecting) {
-  TemporaryDirectory directory{"m3b-wss-control-rate-limit"};
+  TemporaryDirectory directory{test_state_dir, "m3b-wss-control-rate-limit"};
   ASSERT_TRUE(write_test_certificate(directory.path()));
-  auto config = server_config(directory.path());
+  auto config = relay_test_server_config(directory.path(), "heyaki-m3b-wss-client-test");
   config.rate_limits.connection.capacity = 1U;
   config.rate_limits.connection.window = 60s;
   auto server = RelayServer::create(std::move(config));
   ASSERT_TRUE(server) << server.error_if()->safe_detail();
   ASSERT_TRUE(wait_until(
       [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
-  auto client = connect_control_client(
-      directory.path(), server.value_if()->snapshot().listen_port);
+  auto client = connect_control_client(directory.path(), server.value_if()->snapshot().listen_port,
+                                       "heyaki-m3b-wss-control-client");
   ASSERT_TRUE(client) << client.error_if()->safe_detail();
 
   ASSERT_TRUE(send_control(*client.value_if(),
@@ -585,23 +359,24 @@ TEST(M3BRelayWssClientTest, ChargesEveryBaseRateLimitBeforeRejecting) {
 }
 
 TEST(M3BRelayWssClientTest, BindsEnrollmentChallengeToControlSession) {
-  TemporaryDirectory directory{"m3b-wss-control-session-binding"};
+  TemporaryDirectory directory{test_state_dir, "m3b-wss-control-session-binding"};
   ASSERT_TRUE(write_test_certificate(directory.path()));
   const std::string token = "TEST-ONLY-wss-session-token-0123456789";
   const auto now = now_milliseconds();
   {
     auto database = RelayDatabase::open(directory.path() / "relay.sqlite");
     ASSERT_TRUE(database) << database.error_if()->safe_detail();
-    ASSERT_TRUE(database.value_if()->create_bootstrap_token(
-        "tenant-a", token, now + 60U * 1000U, 1U));
+    ASSERT_TRUE(
+        database.value_if()->create_bootstrap_token("tenant-a", token, now + 60U * 1000U, 1U));
   }
-  auto server = RelayServer::create(server_config(directory.path()));
+  auto server = RelayServer::create(relay_test_server_config(directory.path(), "heyaki-m3b-wss-client-test"));
   ASSERT_TRUE(server) << server.error_if()->safe_detail();
-  ASSERT_TRUE(wait_until(
-      [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
+  ASSERT_TRUE(wait_until([&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
   const auto port = server.value_if()->snapshot().listen_port;
-  auto first_client = connect_control_client(directory.path(), port);
-  auto second_client = connect_control_client(directory.path(), port);
+  auto first_client =
+      connect_control_client(directory.path(), port, "heyaki-m3b-wss-control-client");
+  auto second_client =
+      connect_control_client(directory.path(), port, "heyaki-m3b-wss-control-client");
   ASSERT_TRUE(first_client) << first_client.error_if()->safe_detail();
   ASSERT_TRUE(second_client) << second_client.error_if()->safe_detail();
 
@@ -650,7 +425,7 @@ TEST(M3BRelayWssClientTest, BindsEnrollmentChallengeToControlSession) {
 }
 
 TEST(M3BRelayWssClientTest, LogsInHeartbeatsPublishesAndQueriesEndpoint) {
-  TemporaryDirectory directory{"m3b-wss-control-login"};
+  TemporaryDirectory directory{test_state_dir, "m3b-wss-control-login"};
   ASSERT_TRUE(write_test_certificate(directory.path()));
   auto identity = create_identity();
   ASSERT_TRUE(identity) << identity.error_if()->safe_detail();
@@ -668,12 +443,12 @@ TEST(M3BRelayWssClientTest, LogsInHeartbeatsPublishesAndQueriesEndpoint) {
     ASSERT_TRUE(database.value_if()->enroll_device(device, now));
   }
 
-  auto server = RelayServer::create(server_config(directory.path()));
+  auto server = RelayServer::create(relay_test_server_config(directory.path(), "heyaki-m3b-wss-client-test"));
   ASSERT_TRUE(server) << server.error_if()->safe_detail();
   ASSERT_TRUE(wait_until(
       [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
   const auto port = server.value_if()->snapshot().listen_port;
-  auto client = connect_control_client(directory.path(), port);
+  auto client = connect_control_client(directory.path(), port, "heyaki-m3b-wss-control-client");
   ASSERT_TRUE(client) << client.error_if()->safe_detail();
 
   ASSERT_TRUE(send_control(*client.value_if(),
@@ -804,7 +579,7 @@ TEST(M3BRelayWssClientTest, LogsInHeartbeatsPublishesAndQueriesEndpoint) {
 }
 
 TEST(M3BRelayWssClientTest, RejectsRevokedLoginAndClosesExistingControlSession) {
-  TemporaryDirectory directory{"m3b-wss-control-revoked"};
+  TemporaryDirectory directory{test_state_dir, "m3b-wss-control-revoked"};
   ASSERT_TRUE(write_test_certificate(directory.path()));
   auto identity = create_identity();
   ASSERT_TRUE(identity) << identity.error_if()->safe_detail();
@@ -821,12 +596,12 @@ TEST(M3BRelayWssClientTest, RejectsRevokedLoginAndClosesExistingControlSession) 
     device.status = RelayDeviceStatus::active;
     ASSERT_TRUE(database.value_if()->enroll_device(device, now));
   }
-  auto server = RelayServer::create(server_config(directory.path()));
+  auto server = RelayServer::create(relay_test_server_config(directory.path(), "heyaki-m3b-wss-client-test"));
   ASSERT_TRUE(server) << server.error_if()->safe_detail();
   ASSERT_TRUE(wait_until(
       [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
   const auto port = server.value_if()->snapshot().listen_port;
-  auto client = connect_control_client(directory.path(), port);
+  auto client = connect_control_client(directory.path(), port, "heyaki-m3b-wss-control-client");
   ASSERT_TRUE(client) << client.error_if()->safe_detail();
   ASSERT_TRUE(send_control(*client.value_if(),
                            RelayWssControlType::login_challenge));
@@ -874,7 +649,7 @@ TEST(M3BRelayWssClientTest, RejectsRevokedLoginAndClosesExistingControlSession) 
 }
 
 TEST(M3BRelayWssClientTest, SameDeviceMultipleEndpointsShareTenantDirectory) {
-  TemporaryDirectory directory{"m3b-wss-control-multi-endpoint"};
+  TemporaryDirectory directory{test_state_dir, "m3b-wss-control-multi-endpoint"};
   ASSERT_TRUE(write_test_certificate(directory.path()));
   auto identity = create_identity();
   ASSERT_TRUE(identity) << identity.error_if()->safe_detail();
@@ -891,13 +666,13 @@ TEST(M3BRelayWssClientTest, SameDeviceMultipleEndpointsShareTenantDirectory) {
     device.status = RelayDeviceStatus::active;
     ASSERT_TRUE(database.value_if()->enroll_device(device, now));
   }
-  auto server = RelayServer::create(server_config(directory.path()));
+  auto server = RelayServer::create(relay_test_server_config(directory.path(), "heyaki-m3b-wss-client-test"));
   ASSERT_TRUE(server) << server.error_if()->safe_detail();
   ASSERT_TRUE(wait_until(
       [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
   const auto port = server.value_if()->snapshot().listen_port;
-  auto first = connect_control_client(directory.path(), port);
-  auto second = connect_control_client(directory.path(), port);
+  auto first = connect_control_client(directory.path(), port, "heyaki-m3b-wss-control-client");
+  auto second = connect_control_client(directory.path(), port, "heyaki-m3b-wss-control-client");
   ASSERT_TRUE(first) << first.error_if()->safe_detail();
   ASSERT_TRUE(second) << second.error_if()->safe_detail();
 
@@ -1018,7 +793,7 @@ TEST(M3BRelayWssClientTest, SameDeviceMultipleEndpointsShareTenantDirectory) {
 }
 
 TEST(M3BRelayWssClientTest, PersistsRealWssEnrollmentAndRetriesIdempotently) {
-  TemporaryDirectory directory{"m3b-wss-control-profile-enrollment"};
+  TemporaryDirectory directory{test_state_dir, "m3b-wss-control-profile-enrollment"};
 #ifndef _WIN32
   ASSERT_EQ(::chmod(directory.path().c_str(), S_IRWXU), 0);
 #endif
@@ -1028,10 +803,10 @@ TEST(M3BRelayWssClientTest, PersistsRealWssEnrollmentAndRetriesIdempotently) {
   {
     auto database = RelayDatabase::open(directory.path() / "relay.sqlite");
     ASSERT_TRUE(database) << database.error_if()->safe_detail();
-    ASSERT_TRUE(database.value_if()->create_bootstrap_token(
-        "tenant-a", token, now + 60U * 1000U, 1U));
+    ASSERT_TRUE(
+        database.value_if()->create_bootstrap_token("tenant-a", token, now + 60U * 1000U, 1U));
   }
-  auto server = RelayServer::create(server_config(directory.path()));
+  auto server = RelayServer::create(relay_test_server_config(directory.path(), "heyaki-m3b-wss-client-test"));
   ASSERT_TRUE(server) << server.error_if()->safe_detail();
   ASSERT_TRUE(wait_until(
       [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
@@ -1090,7 +865,7 @@ TEST(M3BRelayWssClientTest, PersistsRealWssEnrollmentAndRetriesIdempotently) {
 }
 
 TEST(M3BRelayWssClientTest, NodeAutoLoginHeartbeatsAndRelayFailureKeepsLanDisabledPath) {
-  TemporaryDirectory directory{"m3b-node-relay-auto-login"};
+  TemporaryDirectory directory{test_state_dir, "m3b-node-relay-auto-login"};
 #ifndef _WIN32
   ASSERT_EQ(::chmod(directory.path().c_str(), S_IRWXU), 0);
 #endif
@@ -1128,7 +903,7 @@ TEST(M3BRelayWssClientTest, NodeAutoLoginHeartbeatsAndRelayFailureKeepsLanDisabl
     device.status = RelayDeviceStatus::active;
     ASSERT_TRUE(database.value_if()->enroll_device(device, now));
   }
-  auto server = RelayServer::create(server_config(directory.path()));
+  auto server = RelayServer::create(relay_test_server_config(directory.path(), "heyaki-m3b-wss-client-test"));
   ASSERT_TRUE(server) << server.error_if()->safe_detail();
   ASSERT_TRUE(wait_until(
       [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
@@ -1192,7 +967,7 @@ TEST(M3BRelayWssClientTest, NodeAutoLoginHeartbeatsAndRelayFailureKeepsLanDisabl
 }
 
 TEST(M3BRelayWssClientTest, NodeAutoLogsInFromPersistedRelayEnrollment) {
-  TemporaryDirectory directory{"m3b-node-relay-profile-auto-login"};
+  TemporaryDirectory directory{test_state_dir, "m3b-node-relay-profile-auto-login"};
 #ifndef _WIN32
   ASSERT_EQ(::chmod(directory.path().c_str(), S_IRWXU), 0);
 #endif
@@ -1229,7 +1004,7 @@ TEST(M3BRelayWssClientTest, NodeAutoLogsInFromPersistedRelayEnrollment) {
     device.status = RelayDeviceStatus::active;
     ASSERT_TRUE(database.value_if()->enroll_device(device, now));
   }
-  auto server = RelayServer::create(server_config(directory.path()));
+  auto server = RelayServer::create(relay_test_server_config(directory.path(), "heyaki-m3b-wss-client-test"));
   ASSERT_TRUE(server) << server.error_if()->safe_detail();
   ASSERT_TRUE(wait_until(
       [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
@@ -1269,7 +1044,7 @@ TEST(M3BRelayWssClientTest, NodeAutoLogsInFromPersistedRelayEnrollment) {
 }
 
 TEST(M3BRelayWssClientTest, NodeReconnectsWithBoundedBackoffAfterRelayOutage) {
-  TemporaryDirectory directory{"m3b-node-relay-reconnect"};
+  TemporaryDirectory directory{test_state_dir, "m3b-node-relay-reconnect"};
 #ifndef _WIN32
   ASSERT_EQ(::chmod(directory.path().c_str(), S_IRWXU), 0);
 #endif
@@ -1375,7 +1150,7 @@ TEST(M3BRelayWssClientTest, NodeReconnectsWithBoundedBackoffAfterRelayOutage) {
   EXPECT_GE(degraded.backoff.count(), 100);
   EXPECT_LE(degraded.backoff.count(), 400);
 
-  auto config = server_config(directory.path());
+  auto config = relay_test_server_config(directory.path(), "heyaki-m3b-wss-client-test");
   config.listen_port = port;
   auto server = RelayServer::create(std::move(config));
   ASSERT_TRUE(server) << server.error_if()->safe_detail();
@@ -1397,7 +1172,7 @@ TEST(M3BRelayWssClientTest, NodeReconnectsWithBoundedBackoffAfterRelayOutage) {
 }
 
 TEST(M3BRelayWssClientTest, NodeReconnectsAfterRelayRestart) {
-  TemporaryDirectory directory{"m3b-node-relay-restart"};
+  TemporaryDirectory directory{test_state_dir, "m3b-node-relay-restart"};
 #ifndef _WIN32
   ASSERT_EQ(::chmod(directory.path().c_str(), S_IRWXU), 0);
 #endif
@@ -1435,7 +1210,7 @@ TEST(M3BRelayWssClientTest, NodeReconnectsAfterRelayRestart) {
     ASSERT_TRUE(database.value_if()->enroll_device(device, now));
   }
 
-  auto first_server = RelayServer::create(server_config(directory.path()));
+  auto first_server = RelayServer::create(relay_test_server_config(directory.path(), "heyaki-m3b-wss-client-test"));
   ASSERT_TRUE(first_server) << first_server.error_if()->safe_detail();
   ASSERT_TRUE(wait_until(
       [&] { return first_server.value_if()->snapshot().listen_port != 0U; }, 2s));
@@ -1513,7 +1288,7 @@ TEST(M3BRelayWssClientTest, NodeReconnectsAfterRelayRestart) {
               relay.registration_successes + relay.registration_failures);
   }
 
-  auto restarted_config = server_config(directory.path());
+  auto restarted_config = relay_test_server_config(directory.path(), "heyaki-m3b-wss-client-test");
   restarted_config.listen_port = port;
   auto restarted_server = RelayServer::create(std::move(restarted_config));
   ASSERT_TRUE(restarted_server) << restarted_server.error_if()->safe_detail();
@@ -1543,7 +1318,7 @@ TEST(M3BRelayWssClientTest, NodeReconnectsAfterRelayRestart) {
 }
 
 TEST(M3BRelayWssClientTest, NodesAssembleAuthenticatedSessionOverRelayOnlyRoute) {
-  TemporaryDirectory directory{"m4-node-relay-session"};
+  TemporaryDirectory directory{test_state_dir, "m4-node-relay-session"};
 #ifndef _WIN32
   ASSERT_EQ(::chmod(directory.path().c_str(), S_IRWXU), 0);
 #endif
@@ -1589,7 +1364,7 @@ TEST(M3BRelayWssClientTest, NodesAssembleAuthenticatedSessionOverRelayOnlyRoute)
       ASSERT_TRUE(database.value_if()->enroll_device(device, now_milliseconds()));
     }
   }
-  auto server = RelayServer::create(server_config(directory.path()));
+  auto server = RelayServer::create(relay_test_server_config(directory.path(), "heyaki-m3b-wss-client-test"));
   ASSERT_TRUE(server) << server.error_if()->safe_detail();
   ASSERT_TRUE(wait_until(
       [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
@@ -1673,7 +1448,7 @@ TEST(M3BRelayWssClientTest, DualRouteNodesDedupEndpointsAndPreferLanByPolicy) {
   // M4 exit condition: with LAN and relay both available the peer appears as
   // ONE merged directory entry, automatic policy prefers the LAN signaling
   // route, and each side ends up with exactly one authenticated session.
-  TemporaryDirectory directory{"m3b-wss-dual-route"};
+  TemporaryDirectory directory{test_state_dir, "m3b-wss-dual-route"};
 #ifndef _WIN32
   ASSERT_EQ(::chmod(directory.path().c_str(), S_IRWXU), 0);
 #endif
@@ -1719,7 +1494,7 @@ TEST(M3BRelayWssClientTest, DualRouteNodesDedupEndpointsAndPreferLanByPolicy) {
       ASSERT_TRUE(database.value_if()->enroll_device(device, now_milliseconds()));
     }
   }
-  auto server = RelayServer::create(server_config(directory.path()));
+  auto server = RelayServer::create(relay_test_server_config(directory.path(), "heyaki-m3b-wss-client-test"));
   ASSERT_TRUE(server) << server.error_if()->safe_detail();
   ASSERT_TRUE(wait_until(
       [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
@@ -1840,7 +1615,7 @@ TEST(M3BRelayWssClientTest, AutomaticFallsBackToRelayWhenLanHintAbsent) {
   // M4 exit condition: the automatic policy's relay fallback — with no LAN
   // hint for the peer, connect() must use the relay route and still produce
   // exactly one authenticated session per side.
-  TemporaryDirectory directory{"m3b-wss-relay-preferred"};
+  TemporaryDirectory directory{test_state_dir, "m3b-wss-relay-preferred"};
 #ifndef _WIN32
   ASSERT_EQ(::chmod(directory.path().c_str(), S_IRWXU), 0);
 #endif
@@ -1886,7 +1661,7 @@ TEST(M3BRelayWssClientTest, AutomaticFallsBackToRelayWhenLanHintAbsent) {
       ASSERT_TRUE(database.value_if()->enroll_device(device, now_milliseconds()));
     }
   }
-  auto server = RelayServer::create(server_config(directory.path()));
+  auto server = RelayServer::create(relay_test_server_config(directory.path(), "heyaki-m3b-wss-client-test"));
   ASSERT_TRUE(server) << server.error_if()->safe_detail();
   ASSERT_TRUE(wait_until(
       [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
@@ -1974,17 +1749,17 @@ TEST(M3BRelayWssClientTest, AutomaticFallsBackToRelayWhenLanHintAbsent) {
 }
 
 TEST(M3BRelayWssClientTest, EnrollmentLatencyP95UnderTwoSeconds) {
-  TemporaryDirectory directory{"m3b-wss-enrollment-latency"};
+  TemporaryDirectory directory{test_state_dir, "m3b-wss-enrollment-latency"};
   ASSERT_TRUE(write_test_certificate(directory.path()));
   const std::string token = "TEST-ONLY-enrollment-latency-token-0123456789";
   const auto now = now_milliseconds();
   {
     auto database = RelayDatabase::open(directory.path() / "relay.sqlite");
     ASSERT_TRUE(database) << database.error_if()->safe_detail();
-    ASSERT_TRUE(database.value_if()->create_bootstrap_token(
-        "tenant-a", token, now + 120U * 1000U, 100U));
+    ASSERT_TRUE(
+        database.value_if()->create_bootstrap_token("tenant-a", token, now + 120U * 1000U, 100U));
   }
-  auto server = RelayServer::create(server_config(directory.path()));
+  auto server = RelayServer::create(relay_test_server_config(directory.path(), "heyaki-m3b-wss-client-test"));
   ASSERT_TRUE(server) << server.error_if()->safe_detail();
   ASSERT_TRUE(wait_until(
       [&] { return server.value_if()->snapshot().listen_port != 0U; }, 2s));
