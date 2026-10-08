@@ -1,5 +1,6 @@
 #include <heyaki/relay_wss_control.hpp>
 #include <heyaki/signaling_protocol.hpp>
+#include "../core/proto_codec.hpp"
 
 #include <algorithm>
 #include <array>
@@ -15,6 +16,8 @@
 
 namespace heyaki {
 namespace {
+
+constexpr auto kProtoComponent = "relay_wss_control";
 
 Error control_error(const char* detail) {
   return Error{ErrorCode::protocol, "relay_wss_control", detail};
@@ -77,113 +80,6 @@ bool valid_utf8(std::string_view value) noexcept {
   return true;
 }
 
-void append_varint(std::vector<std::byte>& output, std::uint64_t value) {
-  do {
-    auto byte = static_cast<std::uint8_t>(value & 0x7fU);
-    value >>= 7U;
-    if (value != 0U) {
-      byte |= 0x80U;
-    }
-    output.push_back(static_cast<std::byte>(byte));
-  } while (value != 0U);
-}
-
-void append_tag(std::vector<std::byte>& output, std::uint32_t field,
-                std::uint8_t wire_type) {
-  append_varint(output, (static_cast<std::uint64_t>(field) << 3U) | wire_type);
-}
-
-void append_uint(std::vector<std::byte>& output, std::uint32_t field,
-                 std::uint64_t value) {
-  append_tag(output, field, 0U);
-  append_varint(output, value);
-}
-
-void append_bytes(std::vector<std::byte>& output, std::uint32_t field,
-                  std::span<const std::byte> value) {
-  append_tag(output, field, 2U);
-  append_varint(output, value.size());
-  output.insert(output.end(), value.begin(), value.end());
-}
-
-void append_string(std::vector<std::byte>& output, std::uint32_t field,
-                   std::string_view value) {
-  append_bytes(output, field,
-               std::span<const std::byte>{
-                   reinterpret_cast<const std::byte*>(value.data()), value.size()});
-}
-
-struct ProtoField {
-  std::uint32_t number{};
-  std::uint8_t wire_type{};
-  std::uint64_t integer{};
-  std::span<const std::byte> bytes;
-};
-
-class ProtoReader {
- public:
-  explicit ProtoReader(std::span<const std::byte> input) : input_(input) {}
-
-  [[nodiscard]] bool done() const noexcept { return offset_ == input_.size(); }
-
-  Result<ProtoField> next() {
-    auto tag = read_varint();
-    if (!tag) {
-      return Result<ProtoField>::failure(*tag.error_if());
-    }
-    if (*tag.value_if() == 0U || (*tag.value_if() >> 3U) > 536870911U) {
-      return Result<ProtoField>::failure(control_error("protobuf_tag_invalid"));
-    }
-    ProtoField field;
-    field.number = static_cast<std::uint32_t>(*tag.value_if() >> 3U);
-    field.wire_type = static_cast<std::uint8_t>(*tag.value_if() & 0x07U);
-    if (field.wire_type == 0U) {
-      auto value = read_varint();
-      if (!value) {
-        return Result<ProtoField>::failure(*value.error_if());
-      }
-      field.integer = *value.value_if();
-      return Result<ProtoField>::success(field);
-    }
-    if (field.wire_type == 2U) {
-      auto length = read_varint();
-      if (!length || *length.value_if() > input_.size() - offset_) {
-        return Result<ProtoField>::failure(control_error("protobuf_length_invalid"));
-      }
-      const auto count = static_cast<std::size_t>(*length.value_if());
-      field.bytes = input_.subspan(offset_, count);
-      offset_ += count;
-      return Result<ProtoField>::success(field);
-    }
-    return Result<ProtoField>::failure(control_error("protobuf_wire_type_unsupported"));
-  }
-
- private:
-  Result<std::uint64_t> read_varint() {
-    std::uint64_t value = 0U;
-    for (std::size_t index = 0U; index < 10U; ++index) {
-      if (offset_ >= input_.size()) {
-        return Result<std::uint64_t>::failure(control_error("protobuf_varint_truncated"));
-      }
-      const auto byte = std::to_integer<std::uint8_t>(input_[offset_++]);
-      if (index == 9U && (byte & 0xfeU) != 0U) {
-        return Result<std::uint64_t>::failure(control_error("protobuf_varint_overflow"));
-      }
-      value |= static_cast<std::uint64_t>(byte & 0x7fU) << (7U * index);
-      if ((byte & 0x80U) == 0U) {
-        if (index > 0U && (byte & 0x7fU) == 0U) {
-          return Result<std::uint64_t>::failure(control_error("protobuf_varint_noncanonical"));
-        }
-        return Result<std::uint64_t>::success(value);
-      }
-    }
-    return Result<std::uint64_t>::failure(control_error("protobuf_varint_overflow"));
-  }
-
-  std::span<const std::byte> input_;
-  std::size_t offset_{};
-};
-
 }  // namespace
 
 Result<std::vector<std::byte>> encode_relay_wss_control_frame(
@@ -238,13 +134,13 @@ Result<std::vector<std::byte>> encode_relay_wss_enrollment_result(
     return Result<std::vector<std::byte>>::failure(control_error("enrollment_result_invalid"));
   }
   std::vector<std::byte> output;
-  append_string(output, 1U, result.tenant);
-  append_uint(output, 2U, result.enrollment_generation);
+  proto_codec::append_text(output, 1U, result.tenant);
+  proto_codec::append_uint(output, 2U, result.enrollment_generation);
   if (result.token_remaining_uses_after != 0U) {
-    append_uint(output, 3U, result.token_remaining_uses_after);
+    proto_codec::append_uint(output, 3U, result.token_remaining_uses_after);
   }
   if (result.relay_certificate_sha256) {
-    append_bytes(output, 4U, *result.relay_certificate_sha256);
+    proto_codec::append_bytes(output, 4U, *result.relay_certificate_sha256);
   }
   return Result<std::vector<std::byte>>::success(std::move(output));
 }
@@ -255,7 +151,7 @@ Result<RelayWssEnrollmentResult> parse_relay_wss_enrollment_result(
     return Result<RelayWssEnrollmentResult>::failure(
         control_error("enrollment_result_size_invalid"));
   }
-  ProtoReader reader(payload);
+  proto_codec::ProtoReader reader(payload, kProtoComponent);
   RelayWssEnrollmentResult result;
   std::array<bool, 4U> seen{};
   while (!reader.done()) {
@@ -314,8 +210,8 @@ Result<std::vector<std::byte>> encode_relay_wss_control_error(
     return Result<std::vector<std::byte>>::failure(control_error("control_error_invalid"));
   }
   std::vector<std::byte> output;
-  append_uint(output, 1U, static_cast<std::uint16_t>(code));
-  append_string(output, 2U, safe_detail);
+  proto_codec::append_uint(output, 1U, static_cast<std::uint16_t>(code));
+  proto_codec::append_text(output, 2U, safe_detail);
   return Result<std::vector<std::byte>>::success(std::move(output));
 }
 
@@ -324,7 +220,7 @@ Result<RelayWssControlError> parse_relay_wss_control_error(
   if (payload.empty() || payload.size() > 128U) {
     return Result<RelayWssControlError>::failure(control_error("control_error_size_invalid"));
   }
-  ProtoReader reader(payload);
+  proto_codec::ProtoReader reader(payload, kProtoComponent);
   RelayWssControlError output;
   std::array<bool, 2U> seen{};
   while (!reader.done()) {
@@ -399,33 +295,33 @@ Result<void> copy_control_bytes(std::span<const std::byte> input,
 void append_control_publication(std::vector<std::byte>& output, std::uint32_t field,
                                 const RelayWssEndpointPublication& publication) {
   std::vector<std::byte> nested;
-  append_bytes(nested, 1U, publication.device_id.bytes());
-  append_bytes(nested, 2U, publication.endpoint_id.bytes());
+  proto_codec::append_bytes(nested, 1U, publication.device_id.bytes());
+  proto_codec::append_bytes(nested, 2U, publication.endpoint_id.bytes());
   if (publication.application_id) {
-    append_string(nested, 3U, *publication.application_id);
+    proto_codec::append_text(nested, 3U, *publication.application_id);
   }
   if (publication.record_generation) {
-    append_uint(nested, 4U, *publication.record_generation);
+    proto_codec::append_uint(nested, 4U, *publication.record_generation);
   }
   if (publication.manifest_generation) {
-    append_uint(nested, 5U, *publication.manifest_generation);
+    proto_codec::append_uint(nested, 5U, *publication.manifest_generation);
   }
   if (publication.manifest_sha256) {
-    append_bytes(nested, 6U, *publication.manifest_sha256);
+    proto_codec::append_bytes(nested, 6U, *publication.manifest_sha256);
   }
   if (publication.expires_unix_milliseconds) {
-    append_uint(nested, 7U, *publication.expires_unix_milliseconds);
+    proto_codec::append_uint(nested, 7U, *publication.expires_unix_milliseconds);
   }
   if (publication.lease_expires_unix_milliseconds) {
-    append_uint(nested, 8U, *publication.lease_expires_unix_milliseconds);
+    proto_codec::append_uint(nested, 8U, *publication.lease_expires_unix_milliseconds);
   }
   if (publication.endpoint_record) {
-    append_bytes(nested, 9U, *publication.endpoint_record);
+    proto_codec::append_bytes(nested, 9U, *publication.endpoint_record);
   }
   if (publication.identity_public_key) {
-    append_bytes(nested, 10U, *publication.identity_public_key);
+    proto_codec::append_bytes(nested, 10U, *publication.identity_public_key);
   }
-  append_bytes(output, field, nested);
+  proto_codec::append_bytes(output, field, nested);
 }
 
 Result<RelayWssEndpointPublication> parse_control_publication(
@@ -434,7 +330,7 @@ Result<RelayWssEndpointPublication> parse_control_publication(
     return Result<RelayWssEndpointPublication>::failure(
         control_error("endpoint_publication_size_invalid"));
   }
-  ProtoReader reader(payload);
+  proto_codec::ProtoReader reader(payload, kProtoComponent);
   RelayWssEndpointPublication output;
   std::array<bool, 10U> seen{};
   while (!reader.done()) {
@@ -560,27 +456,27 @@ void append_ice_config(std::vector<std::byte>& output, std::uint32_t field,
   for (const auto& server : config.servers) {
     std::vector<std::byte> entry;
     if (server.kind != RelayWssIceServerKind::stun) {
-      append_uint(entry, 1U, static_cast<std::uint64_t>(server.kind));
+      proto_codec::append_uint(entry, 1U, static_cast<std::uint64_t>(server.kind));
     }
-    append_string(entry, 2U, server.hostname);
-    append_uint(entry, 3U, server.port);
+    proto_codec::append_text(entry, 2U, server.hostname);
+    proto_codec::append_uint(entry, 3U, server.port);
     if (!server.username.empty()) {
-      append_string(entry, 4U, server.username);
+      proto_codec::append_text(entry, 4U, server.username);
     }
     if (!server.credential.empty()) {
-      append_string(entry, 5U, server.credential);
+      proto_codec::append_text(entry, 5U, server.credential);
     }
-    append_bytes(nested, 1U, entry);
+    proto_codec::append_bytes(nested, 1U, entry);
   }
-  append_uint(nested, 2U, config.expires_unix_seconds);
-  append_bytes(output, field, nested);
+  proto_codec::append_uint(nested, 2U, config.expires_unix_seconds);
+  proto_codec::append_bytes(output, field, nested);
 }
 
 Result<RelayWssIceConfig> parse_ice_config(std::span<const std::byte> payload) {
   if (payload.empty() || payload.size() > max_relay_wss_login_result_bytes) {
     return Result<RelayWssIceConfig>::failure(control_error("ice_config_size_invalid"));
   }
-  ProtoReader reader(payload);
+  proto_codec::ProtoReader reader(payload, kProtoComponent);
   RelayWssIceConfig config;
   bool seen_expiry = false;
   while (!reader.done()) {
@@ -594,7 +490,7 @@ Result<RelayWssIceConfig> parse_ice_config(std::span<const std::byte> payload) {
         return Result<RelayWssIceConfig>::failure(
             control_error("ice_config_field_invalid"));
       }
-      ProtoReader entry_reader(field.value_if()->bytes);
+      proto_codec::ProtoReader entry_reader(field.value_if()->bytes, kProtoComponent);
       RelayWssIceServer server;
       std::array<bool, 5U> seen{};
       if (field.value_if()->bytes.empty() ||
@@ -714,9 +610,9 @@ Result<std::vector<std::byte>> encode_relay_wss_login_result(
     return Result<std::vector<std::byte>>::failure(control_error("login_result_invalid"));
   }
   std::vector<std::byte> output;
-  append_string(output, 1U, result.tenant);
-  append_uint(output, 2U, result.enrollment_generation);
-  append_uint(output, 3U, result.lease_milliseconds);
+  proto_codec::append_text(output, 1U, result.tenant);
+  proto_codec::append_uint(output, 2U, result.enrollment_generation);
+  proto_codec::append_uint(output, 3U, result.lease_milliseconds);
   if (result.ice_config) {
     append_ice_config(output, 4U, *result.ice_config);
   }
@@ -728,7 +624,7 @@ Result<RelayWssLoginResult> parse_relay_wss_login_result(
   if (payload.empty() || payload.size() > max_relay_wss_login_result_bytes) {
     return Result<RelayWssLoginResult>::failure(control_error("login_result_size_invalid"));
   }
-  ProtoReader reader(payload);
+  proto_codec::ProtoReader reader(payload, kProtoComponent);
   RelayWssLoginResult result;
   std::array<bool, 4U> seen{};
   while (!reader.done()) {
@@ -791,7 +687,7 @@ Result<std::vector<std::byte>> encode_relay_wss_heartbeat_request(
     if (*request.lease_milliseconds > max_relay_wss_lease_milliseconds) {
       return Result<std::vector<std::byte>>::failure(control_error("heartbeat_request_invalid"));
     }
-    append_uint(output, 1U, *request.lease_milliseconds);
+    proto_codec::append_uint(output, 1U, *request.lease_milliseconds);
   }
   return Result<std::vector<std::byte>>::success(std::move(output));
 }
@@ -802,7 +698,7 @@ Result<RelayWssHeartbeatRequest> parse_relay_wss_heartbeat_request(
     return Result<RelayWssHeartbeatRequest>::failure(
         control_error("heartbeat_request_size_invalid"));
   }
-  ProtoReader reader(payload);
+  proto_codec::ProtoReader reader(payload, kProtoComponent);
   RelayWssHeartbeatRequest request;
   while (!reader.done()) {
     auto field = reader.next();
@@ -831,8 +727,8 @@ Result<std::vector<std::byte>> encode_relay_wss_heartbeat_ack(
     return Result<std::vector<std::byte>>::failure(control_error("heartbeat_ack_invalid"));
   }
   std::vector<std::byte> output;
-  append_uint(output, 1U, ack.lease_generation);
-  append_uint(output, 2U, ack.granted_lease_milliseconds);
+  proto_codec::append_uint(output, 1U, ack.lease_generation);
+  proto_codec::append_uint(output, 2U, ack.granted_lease_milliseconds);
   if (ack.ice_config) {
     append_ice_config(output, 3U, *ack.ice_config);
   }
@@ -844,7 +740,7 @@ Result<RelayWssHeartbeatAck> parse_relay_wss_heartbeat_ack(
   if (payload.empty() || payload.size() > max_relay_wss_heartbeat_ack_bytes) {
     return Result<RelayWssHeartbeatAck>::failure(control_error("heartbeat_ack_size_invalid"));
   }
-  ProtoReader reader(payload);
+  proto_codec::ProtoReader reader(payload, kProtoComponent);
   RelayWssHeartbeatAck ack;
   std::array<bool, 3U> seen{};
   while (!reader.done()) {
@@ -893,27 +789,28 @@ Result<RelayWssHeartbeatAck> parse_relay_wss_heartbeat_ack(
 
 Result<std::vector<std::byte>> encode_relay_wss_endpoint_publish(
     const RelayWssEndpointPublish& publish) {
-  if (publish.endpoint_record.empty() || publish.endpoint_record.size() > max_relay_wss_endpoint_record_bytes ||
+  if (publish.endpoint_record.empty() ||
+      publish.endpoint_record.size() > max_relay_wss_endpoint_record_bytes ||
       (publish.service_manifest &&
        (publish.service_manifest->empty() ||
         publish.service_manifest->size() > max_relay_wss_service_manifest_bytes))) {
     return Result<std::vector<std::byte>>::failure(control_error("endpoint_publish_invalid"));
   }
   std::vector<std::byte> output;
-  append_bytes(output, 1U, publish.endpoint_record);
+  proto_codec::append_bytes(output, 1U, publish.endpoint_record);
   if (publish.service_manifest) {
-    append_bytes(output, 2U, *publish.service_manifest);
+    proto_codec::append_bytes(output, 2U, *publish.service_manifest);
   }
   return Result<std::vector<std::byte>>::success(std::move(output));
 }
 
 Result<RelayWssEndpointPublish> parse_relay_wss_endpoint_publish(
     std::span<const std::byte> payload) {
-  if (payload.empty() || payload.size() > max_relay_wss_endpoint_record_bytes + max_relay_wss_service_manifest_bytes + 64U) {
-    return Result<RelayWssEndpointPublish>::failure(
-        control_error("endpoint_publish_size_invalid"));
+  if (payload.empty() || payload.size() > max_relay_wss_endpoint_record_bytes +
+                                              max_relay_wss_service_manifest_bytes + 64U) {
+    return Result<RelayWssEndpointPublish>::failure(control_error("endpoint_publish_size_invalid"));
   }
-  ProtoReader reader(payload);
+  proto_codec::ProtoReader reader(payload, kProtoComponent);
   RelayWssEndpointPublish output;
   std::array<bool, 2U> seen{};
   while (!reader.done()) {
@@ -958,7 +855,7 @@ Result<std::vector<std::byte>> encode_relay_wss_endpoint_publish_ack(
         control_error("endpoint_publish_ack_invalid"));
   }
   std::vector<std::byte> output;
-  append_uint(output, 1U, ack.record_generation);
+  proto_codec::append_uint(output, 1U, ack.record_generation);
   return Result<std::vector<std::byte>>::success(std::move(output));
 }
 
@@ -968,7 +865,7 @@ Result<RelayWssEndpointPublishAck> parse_relay_wss_endpoint_publish_ack(
     return Result<RelayWssEndpointPublishAck>::failure(
         control_error("endpoint_publish_ack_size_invalid"));
   }
-  ProtoReader reader(payload);
+  proto_codec::ProtoReader reader(payload, kProtoComponent);
   RelayWssEndpointPublishAck ack;
   while (!reader.done()) {
     auto field = reader.next();
@@ -996,10 +893,10 @@ Result<std::vector<std::byte>> encode_relay_wss_endpoint_query(
   }
   std::vector<std::byte> output;
   if (query.device_id) {
-    append_bytes(output, 1U, query.device_id->bytes());
+    proto_codec::append_bytes(output, 1U, query.device_id->bytes());
   }
   if (query.endpoint_id) {
-    append_bytes(output, 2U, query.endpoint_id->bytes());
+    proto_codec::append_bytes(output, 2U, query.endpoint_id->bytes());
   }
   return Result<std::vector<std::byte>>::success(std::move(output));
 }
@@ -1010,7 +907,7 @@ Result<RelayWssEndpointQuery> parse_relay_wss_endpoint_query(
     return Result<RelayWssEndpointQuery>::failure(
         control_error("endpoint_query_size_invalid"));
   }
-  ProtoReader reader(payload);
+  proto_codec::ProtoReader reader(payload, kProtoComponent);
   RelayWssEndpointQuery query;
   std::array<bool, 2U> seen{};
   while (!reader.done()) {
@@ -1082,7 +979,7 @@ Result<RelayWssEndpointQueryResult> parse_relay_wss_endpoint_query_result(
     return Result<RelayWssEndpointQueryResult>::failure(
         control_error("endpoint_query_result_size_invalid"));
   }
-  ProtoReader reader(payload);
+  proto_codec::ProtoReader reader(payload, kProtoComponent);
   RelayWssEndpointQueryResult result;
   while (!reader.done()) {
     auto field = reader.next();
@@ -1107,7 +1004,7 @@ namespace {
 
 template <typename Target>
 Result<Target> parse_signaling_target(std::span<const std::byte> payload) {
-  ProtoReader reader(payload);
+  proto_codec::ProtoReader reader(payload, kProtoComponent);
   std::optional<DeviceId> device_id;
   std::optional<EndpointId> endpoint_id;
   std::optional<std::uint8_t> kind;
@@ -1194,13 +1091,13 @@ void append_signaling_common(std::vector<std::byte>& output, const DeviceId& dev
                              const EndpointId& endpoint_id, std::uint8_t kind,
                              const RequestId& request_id,
                              std::span<const std::byte> payload) {
-  append_bytes(output, 1U, device_id.bytes());
-  append_bytes(output, 2U, endpoint_id.bytes());
-  append_uint(output, 3U, kind);
-  append_bytes(output, 4U, request_id.bytes());
+  proto_codec::append_bytes(output, 1U, device_id.bytes());
+  proto_codec::append_bytes(output, 2U, endpoint_id.bytes());
+  proto_codec::append_uint(output, 3U, kind);
+  proto_codec::append_bytes(output, 4U, request_id.bytes());
   // proto3 omits absent bytes fields; an empty payload is encoded as absence.
   if (!payload.empty()) {
-    append_bytes(output, 5U, payload);
+    proto_codec::append_bytes(output, 5U, payload);
   }
 }
 

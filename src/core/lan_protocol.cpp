@@ -1,4 +1,5 @@
 #include <heyaki/lan_protocol.hpp>
+#include "proto_codec.hpp"
 
 #include <heyaki/signing.hpp>
 
@@ -15,6 +16,8 @@
 namespace heyaki {
 namespace {
 
+constexpr auto kProtoComponent = "lan_discovery";
+
 Error lan_protocol_error(ErrorCode code, const char* detail) {
   return {code, "lan_discovery", detail};
 }
@@ -23,119 +26,9 @@ Error lan_signaling_error(ErrorCode code, const char* detail) {
   return {code, "lan_signaling", detail};
 }
 
-void append_varint(std::vector<std::byte>& output, std::uint64_t value) {
-  do {
-    auto byte = static_cast<std::uint8_t>(value & 0x7fU);
-    value >>= 7U;
-    if (value != 0U) {
-      byte |= 0x80U;
-    }
-    output.push_back(static_cast<std::byte>(byte));
-  } while (value != 0U);
-}
-
-void append_tag(std::vector<std::byte>& output, std::uint32_t field, std::uint8_t wire_type) {
-  append_varint(output, (static_cast<std::uint64_t>(field) << 3U) | wire_type);
-}
-
-void append_uint(std::vector<std::byte>& output, std::uint32_t field, std::uint64_t value) {
-  append_tag(output, field, 0U);
-  append_varint(output, value);
-}
-
-void append_bytes(std::vector<std::byte>& output, std::uint32_t field,
-                  std::span<const std::byte> value) {
-  append_tag(output, field, 2U);
-  append_varint(output, value.size());
-  output.insert(output.end(), value.begin(), value.end());
-}
-
-void append_message(std::vector<std::byte>& output, std::uint32_t field,
-                    const std::vector<std::byte>& value) {
-  append_bytes(output, field, value);
-}
-
-struct ProtoField {
-  std::uint32_t number{};
-  std::uint8_t wire_type{};
-  std::uint64_t integer{};
-  std::span<const std::byte> bytes;
-};
-
-class ProtoReader {
- public:
-  explicit ProtoReader(std::span<const std::byte> input) : input_(input) {}
-
-  [[nodiscard]] bool done() const noexcept { return offset_ == input_.size(); }
-
-  Result<ProtoField> next() {
-    auto tag = read_varint();
-    if (!tag) {
-      return Result<ProtoField>::failure(*tag.error_if());
-    }
-    if (*tag.value_if() == 0U || (*tag.value_if() >> 3U) > 536870911U) {
-      return Result<ProtoField>::failure(
-          lan_protocol_error(ErrorCode::protocol, "protobuf_tag_invalid"));
-    }
-    ProtoField field;
-    field.number = static_cast<std::uint32_t>(*tag.value_if() >> 3U);
-    field.wire_type = static_cast<std::uint8_t>(*tag.value_if() & 0x07U);
-    if (field.wire_type == 0U) {
-      auto value = read_varint();
-      if (!value) {
-        return Result<ProtoField>::failure(*value.error_if());
-      }
-      field.integer = *value.value_if();
-      return Result<ProtoField>::success(field);
-    }
-    if (field.wire_type == 2U) {
-      auto length = read_varint();
-      if (!length || *length.value_if() > input_.size() - offset_) {
-        return Result<ProtoField>::failure(
-            lan_protocol_error(ErrorCode::protocol, "protobuf_length_invalid"));
-      }
-      const auto count = static_cast<std::size_t>(*length.value_if());
-      field.bytes = input_.subspan(offset_, count);
-      offset_ += count;
-      return Result<ProtoField>::success(field);
-    }
-    return Result<ProtoField>::failure(
-        lan_protocol_error(ErrorCode::protocol, "protobuf_wire_type_unsupported"));
-  }
-
- private:
-  Result<std::uint64_t> read_varint() {
-    std::uint64_t value = 0U;
-    for (std::size_t index = 0U; index < 10U; ++index) {
-      if (offset_ >= input_.size()) {
-        return Result<std::uint64_t>::failure(
-            lan_protocol_error(ErrorCode::protocol, "protobuf_varint_truncated"));
-      }
-      const auto byte = std::to_integer<std::uint8_t>(input_[offset_++]);
-      if (index == 9U && (byte & 0xfeU) != 0U) {
-        return Result<std::uint64_t>::failure(
-            lan_protocol_error(ErrorCode::protocol, "protobuf_varint_overflow"));
-      }
-      value |= static_cast<std::uint64_t>(byte & 0x7fU) << (7U * index);
-      if ((byte & 0x80U) == 0U) {
-        if (index > 0U && (byte & 0x7fU) == 0U) {
-          return Result<std::uint64_t>::failure(
-              lan_protocol_error(ErrorCode::protocol, "protobuf_varint_noncanonical"));
-        }
-        return Result<std::uint64_t>::success(value);
-      }
-    }
-    return Result<std::uint64_t>::failure(
-        lan_protocol_error(ErrorCode::protocol, "protobuf_varint_overflow"));
-  }
-
-  std::span<const std::byte> input_;
-  std::size_t offset_{};
-};
-
 Result<std::pair<std::uint32_t, std::uint32_t>> parse_protocol_version(
     std::span<const std::byte> bytes) {
-  ProtoReader reader(bytes);
+  proto_codec::ProtoReader reader(bytes, kProtoComponent);
   std::optional<std::uint32_t> major;
   std::optional<std::uint32_t> minor;
   while (!reader.done()) {
@@ -164,7 +57,7 @@ Result<std::pair<std::uint32_t, std::uint32_t>> parse_protocol_version(
 
 Result<std::pair<std::uint64_t, std::uint64_t>> parse_capabilities(
     std::span<const std::byte> bytes) {
-  ProtoReader reader(bytes);
+  proto_codec::ProtoReader reader(bytes, kProtoComponent);
   std::optional<std::uint64_t> supported;
   std::optional<std::uint64_t> required;
   while (!reader.done()) {
@@ -190,11 +83,8 @@ Result<std::pair<std::uint64_t, std::uint64_t>> parse_capabilities(
   return Result<std::pair<std::uint64_t, std::uint64_t>>::success({*supported, *required});
 }
 
-Result<void> copy_exact(std::span<const std::byte> source, std::span<std::byte> destination,
-                        const char* detail);
-
 Result<IdentitySignature> parse_signature(std::span<const std::byte> bytes) {
-  ProtoReader reader(bytes);
+  proto_codec::ProtoReader reader(bytes, kProtoComponent);
   std::optional<IdentitySignature> signature;
   while (!reader.done()) {
     auto field = reader.next();
@@ -219,7 +109,7 @@ Result<IdentitySignature> parse_signature(std::span<const std::byte> bytes) {
 
 Result<std::pair<DeviceId, EndpointId>> parse_device_endpoint_fields(
     std::span<const std::byte> bytes) {
-  ProtoReader reader(bytes);
+  proto_codec::ProtoReader reader(bytes, kProtoComponent);
   std::optional<DeviceId> device_id;
   std::optional<EndpointId> endpoint_id;
   while (!reader.done()) {
@@ -233,14 +123,16 @@ Result<std::pair<DeviceId, EndpointId>> parse_device_endpoint_fields(
     }
     if (field.value_if()->number == 1U && !device_id) {
       DeviceId::Storage value{};
-      auto copied = copy_exact(field.value_if()->bytes, value, "hello_device_id_invalid");
+      auto copied = proto_codec::copy_exact(field.value_if()->bytes, value, kProtoComponent,
+                                            "hello_device_id_invalid");
       if (!copied) {
         return Result<std::pair<DeviceId, EndpointId>>::failure(*copied.error_if());
       }
       device_id = DeviceId{value};
     } else if (field.value_if()->number == 2U && !endpoint_id) {
       EndpointId::Storage value{};
-      auto copied = copy_exact(field.value_if()->bytes, value, "hello_endpoint_id_invalid");
+      auto copied = proto_codec::copy_exact(field.value_if()->bytes, value, kProtoComponent,
+                                            "hello_endpoint_id_invalid");
       if (!copied) {
         return Result<std::pair<DeviceId, EndpointId>>::failure(*copied.error_if());
       }
@@ -260,8 +152,8 @@ Result<std::pair<DeviceId, EndpointId>> parse_device_endpoint_fields(
 std::vector<std::byte> encode_device_endpoint(const DeviceId& device_id,
                                               const EndpointId& endpoint_id) {
   std::vector<std::byte> output;
-  append_bytes(output, 1U, device_id.bytes());
-  append_bytes(output, 2U, endpoint_id.bytes());
+  proto_codec::append_bytes(output, 1U, device_id.bytes());
+  proto_codec::append_bytes(output, 2U, endpoint_id.bytes());
   return output;
 }
 
@@ -289,15 +181,6 @@ bool is_signed_lan_signaling_kind(LanSignalingMessageKind kind) noexcept {
   return kind == LanSignalingMessageKind::signed_offer ||
          kind == LanSignalingMessageKind::signed_answer ||
          kind == LanSignalingMessageKind::signed_candidate;
-}
-
-Result<void> copy_exact(std::span<const std::byte> source, std::span<std::byte> destination,
-                        const char* detail) {
-  if (source.size() != destination.size()) {
-    return Result<void>::failure(lan_protocol_error(ErrorCode::protocol, detail));
-  }
-  std::copy(source.begin(), source.end(), destination.begin());
-  return Result<void>::success();
 }
 
 }  // namespace
@@ -469,26 +352,26 @@ Result<std::vector<std::byte>> encode_lan_presence(const LanPresence& presence) 
     return Result<std::vector<std::byte>>::failure(*valid.error_if());
   }
   std::vector<std::byte> version;
-  append_uint(version, 1U, presence.protocol_version.major);
-  append_uint(version, 2U, presence.protocol_version.minor);
+  proto_codec::append_uint(version, 1U, presence.protocol_version.major);
+  proto_codec::append_uint(version, 2U, presence.protocol_version.minor);
   std::vector<std::byte> capabilities;
-  append_uint(capabilities, 1U, presence.supported.bits);
-  append_uint(capabilities, 2U, presence.required.bits);
+  proto_codec::append_uint(capabilities, 1U, presence.supported.bits);
+  proto_codec::append_uint(capabilities, 2U, presence.required.bits);
   std::vector<std::byte> signature;
-  append_bytes(signature, 1U, presence.signature);
+  proto_codec::append_bytes(signature, 1U, presence.signature);
 
   std::vector<std::byte> output;
   output.reserve(256U);
-  append_message(output, 1U, version);
-  append_message(output, 2U, capabilities);
-  append_bytes(output, 3U, presence.device_id.bytes());
-  append_bytes(output, 4U, presence.identity_public_key);
-  append_bytes(output, 5U, presence.endpoint_id.bytes());
-  append_bytes(output, 6U, presence.boot_nonce);
-  append_uint(output, 7U, presence.sequence);
-  append_uint(output, 8U, presence.tls_signaling_port);
-  append_uint(output, 9U, static_cast<std::uint32_t>(presence.lease.count()));
-  append_message(output, 10U, signature);
+  proto_codec::append_bytes(output, 1U, version);
+  proto_codec::append_bytes(output, 2U, capabilities);
+  proto_codec::append_bytes(output, 3U, presence.device_id.bytes());
+  proto_codec::append_bytes(output, 4U, presence.identity_public_key);
+  proto_codec::append_bytes(output, 5U, presence.endpoint_id.bytes());
+  proto_codec::append_bytes(output, 6U, presence.boot_nonce);
+  proto_codec::append_uint(output, 7U, presence.sequence);
+  proto_codec::append_uint(output, 8U, presence.tls_signaling_port);
+  proto_codec::append_uint(output, 9U, static_cast<std::uint32_t>(presence.lease.count()));
+  proto_codec::append_bytes(output, 10U, signature);
   if (output.size() > max_lan_datagram_payload_bytes) {
     return Result<std::vector<std::byte>>::failure(
         lan_protocol_error(ErrorCode::resource_exhausted, "presence_payload_too_large"));
@@ -501,7 +384,7 @@ Result<LanPresence> parse_lan_presence(std::span<const std::byte> payload) {
     return Result<LanPresence>::failure(
         lan_protocol_error(ErrorCode::protocol, "presence_payload_size_invalid"));
   }
-  ProtoReader reader(payload);
+  proto_codec::ProtoReader reader(payload, kProtoComponent);
   LanPresence presence;
   std::array<bool, 10U> seen{};
   while (!reader.done()) {
@@ -544,9 +427,10 @@ Result<LanPresence> parse_lan_presence(std::span<const std::byte> payload) {
       case 3U: {
         DeviceId::Storage bytes{};
         auto copied = field.value_if()->wire_type == 2U
-                          ? copy_exact(field.value_if()->bytes, bytes, "presence_device_id_invalid")
-                          : Result<void>::failure(lan_protocol_error(
-                                ErrorCode::protocol, "presence_device_id_invalid"));
+                          ? proto_codec::copy_exact(field.value_if()->bytes, bytes, kProtoComponent,
+                                                    "presence_device_id_invalid")
+                          : Result<void>::failure(lan_protocol_error(ErrorCode::protocol,
+                                                                     "presence_device_id_invalid"));
         if (!copied) {
           return Result<LanPresence>::failure(*copied.error_if());
         }
@@ -554,11 +438,12 @@ Result<LanPresence> parse_lan_presence(std::span<const std::byte> payload) {
         break;
       }
       case 4U: {
-        auto copied = field.value_if()->wire_type == 2U
-                          ? copy_exact(field.value_if()->bytes, presence.identity_public_key,
-                                       "presence_public_key_invalid")
-                          : Result<void>::failure(lan_protocol_error(
-                                ErrorCode::protocol, "presence_public_key_invalid"));
+        auto copied =
+            field.value_if()->wire_type == 2U
+                ? proto_codec::copy_exact(field.value_if()->bytes, presence.identity_public_key,
+                                          kProtoComponent, "presence_public_key_invalid")
+                : Result<void>::failure(
+                      lan_protocol_error(ErrorCode::protocol, "presence_public_key_invalid"));
         if (!copied) {
           return Result<LanPresence>::failure(*copied.error_if());
         }
@@ -567,9 +452,10 @@ Result<LanPresence> parse_lan_presence(std::span<const std::byte> payload) {
       case 5U: {
         EndpointId::Storage bytes{};
         auto copied = field.value_if()->wire_type == 2U
-                          ? copy_exact(field.value_if()->bytes, bytes, "presence_endpoint_invalid")
-                          : Result<void>::failure(lan_protocol_error(
-                                ErrorCode::protocol, "presence_endpoint_invalid"));
+                          ? proto_codec::copy_exact(field.value_if()->bytes, bytes, kProtoComponent,
+                                                    "presence_endpoint_invalid")
+                          : Result<void>::failure(lan_protocol_error(ErrorCode::protocol,
+                                                                     "presence_endpoint_invalid"));
         if (!copied) {
           return Result<LanPresence>::failure(*copied.error_if());
         }
@@ -578,8 +464,8 @@ Result<LanPresence> parse_lan_presence(std::span<const std::byte> payload) {
       }
       case 6U: {
         auto copied = field.value_if()->wire_type == 2U
-                          ? copy_exact(field.value_if()->bytes, presence.boot_nonce,
-                                       "presence_boot_nonce_invalid")
+                          ? proto_codec::copy_exact(field.value_if()->bytes, presence.boot_nonce,
+                                                    kProtoComponent, "presence_boot_nonce_invalid")
                           : Result<void>::failure(lan_protocol_error(
                                 ErrorCode::protocol, "presence_boot_nonce_invalid"));
         if (!copied) {
@@ -749,29 +635,29 @@ Result<std::vector<std::byte>> encode_lan_hello(const LanHello& hello) {
   const auto sender = encode_device_endpoint(hello.sender_device_id, hello.sender_endpoint_id);
   const auto peer = encode_device_endpoint(hello.peer_device_id, hello.peer_endpoint_id);
   std::vector<std::byte> version;
-  append_uint(version, 1U, hello.protocol_version.major);
-  append_uint(version, 2U, hello.protocol_version.minor);
+  proto_codec::append_uint(version, 1U, hello.protocol_version.major);
+  proto_codec::append_uint(version, 2U, hello.protocol_version.minor);
   std::vector<std::byte> capabilities;
-  append_uint(capabilities, 1U, hello.supported.bits);
-  append_uint(capabilities, 2U, hello.required.bits);
+  proto_codec::append_uint(capabilities, 1U, hello.supported.bits);
+  proto_codec::append_uint(capabilities, 2U, hello.required.bits);
   std::vector<std::byte> signature;
-  append_bytes(signature, 1U, hello.signature);
+  proto_codec::append_bytes(signature, 1U, hello.signature);
 
   std::vector<std::byte> output;
   output.reserve(512U);
-  append_uint(output, 1U, static_cast<std::uint32_t>(hello.role));
-  append_message(output, 2U, sender);
-  append_message(output, 3U, peer);
-  append_bytes(output, 4U, hello.sender_identity_public_key);
-  append_bytes(output, 5U, hello.initiator_nonce);
-  append_bytes(output, 6U, hello.responder_nonce);
-  append_bytes(output, 7U, hello.sender_tls_certificate_sha256);
-  append_bytes(output, 8U, hello.observed_peer_tls_certificate_sha256);
-  append_bytes(output, 9U, hello.sender_boot_nonce);
-  append_message(output, 10U, version);
-  append_message(output, 11U, capabilities);
-  append_uint(output, 12U, static_cast<std::uint32_t>(hello.expiry.count()));
-  append_message(output, 13U, signature);
+  proto_codec::append_uint(output, 1U, static_cast<std::uint32_t>(hello.role));
+  proto_codec::append_bytes(output, 2U, sender);
+  proto_codec::append_bytes(output, 3U, peer);
+  proto_codec::append_bytes(output, 4U, hello.sender_identity_public_key);
+  proto_codec::append_bytes(output, 5U, hello.initiator_nonce);
+  proto_codec::append_bytes(output, 6U, hello.responder_nonce);
+  proto_codec::append_bytes(output, 7U, hello.sender_tls_certificate_sha256);
+  proto_codec::append_bytes(output, 8U, hello.observed_peer_tls_certificate_sha256);
+  proto_codec::append_bytes(output, 9U, hello.sender_boot_nonce);
+  proto_codec::append_bytes(output, 10U, version);
+  proto_codec::append_bytes(output, 11U, capabilities);
+  proto_codec::append_uint(output, 12U, static_cast<std::uint32_t>(hello.expiry.count()));
+  proto_codec::append_bytes(output, 13U, signature);
   if (output.size() > max_lan_datagram_payload_bytes) {
     return Result<std::vector<std::byte>>::failure(
         lan_protocol_error(ErrorCode::resource_exhausted, "hello_payload_too_large"));
@@ -784,7 +670,7 @@ Result<LanHello> parse_lan_hello(std::span<const std::byte> payload) {
     return Result<LanHello>::failure(
         lan_protocol_error(ErrorCode::protocol, "hello_payload_size_invalid"));
   }
-  ProtoReader reader(payload);
+  proto_codec::ProtoReader reader(payload, kProtoComponent);
   LanHello hello;
   std::array<bool, 13U> seen{};
   while (!reader.done()) {
@@ -827,8 +713,8 @@ Result<LanHello> parse_lan_hello(std::span<const std::byte> payload) {
       }
       case 4U: {
         auto copied = field.value_if()->wire_type == 2U
-                          ? copy_exact(field.value_if()->bytes,
-                                       hello.sender_identity_public_key,
+                          ? proto_codec::copy_exact(field.value_if()->bytes,
+                                       hello.sender_identity_public_key,kProtoComponent, 
                                        "hello_public_key_invalid")
                           : Result<void>::failure(lan_protocol_error(
                                 ErrorCode::protocol, "hello_public_key_invalid"));
@@ -864,7 +750,7 @@ Result<LanHello> parse_lan_hello(std::span<const std::byte> payload) {
             destination = hello.sender_boot_nonce;
             break;
         }
-        auto copied = copy_exact(field.value_if()->bytes, destination,
+        auto copied = proto_codec::copy_exact(field.value_if()->bytes, destination,kProtoComponent, 
                                  "hello_bytes_field_invalid");
         if (!copied) {
           return Result<LanHello>::failure(*copied.error_if());

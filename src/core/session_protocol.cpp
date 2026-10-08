@@ -1,4 +1,5 @@
 #include <heyaki/session_protocol.hpp>
+#include "proto_codec.hpp"
 
 #include <heyaki/security.hpp>
 #include <heyaki/signing.hpp>
@@ -16,6 +17,8 @@
 namespace heyaki {
 namespace {
 
+constexpr auto kProtoComponent = "session_hello";
+
 Error session_error(ErrorCode code, const char* detail) {
   return Error{code, "session_hello", detail};
 }
@@ -25,120 +28,6 @@ bool all_zero(const std::array<std::byte, Size>& value) noexcept {
   return std::all_of(value.begin(), value.end(), [](std::byte byte) {
     return byte == std::byte{0};
   });
-}
-
-void append_varint(std::vector<std::byte>& output, std::uint64_t value) {
-  do {
-    auto byte = static_cast<std::uint8_t>(value & 0x7fU);
-    value >>= 7U;
-    if (value != 0U) {
-      byte |= 0x80U;
-    }
-    output.push_back(static_cast<std::byte>(byte));
-  } while (value != 0U);
-}
-
-void append_tag(std::vector<std::byte>& output, std::uint32_t field, std::uint8_t wire_type) {
-  append_varint(output, (static_cast<std::uint64_t>(field) << 3U) | wire_type);
-}
-
-void append_uint(std::vector<std::byte>& output, std::uint32_t field, std::uint64_t value) {
-  append_tag(output, field, 0U);
-  append_varint(output, value);
-}
-
-void append_bytes(std::vector<std::byte>& output, std::uint32_t field,
-                  std::span<const std::byte> value) {
-  append_tag(output, field, 2U);
-  append_varint(output, value.size());
-  output.insert(output.end(), value.begin(), value.end());
-}
-
-struct ProtoField {
-  std::uint32_t number{};
-  std::uint8_t wire_type{};
-  std::uint64_t integer{};
-  std::span<const std::byte> bytes;
-};
-
-class ProtoReader {
- public:
-  explicit ProtoReader(std::span<const std::byte> input) : input_(input) {}
-
-  [[nodiscard]] bool done() const noexcept { return offset_ == input_.size(); }
-
-  Result<ProtoField> next() {
-    auto tag = read_varint();
-    if (!tag) {
-      return Result<ProtoField>::failure(*tag.error_if());
-    }
-    if (*tag.value_if() == 0U || (*tag.value_if() >> 3U) > 536870911U) {
-      return Result<ProtoField>::failure(
-          session_error(ErrorCode::protocol, "protobuf_tag_invalid"));
-    }
-    ProtoField field;
-    field.number = static_cast<std::uint32_t>(*tag.value_if() >> 3U);
-    field.wire_type = static_cast<std::uint8_t>(*tag.value_if() & 0x07U);
-    if (field.wire_type == 0U) {
-      auto value = read_varint();
-      if (!value) {
-        return Result<ProtoField>::failure(*value.error_if());
-      }
-      field.integer = *value.value_if();
-      return Result<ProtoField>::success(field);
-    }
-    if (field.wire_type == 2U) {
-      auto length = read_varint();
-      if (!length || *length.value_if() > input_.size() - offset_) {
-        return Result<ProtoField>::failure(
-            session_error(ErrorCode::protocol, "protobuf_length_invalid"));
-      }
-      const auto count = static_cast<std::size_t>(*length.value_if());
-      field.bytes = input_.subspan(offset_, count);
-      offset_ += count;
-      return Result<ProtoField>::success(field);
-    }
-    return Result<ProtoField>::failure(
-        session_error(ErrorCode::protocol, "protobuf_wire_type_unsupported"));
-  }
-
- private:
-  Result<std::uint64_t> read_varint() {
-    std::uint64_t value = 0U;
-    for (std::size_t index = 0U; index < 10U; ++index) {
-      if (offset_ >= input_.size()) {
-        return Result<std::uint64_t>::failure(
-            session_error(ErrorCode::protocol, "protobuf_varint_truncated"));
-      }
-      const auto byte = std::to_integer<std::uint8_t>(input_[offset_++]);
-      if (index == 9U && (byte & 0xfeU) != 0U) {
-        return Result<std::uint64_t>::failure(
-            session_error(ErrorCode::protocol, "protobuf_varint_overflow"));
-      }
-      value |= static_cast<std::uint64_t>(byte & 0x7fU) << (7U * index);
-      if ((byte & 0x80U) == 0U) {
-        if (index > 0U && (byte & 0x7fU) == 0U) {
-          return Result<std::uint64_t>::failure(
-              session_error(ErrorCode::protocol, "protobuf_varint_noncanonical"));
-        }
-        return Result<std::uint64_t>::success(value);
-      }
-    }
-    return Result<std::uint64_t>::failure(
-        session_error(ErrorCode::protocol, "protobuf_varint_overflow"));
-  }
-
-  std::span<const std::byte> input_;
-  std::size_t offset_{};
-};
-
-Result<void> copy_exact(std::span<const std::byte> source, std::span<std::byte> destination,
-                        const char* detail) {
-  if (source.size() != destination.size()) {
-    return Result<void>::failure(session_error(ErrorCode::protocol, detail));
-  }
-  std::copy(source.begin(), source.end(), destination.begin());
-  return Result<void>::success();
 }
 
 std::vector<CanonicalField> session_hello_fields(const SignedSessionHello& hello) {
@@ -163,34 +52,34 @@ std::vector<CanonicalField> session_hello_fields(const SignedSessionHello& hello
 
 std::vector<std::byte> encode_device_endpoint(const DeviceEndpointKey& endpoint) {
   std::vector<std::byte> output;
-  append_bytes(output, 1U, endpoint.device_id.bytes());
-  append_bytes(output, 2U, endpoint.endpoint_id.bytes());
+  proto_codec::append_bytes(output, 1U, endpoint.device_id.bytes());
+  proto_codec::append_bytes(output, 2U, endpoint.endpoint_id.bytes());
   return output;
 }
 
 std::vector<std::byte> encode_protocol_version(ProtocolVersion version) {
   std::vector<std::byte> output;
-  append_uint(output, 1U, version.major);
-  append_uint(output, 2U, version.minor);
+  proto_codec::append_uint(output, 1U, version.major);
+  proto_codec::append_uint(output, 2U, version.minor);
   return output;
 }
 
 std::vector<std::byte> encode_capabilities(CapabilitySet supported,
                                            CapabilitySet required) {
   std::vector<std::byte> output;
-  append_uint(output, 1U, supported.bits);
-  append_uint(output, 2U, required.bits);
+  proto_codec::append_uint(output, 1U, supported.bits);
+  proto_codec::append_uint(output, 2U, required.bits);
   return output;
 }
 
 std::vector<std::byte> encode_signature(const IdentitySignature& signature) {
   std::vector<std::byte> output;
-  append_bytes(output, 1U, signature);
+  proto_codec::append_bytes(output, 1U, signature);
   return output;
 }
 
 Result<DeviceEndpointKey> parse_device_endpoint(std::span<const std::byte> payload) {
-  ProtoReader reader(payload);
+  proto_codec::ProtoReader reader(payload, kProtoComponent);
   std::optional<DeviceId> device_id;
   std::optional<EndpointId> endpoint_id;
   while (!reader.done()) {
@@ -204,14 +93,16 @@ Result<DeviceEndpointKey> parse_device_endpoint(std::span<const std::byte> paylo
     }
     if (field.value_if()->number == 1U && !device_id) {
       DeviceId::Storage value{};
-      auto copied = copy_exact(field.value_if()->bytes, value, "endpoint_device_id_invalid");
+      auto copied = proto_codec::copy_exact(field.value_if()->bytes, value, kProtoComponent,
+                                            "endpoint_device_id_invalid");
       if (!copied) {
         return Result<DeviceEndpointKey>::failure(*copied.error_if());
       }
       device_id = DeviceId{value};
     } else if (field.value_if()->number == 2U && !endpoint_id) {
       EndpointId::Storage value{};
-      auto copied = copy_exact(field.value_if()->bytes, value, "endpoint_id_invalid");
+      auto copied = proto_codec::copy_exact(field.value_if()->bytes, value, kProtoComponent,
+                                            "endpoint_id_invalid");
       if (!copied) {
         return Result<DeviceEndpointKey>::failure(*copied.error_if());
       }
@@ -229,7 +120,7 @@ Result<DeviceEndpointKey> parse_device_endpoint(std::span<const std::byte> paylo
 }
 
 Result<ProtocolVersion> parse_protocol_version(std::span<const std::byte> payload) {
-  ProtoReader reader(payload);
+  proto_codec::ProtoReader reader(payload, kProtoComponent);
   std::optional<std::uint32_t> major;
   std::optional<std::uint32_t> minor;
   while (!reader.done()) {
@@ -260,7 +151,7 @@ Result<ProtocolVersion> parse_protocol_version(std::span<const std::byte> payloa
 
 Result<std::pair<CapabilitySet, CapabilitySet>> parse_capabilities(
     std::span<const std::byte> payload) {
-  ProtoReader reader(payload);
+  proto_codec::ProtoReader reader(payload, kProtoComponent);
   std::optional<std::uint64_t> supported;
   std::optional<std::uint64_t> required;
   while (!reader.done()) {
@@ -290,7 +181,7 @@ Result<std::pair<CapabilitySet, CapabilitySet>> parse_capabilities(
 }
 
 Result<IdentitySignature> parse_signature(std::span<const std::byte> payload) {
-  ProtoReader reader(payload);
+  proto_codec::ProtoReader reader(payload, kProtoComponent);
   std::optional<IdentitySignature> signature;
   while (!reader.done()) {
     auto field = reader.next();
@@ -302,7 +193,8 @@ Result<IdentitySignature> parse_signature(std::span<const std::byte> payload) {
           session_error(ErrorCode::protocol, "signature_field_conflict"));
     }
     IdentitySignature value{};
-    auto copied = copy_exact(field.value_if()->bytes, value, "signature_field_invalid");
+    auto copied = proto_codec::copy_exact(field.value_if()->bytes, value, kProtoComponent,
+                                          "signature_field_invalid");
     if (!copied) {
       return Result<IdentitySignature>::failure(*copied.error_if());
     }
@@ -427,17 +319,17 @@ Result<std::vector<std::byte>> encode_signed_session_hello(
   }
   std::vector<std::byte> output;
   output.reserve(384U);
-  append_bytes(output, 1U, encode_device_endpoint(hello.sender));
-  append_bytes(output, 2U, encode_device_endpoint(hello.peer));
-  append_bytes(output, 3U, hello.session_id.bytes());
-  append_uint(output, 4U, hello.session_epoch);
-  append_bytes(output, 5U, hello.initiator_nonce);
-  append_bytes(output, 6U, hello.responder_nonce);
-  append_bytes(output, 7U, hello.signaling_transcript_sha256);
-  append_bytes(output, 8U, encode_protocol_version(hello.protocol_version));
-  append_bytes(output, 9U, encode_capabilities(hello.supported, hello.required));
-  append_uint(output, 10U, hello.expires_unix_milliseconds);
-  append_bytes(output, 11U, encode_signature(hello.signature));
+  proto_codec::append_bytes(output, 1U, encode_device_endpoint(hello.sender));
+  proto_codec::append_bytes(output, 2U, encode_device_endpoint(hello.peer));
+  proto_codec::append_bytes(output, 3U, hello.session_id.bytes());
+  proto_codec::append_uint(output, 4U, hello.session_epoch);
+  proto_codec::append_bytes(output, 5U, hello.initiator_nonce);
+  proto_codec::append_bytes(output, 6U, hello.responder_nonce);
+  proto_codec::append_bytes(output, 7U, hello.signaling_transcript_sha256);
+  proto_codec::append_bytes(output, 8U, encode_protocol_version(hello.protocol_version));
+  proto_codec::append_bytes(output, 9U, encode_capabilities(hello.supported, hello.required));
+  proto_codec::append_uint(output, 10U, hello.expires_unix_milliseconds);
+  proto_codec::append_bytes(output, 11U, encode_signature(hello.signature));
   if (output.size() > max_session_hello_bytes) {
     return Result<std::vector<std::byte>>::failure(
         session_error(ErrorCode::resource_exhausted, "object_too_large"));
@@ -450,7 +342,7 @@ Result<SignedSessionHello> parse_signed_session_hello(std::span<const std::byte>
     return Result<SignedSessionHello>::failure(
         session_error(ErrorCode::resource_exhausted, "object_too_large"));
   }
-  ProtoReader reader(payload);
+  proto_codec::ProtoReader reader(payload, kProtoComponent);
   std::optional<DeviceEndpointKey> sender;
   std::optional<DeviceEndpointKey> peer;
   std::optional<SessionId> session_id;
@@ -488,7 +380,8 @@ Result<SignedSessionHello> parse_signed_session_hello(std::span<const std::byte>
               session_error(ErrorCode::protocol, "session_id_field_conflict"));
         }
         SessionId::Storage value{};
-        auto copied = copy_exact(field.value_if()->bytes, value, "session_id_field_invalid");
+        auto copied = proto_codec::copy_exact(field.value_if()->bytes, value, kProtoComponent,
+                                              "session_id_field_invalid");
         if (!copied) {
           return Result<SignedSessionHello>::failure(*copied.error_if());
         }
@@ -510,7 +403,8 @@ Result<SignedSessionHello> parse_signed_session_hello(std::span<const std::byte>
               session_error(ErrorCode::protocol, "nonce_field_conflict"));
         }
         SignalingNonce value{};
-        auto copied = copy_exact(field.value_if()->bytes, value, "nonce_field_invalid");
+        auto copied = proto_codec::copy_exact(field.value_if()->bytes, value, kProtoComponent,
+                                              "nonce_field_invalid");
         if (!copied) {
           return Result<SignedSessionHello>::failure(*copied.error_if());
         }
@@ -523,7 +417,8 @@ Result<SignedSessionHello> parse_signed_session_hello(std::span<const std::byte>
               session_error(ErrorCode::protocol, "transcript_field_conflict"));
         }
         SignalingTranscriptSha256 value{};
-        auto copied = copy_exact(field.value_if()->bytes, value, "transcript_field_invalid");
+        auto copied = proto_codec::copy_exact(field.value_if()->bytes, value, kProtoComponent,
+                                              "transcript_field_invalid");
         if (!copied) {
           return Result<SignedSessionHello>::failure(*copied.error_if());
         }

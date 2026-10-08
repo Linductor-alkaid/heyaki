@@ -1,4 +1,5 @@
 #include "relay_endpoint.hpp"
+#include "../core/proto_codec.hpp"
 
 #include <heyaki/security.hpp>
 #include <heyaki/signing.hpp>
@@ -18,134 +19,14 @@
 namespace heyaki {
 namespace {
 
+constexpr auto kProtoComponent = "relay_endpoint";
+
 Error endpoint_error(ErrorCode code, const char* detail) {
   return Error{code, "relay_endpoint", detail};
 }
 
-void append_varint(std::vector<std::byte>& output, std::uint64_t value) {
-  do {
-    auto byte = static_cast<std::uint8_t>(value & 0x7fU);
-    value >>= 7U;
-    if (value != 0U) {
-      byte |= 0x80U;
-    }
-    output.push_back(static_cast<std::byte>(byte));
-  } while (value != 0U);
-}
-
-void append_tag(std::vector<std::byte>& output, std::uint32_t field, std::uint8_t wire_type) {
-  append_varint(output, (static_cast<std::uint64_t>(field) << 3U) | wire_type);
-}
-
-void append_uint(std::vector<std::byte>& output, std::uint32_t field, std::uint64_t value) {
-  append_tag(output, field, 0U);
-  append_varint(output, value);
-}
-
-void append_bytes(std::vector<std::byte>& output, std::uint32_t field,
-                  std::span<const std::byte> value) {
-  append_tag(output, field, 2U);
-  append_varint(output, value.size());
-  output.insert(output.end(), value.begin(), value.end());
-}
-
-void append_string(std::vector<std::byte>& output, std::uint32_t field,
-                   std::string_view value) {
-  append_bytes(output, field,
-               std::span<const std::byte>{reinterpret_cast<const std::byte*>(value.data()),
-                                          value.size()});
-}
-
-struct ProtoField {
-  std::uint32_t number{};
-  std::uint8_t wire_type{};
-  std::uint64_t integer{};
-  std::span<const std::byte> bytes;
-};
-
-class ProtoReader {
- public:
-  explicit ProtoReader(std::span<const std::byte> input) : input_(input) {}
-
-  [[nodiscard]] bool done() const noexcept { return offset_ == input_.size(); }
-
-  Result<ProtoField> next() {
-    auto tag = read_varint();
-    if (!tag) {
-      return Result<ProtoField>::failure(*tag.error_if());
-    }
-    if (*tag.value_if() == 0U || (*tag.value_if() >> 3U) > 536870911U) {
-      return Result<ProtoField>::failure(endpoint_error(ErrorCode::protocol,
-                                                        "protobuf_tag_invalid"));
-    }
-    ProtoField field;
-    field.number = static_cast<std::uint32_t>(*tag.value_if() >> 3U);
-    field.wire_type = static_cast<std::uint8_t>(*tag.value_if() & 0x07U);
-    if (field.wire_type == 0U) {
-      auto value = read_varint();
-      if (!value) {
-        return Result<ProtoField>::failure(*value.error_if());
-      }
-      field.integer = *value.value_if();
-      return Result<ProtoField>::success(field);
-    }
-    if (field.wire_type == 2U) {
-      auto length = read_varint();
-      if (!length || *length.value_if() > input_.size() - offset_) {
-        return Result<ProtoField>::failure(endpoint_error(ErrorCode::protocol,
-                                                          "protobuf_length_invalid"));
-      }
-      const auto count = static_cast<std::size_t>(*length.value_if());
-      field.bytes = input_.subspan(offset_, count);
-      offset_ += count;
-      return Result<ProtoField>::success(field);
-    }
-    return Result<ProtoField>::failure(endpoint_error(ErrorCode::protocol,
-                                                      "protobuf_wire_type_unsupported"));
-  }
-
- private:
-  Result<std::uint64_t> read_varint() {
-    std::uint64_t value = 0U;
-    for (std::size_t index = 0U; index < 10U; ++index) {
-      if (offset_ >= input_.size()) {
-        return Result<std::uint64_t>::failure(endpoint_error(ErrorCode::protocol,
-                                                             "protobuf_varint_truncated"));
-      }
-      const auto byte = std::to_integer<std::uint8_t>(input_[offset_++]);
-      if (index == 9U && (byte & 0xfeU) != 0U) {
-        return Result<std::uint64_t>::failure(endpoint_error(ErrorCode::protocol,
-                                                             "protobuf_varint_overflow"));
-      }
-      value |= static_cast<std::uint64_t>(byte & 0x7fU) << (7U * index);
-      if ((byte & 0x80U) == 0U) {
-        if (index > 0U && (byte & 0x7fU) == 0U) {
-          return Result<std::uint64_t>::failure(endpoint_error(ErrorCode::protocol,
-                                                               "protobuf_varint_noncanonical"));
-        }
-        return Result<std::uint64_t>::success(value);
-      }
-    }
-    return Result<std::uint64_t>::failure(endpoint_error(ErrorCode::protocol,
-                                                         "protobuf_varint_overflow"));
-  }
-
-  std::span<const std::byte> input_;
-  std::size_t offset_{};
-};
-
-template <std::size_t Size>
-Result<void> copy_exact(std::span<const std::byte> input, std::array<std::byte, Size>& output,
-                        const char* detail) {
-  if (input.size() != Size) {
-    return Result<void>::failure(endpoint_error(ErrorCode::protocol, detail));
-  }
-  std::copy_n(input.begin(), Size, output.begin());
-  return Result<void>::success();
-}
-
 Result<RelayEndpointKey> parse_endpoint_message(std::span<const std::byte> input) {
-  ProtoReader reader(input);
+  proto_codec::ProtoReader reader(input, kProtoComponent);
   DeviceId::Storage device{};
   EndpointId::Storage endpoint{};
   bool seen_device = false;
@@ -164,7 +45,8 @@ Result<RelayEndpointKey> parse_endpoint_message(std::span<const std::byte> input
         return Result<RelayEndpointKey>::failure(
             endpoint_error(ErrorCode::protocol, "endpoint_field_conflict"));
       }
-      auto copied = copy_exact(field.value_if()->bytes, device, "endpoint_device_id_invalid");
+      auto copied = proto_codec::copy_exact(field.value_if()->bytes, device, kProtoComponent,
+                                            "endpoint_device_id_invalid");
       if (!copied) {
         return Result<RelayEndpointKey>::failure(*copied.error_if());
       }
@@ -174,7 +56,8 @@ Result<RelayEndpointKey> parse_endpoint_message(std::span<const std::byte> input
         return Result<RelayEndpointKey>::failure(
             endpoint_error(ErrorCode::protocol, "endpoint_field_conflict"));
       }
-      auto copied = copy_exact(field.value_if()->bytes, endpoint, "endpoint_id_invalid");
+      auto copied = proto_codec::copy_exact(field.value_if()->bytes, endpoint, kProtoComponent,
+                                            "endpoint_id_invalid");
       if (!copied) {
         return Result<RelayEndpointKey>::failure(*copied.error_if());
       }
@@ -193,7 +76,7 @@ Result<RelayEndpointKey> parse_endpoint_message(std::span<const std::byte> input
 }
 
 Result<IdentitySignature> parse_signature_message(std::span<const std::byte> input) {
-  ProtoReader reader(input);
+  proto_codec::ProtoReader reader(input, kProtoComponent);
   IdentitySignature signature{};
   bool seen = false;
   while (!reader.done()) {
@@ -205,7 +88,8 @@ Result<IdentitySignature> parse_signature_message(std::span<const std::byte> inp
       return Result<IdentitySignature>::failure(
           endpoint_error(ErrorCode::protocol, "signature_field_invalid"));
     }
-    auto copied = copy_exact(field.value_if()->bytes, signature, "signature_length_invalid");
+    auto copied = proto_codec::copy_exact(field.value_if()->bytes, signature, kProtoComponent,
+                                          "signature_length_invalid");
     if (!copied) {
       return Result<IdentitySignature>::failure(*copied.error_if());
     }
@@ -220,14 +104,14 @@ Result<IdentitySignature> parse_signature_message(std::span<const std::byte> inp
 
 std::vector<std::byte> encode_endpoint_message(RelayEndpointKey endpoint) {
   std::vector<std::byte> output;
-  append_bytes(output, 1U, endpoint.device_id.bytes());
-  append_bytes(output, 2U, endpoint.endpoint_id.bytes());
+  proto_codec::append_bytes(output, 1U, endpoint.device_id.bytes());
+  proto_codec::append_bytes(output, 2U, endpoint.endpoint_id.bytes());
   return output;
 }
 
 std::vector<std::byte> encode_signature_message(IdentitySignature signature) {
   std::vector<std::byte> output;
-  append_bytes(output, 1U, signature);
+  proto_codec::append_bytes(output, 1U, signature);
   return output;
 }
 
@@ -313,12 +197,12 @@ Result<std::vector<std::byte>> encode_relay_endpoint_record(
   }
   std::vector<std::byte> output;
   output.reserve(320U);
-  append_bytes(output, 1U, encode_endpoint_message(record.endpoint));
-  append_string(output, 2U, record.application_id);
-  append_uint(output, 3U, record.record_generation);
-  append_bytes(output, 4U, record.manifest_sha256);
-  append_uint(output, 5U, record.expires_unix_milliseconds);
-  append_bytes(output, 6U, encode_signature_message(record.signature));
+  proto_codec::append_bytes(output, 1U, encode_endpoint_message(record.endpoint));
+  proto_codec::append_text(output, 2U, record.application_id);
+  proto_codec::append_uint(output, 3U, record.record_generation);
+  proto_codec::append_bytes(output, 4U, record.manifest_sha256);
+  proto_codec::append_uint(output, 5U, record.expires_unix_milliseconds);
+  proto_codec::append_bytes(output, 6U, encode_signature_message(record.signature));
   return Result<std::vector<std::byte>>::success(std::move(output));
 }
 
@@ -327,7 +211,7 @@ Result<RelayEndpointRecord> parse_relay_endpoint_record(std::span<const std::byt
     return Result<RelayEndpointRecord>::failure(
         endpoint_error(ErrorCode::protocol, "endpoint_record_size_invalid"));
   }
-  ProtoReader reader(payload);
+  proto_codec::ProtoReader reader(payload, kProtoComponent);
   RelayEndpointRecord record;
   std::array<bool, 6U> seen{};
   while (!reader.done()) {
@@ -372,11 +256,12 @@ Result<RelayEndpointRecord> parse_relay_endpoint_record(std::span<const std::byt
         record.record_generation = field.value_if()->integer;
         break;
       case 4U: {
-        auto copied = field.value_if()->wire_type == 2U
-                          ? copy_exact(field.value_if()->bytes, record.manifest_sha256,
-                                       "endpoint_manifest_hash_invalid")
-                          : Result<void>::failure(endpoint_error(
-                                ErrorCode::protocol, "endpoint_manifest_hash_invalid"));
+        auto copied =
+            field.value_if()->wire_type == 2U
+                ? proto_codec::copy_exact(field.value_if()->bytes, record.manifest_sha256,
+                                          kProtoComponent, "endpoint_manifest_hash_invalid")
+                : Result<void>::failure(
+                      endpoint_error(ErrorCode::protocol, "endpoint_manifest_hash_invalid"));
         if (!copied) {
           return Result<RelayEndpointRecord>::failure(*copied.error_if());
         }
@@ -480,11 +365,11 @@ Result<std::vector<std::byte>> encode_relay_service_manifest(
   }
   std::vector<std::byte> output;
   output.reserve(192U);
-  append_bytes(output, 1U, encode_endpoint_message(manifest.endpoint));
-  append_uint(output, 2U, manifest.manifest_generation);
-  append_bytes(output, 3U, manifest.canonical_manifest_sha256);
-  append_uint(output, 4U, manifest.expires_unix_milliseconds);
-  append_bytes(output, 5U, encode_signature_message(manifest.signature));
+  proto_codec::append_bytes(output, 1U, encode_endpoint_message(manifest.endpoint));
+  proto_codec::append_uint(output, 2U, manifest.manifest_generation);
+  proto_codec::append_bytes(output, 3U, manifest.canonical_manifest_sha256);
+  proto_codec::append_uint(output, 4U, manifest.expires_unix_milliseconds);
+  proto_codec::append_bytes(output, 5U, encode_signature_message(manifest.signature));
   return Result<std::vector<std::byte>>::success(std::move(output));
 }
 
@@ -493,7 +378,7 @@ Result<RelayServiceManifest> parse_relay_service_manifest(std::span<const std::b
     return Result<RelayServiceManifest>::failure(
         endpoint_error(ErrorCode::protocol, "service_manifest_size_invalid"));
   }
-  ProtoReader reader(payload);
+  proto_codec::ProtoReader reader(payload, kProtoComponent);
   RelayServiceManifest manifest;
   std::array<bool, 5U> seen{};
   while (!reader.done()) {
@@ -529,8 +414,8 @@ Result<RelayServiceManifest> parse_relay_service_manifest(std::span<const std::b
         break;
       case 3U: {
         auto copied = field.value_if()->wire_type == 2U
-                          ? copy_exact(field.value_if()->bytes,
-                                       manifest.canonical_manifest_sha256,
+                          ? proto_codec::copy_exact(field.value_if()->bytes,
+                                       manifest.canonical_manifest_sha256,kProtoComponent, 
                                        "manifest_hash_invalid")
                           : Result<void>::failure(
                                 endpoint_error(ErrorCode::protocol, "manifest_hash_invalid"));

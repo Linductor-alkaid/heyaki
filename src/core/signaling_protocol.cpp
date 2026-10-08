@@ -1,4 +1,5 @@
 #include <heyaki/signaling_protocol.hpp>
+#include "proto_codec.hpp"
 
 #include <heyaki/security.hpp>
 
@@ -16,129 +17,17 @@
 namespace heyaki {
 namespace {
 
+constexpr auto kProtoComponent = "signaling";
+
 Error signaling_error(ErrorCode code, const char* detail) {
   return Error{code, "signaling", detail};
 }
-
-void append_varint(std::vector<std::byte>& output, std::uint64_t value) {
-  do {
-    auto byte = static_cast<std::uint8_t>(value & 0x7fU);
-    value >>= 7U;
-    if (value != 0U) {
-      byte |= 0x80U;
-    }
-    output.push_back(static_cast<std::byte>(byte));
-  } while (value != 0U);
-}
-
-void append_tag(std::vector<std::byte>& output, std::uint32_t field, std::uint8_t wire_type) {
-  append_varint(output, (static_cast<std::uint64_t>(field) << 3U) | wire_type);
-}
-
-void append_uint(std::vector<std::byte>& output, std::uint32_t field, std::uint64_t value) {
-  append_tag(output, field, 0U);
-  append_varint(output, value);
-}
-
-void append_bytes(std::vector<std::byte>& output, std::uint32_t field,
-                  std::span<const std::byte> value) {
-  append_tag(output, field, 2U);
-  append_varint(output, value.size());
-  output.insert(output.end(), value.begin(), value.end());
-}
-
-struct ProtoField {
-  std::uint32_t number{};
-  std::uint8_t wire_type{};
-  std::uint64_t integer{};
-  std::span<const std::byte> bytes;
-};
-
-class ProtoReader {
- public:
-  explicit ProtoReader(std::span<const std::byte> input) : input_(input) {}
-
-  [[nodiscard]] bool done() const noexcept { return offset_ == input_.size(); }
-
-  Result<ProtoField> next() {
-    auto tag = read_varint();
-    if (!tag) {
-      return Result<ProtoField>::failure(*tag.error_if());
-    }
-    if (*tag.value_if() == 0U || (*tag.value_if() >> 3U) > 536870911U) {
-      return Result<ProtoField>::failure(
-          signaling_error(ErrorCode::protocol, "protobuf_tag_invalid"));
-    }
-    ProtoField field;
-    field.number = static_cast<std::uint32_t>(*tag.value_if() >> 3U);
-    field.wire_type = static_cast<std::uint8_t>(*tag.value_if() & 0x07U);
-    if (field.wire_type == 0U) {
-      auto value = read_varint();
-      if (!value) {
-        return Result<ProtoField>::failure(*value.error_if());
-      }
-      field.integer = *value.value_if();
-      return Result<ProtoField>::success(field);
-    }
-    if (field.wire_type == 2U) {
-      auto length = read_varint();
-      if (!length || *length.value_if() > input_.size() - offset_) {
-        return Result<ProtoField>::failure(
-            signaling_error(ErrorCode::protocol, "protobuf_length_invalid"));
-      }
-      const auto count = static_cast<std::size_t>(*length.value_if());
-      field.bytes = input_.subspan(offset_, count);
-      offset_ += count;
-      return Result<ProtoField>::success(field);
-    }
-    return Result<ProtoField>::failure(
-        signaling_error(ErrorCode::protocol, "protobuf_wire_type_unsupported"));
-  }
-
- private:
-  Result<std::uint64_t> read_varint() {
-    std::uint64_t value = 0U;
-    for (std::size_t index = 0U; index < 10U; ++index) {
-      if (offset_ >= input_.size()) {
-        return Result<std::uint64_t>::failure(
-            signaling_error(ErrorCode::protocol, "protobuf_varint_truncated"));
-      }
-      const auto byte = std::to_integer<std::uint8_t>(input_[offset_++]);
-      if (index == 9U && (byte & 0xfeU) != 0U) {
-        return Result<std::uint64_t>::failure(
-            signaling_error(ErrorCode::protocol, "protobuf_varint_overflow"));
-      }
-      value |= static_cast<std::uint64_t>(byte & 0x7fU) << (7U * index);
-      if ((byte & 0x80U) == 0U) {
-        if (index > 0U && (byte & 0x7fU) == 0U) {
-          return Result<std::uint64_t>::failure(
-              signaling_error(ErrorCode::protocol, "protobuf_varint_noncanonical"));
-        }
-        return Result<std::uint64_t>::success(value);
-      }
-    }
-    return Result<std::uint64_t>::failure(
-        signaling_error(ErrorCode::protocol, "protobuf_varint_overflow"));
-  }
-
-  std::span<const std::byte> input_;
-  std::size_t offset_{};
-};
 
 template <std::size_t Size>
 bool all_zero(const std::array<std::byte, Size>& value) noexcept {
   return std::all_of(value.begin(), value.end(), [](std::byte byte) {
     return byte == std::byte{0};
   });
-}
-
-Result<void> copy_exact(std::span<const std::byte> source, std::span<std::byte> destination,
-                        const char* detail) {
-  if (source.size() != destination.size()) {
-    return Result<void>::failure(signaling_error(ErrorCode::protocol, detail));
-  }
-  std::copy(source.begin(), source.end(), destination.begin());
-  return Result<void>::success();
 }
 
 bool is_printable_ascii(std::string_view value) noexcept {
@@ -244,20 +133,20 @@ std::vector<CanonicalField> candidate_fields(const SignedCandidate& candidate) {
 
 std::vector<std::byte> encode_device_endpoint(const DeviceEndpointKey& endpoint) {
   std::vector<std::byte> output;
-  append_bytes(output, 1U, endpoint.device_id.bytes());
-  append_bytes(output, 2U, endpoint.endpoint_id.bytes());
+  proto_codec::append_bytes(output, 1U, endpoint.device_id.bytes());
+  proto_codec::append_bytes(output, 2U, endpoint.endpoint_id.bytes());
   return output;
 }
 
 std::vector<std::byte> encode_signature(const IdentitySignature& signature) {
   std::vector<std::byte> output;
-  append_bytes(output, 1U,
+  proto_codec::append_bytes(output, 1U,
                std::span<const std::byte>{signature.data(), signature.size()});
   return output;
 }
 
 Result<DeviceEndpointKey> parse_device_endpoint(std::span<const std::byte> bytes) {
-  ProtoReader reader(bytes);
+  proto_codec::ProtoReader reader(bytes, kProtoComponent);
   std::optional<DeviceId> device_id;
   std::optional<EndpointId> endpoint_id;
   while (!reader.done()) {
@@ -271,14 +160,16 @@ Result<DeviceEndpointKey> parse_device_endpoint(std::span<const std::byte> bytes
     }
     if (field.value_if()->number == 1U && !device_id) {
       DeviceId::Storage value{};
-      auto copied = copy_exact(field.value_if()->bytes, value, "endpoint_device_id_invalid");
+      auto copied = proto_codec::copy_exact(field.value_if()->bytes, value, kProtoComponent,
+                                            "endpoint_device_id_invalid");
       if (!copied) {
         return Result<DeviceEndpointKey>::failure(*copied.error_if());
       }
       device_id = DeviceId{value};
     } else if (field.value_if()->number == 2U && !endpoint_id) {
       EndpointId::Storage value{};
-      auto copied = copy_exact(field.value_if()->bytes, value, "endpoint_endpoint_id_invalid");
+      auto copied = proto_codec::copy_exact(field.value_if()->bytes, value, kProtoComponent,
+                                            "endpoint_endpoint_id_invalid");
       if (!copied) {
         return Result<DeviceEndpointKey>::failure(*copied.error_if());
       }
@@ -296,7 +187,7 @@ Result<DeviceEndpointKey> parse_device_endpoint(std::span<const std::byte> bytes
 }
 
 Result<IdentitySignature> parse_signature_message(std::span<const std::byte> bytes) {
-  ProtoReader reader(bytes);
+  proto_codec::ProtoReader reader(bytes, kProtoComponent);
   std::optional<IdentitySignature> signature;
   while (!reader.done()) {
     auto field = reader.next();
@@ -321,7 +212,7 @@ Result<IdentitySignature> parse_signature_message(std::span<const std::byte> byt
 
 Result<SignalBinding> parse_binding(std::span<const std::byte> bytes, bool allow_responder,
                                     bool require_responder) {
-  ProtoReader reader(bytes);
+  proto_codec::ProtoReader reader(bytes, kProtoComponent);
   std::optional<DeviceEndpointKey> initiator;
   std::optional<DeviceEndpointKey> responder;
   std::optional<RequestId> request_id;
@@ -356,7 +247,8 @@ Result<SignalBinding> parse_binding(std::span<const std::byte> bytes, bool allow
       case 3U: {
         RequestId::Storage value{};
         if (field.value_if()->wire_type != 2U || request_id ||
-            !copy_exact(field.value_if()->bytes, value, "binding_request_id_invalid")) {
+            !proto_codec::copy_exact(field.value_if()->bytes, value, kProtoComponent,
+                                     "binding_request_id_invalid")) {
           return Result<SignalBinding>::failure(
               signaling_error(ErrorCode::protocol, "binding_request_id_invalid"));
         }
@@ -366,7 +258,8 @@ Result<SignalBinding> parse_binding(std::span<const std::byte> bytes, bool allow
       case 4U: {
         SessionId::Storage value{};
         if (field.value_if()->wire_type != 2U || session_id ||
-            !copy_exact(field.value_if()->bytes, value, "binding_session_id_invalid")) {
+            !proto_codec::copy_exact(field.value_if()->bytes, value, kProtoComponent,
+                                     "binding_session_id_invalid")) {
           return Result<SignalBinding>::failure(
               signaling_error(ErrorCode::protocol, "binding_session_id_invalid"));
         }
@@ -376,7 +269,8 @@ Result<SignalBinding> parse_binding(std::span<const std::byte> bytes, bool allow
       case 5U: {
         SignalingNonce value{};
         if (field.value_if()->wire_type != 2U || initiator_nonce ||
-            !copy_exact(field.value_if()->bytes, value, "binding_initiator_nonce_invalid")) {
+            !proto_codec::copy_exact(field.value_if()->bytes, value, kProtoComponent,
+                                     "binding_initiator_nonce_invalid")) {
           return Result<SignalBinding>::failure(
               signaling_error(ErrorCode::protocol, "binding_initiator_nonce_invalid"));
         }
@@ -394,7 +288,8 @@ Result<SignalBinding> parse_binding(std::span<const std::byte> bytes, bool allow
       case 7U: {
         SignalingNonce value{};
         if (field.value_if()->wire_type != 2U || responder_nonce ||
-            !copy_exact(field.value_if()->bytes, value, "binding_responder_nonce_invalid")) {
+            !proto_codec::copy_exact(field.value_if()->bytes, value, kProtoComponent,
+                                     "binding_responder_nonce_invalid")) {
           return Result<SignalBinding>::failure(
               signaling_error(ErrorCode::protocol, "binding_responder_nonce_invalid"));
         }
@@ -432,7 +327,7 @@ Result<SignalBinding> parse_binding(std::span<const std::byte> bytes, bool allow
 Result<DtlsFingerprint> parse_fingerprint(std::span<const std::byte> bytes,
                                           const char* detail) {
   DtlsFingerprint value{};
-  auto copied = copy_exact(bytes, value, detail);
+  auto copied = proto_codec::copy_exact(bytes, value,kProtoComponent,  detail);
   if (!copied) {
     return Result<DtlsFingerprint>::failure(*copied.error_if());
   }
@@ -691,26 +586,26 @@ Result<std::vector<std::byte>> encode_signed_offer(const SignedOffer& offer) {
     return Result<std::vector<std::byte>>::failure(*validated.error_if());
   }
   std::vector<std::byte> binding;
-  append_bytes(binding, 1U, encode_device_endpoint(offer.binding.initiator));
-  append_bytes(binding, 2U, encode_device_endpoint(offer.binding.responder));
-  append_bytes(binding, 3U, offer.binding.request_id.bytes());
-  append_bytes(binding, 4U, offer.binding.session_id.bytes());
-  append_bytes(binding, 5U,
+  proto_codec::append_bytes(binding, 1U, encode_device_endpoint(offer.binding.initiator));
+  proto_codec::append_bytes(binding, 2U, encode_device_endpoint(offer.binding.responder));
+  proto_codec::append_bytes(binding, 3U, offer.binding.request_id.bytes());
+  proto_codec::append_bytes(binding, 4U, offer.binding.session_id.bytes());
+  proto_codec::append_bytes(binding, 5U,
                std::span<const std::byte>{offer.binding.initiator_nonce.data(),
                                           offer.binding.initiator_nonce.size()});
-  append_uint(binding, 6U, offer.binding.expires_unix_milliseconds);
+  proto_codec::append_uint(binding, 6U, offer.binding.expires_unix_milliseconds);
   if (offer.binding.responder_nonce.has_value()) {
-    append_bytes(binding, 7U,
+    proto_codec::append_bytes(binding, 7U,
                  std::span<const std::byte>{offer.binding.responder_nonce->data(),
                                             offer.binding.responder_nonce->size()});
   }
 
   std::vector<std::byte> output;
   output.reserve(offer.sdp.size() + 192U);
-  append_bytes(output, 1U, binding);
-  append_bytes(output, 2U, offer.sdp);
-  append_bytes(output, 3U, fingerprint_bytes(offer.dtls_fingerprint));
-  append_bytes(output, 4U, encode_signature(offer.signature));
+  proto_codec::append_bytes(output, 1U, binding);
+  proto_codec::append_bytes(output, 2U, offer.sdp);
+  proto_codec::append_bytes(output, 3U, fingerprint_bytes(offer.dtls_fingerprint));
+  proto_codec::append_bytes(output, 4U, encode_signature(offer.signature));
   if (output.size() > max_signaling_object_bytes) {
     return Result<std::vector<std::byte>>::failure(
         signaling_error(ErrorCode::protocol, "signaling_object_too_large"));
@@ -723,7 +618,7 @@ Result<SignedOffer> parse_signed_offer(std::span<const std::byte> payload) {
     return Result<SignedOffer>::failure(
         signaling_error(ErrorCode::protocol, "signaling_object_too_large"));
   }
-  ProtoReader reader(payload);
+  proto_codec::ProtoReader reader(payload, kProtoComponent);
   std::optional<SignalBinding> binding;
   std::optional<std::vector<std::byte>> sdp;
   std::optional<DtlsFingerprint> fingerprint;
@@ -806,24 +701,24 @@ Result<std::vector<std::byte>> encode_signed_answer(const SignedAnswer& answer) 
     return Result<std::vector<std::byte>>::failure(*validated.error_if());
   }
   std::vector<std::byte> binding;
-  append_bytes(binding, 1U, encode_device_endpoint(answer.binding.initiator));
-  append_bytes(binding, 2U, encode_device_endpoint(answer.binding.responder));
-  append_bytes(binding, 3U, answer.binding.request_id.bytes());
-  append_bytes(binding, 4U, answer.binding.session_id.bytes());
-  append_bytes(binding, 5U,
+  proto_codec::append_bytes(binding, 1U, encode_device_endpoint(answer.binding.initiator));
+  proto_codec::append_bytes(binding, 2U, encode_device_endpoint(answer.binding.responder));
+  proto_codec::append_bytes(binding, 3U, answer.binding.request_id.bytes());
+  proto_codec::append_bytes(binding, 4U, answer.binding.session_id.bytes());
+  proto_codec::append_bytes(binding, 5U,
                std::span<const std::byte>{answer.binding.initiator_nonce.data(),
                                           answer.binding.initiator_nonce.size()});
-  append_uint(binding, 6U, answer.binding.expires_unix_milliseconds);
-  append_bytes(binding, 7U,
+  proto_codec::append_uint(binding, 6U, answer.binding.expires_unix_milliseconds);
+  proto_codec::append_bytes(binding, 7U,
                std::span<const std::byte>{answer.binding.responder_nonce->data(),
                                           answer.binding.responder_nonce->size()});
 
   std::vector<std::byte> output;
   output.reserve(answer.sdp.size() + 192U);
-  append_bytes(output, 1U, binding);
-  append_bytes(output, 2U, answer.sdp);
-  append_bytes(output, 3U, fingerprint_bytes(answer.dtls_fingerprint));
-  append_bytes(output, 4U, encode_signature(answer.signature));
+  proto_codec::append_bytes(output, 1U, binding);
+  proto_codec::append_bytes(output, 2U, answer.sdp);
+  proto_codec::append_bytes(output, 3U, fingerprint_bytes(answer.dtls_fingerprint));
+  proto_codec::append_bytes(output, 4U, encode_signature(answer.signature));
   if (output.size() > max_signaling_object_bytes) {
     return Result<std::vector<std::byte>>::failure(
         signaling_error(ErrorCode::protocol, "signaling_object_too_large"));
@@ -836,7 +731,7 @@ Result<SignedAnswer> parse_signed_answer(std::span<const std::byte> payload) {
     return Result<SignedAnswer>::failure(
         signaling_error(ErrorCode::protocol, "signaling_object_too_large"));
   }
-  ProtoReader reader(payload);
+  proto_codec::ProtoReader reader(payload, kProtoComponent);
   std::optional<SignalBinding> binding;
   std::optional<std::vector<std::byte>> sdp;
   std::optional<DtlsFingerprint> fingerprint;
@@ -919,34 +814,34 @@ Result<std::vector<std::byte>> encode_signed_candidate(const SignedCandidate& ca
     return Result<std::vector<std::byte>>::failure(*validated.error_if());
   }
   std::vector<std::byte> binding;
-  append_bytes(binding, 1U, encode_device_endpoint(candidate.binding.initiator));
-  append_bytes(binding, 2U, encode_device_endpoint(candidate.binding.responder));
-  append_bytes(binding, 3U, candidate.binding.request_id.bytes());
-  append_bytes(binding, 4U, candidate.binding.session_id.bytes());
-  append_bytes(binding, 5U,
+  proto_codec::append_bytes(binding, 1U, encode_device_endpoint(candidate.binding.initiator));
+  proto_codec::append_bytes(binding, 2U, encode_device_endpoint(candidate.binding.responder));
+  proto_codec::append_bytes(binding, 3U, candidate.binding.request_id.bytes());
+  proto_codec::append_bytes(binding, 4U, candidate.binding.session_id.bytes());
+  proto_codec::append_bytes(binding, 5U,
                std::span<const std::byte>{candidate.binding.initiator_nonce.data(),
                                           candidate.binding.initiator_nonce.size()});
-  append_uint(binding, 6U, candidate.binding.expires_unix_milliseconds);
-  append_bytes(binding, 7U,
+  proto_codec::append_uint(binding, 6U, candidate.binding.expires_unix_milliseconds);
+  proto_codec::append_bytes(binding, 7U,
                std::span<const std::byte>{candidate.binding.responder_nonce->data(),
                                           candidate.binding.responder_nonce->size()});
 
   std::vector<std::byte> output;
   output.reserve(candidate.candidate.size() + 320U);
-  append_bytes(output, 1U, binding);
-  append_uint(output, 2U, candidate.sequence);
-  append_bytes(output, 3U, candidate.candidate);
-  append_bytes(output, 4U,
+  proto_codec::append_bytes(output, 1U, binding);
+  proto_codec::append_uint(output, 2U, candidate.sequence);
+  proto_codec::append_bytes(output, 3U, candidate.candidate);
+  proto_codec::append_bytes(output, 4U,
                std::span<const std::byte>{
                    candidate.signaling_transcript_sha256.data(),
                    candidate.signaling_transcript_sha256.size()});
-  append_bytes(
+  proto_codec::append_bytes(
       output, 5U,
       std::span<const std::byte>{
           reinterpret_cast<const std::byte*>(candidate.owner_ice_ufrag.data()),
           candidate.owner_ice_ufrag.size()});
-  append_bytes(output, 6U, fingerprint_bytes(candidate.owner_dtls_fingerprint));
-  append_bytes(output, 7U, encode_signature(candidate.signature));
+  proto_codec::append_bytes(output, 6U, fingerprint_bytes(candidate.owner_dtls_fingerprint));
+  proto_codec::append_bytes(output, 7U, encode_signature(candidate.signature));
   if (output.size() > max_signaling_object_bytes) {
     return Result<std::vector<std::byte>>::failure(
         signaling_error(ErrorCode::protocol, "signaling_object_too_large"));
@@ -959,7 +854,7 @@ Result<SignedCandidate> parse_signed_candidate(std::span<const std::byte> payloa
     return Result<SignedCandidate>::failure(
         signaling_error(ErrorCode::protocol, "signaling_object_too_large"));
   }
-  ProtoReader reader(payload);
+  proto_codec::ProtoReader reader(payload, kProtoComponent);
   std::optional<SignalBinding> binding;
   std::optional<std::uint32_t> sequence;
   std::optional<std::vector<std::byte>> candidate;
@@ -1007,8 +902,8 @@ Result<SignedCandidate> parse_signed_candidate(std::span<const std::byte> payloa
               signaling_error(ErrorCode::protocol, "candidate_transcript_field_conflict"));
         }
         SignalingTranscriptSha256 value{};
-        auto copied =
-            copy_exact(field.value_if()->bytes, value, "candidate_transcript_field_invalid");
+        auto copied = proto_codec::copy_exact(field.value_if()->bytes, value, kProtoComponent,
+                                              "candidate_transcript_field_invalid");
         if (!copied) {
           return Result<SignedCandidate>::failure(*copied.error_if());
         }

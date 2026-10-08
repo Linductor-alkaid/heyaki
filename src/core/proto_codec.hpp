@@ -1,9 +1,9 @@
 #pragma once
 
-// Internal minimal Protobuf wire codec shared by hand-rolled core protocol
-// payloads (trust grants, pairing). Not installed, not public API: the frozen
-// schemas live under proto/, and core deliberately avoids linking the
-// generated lite runtime.
+// Internal minimal Protobuf wire codec shared by hand-rolled protocol payloads
+// across core, client, and relay (trust grants, pairing, relay control, ...).
+// Not installed, not public API: the frozen schemas live under proto/, and
+// Heyaki deliberately avoids linking the generated lite runtime.
 
 #include <heyaki/error.hpp>
 
@@ -16,8 +16,11 @@
 
 namespace heyaki::proto_codec {
 
-inline Error protocol_error(std::string_view detail) {
-  return Error{ErrorCode::protocol, "proto", std::string{detail}};
+// `component` tags wire-codec failures with the calling protocol's error
+// domain. Every overload takes it as `const char*` and every call site passes
+// a literal, so the pointers stay valid for the reader's lifetime.
+inline Error protocol_error(std::string_view detail, const char* component = "proto") {
+  return Error{ErrorCode::protocol, std::string{component}, std::string{detail}};
 }
 
 inline void append_varint(std::vector<std::byte>& output, std::uint64_t value) {
@@ -65,7 +68,8 @@ struct ProtoField {
 
 class ProtoReader {
  public:
-  explicit ProtoReader(std::span<const std::byte> input) : input_(input) {}
+  explicit ProtoReader(std::span<const std::byte> input, const char* component = "proto")
+      : input_(input), component_(component) {}
 
   [[nodiscard]] bool done() const noexcept { return offset_ == input_.size(); }
 
@@ -75,7 +79,7 @@ class ProtoReader {
       return Result<ProtoField>::failure(*tag.error_if());
     }
     if (*tag.value_if() == 0U || (*tag.value_if() >> 3U) > 536870911U) {
-      return Result<ProtoField>::failure(protocol_error("protobuf_tag_invalid"));
+      return Result<ProtoField>::failure(protocol_error("protobuf_tag_invalid", component_));
     }
     ProtoField field;
     field.number = static_cast<std::uint32_t>(*tag.value_if() >> 3U);
@@ -91,14 +95,15 @@ class ProtoReader {
     if (field.wire_type == 2U) {
       auto length = read_varint();
       if (!length || *length.value_if() > input_.size() - offset_) {
-        return Result<ProtoField>::failure(protocol_error("protobuf_length_invalid"));
+        return Result<ProtoField>::failure(protocol_error("protobuf_length_invalid", component_));
       }
       const auto count = static_cast<std::size_t>(*length.value_if());
       field.bytes = input_.subspan(offset_, count);
       offset_ += count;
       return Result<ProtoField>::success(field);
     }
-    return Result<ProtoField>::failure(protocol_error("protobuf_wire_type_unsupported"));
+    return Result<ProtoField>::failure(
+        protocol_error("protobuf_wire_type_unsupported", component_));
   }
 
   [[nodiscard]] std::string_view text(const ProtoField& field) const noexcept {
@@ -110,33 +115,37 @@ class ProtoReader {
     std::uint64_t value = 0U;
     for (std::size_t index = 0U; index < 10U; ++index) {
       if (offset_ >= input_.size()) {
-        return Result<std::uint64_t>::failure(protocol_error("protobuf_varint_truncated"));
+        return Result<std::uint64_t>::failure(
+            protocol_error("protobuf_varint_truncated", component_));
       }
       const auto byte = std::to_integer<std::uint8_t>(input_[offset_++]);
       if (index == 9U && (byte & 0xfeU) != 0U) {
-        return Result<std::uint64_t>::failure(protocol_error("protobuf_varint_overflow"));
+        return Result<std::uint64_t>::failure(
+            protocol_error("protobuf_varint_overflow", component_));
       }
       value |= static_cast<std::uint64_t>(byte & 0x7fU) << (7U * index);
       if ((byte & 0x80U) == 0U) {
         if (index > 0U && (byte & 0x7fU) == 0U) {
           return Result<std::uint64_t>::failure(
-              protocol_error("protobuf_varint_noncanonical"));
+              protocol_error("protobuf_varint_noncanonical", component_));
         }
         return Result<std::uint64_t>::success(value);
       }
     }
-    return Result<std::uint64_t>::failure(protocol_error("protobuf_varint_overflow"));
+    return Result<std::uint64_t>::failure(
+        protocol_error("protobuf_varint_overflow", component_));
   }
 
   std::span<const std::byte> input_;
+  const char* component_;
   std::size_t offset_{};
 };
 
 template <typename Storage>
 Result<void> copy_exact(std::span<const std::byte> source, Storage& destination,
-                        std::string_view detail) {
+                        std::string_view detail, const char* component = "proto") {
   if (source.size() != destination.size()) {
-    return Result<void>::failure(protocol_error(detail));
+    return Result<void>::failure(protocol_error(detail, component));
   }
   std::copy(source.begin(), source.end(), destination.begin());
   return Result<void>::success();
