@@ -7,10 +7,29 @@ option optimize_for = LITE_RUNTIME;
 // Relay WSS control-plane messages after the enrollment flow.
 // The control envelope is intentionally not a Protobuf message itself; these
 // messages are the bounded payloads of relay_wss_control.hpp.
+message IceServer {
+  uint32 kind = 1;      // 0 stun, 1 turn_udp, 2 turn_tcp, 3 turn_tls.
+  string hostname = 2;  // 1..255 bytes UTF-8.
+  uint32 port = 3;      // 1..65535.
+  string username = 4;  // TURN REST username; required for TURN, absent for STUN.
+  string credential = 5; // base64(HMAC-SHA1(secret, username)); TURN only.
+}
+
+// Relay-issued ICE configuration (short-lived coturn REST credentials).
+// Present in LoginResult/HeartbeatAck only when the relay has TURN
+// credential issuance enabled and the device advertised the
+// relay_ice_config_v1 capability at login. At most 4 servers; credentials
+// expire at expires_unix_seconds and are refreshed on the heartbeat cadence.
+message IceConfig {
+  repeated IceServer servers = 1;
+  uint64 expires_unix_seconds = 2; // > 0; credential expiry.
+}
+
 message LoginResult {
   string tenant = 1;
   uint64 enrollment_generation = 2;
   uint32 lease_milliseconds = 3; // Bounded to 1..120000.
+  optional IceConfig ice_config = 4; // Capability-gated, see IceConfig.
 }
 
 message HeartbeatRequest {
@@ -20,6 +39,7 @@ message HeartbeatRequest {
 message HeartbeatAck {
   uint64 lease_generation = 1;
   uint32 granted_lease_milliseconds = 2;
+  optional IceConfig ice_config = 3; // Capability-gated, see IceConfig.
 }
 
 message EndpointPublish {

@@ -182,7 +182,23 @@ mapped 环回绕过）不可配置移除，只可叠加。
 其余（sweep 周期 1s、信令滑窗 1s、HTTP header_limit 8KiB、TLS 1.3、challenge
 capacity 256 / validity 60s）为**协议/安全冻结常量**：无配置面，调整等于协议变更。
 
-### 7a. 注册准入（密码模式，`enrollment_mode = password`）
+### 7a. TURN 凭据签发（`RelayServerConfig`，relay_ice_config_v1）
+
+校验：`validate_relay_server_config`。默认 `turn_credentials_enabled = false`：
+未启用的部署控制面字节与现状一致。共享密钥不进配置文件（`turn_secret_file` 或
+环境变量 `HEYAKI_TURN_SECRET`，校验复用 `validate_turn_secret` 16–256 printable
+ASCII）；启用时 `RelayServer::create` 与 `--check-config` 均要求密钥可解析。
+
+| 参数 | 默认 | 硬上限 | 依据 |
+|---|---|---|---|
+| turn_credentials_enabled | false | bool | 向后兼容；启用后仅对登录时声明 `relay_ice_config_v1` 能力位的设备下发 |
+| turn_credential_ttl_seconds | 600 | 86400（`turn_credential_max_ttl_seconds`） | coturn REST 契约基线（deploy/coturn/README.md）；心跳 15s 节奏下凭据始终早于到期刷新 |
+| turn_servers 条目数 | 启用时必填 | 4（`max_relay_wss_ice_servers`） | 与 coturn 基线 3478/UDP+TCP 匹配的一到两条 URI；上限对齐客户端合并后的 ICE 帽 |
+| turn_servers URI | `turn:host:port[?transport=udp\|tcp]` / `stun:host:port` | host ≤253 printable；`turns:` 拒绝 | 无 pinned 后端实现 TURN/TLS（M9-19 口径） |
+| login_result 载荷上限 | 1024 → **4096B**（含 ice_config 时） | 4096 | 4 条 server ≈ 350B/条；未启用路径载荷不变 |
+| heartbeat_ack 载荷上限 | 32 → **2048B**（含 ice_config 时） | 2048 | 同上；未启用路径载荷不变 |
+| 客户端合并 ICE 总数（静态+relay） | 静态优先 | 8（`maximum_ice_servers`） | 既有静态上限沿用，relay 条目按类过滤、过期即弃 |
+### 7b. 注册准入（密码模式，`enrollment_mode = password`）
 
 本轮新增（issue：relay 密码准入 + 首次运行引导）。参数分两层：
 

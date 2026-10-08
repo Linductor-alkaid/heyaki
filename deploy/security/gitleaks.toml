@@ -46,4 +46,14 @@ regexes = ['''(password", ")?(argon2_calibration_failed|argon2_hash_failed|corru
 # to prove the rule set fires (commit 06f8f91 briefly carried the literal;
 # later revisions generate the body at runtime). Exact-token allowlist — any
 # other AKIA-style token still fails the scan.
-'''AKIAIMNOJVGFDXXXE4OA''']
+'''AKIAIMNOJVGFDXXXE4OA''',
+# Fabricated TURN/ICE fixtures from the relay-issued credential feature
+# (commit 87fde4b): a fake shared secret and the base64 of "provenance" as a
+# fake REST credential inside unit-test assignment shape, which the
+# generic-api-key rule pins. No real system ever issued these tokens; the
+# tests were restructured in bd0d2ce so current sources carry only
+# fragments, and these exact tokens cover the two commits already in
+# history. Exact-token allowlist — any other secret-shaped token still
+# fails the scan.
+'''test-turn-secret-0123456789ab''',
+'''cHJvdmVuYW5jZQ==''']

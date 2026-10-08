@@ -1277,6 +1277,7 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         node_error(ErrorCode::cancelled, "relay_disabled_at_runtime"));
     relay.enabled = false;
     relay_phase = RelayLoginPhase::disabled;
+    relay_ice_servers.clear();
     update_snapshot([](NodeSnapshot& snapshot) {
       snapshot.relay = RelayNodeSnapshot{};
     });
@@ -1529,6 +1530,11 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
                      true);
         return;
       }
+      // Relay-issued ICE credentials (relay_ice_config_v1): stored for the
+      // next transport start; absent for disabled relays or legacy peers.
+      if (result.value_if()->ice_config) {
+        apply_relay_ice_config(*result.value_if()->ice_config);
+      }
       relay_phase = RelayLoginPhase::ready;
       relay_lease_generation = 0U;
       relay_lease_deadline =
@@ -1567,6 +1573,9 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
           std::chrono::milliseconds{ack.value_if()->granted_lease_milliseconds};
       relay_heartbeats_missed = 0U;
       relay_heartbeat_pending = false;
+      if (ack.value_if()->ice_config) {
+        apply_relay_ice_config(*ack.value_if()->ice_config);
+      }
       update_snapshot([&](NodeSnapshot& snapshot) {
         snapshot.relay.lease_generation = relay_lease_generation;
       });
@@ -1633,6 +1642,61 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     }
   }
 
+  // Stores one relay-issued ICE delivery (login_result or heartbeat_ack).
+  // Expired payloads are counted as rejected and dropped: the relay is
+  // required to issue ahead of expiry, and acting on a dead credential would
+  // only manufacture silent TURN failures.
+  void apply_relay_ice_config(const RelayWssIceConfig& config) {
+    const auto now_seconds = unix_milliseconds_now() / 1000U;
+    if (config.expires_unix_seconds <= now_seconds || config.servers.empty()) {
+      ++relay_ice_rejected;
+      update_snapshot([&](NodeSnapshot& snapshot) {
+        snapshot.relay.ice_config_updates = relay_ice_updates;
+        snapshot.relay.ice_config_rejected = relay_ice_rejected;
+        snapshot.relay.ice_config_servers_active = relay_ice_servers.size();
+        snapshot.relay.ice_config_expires_unix_seconds =
+            relay_ice_servers.empty()
+                ? 0U
+                : relay_ice_servers.front().expires_unix_seconds;
+      });
+      return;
+    }
+    std::vector<RelayIssuedIceServer> issued;
+    issued.reserve(config.servers.size());
+    for (const auto& server : config.servers) {
+      RelayIssuedIceServer entry;
+      switch (server.kind) {
+        case RelayWssIceServerKind::stun:
+          entry.kind = NodeIceServerKind::stun;
+          break;
+        case RelayWssIceServerKind::turn_udp:
+          entry.kind = NodeIceServerKind::turn_udp;
+          break;
+        case RelayWssIceServerKind::turn_tcp:
+          entry.kind = NodeIceServerKind::turn_tcp;
+          break;
+        case RelayWssIceServerKind::turn_tls:
+          entry.kind = NodeIceServerKind::turn_tls;
+          break;
+      }
+      entry.hostname = server.hostname;
+      entry.port = server.port;
+      entry.username = server.username;
+      entry.credential = server.credential;
+      entry.expires_unix_seconds = config.expires_unix_seconds;
+      issued.push_back(std::move(entry));
+    }
+    relay_ice_servers = std::move(issued);
+    ++relay_ice_updates;
+    update_snapshot([&](NodeSnapshot& snapshot) {
+      snapshot.relay.ice_config_updates = relay_ice_updates;
+      snapshot.relay.ice_config_rejected = relay_ice_rejected;
+      snapshot.relay.ice_config_servers_active = relay_ice_servers.size();
+      snapshot.relay.ice_config_expires_unix_seconds =
+          config.expires_unix_seconds;
+    });
+  }
+
   void relay_failed(Error error, bool security_error) {
     if (relay_phase == RelayLoginPhase::stopped ||
         relay_phase == RelayLoginPhase::disabled) {
@@ -1668,6 +1732,10 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     relay_heartbeat_pending = false;
     (void)relay_heartbeat_timer.cancel();
     relay_heartbeat_timer_active = false;
+    // Relay-issued credentials die with the control session; the stored list
+    // is dropped so reconnects start from the static policy until the relay
+    // re-issues. Cumulative counters survive for diagnostics.
+    relay_ice_servers.clear();
     if (security_error) {
       relay_phase = RelayLoginPhase::failed;
       (void)relay_poll_timer.cancel();
@@ -1680,6 +1748,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
         snapshot.relay.registration_successes = relay_registration_successes;
         snapshot.relay.registration_failures = relay_registration_failures;
         snapshot.relay.lease_refresh_failures = relay_lease_refresh_failures;
+        snapshot.relay.ice_config_servers_active = 0U;
+        snapshot.relay.ice_config_expires_unix_seconds = 0U;
         snapshot.relay.last_error = std::move(error);
       });
       return;
@@ -1695,6 +1765,8 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
       snapshot.relay.registration_successes = relay_registration_successes;
       snapshot.relay.registration_failures = relay_registration_failures;
       snapshot.relay.lease_refresh_failures = relay_lease_refresh_failures;
+      snapshot.relay.ice_config_servers_active = 0U;
+      snapshot.relay.ice_config_expires_unix_seconds = 0U;
       snapshot.relay.last_error = std::move(error);
       snapshot.relay.reconnect_count = relay_reconnect_count;
       snapshot.relay.backoff = relay_backoff;
@@ -3033,8 +3105,15 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     config.candidates.allow_turn_tcp = path_policy.allow_turn_tcp;
     config.candidates.allow_turn_tls = path_policy.allow_turn_tls;
     config.candidates.relay_only = path_policy.force_turn_data_path;
-    config.ice_servers.reserve(path_policy.ice_servers.size());
-    for (const auto& server : path_policy.ice_servers) {
+    // Static policy servers first, then fresh relay-issued entries (see
+    // merge_relay_ice_servers): without relay deliveries this is exactly the
+    // historical static behavior.
+    RelayIceMergeStats ice_merge_stats;
+    const auto merged_ice_servers =
+        merge_relay_ice_servers(path_policy, relay_ice_servers,
+                                unix_milliseconds_now(), &ice_merge_stats);
+    config.ice_servers.reserve(merged_ice_servers.size());
+    for (const auto& server : merged_ice_servers) {
       transport::webrtc::IceServerConfig mapped;
       switch (server.kind) {
         case NodeIceServerKind::stun:
@@ -5032,8 +5111,15 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
     config.candidates.allow_turn_tcp = path_policy.allow_turn_tcp;
     config.candidates.allow_turn_tls = path_policy.allow_turn_tls;
     config.candidates.relay_only = path_policy.force_turn_data_path;
-    config.ice_servers.reserve(path_policy.ice_servers.size());
-    for (const auto& server : path_policy.ice_servers) {
+    // Static policy servers first, then fresh relay-issued entries (see
+    // merge_relay_ice_servers): without relay deliveries this is exactly the
+    // historical static behavior.
+    RelayIceMergeStats ice_merge_stats;
+    const auto merged_ice_servers =
+        merge_relay_ice_servers(path_policy, relay_ice_servers,
+                                unix_milliseconds_now(), &ice_merge_stats);
+    config.ice_servers.reserve(merged_ice_servers.size());
+    for (const auto& server : merged_ice_servers) {
       transport::webrtc::IceServerConfig mapped;
       switch (server.kind) {
         case NodeIceServerKind::stun:
@@ -6783,6 +6869,15 @@ class Node::Impl : public std::enable_shared_from_this<Node::Impl> {
   std::chrono::milliseconds relay_backoff{1000};
   bool relay_poll_timer_active{false};
   bool relay_heartbeat_timer_active{false};
+  // Relay-issued ICE configuration (relay_ice_config_v1): replaced wholesale
+  // on every login_result/heartbeat_ack delivery, cleared when the relay
+  // session fails. Consumed at transport start through
+  // merge_relay_ice_servers; entries expire by wall clock so a relay that
+  // stops issuing degrades back to the static policy. Strand-confined like
+  // every other relay_* member.
+  std::vector<RelayIssuedIceServer> relay_ice_servers;
+  std::uint64_t relay_ice_updates{};
+  std::uint64_t relay_ice_rejected{};
   // A relay-routed connect_request can arrive before the local directory has
   // the initiator's verified public key: both nodes log in concurrently and
   // the relay directory only refreshes on heartbeat. Denying there kills the
@@ -8565,6 +8660,62 @@ Result<void> validate_peer_path_policy(const PeerPathPolicy& policy,
     }
   }
   return Result<void>::success();
+}
+
+std::vector<NodeIceServer> merge_relay_ice_servers(
+    const PeerPathPolicy& policy,
+    const std::vector<RelayIssuedIceServer>& relay_issued,
+    std::uint64_t now_unix_seconds, RelayIceMergeStats* stats) {
+  RelayIceMergeStats local{};
+  std::vector<NodeIceServer> merged;
+  merged.reserve(policy.ice_servers.size() + relay_issued.size());
+  for (const auto& server : policy.ice_servers) {
+    merged.push_back(server);
+  }
+  local.static_active = merged.size();
+  const auto class_allowed = [&policy](NodeIceServerKind kind) {
+    switch (kind) {
+      case NodeIceServerKind::stun:
+        return policy.allow_server_reflexive;
+      case NodeIceServerKind::turn_udp:
+        return policy.allow_turn_udp;
+      case NodeIceServerKind::turn_tcp:
+        // Same backend gate validate_peer_path_policy applies to static
+        // TURN/TCP entries: an unsupported client is dead weight.
+        return policy.allow_turn_tcp && tcp_turn_backend_supported();
+      case NodeIceServerKind::turn_tls:
+        return policy.allow_turn_tls;
+    }
+    return false;
+  };
+  for (const auto& issued : relay_issued) {
+    ++local.relay_considered;
+    if (issued.expires_unix_seconds != 0U &&
+        now_unix_seconds >= issued.expires_unix_seconds) {
+      ++local.relay_expired_dropped;
+      continue;
+    }
+    if (!class_allowed(issued.kind)) {
+      ++local.relay_class_dropped;
+      continue;
+    }
+    if (merged.size() >= maximum_ice_servers) {
+      ++local.relay_capacity_dropped;
+      continue;
+    }
+    NodeIceServer server;
+    server.kind = issued.kind;
+    server.hostname = issued.hostname;
+    server.port = issued.port;
+    server.username = issued.username;
+    server.credential = issued.credential;
+    merged.push_back(std::move(server));
+    ++local.relay_active;
+  }
+  if (stats != nullptr) {
+    *stats = local;
+  }
+  return merged;
 }
 
 Result<SignalingRouteKind> select_signaling_route(

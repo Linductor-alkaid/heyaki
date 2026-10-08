@@ -19,6 +19,39 @@ inline constexpr std::size_t relay_wss_control_header_bytes = 5U;
 inline constexpr std::size_t max_relay_wss_control_frame_bytes = 64U * 1024U;
 inline constexpr std::string_view relay_wss_control_path = "/control";
 
+// Bound on the per-message relay-issued ICE server list. Frozen in
+// docs/operations/parameter-freeze.md alongside the combined client-side cap
+// (8 servers including static entries).
+inline constexpr std::size_t max_relay_wss_ice_servers = 4U;
+
+enum class RelayWssIceServerKind : std::uint8_t {
+  stun = 0U,
+  turn_udp = 1U,
+  turn_tcp = 2U,
+  turn_tls = 3U,
+};
+
+// One ICE server issued by the relay control plane. TURN entries carry the
+// coturn REST credential (`username = <expiry>:<tenant>:<device>`,
+// `password = base64(HMAC-SHA1(secret, username))`); STUN entries carry no
+// credentials. Secret discipline: values live in memory only and never
+// enter logs, snapshots, or error details.
+struct RelayWssIceServer {
+  RelayWssIceServerKind kind{RelayWssIceServerKind::stun};
+  std::string hostname;
+  std::uint16_t port{};
+  std::string username;
+  std::string credential;
+};
+
+// Relay-issued ICE configuration: the advertised server list plus the UNIX
+// seconds after which the issued TURN credentials expire. Clients replace
+// their previous relay-issued list wholesale on every delivery.
+struct RelayWssIceConfig {
+  std::vector<RelayWssIceServer> servers;
+  std::uint64_t expires_unix_seconds{};
+};
+
 enum class RelayWssControlType : std::uint8_t {
   enrollment_challenge = 1U,
   enrollment_challenge_response = 2U,
@@ -59,6 +92,10 @@ struct RelayWssLoginResult {
   std::string tenant;
   std::uint64_t enrollment_generation{};
   std::uint32_t lease_milliseconds{};
+  // Optional relay-issued ICE configuration (field 4). Present only when the
+  // relay has TURN credential issuance enabled AND the login advertisement
+  // carried Capability::relay_ice_config_v1; legacy peers never see it.
+  std::optional<RelayWssIceConfig> ice_config;
 };
 
 struct RelayWssHeartbeatRequest {
@@ -68,6 +105,9 @@ struct RelayWssHeartbeatRequest {
 struct RelayWssHeartbeatAck {
   std::uint64_t lease_generation{};
   std::uint32_t granted_lease_milliseconds{};
+  // Optional relay-issued ICE configuration (field 3), refreshed on the
+  // heartbeat cadence so issued TURN credentials stay ahead of their expiry.
+  std::optional<RelayWssIceConfig> ice_config;
 };
 
 struct RelayWssEndpointPublish {

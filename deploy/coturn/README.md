@@ -25,6 +25,29 @@ Heyaki uses coturn TURN REST API credentials:
 - `static-auth-secret` is never committed to the repository or written to relay logs.
   It is supplied through the deployment environment as `HEYAKI_TURN_SECRET`.
 
+### Relay-issued mode (recommended)
+
+The relay can sign the credentials itself and deliver them to enrolled devices
+through the control plane: set `turn_credentials_enabled = true` plus
+`turn_servers` in the relay config and point `turn_secret_file` (or the
+`HEYAKI_TURN_SECRET` environment variable — the same variable the coturn
+container consumes) at the shared secret. Every authenticated device then
+receives a fresh credential in the `ice_config` field of
+`login_result`/`heartbeat_ack`, and users never touch a TURN username,
+password, or hostname. Relays without the flag keep the historical
+static-credential flow, now a compatibility path.
+
+Requirements for the recommended path:
+
+- The relay and coturn must share the identical secret and the credential TTL
+  contract above (`turn_credential_ttl_seconds`, default 600).
+- `turn_servers` must list the address devices dial (the advertised
+  `external-ip` side), e.g. `turn:turn.example.com:3478?transport=udp`.
+- Devices at this protocol version advertise `relay_ice_config_v1` and merge
+  the delivered entries automatically; static per-device ICE configuration
+  keeps working alongside it. Relays without the flag keep the historical
+  static-credential flow, now a compatibility path.
+
 ## Resource policy
 
 - Client listeners: UDP/TCP 3478 and TLS 5349. Heyaki clients use TURN/UDP and

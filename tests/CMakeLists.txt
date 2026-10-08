@@ -427,6 +427,33 @@ heyaki_add_runtime_test(
   heyaki_m4_node_relay_update heyaki_m4_node_relay_update_tests
   "relay;regression;concurrency")
 
+# Relay-issued TURN/ICE configuration (relay_ice_config_v1): merge semantics
+# plus Node integration against an in-process relay that issues short-lived
+# coturn REST credentials on login_result/heartbeat_ack.
+add_executable(heyaki_m4_node_turn_ice_tests unit/m4_node_turn_ice_test.cpp)
+heyaki_enable_executor_exception_adapter_source(unit/m4_node_turn_ice_test.cpp)
+target_link_libraries(heyaki_m4_node_turn_ice_tests PRIVATE
+  heyaki::client
+  heyaki::profile
+  heyaki::sqlite
+  heyaki::relay
+  kairo::kairo
+  GTest::gtest_main
+  OpenSSL::SSL OpenSSL::Crypto)
+heyaki_target_use_pinned_boost_beast(heyaki_m4_node_turn_ice_tests)
+target_include_directories(heyaki_m4_node_turn_ice_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/relay"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/client"
+  "${CMAKE_CURRENT_SOURCE_DIR}/unit")
+heyaki_configure_target(heyaki_m4_node_turn_ice_tests)
+target_compile_definitions(heyaki_m4_node_turn_ice_tests PRIVATE
+  "HEYAKI_M4_TURN_ICE_STATE_DIR=\"${HEYAKI_TEST_STATE_DIR}/m4-node-turn-ice\"")
+heyaki_add_runtime_test(
+  heyaki_m4_node_turn_ice heyaki_m4_node_turn_ice_tests
+  "relay;regression;concurrency")
+set_tests_properties(heyaki_m4_node_turn_ice PROPERTIES TIMEOUT 300)
+
 add_executable(heyaki_m4_topology_matrix_tests unit/m4_topology_matrix_test.cpp)
 heyaki_enable_executor_exception_adapter_source(unit/m4_topology_matrix_test.cpp)
 target_link_libraries(heyaki_m4_topology_matrix_tests PRIVATE
@@ -1190,6 +1217,7 @@ add_executable(heyaki_m3b_relay_tests
   unit/m3b_relay_database_test.cpp
   unit/m3b_relay_wss_client_test.cpp
   unit/m3b_relay_wss_control_test.cpp
+  unit/m3b_relay_turn_ice_config_test.cpp
   unit/m3b_relay_endpoint_test.cpp
   unit/m3b_relay_enrollment_client_test.cpp
   unit/m3b_relay_enrollment_test.cpp

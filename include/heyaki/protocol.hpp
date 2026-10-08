@@ -44,6 +44,11 @@ enum class Capability : std::uint64_t {
   // requests without it. Token-mode exchanges never carry the field, so
   // builds without the bit are unaffected.
   relay_enrollment_password_v1 = 1ULL << 15U,
+  // Optional: the peer consumes the relay-issued `ice_config` field of
+  // login_result/heartbeat_ack (short-lived TURN REST credentials). The
+  // relay includes the field only for sessions whose login advertisement
+  // carried the bit, so legacy peers keep byte-identical control traffic.
+  relay_ice_config_v1 = 1ULL << 16U,
 };
 
 inline constexpr std::uint64_t protocol_1_0_capability_bits =
@@ -77,11 +82,16 @@ inline constexpr std::uint64_t protocol_1_2_capability_bits =
 // Protocol 1.3 additionally carries the relay password-enrollment capability,
 // which follows the same optional-bit pattern: only password-mode enrollment
 // exchanges put the matching proof field on the wire.
+// Protocol 1.3 additionally carries the relay-ice-config capability: peers
+// advertising it accept the optional `ice_config` field of relay
+// login_result/heartbeat_ack. The relay gates the field on the login
+// advertisement, so a mixed-version fleet keeps legacy peers unperturbed.
 inline constexpr std::uint64_t protocol_1_3_capability_bits =
     protocol_1_2_capability_bits |
     static_cast<std::uint64_t>(Capability::gateway_v1) |
     static_cast<std::uint64_t>(Capability::pairing_approval_v1) |
-    static_cast<std::uint64_t>(Capability::relay_enrollment_password_v1);
+    static_cast<std::uint64_t>(Capability::relay_enrollment_password_v1) |
+    static_cast<std::uint64_t>(Capability::relay_ice_config_v1);
 inline constexpr std::uint64_t known_capability_bits = protocol_1_3_capability_bits;
 
 inline constexpr ProtocolVersion current_protocol_version{1U, 3U};

@@ -284,6 +284,15 @@ int main(int argc, char** argv) {
     return print_error(*valid.error_if());
   }
   if (parsed->check_config) {
+    // TURN credential issuance: resolve the shared secret exactly like the
+    // server start would, so --check-config catches an enabled-but-secretless
+    // deployment. The value itself is never printed.
+    if (config.turn_credentials_enabled) {
+      auto secret = heyaki::load_relay_turn_secret(config);
+      if (!secret) {
+        return print_error(*secret.error_if());
+      }
+    }
     std::cout << "heyaki-relay configuration OK\n";
     std::cout << "enrollment_mode="
               << (config.enrollment_mode == heyaki::RelayEnrollmentMode::token
