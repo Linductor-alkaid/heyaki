@@ -7040,6 +7040,22 @@ Node& Node::operator=(Node&& other) noexcept {
 }
 Node::~Node() { (void)shutdown(); }
 
+namespace {
+
+// Runs one mutation on the node strand and waits (bounded) for its result.
+// Callers must have checked `impl_` already. The sentinel `no_result_detail`
+// failure is returned when the strand never runs the action (post failure or
+// bounded-wait expiry); otherwise the action's own result is returned.
+template <typename T, typename Action>
+Result<T> strand_outcome(Node::Impl* impl, const char* no_result_detail, Action&& action) {
+  Result<T> outcome = Result<T>::failure(node_error(ErrorCode::internal, no_result_detail));
+  impl->run_on_strandAndWait(
+      [&](Node::Impl& strand_impl) { outcome = action(strand_impl); });
+  return outcome;
+}
+
+}  // namespace
+
 Result<Node> Node::create(NodeConfig config) {
   if (config.profile == nullptr || config.application_id.empty()) {
     return Result<Node>::failure(node_error(ErrorCode::configuration,
@@ -7960,13 +7976,10 @@ Result<EventSubscriptionId> Node::subscribe_events(const DeviceEndpointKey& peer
     return Result<EventSubscriptionId>::failure(
         node_error(ErrorCode::peer_offline, "peer_session_missing"));
   }
-  Result<EventSubscriptionId> outcome =
-      Result<EventSubscriptionId>::failure(node_error(ErrorCode::internal,
-                                                      "event_subscribe_no_result"));
-  impl_->run_on_strandAndWait([&](Impl& impl) {
-    outcome = impl.subscribe_events_strand(peer, pattern, prefix_match, qos);
-  });
-  return outcome;
+  return strand_outcome<EventSubscriptionId>(
+      impl_.get(), "event_subscribe_no_result", [&](Impl& impl) {
+        return impl.subscribe_events_strand(peer, pattern, prefix_match, qos);
+      });
 }
 
 std::size_t Node::unsubscribe_events(const DeviceEndpointKey& peer,
@@ -8006,12 +8019,11 @@ Result<std::size_t> Node::publish_event(const DeviceEndpointKey& peer, std::stri
     return Result<std::size_t>::failure(
         node_error(ErrorCode::peer_offline, "peer_session_missing"));
   }
-  Result<std::size_t> outcome = Result<std::size_t>::failure(
-      node_error(ErrorCode::internal, "event_publish_no_result"));
-  impl_->run_on_strandAndWait([&](Impl& impl) {
-    outcome = impl.publish_event_strand(peer, topic, payload, schema_version);
-  });
-  return outcome;
+  return strand_outcome<std::size_t>(impl_.get(), "event_publish_no_result",
+                                     [&](Impl& impl) {
+                                       return impl.publish_event_strand(
+                                           peer, topic, payload, schema_version);
+                                     });
 }
 
 void Node::set_event_inbound_handler(NodeEventInboundHandler handler) {
@@ -8052,12 +8064,11 @@ Result<std::size_t> Node::publish_local_event(const DeviceEndpointKey& peer,
     return Result<std::size_t>::failure(
         node_error(ErrorCode::peer_offline, "peer_session_missing"));
   }
-  Result<std::size_t> outcome = Result<std::size_t>::failure(
-      node_error(ErrorCode::internal, "event_publish_no_result"));
-  impl_->run_on_strandAndWait([&](Impl& impl) {
-    outcome = impl.publish_local_event_strand(peer, topic, payload, schema_version);
-  });
-  return outcome;
+  return strand_outcome<std::size_t>(impl_.get(), "event_publish_no_result",
+                                     [&](Impl& impl) {
+                                       return impl.publish_local_event_strand(
+                                           peer, topic, payload, schema_version);
+                                     });
 }
 
 Result<TransferId> Node::push_file(const DeviceEndpointKey& peer, std::string root,
@@ -8087,12 +8098,9 @@ Result<TransferId> Node::push_file(const DeviceEndpointKey& peer, std::string ro
     return Result<TransferId>::failure(
         node_error(ErrorCode::peer_offline, "peer_session_missing"));
   }
-  Result<TransferId> outcome = Result<TransferId>::failure(
-      node_error(ErrorCode::internal, "file_push_no_result"));
-  impl_->run_on_strandAndWait([&](Impl& impl) {
-    outcome = impl.push_file_strand(peer, root, logical_name, source_path, transfer_id);
+  return strand_outcome<TransferId>(impl_.get(), "file_push_no_result", [&](Impl& impl) {
+    return impl.push_file_strand(peer, root, logical_name, source_path, transfer_id);
   });
-  return outcome;
 }
 
 Result<TransferId> Node::pull_file(const DeviceEndpointKey& peer, std::string root,
@@ -8115,12 +8123,9 @@ Result<TransferId> Node::pull_file(const DeviceEndpointKey& peer, std::string ro
     return Result<TransferId>::failure(
         node_error(ErrorCode::peer_offline, "peer_session_missing"));
   }
-  Result<TransferId> outcome = Result<TransferId>::failure(
-      node_error(ErrorCode::internal, "file_pull_no_result"));
-  impl_->run_on_strandAndWait([&](Impl& impl) {
-    outcome = impl.pull_file_strand(peer, root, logical_name);
+  return strand_outcome<TransferId>(impl_.get(), "file_pull_no_result", [&](Impl& impl) {
+    return impl.pull_file_strand(peer, root, logical_name);
   });
-  return outcome;
 }
 
 Result<void> Node::pause_file_transfer(const DeviceEndpointKey& peer,
@@ -8128,11 +8133,9 @@ Result<void> Node::pause_file_transfer(const DeviceEndpointKey& peer,
   if (!impl_) {
     return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
   }
-  Result<void> outcome =
-      Result<void>::failure(node_error(ErrorCode::internal, "file_pause_no_result"));
-  impl_->run_on_strandAndWait(
-      [&](Impl& impl) { outcome = impl.pause_file_transfer_strand(peer, id); });
-  return outcome;
+  return strand_outcome<void>(impl_.get(), "file_pause_no_result", [&](Impl& impl) {
+    return impl.pause_file_transfer_strand(peer, id);
+  });
 }
 
 Result<void> Node::resume_file_transfer(const DeviceEndpointKey& peer,
@@ -8140,11 +8143,9 @@ Result<void> Node::resume_file_transfer(const DeviceEndpointKey& peer,
   if (!impl_) {
     return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
   }
-  Result<void> outcome =
-      Result<void>::failure(node_error(ErrorCode::internal, "file_resume_no_result"));
-  impl_->run_on_strandAndWait(
-      [&](Impl& impl) { outcome = impl.resume_file_transfer_strand(peer, id); });
-  return outcome;
+  return strand_outcome<void>(impl_.get(), "file_resume_no_result", [&](Impl& impl) {
+    return impl.resume_file_transfer_strand(peer, id);
+  });
 }
 
 Result<void> Node::cancel_file_transfer(const DeviceEndpointKey& peer,
@@ -8152,11 +8153,9 @@ Result<void> Node::cancel_file_transfer(const DeviceEndpointKey& peer,
   if (!impl_) {
     return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
   }
-  Result<void> outcome =
-      Result<void>::failure(node_error(ErrorCode::internal, "file_cancel_no_result"));
-  impl_->run_on_strandAndWait(
-      [&](Impl& impl) { outcome = impl.cancel_file_transfer_strand(peer, id); });
-  return outcome;
+  return strand_outcome<void>(impl_.get(), "file_cancel_no_result", [&](Impl& impl) {
+    return impl.cancel_file_transfer_strand(peer, id);
+  });
 }
 
 void Node::set_file_event_observer(NodeFileEventObserver observer) {
@@ -8227,18 +8226,14 @@ Result<ShellId> Node::open_shell(const DeviceEndpointKey& peer, std::string prof
     return Result<ShellId>::failure(
         node_error(ErrorCode::peer_offline, "peer_session_missing"));
   }
-  Result<ShellId> outcome = Result<ShellId>::failure(
-      node_error(ErrorCode::internal, "shell_open_no_result"));
-  impl_->run_on_strandAndWait([&](Impl& impl) {
+  return strand_outcome<ShellId>(impl_.get(), "shell_open_no_result", [&](Impl& impl) {
     const auto service = impl.shell_services.find(peer);
     if (service == impl.shell_services.end()) {
-      outcome = Result<ShellId>::failure(
+      return Result<ShellId>::failure(
           node_error(ErrorCode::peer_offline, "shell_service_missing"));
-      return;
     }
-    outcome = service->second->open_shell(std::move(profile), std::move(options));
+    return service->second->open_shell(std::move(profile), std::move(options));
   });
-  return outcome;
 }
 
 Result<void> shell_control_frame(Node::Impl& impl, const DeviceEndpointKey& peer,
@@ -8258,14 +8253,11 @@ Result<void> Node::shell_send_input(const DeviceEndpointKey& peer, const ShellId
   if (!impl_) {
     return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
   }
-  Result<void> outcome =
-      Result<void>::failure(node_error(ErrorCode::internal, "shell_input_no_result"));
-  impl_->run_on_strandAndWait([&](Impl& impl) {
-    outcome = shell_control_frame(impl, peer, shell, [&](ShellService& service) {
+  return strand_outcome<void>(impl_.get(), "shell_input_no_result", [&](Impl& impl) {
+    return shell_control_frame(impl, peer, shell, [&](ShellService& service) {
       return service.send_input(shell, data);
     });
   });
-  return outcome;
 }
 
 Result<void> Node::shell_resize(const DeviceEndpointKey& peer, const ShellId& shell,
@@ -8273,14 +8265,11 @@ Result<void> Node::shell_resize(const DeviceEndpointKey& peer, const ShellId& sh
   if (!impl_) {
     return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
   }
-  Result<void> outcome =
-      Result<void>::failure(node_error(ErrorCode::internal, "shell_resize_no_result"));
-  impl_->run_on_strandAndWait([&](Impl& impl) {
-    outcome = shell_control_frame(impl, peer, shell, [&](ShellService& service) {
+  return strand_outcome<void>(impl_.get(), "shell_resize_no_result", [&](Impl& impl) {
+    return shell_control_frame(impl, peer, shell, [&](ShellService& service) {
       return service.resize_shell(shell, columns, rows);
     });
   });
-  return outcome;
 }
 
 Result<void> Node::shell_signal(const DeviceEndpointKey& peer, const ShellId& shell,
@@ -8288,42 +8277,33 @@ Result<void> Node::shell_signal(const DeviceEndpointKey& peer, const ShellId& sh
   if (!impl_) {
     return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
   }
-  Result<void> outcome =
-      Result<void>::failure(node_error(ErrorCode::internal, "shell_signal_no_result"));
-  impl_->run_on_strandAndWait([&](Impl& impl) {
-    outcome = shell_control_frame(impl, peer, shell, [&](ShellService& service) {
+  return strand_outcome<void>(impl_.get(), "shell_signal_no_result", [&](Impl& impl) {
+    return shell_control_frame(impl, peer, shell, [&](ShellService& service) {
       return service.signal_shell(shell, signal);
     });
   });
-  return outcome;
 }
 
 Result<void> Node::shell_send_eof(const DeviceEndpointKey& peer, const ShellId& shell) {
   if (!impl_) {
     return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
   }
-  Result<void> outcome =
-      Result<void>::failure(node_error(ErrorCode::internal, "shell_eof_no_result"));
-  impl_->run_on_strandAndWait([&](Impl& impl) {
-    outcome = shell_control_frame(impl, peer, shell, [&](ShellService& service) {
+  return strand_outcome<void>(impl_.get(), "shell_eof_no_result", [&](Impl& impl) {
+    return shell_control_frame(impl, peer, shell, [&](ShellService& service) {
       return service.send_eof(shell);
     });
   });
-  return outcome;
 }
 
 Result<void> Node::close_shell(const DeviceEndpointKey& peer, const ShellId& shell) {
   if (!impl_) {
     return Result<void>::failure(node_error(ErrorCode::cancelled, "node_not_running"));
   }
-  Result<void> outcome =
-      Result<void>::failure(node_error(ErrorCode::internal, "shell_close_no_result"));
-  impl_->run_on_strandAndWait([&](Impl& impl) {
-    outcome = shell_control_frame(impl, peer, shell, [&](ShellService& service) {
+  return strand_outcome<void>(impl_.get(), "shell_close_no_result", [&](Impl& impl) {
+    return shell_control_frame(impl, peer, shell, [&](ShellService& service) {
       return service.close_shell(shell);
     });
   });
-  return outcome;
 }
 
 void Node::set_shell_event_observer(NodeShellEventObserver observer) {
