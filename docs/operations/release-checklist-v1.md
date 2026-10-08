@@ -261,3 +261,35 @@ seven-family CI deflake governance.
 1fc38fb697f813cec8947198e5303f31f417a349ce21a0565bd18cf93e1e97e7  heyaki-1.2.0-linux-x86_64-sdk.tar.gz
 46daf4853d814f55b3405fcefc8335a0dff064bf088070ef13a61f6da4552c3e  heyaki-1.2.0-windows-x64-sdk.zip
 ```
+
+**v1.2.1 stamp (2026-10-08, relay enrollment hardening + TURN credential
+delivery + code-health refactor)**: release commit `7e39bf3`, green CI run
+[37735916871](https://github.com/Linductor-alkaid/heyaki/actions/runs/37735916871)
+(12/12 jobs; first pass had one flake of the `m4_node_turn_ice` heartbeat
+TOCTOU — `wait_until(>=1)` then asserting `==1` — on the linux gcc Debug
+lane, green on failed-job rerun), tag `v1.2.1`,
+[GitHub release](https://github.com/Linductor-alkaid/heyaki/releases/tag/v1.2.1)
+with Ed25519-signed artifacts (signing key id `fa4d676f792b5e82`, same v1
+key train; public key attached). Local gates: `scripts/package_release.sh`
+full pass from the release tree (inventory assertions, 11-file symbol
+split, stripped-binary smoke, manifest-driven uninstall simulation),
+manifest verify/check round-trips. The SDK archives attached by the
+`release-sdk` workflow (run 37741383556; Linux on the 20.04 baseline);
+`MANIFEST-sdk.txt` (2 archives) signed with the v1 key and uploaded with
+its signature. Release-window content: relay password enrollment mode with
+first-run bootstrap and platform-honest Windows `--init`, runtime
+enrollment updates on a running Node, control-plane delivery of
+short-lived TURN/ICE credentials (optional `relay_ice_config_v1`,
+byte-identical traffic for legacy peers), parked-transfer and
+pairing-audit fixes, and the code-health pass (domain-parameterized shared
+wire codec replacing eight verbatim copies with 424k-case differential
+fuzz evidence, `strand_outcome` helper, shared relay/gateway test
+harnesses, dead `time.hpp` public header removed — install tree 36→35
+public headers). Wire protocol unchanged at 1.3.
+
+```text
+1cbbe75be0f07c2ae8d8b2cd86f654a3064a1565864a8b4d4b5f5af42e01b81b  heyaki-1.2.1-linux-x86_64.tar.gz
+346e59b5e21284537762a5fa52eb3a72cdf401fa07aaad7600383682df113967  heyaki-1.2.1-linux-x86_64-dbg.tar.gz
+061a7a56244fa789665ac3527fb0cdaaa0c5c085979578b31cfd0dfb950eaf6f  heyaki-1.2.1-linux-x86_64-sdk.tar.gz
+ee0fba2e9e11b8508e1ea28430edc33e2e78b49abc6d8406545f8a1c4982a103  heyaki-1.2.1-windows-x64-sdk.zip
+```
